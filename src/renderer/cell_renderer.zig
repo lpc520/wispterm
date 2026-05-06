@@ -103,6 +103,14 @@ pub fn updateTerminalCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) bool
     const viewport_active = screen.pages.viewport == .active;
     const selection_active = currentRenderSelection().active;
     const viewport_pin = screen.pages.getTopLeft(.viewport);
+    const terminal_cursor_visible = terminal.modes.get(.cursor_visible);
+    const terminal_cursor_blinking = terminal.modes.get(.cursor_blinking);
+    const terminal_cursor_style: Renderer.CursorStyle = switch (screen.cursor.cursor_style) {
+        .bar => .bar,
+        .block => .block,
+        .underline => .underline,
+        .block_hollow => .block_hollow,
+    };
 
     const needs_rebuild = blk: {
         if (rend.force_rebuild) {
@@ -121,6 +129,9 @@ pub fn updateTerminalCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) bool
             screen.cursor.y != rend.last_cursor_y or
             @as(?*anyopaque, screen.cursor.page_pin.node) != rend.last_cursor_node or
             screen.cursor.page_pin.y != rend.last_cursor_pin_y) break :blk true;
+        if (terminal_cursor_visible != rend.last_cursor_visible) break :blk true;
+        if (terminal_cursor_blinking != rend.last_cursor_blinking) break :blk true;
+        if (terminal_cursor_style != rend.last_cursor_style) break :blk true;
         // Viewport pin changed — scroll happened (matches Ghostty's RenderState viewport_pin comparison)
         if (@as(?*anyopaque, viewport_pin.node) != rend.last_viewport_node or
             viewport_pin.y != rend.last_viewport_y) break :blk true;
@@ -144,21 +155,25 @@ pub fn updateTerminalCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) bool
     };
 
     // Always cache cursor state for drawing outside the lock.
-    // When viewport is at bottom (showing active area), cursor.y is in active coordinates
-    // which matches viewport coordinates. When scrolled up, cursor is not visible.
-    rend.cached_viewport_at_bottom = screen.pages.viewport == .active;
     rend.cached_cursor_x = screen.cursor.x;
     rend.cached_cursor_y = screen.cursor.y;
+    rend.cached_cursor_in_viewport = false;
 
+    // Match Ghostty: locate the cursor by page pin within the visible viewport.
+    var cursor_row_it = screen.pages.rowIterator(.right_down, .{ .viewport = .{} }, null);
+    var cursor_row_idx: usize = 0;
+    while (cursor_row_it.next()) |row_pin| : (cursor_row_idx += 1) {
+        if (@as(?*anyopaque, row_pin.node) == @as(?*anyopaque, screen.cursor.page_pin.node) and
+            row_pin.y == screen.cursor.page_pin.y)
+        {
+            rend.cached_cursor_y = cursor_row_idx;
+            rend.cached_cursor_in_viewport = true;
+            break;
+        }
+    }
 
-    rend.cached_cursor_visible = terminal.modes.get(.cursor_visible);
-    const tcs: Renderer.CursorStyle = switch (screen.cursor.cursor_style) {
-        .bar => .bar,
-        .block => .block,
-        .underline => .underline,
-        .block_hollow => .block_hollow,
-    };
-    rend.cached_cursor_effective = cursorEffectiveStyleForRenderer(rend, tcs, terminal.modes.get(.cursor_blinking));
+    rend.cached_cursor_visible = terminal_cursor_visible;
+    rend.cached_cursor_effective = cursorEffectiveStyleForRenderer(rend, terminal_cursor_style, terminal_cursor_blinking);
     if (rend.cached_cursor_effective) |eff| {
         rend.cached_cursor_style = eff;
     }
@@ -170,7 +185,7 @@ pub fn updateTerminalCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) bool
         image_renderer.snapshot(rend, terminal);
 
         // Debug: check for cursor/content mismatch
-        if (rend.cached_cursor_y >= rend.snap_rows and rend.snap_rows > 0) {
+        if (rend.cached_cursor_in_viewport and rend.cached_cursor_y >= rend.snap_rows and rend.snap_rows > 0) {
             std.log.warn("CURSOR MISMATCH: cursor_y={} snap_rows={} terminal.rows={} viewport={s}", .{
                 rend.cached_cursor_y, rend.snap_rows, terminal.rows,
                 if (screen.pages.viewport == .active) "active" else "pin",
@@ -187,6 +202,9 @@ pub fn updateTerminalCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) bool
         rend.last_cursor_pin_y = screen.cursor.page_pin.y;
         rend.last_cursor_x = screen.cursor.x;
         rend.last_cursor_y = screen.cursor.y;
+        rend.last_cursor_visible = terminal_cursor_visible;
+        rend.last_cursor_blinking = terminal_cursor_blinking;
+        rend.last_cursor_style = terminal_cursor_style;
         rend.last_rows = terminal.rows;
         rend.last_cols = terminal.cols;
         rend.last_selection_active = selection_active;
@@ -228,7 +246,7 @@ pub fn rebuildCells(rend: *Renderer) void {
             if (snap_idx >= Renderer.MAX_CELLS) break;
             const sc = rend.snap[snap_idx];
 
-            const is_cursor = rend.cached_viewport_at_bottom and (col_idx == rend.cached_cursor_x and row_idx == rend.cached_cursor_y);
+            const is_cursor = rend.cached_cursor_in_viewport and (col_idx == rend.cached_cursor_x and row_idx == rend.cached_cursor_y);
             const is_selected = isCellSelected(col_idx, row_idx);
             const col_f: f32 = @floatFromInt(col_idx);
 
@@ -443,7 +461,7 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
     image_renderer.draw(rend, window_height, offset_x, offset_y, .above_text);
 
     // --- Cursor overlay from cached state ---
-    if (rend.cached_viewport_at_bottom and rend.cached_cursor_visible) {
+    if (rend.cached_cursor_in_viewport and rend.cached_cursor_visible) {
         // Use the pre-computed effective cursor style which already factors in
         // window focus, tab rename, split focus, and blink state.
         if (rend.cached_cursor_effective) |style| {
@@ -454,7 +472,7 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
             gl.BindVertexArray.?(gl_init.vao);
 
             const cursor_color = g_theme.cursor_color;
-            const cursor_thickness: f32 = 1.0;
+            const cursor_thickness: f32 = @max(2.0, @as(f32, @floatFromInt(font.box_thickness)));
 
             switch (style) {
                 .bar => gl_init.renderQuad(px, py, cursor_thickness, font.cell_height, cursor_color),
