@@ -104,6 +104,7 @@ pub threadlocal var g_font_discovery: ?*directwrite.FontDiscovery = null;
 pub threadlocal var g_fallback_faces: std.AutoHashMapUnmanaged(u32, freetype.Face) = .empty; // codepoint -> fallback face
 pub threadlocal var g_no_fallback: std.AutoHashMapUnmanaged(u32, void) = .empty; // codepoints with no fallback (negative cache)
 pub threadlocal var g_font_size: u32 = DEFAULT_FONT_SIZE;
+pub threadlocal var g_dpi: u32 = 96;
 pub threadlocal var g_cjk_font_family: ?[]const u8 = null;
 pub threadlocal var g_fallback_font_families: ?[]const u8 = null;
 
@@ -119,6 +120,18 @@ pub threadlocal var g_bell_emoji_face: ?freetype.Face = null;
 // ============================================================================
 // Helper functions
 // ============================================================================
+
+/// Set a FreeType face to a point size using the current window DPI.
+/// High-DPI monitors need a higher-resolution glyph atlas instead of relying on
+/// Windows to scale a 96-DPI OpenGL bitmap.
+pub fn setFacePointSize(face: freetype.Face, font_size: u32) !void {
+    try face.setCharSize(
+        0,
+        @as(i32, @intCast(font_size)) * 64,
+        @intCast(g_dpi),
+        @intCast(g_dpi),
+    );
+}
 
 /// Convert FreeType 26.6 fixed-point to f64 (like Ghostty)
 fn f26dot6ToF64(v: anytype) f64 {
@@ -528,7 +541,7 @@ pub fn packColorBitmapIntoAtlas(
     for (0..height) |row| {
         const src_offset = row * src_pitch;
         const dst_offset = row * width * depth;
-        @memcpy(tight[dst_offset..][0..width * depth], src[src_offset..][0..width * depth]);
+        @memcpy(tight[dst_offset..][0 .. width * depth], src[src_offset..][0 .. width * depth]);
     }
 
     var region = atlas.reserve(alloc, width, height) catch |err| switch (err) {
@@ -715,7 +728,6 @@ pub fn loadGlyph(codepoint: u32) ?Character {
 /// HarfBuzz shapes the sequence into the correct glyph (flags, skin tones, ZWJ, VS16, etc.)
 pub fn loadGraphemeGlyph(base_cp: u21, extra_cps: []const u21) ?Character {
     const hash = graphemeHash(base_cp, extra_cps);
-
 
     // Check grapheme cache first
     if (grapheme_cache.get(hash)) |ch| {
@@ -1069,7 +1081,7 @@ pub fn loadBellEmoji() ?BellCache {
                 defer alloc.free(result.path);
                 const emoji_face = ft_lib.initFace(result.path, @intCast(result.face_index)) catch continue;
                 // Set a large size for crisp color emoji bitmaps
-                emoji_face.setCharSize(0, 12 * 64, 96, 96) catch {
+                emoji_face.setCharSize(0, 12 * 64, @intCast(g_dpi), @intCast(g_dpi)) catch {
                     emoji_face.deinit();
                     continue;
                 };
@@ -1185,7 +1197,7 @@ pub fn findOrLoadFallbackFace(codepoint: u32, alloc: std.mem.Allocator) ?freetyp
     // Start from the primary point size, then normalize fallback metrics to
     // the active terminal face. This follows Ghostty's overall approach of
     // making fallback fonts interchangeable rather than same-point-size only.
-    ft_face.setCharSize(0, @as(i32, @intCast(g_font_size)) * 64, 96, 96) catch {
+    setFacePointSize(ft_face, g_font_size) catch {
         ft_face.deinit();
         return null;
     };
@@ -1194,7 +1206,7 @@ pub fn findOrLoadFallbackFace(codepoint: u32, alloc: std.mem.Allocator) ?freetyp
         const scale = fallbackScaleFactor(primary_face, ft_face, codepoint);
         if (@abs(scale - 1.0) > 0.01) {
             const scaled_size = @max(8.0, @round(@as(f64, @floatFromInt(g_font_size)) * scale));
-            ft_face.setCharSize(0, @intFromFloat(scaled_size * 64.0), 96, 96) catch {
+            ft_face.setCharSize(0, @intFromFloat(scaled_size * 64.0), @intCast(g_dpi), @intCast(g_dpi)) catch {
                 ft_face.deinit();
                 return null;
             };
@@ -1402,7 +1414,7 @@ pub fn loadFontFromConfig(
                 var r = result;
                 defer r.deinit();
                 if (ft_lib.initFace(r.path, @intCast(r.face_index))) |face| {
-                    face.setCharSize(0, @as(i32, @intCast(font_size)) * 64, 96, 96) catch {
+                    setFacePointSize(face, font_size) catch {
                         face.deinit();
                         return null;
                     };
@@ -1416,7 +1428,7 @@ pub fn loadFontFromConfig(
 
     // Fall back to embedded font
     const face = ft_lib.initMemoryFace(embedded.regular, 0) catch return null;
-    face.setCharSize(0, @as(i32, @intCast(font_size)) * 64, 96, 96) catch {
+    setFacePointSize(face, font_size) catch {
         face.deinit();
         return null;
     };

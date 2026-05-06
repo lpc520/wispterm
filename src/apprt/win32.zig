@@ -44,6 +44,9 @@ pub const GUID = extern struct {
     Data4: [8]u8,
 };
 
+pub const DPI_AWARENESS_CONTEXT = windows.HANDLE;
+const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: DPI_AWARENESS_CONTEXT = @ptrFromInt(@as(usize, @bitCast(@as(isize, -4))));
+
 pub const RECT = extern struct {
     left: LONG,
     top: LONG,
@@ -183,6 +186,7 @@ pub const WM_SYSDEADCHAR: UINT = 0x0107;
 pub const WM_IME_STARTCOMPOSITION: UINT = 0x010D;
 pub const WM_IME_ENDCOMPOSITION: UINT = 0x010E;
 pub const WM_IME_COMPOSITION: UINT = 0x010F;
+pub const WM_IME_SETCONTEXT: UINT = 0x0281;
 pub const WM_MOUSEMOVE: UINT = 0x0200;
 pub const WM_LBUTTONDOWN: UINT = 0x0201;
 pub const WM_LBUTTONUP: UINT = 0x0202;
@@ -211,6 +215,9 @@ pub const WM_DROPFILES: UINT = 0x0233;
 
 pub const CFS_POINT: DWORD = 0x0002;
 pub const CFS_CANDIDATEPOS: DWORD = 0x0040;
+const GCS_COMPSTR: DWORD = 0x0008;
+const GCS_RESULTSTR: DWORD = 0x0800;
+const ISC_SHOWUICOMPOSITIONWINDOW: usize = 0x80000000;
 
 pub const COMPOSITIONFORM = extern struct {
     dwStyle: DWORD,
@@ -333,6 +340,9 @@ extern "user32" fn GetDC(hWnd: ?HWND) callconv(.winapi) ?HDC;
 extern "user32" fn ReleaseDC(hWnd: ?HWND, hDC: HDC) callconv(.winapi) INT;
 pub extern "user32" fn GetClientRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi) BOOL;
 pub extern "user32" fn GetDpiForWindow(hWnd: HWND) callconv(.winapi) UINT;
+extern "user32" fn GetDpiForSystem() callconv(.winapi) UINT;
+extern "user32" fn SetProcessDpiAwarenessContext(value: DPI_AWARENESS_CONTEXT) callconv(.winapi) BOOL;
+extern "user32" fn SetProcessDPIAware() callconv(.winapi) BOOL;
 extern "user32" fn SendMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
 extern "user32" fn InvalidateRect(hWnd: HWND, lpRect: ?*const RECT, bErase: BOOL) callconv(.winapi) BOOL;
 extern "user32" fn BeginPaint(hWnd: HWND, lpPaint: *PAINTSTRUCT) callconv(.winapi) ?HDC;
@@ -352,6 +362,7 @@ extern "imm32" fn ImmGetContext(hWnd: HWND) callconv(.winapi) ?HIMC;
 extern "imm32" fn ImmReleaseContext(hWnd: HWND, hIMC: HIMC) callconv(.winapi) BOOL;
 extern "imm32" fn ImmSetCompositionWindow(hIMC: HIMC, lpCompForm: *COMPOSITIONFORM) callconv(.winapi) BOOL;
 extern "imm32" fn ImmSetCandidateWindow(hIMC: HIMC, lpCandidate: *CANDIDATEFORM) callconv(.winapi) BOOL;
+extern "imm32" fn ImmGetCompositionStringW(hIMC: HIMC, dwIndex: DWORD, lpBuf: ?*anyopaque, dwBufLen: DWORD) callconv(.winapi) LONG;
 
 // Clipboard
 pub extern "user32" fn OpenClipboard(hWndNewOwner: ?HWND) callconv(.winapi) BOOL;
@@ -675,6 +686,7 @@ const PM_REMOVE: UINT = 0x0001;
 const SWP_NOZORDER: UINT = 0x0004;
 const SWP_NOMOVE: UINT = 0x0002;
 const SWP_NOSIZE: UINT = 0x0001;
+const SWP_NOACTIVATE: UINT = 0x0010;
 const SWP_FRAMECHANGED: UINT = 0x0020;
 
 // ============================================================================
@@ -769,6 +781,8 @@ pub const Window = struct {
     should_close: bool = false,
     width: i32 = 800,
     height: i32 = 600,
+    dpi: u32 = 96,
+    dpi_changed: bool = false,
     focused: bool = true,
     is_fullscreen: bool = false,
 
@@ -796,6 +810,12 @@ pub const Window = struct {
     ime_caret_x: i32 = 12,
     ime_caret_y: i32 = TITLEBAR_HEIGHT + 10,
     ime_caret_height: i32 = 20,
+    /// UTF-8 preedit text currently owned by the IME composition session.
+    /// Phantty renders this inline, so Windows' default white composition
+    /// popup is hidden.
+    ime_preedit_buf: [1024]u8 = undefined,
+    ime_preedit_len: usize = 0,
+    ime_composing: bool = false,
 
     // Input event queues (written by WndProc, read by main loop)
     key_events: RingBuffer(KeyEvent, 64) = .{},
@@ -818,6 +838,15 @@ pub const Window = struct {
         updateImeWindowPosition(self);
     }
 
+    pub fn imePreeditText(self: *const Window) []const u8 {
+        return self.ime_preedit_buf[0..self.ime_preedit_len];
+    }
+
+    pub fn clearImePreedit(self: *Window) void {
+        self.ime_preedit_len = 0;
+        self.ime_composing = false;
+    }
+
     /// Initialize a Win32 window with an OpenGL 3.3 core profile context.
     ///
     /// Modern OpenGL on Win32 requires a two-step bootstrap:
@@ -833,7 +862,11 @@ pub const Window = struct {
         y: ?i32,
         maximize: bool,
     ) !Window {
+        enableDpiAwareness();
         const hInstance = GetModuleHandleW(null);
+        const initial_dpi = currentSystemDpi();
+        const physical_width = scaleFrom96(width, initial_dpi);
+        const physical_height = scaleFrom96(height, initial_dpi);
 
         // --- Step 1: Register window classes ---
         const dummy_class = std.unicode.utf8ToUtf16LeStringLiteral("PhanttyDummyClass");
@@ -938,8 +971,8 @@ pub const Window = struct {
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             if (x) |xv| xv else CW_USEDEFAULT,
             if (y) |yv| yv else CW_USEDEFAULT,
-            width,
-            height,
+            physical_width,
+            physical_height,
             null,
             null,
             hInstance,
@@ -1060,8 +1093,9 @@ pub const Window = struct {
         var rect: RECT = undefined;
         _ = GetClientRect(hwnd, &rect);
 
-        std.debug.print("Win32: Window created {}x{} (client: {}x{})\n", .{
-            width, height, rect.right - rect.left, rect.bottom - rect.top,
+        const dpi = GetDpiForWindow(hwnd);
+        std.debug.print("Win32: Window created {}x{} at {} DPI (client: {}x{})\n", .{
+            physical_width, physical_height, dpi, rect.right - rect.left, rect.bottom - rect.top,
         });
 
         var window = Window{
@@ -1070,6 +1104,7 @@ pub const Window = struct {
             .hglrc = hglrc,
             .width = rect.right - rect.left,
             .height = rect.bottom - rect.top,
+            .dpi = dpi,
             .is_fullscreen = false, // Fullscreen is applied later via toggleFullscreen
         };
 
@@ -1162,6 +1197,23 @@ pub const Window = struct {
     }
 };
 
+fn enableDpiAwareness() void {
+    if (SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == 0) {
+        // Older Windows builds may not support Per-Monitor V2. Falling back to
+        // process DPI awareness still avoids bitmap stretching on the primary DPI.
+        _ = SetProcessDPIAware();
+    }
+}
+
+fn currentSystemDpi() u32 {
+    const dpi = GetDpiForSystem();
+    return if (dpi == 0) 96 else dpi;
+}
+
+fn scaleFrom96(value: i32, dpi: u32) i32 {
+    return @intCast(@divTrunc(@as(i64, value) * @as(i64, @intCast(dpi)) + 48, 96));
+}
+
 /// OpenGL function loader for GLAD.
 /// On Windows, wglGetProcAddress only returns extension functions (GL 1.2+).
 /// Core OpenGL 1.0/1.1 functions must come from opengl32.dll via GetProcAddress.
@@ -1224,6 +1276,100 @@ fn pushMouseButtonEvent(w: *Window, button: MouseButton, action: MouseButtonActi
         .shift = mods.shift,
         .alt = mods.alt,
     });
+}
+
+fn filteredImeSetContextLParam(lParam: LPARAM) LPARAM {
+    const flags: usize = @intCast(lParam);
+    return @intCast(flags & ~ISC_SHOWUICOMPOSITIONWINDOW);
+}
+
+fn readImeCompositionString(hIMC: HIMC, index: DWORD, out: []WCHAR) usize {
+    if (out.len == 0) return 0;
+
+    const byte_len_raw = ImmGetCompositionStringW(hIMC, index, null, 0);
+    if (byte_len_raw <= 0) return 0;
+
+    const byte_len: usize = @intCast(byte_len_raw);
+    const max_bytes = @min(byte_len, out.len * @sizeOf(WCHAR));
+    const got_raw = ImmGetCompositionStringW(
+        hIMC,
+        index,
+        @ptrCast(out.ptr),
+        @intCast(max_bytes),
+    );
+    if (got_raw <= 0) return 0;
+
+    return @min(@as(usize, @intCast(got_raw)) / @sizeOf(WCHAR), out.len);
+}
+
+fn updateImePreeditString(w: *Window) void {
+    const hIMC = ImmGetContext(w.hwnd) orelse {
+        w.clearImePreedit();
+        return;
+    };
+    defer _ = ImmReleaseContext(w.hwnd, hIMC);
+
+    var wide_buf: [256]WCHAR = undefined;
+    const units = readImeCompositionString(hIMC, GCS_COMPSTR, &wide_buf);
+    if (units == 0) {
+        w.clearImePreedit();
+        return;
+    }
+
+    const utf8_len = std.unicode.utf16LeToUtf8(&w.ime_preedit_buf, wide_buf[0..units]) catch {
+        w.clearImePreedit();
+        return;
+    };
+    w.ime_preedit_len = utf8_len;
+    w.ime_composing = utf8_len > 0;
+}
+
+fn pushImeUtf16Chars(w: *Window, chars: []const WCHAR) void {
+    const mods = getModifiers();
+    var i: usize = 0;
+    while (i < chars.len) {
+        const first = chars[i];
+        i += 1;
+
+        var codepoint: u21 = 0;
+        if (first >= 0xD800 and first <= 0xDBFF and i < chars.len) {
+            const second = chars[i];
+            if (second >= 0xDC00 and second <= 0xDFFF) {
+                i += 1;
+                const high: u32 = @as(u32, @intCast(first)) - 0xD800;
+                const low: u32 = @as(u32, @intCast(second)) - 0xDC00;
+                codepoint = @intCast(0x10000 + (high << 10) + low);
+            } else {
+                codepoint = @intCast(first);
+            }
+        } else if (first >= 0xDC00 and first <= 0xDFFF) {
+            continue;
+        } else {
+            codepoint = @intCast(first);
+        }
+
+        if (codepoint >= 32) {
+            w.char_events.push(.{
+                .codepoint = codepoint,
+                .ctrl = mods.ctrl,
+                .shift = mods.shift,
+                .alt = mods.alt,
+            });
+        }
+    }
+}
+
+fn pushImeResultString(w: *Window) void {
+    const hIMC = ImmGetContext(w.hwnd) orelse {
+        w.clearImePreedit();
+        return;
+    };
+    defer _ = ImmReleaseContext(w.hwnd, hIMC);
+
+    var wide_buf: [512]WCHAR = undefined;
+    const units = readImeCompositionString(hIMC, GCS_RESULTSTR, &wide_buf);
+    if (units > 0) pushImeUtf16Chars(w, wide_buf[0..units]);
+    w.clearImePreedit();
 }
 
 fn getResizeBorderThickness() i32 {
@@ -1302,6 +1448,29 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             if (w.on_resize) |cb| cb(width, height);
             return 0;
         },
+        WM_DPICHANGED => {
+            const new_dpi: u32 = @intCast(wParam & 0xFFFF);
+            if (new_dpi != 0) w.dpi = new_dpi;
+            w.dpi_changed = true;
+
+            const suggested: *const RECT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+            _ = SetWindowPos(
+                hwnd,
+                null,
+                suggested.left,
+                suggested.top,
+                suggested.right - suggested.left,
+                suggested.bottom - suggested.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+
+            var rect: RECT = undefined;
+            _ = GetClientRect(hwnd, &rect);
+            w.width = rect.right - rect.left;
+            w.height = rect.bottom - rect.top;
+            w.size_changed = true;
+            return 0;
+        },
         WM_ACTIVATE => {
             // Re-extend frame on activation changes to keep the custom frame
             const margins = MARGINS{
@@ -1326,12 +1495,29 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             return 1;
         },
 
-        WM_IME_STARTCOMPOSITION, WM_IME_COMPOSITION => {
+        WM_IME_SETCONTEXT => {
             updateImeWindowPosition(w);
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return DefWindowProcW(hwnd, msg, wParam, filteredImeSetContextLParam(lParam));
+        },
+        WM_IME_STARTCOMPOSITION => {
+            w.ime_composing = true;
+            w.ime_preedit_len = 0;
+            updateImeWindowPosition(w);
+            return 0;
+        },
+        WM_IME_COMPOSITION => {
+            updateImeWindowPosition(w);
+
+            if ((@as(usize, @intCast(lParam)) & GCS_RESULTSTR) != 0) {
+                pushImeResultString(w);
+            } else if ((@as(usize, @intCast(lParam)) & GCS_COMPSTR) != 0) {
+                updateImePreeditString(w);
+            }
+            return 0;
         },
         WM_IME_ENDCOMPOSITION => {
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            w.clearImePreedit();
+            return 0;
         },
 
         WM_DROPFILES => {

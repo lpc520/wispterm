@@ -650,22 +650,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     font.g_fallback_font_families = cfg.@"font-family-fallback";
 
     // Reload font: clear caches, load new face, recalculate metrics
-    if (font.loadFontFromConfig(allocator, new_family, new_weight, new_font_size, ft_lib)) |new_face| {
-        // Clean up old font state
-        if (font.glyph_face) |old| old.deinit();
-        font.clearGlyphCache(allocator);
-        font.clearFallbackFaces(allocator);
-        font.g_bell_cache = null;
-        if (font.g_bell_emoji_face) |f| f.deinit();
-        font.g_bell_emoji_face = null;
-
-        font.g_font_size = new_font_size;
-        font.preloadCharacters(new_face);
-        // glyph_face is set inside preloadCharacters
-
-        rebuildTitlebarFont(allocator, new_family, new_weight, uiFontSize(new_font_size), ft_lib);
-        if (g_window) |w| _ = syncWindowTitlebarHeight(w);
-
+    if (reloadFontFaces(allocator, new_family, new_weight, new_font_size, ft_lib)) {
         // --- Window size ---
         // In normal windowed mode, preserve the current grid size and resize
         // the window around the new cell metrics. In maximized/fullscreen mode,
@@ -692,6 +677,49 @@ fn uiFontSize(term_font_size: u32) u32 {
     return @min(24, @max(9, term_font_size));
 }
 
+fn markAllRenderersDirty() void {
+    g_force_rebuild = true;
+    g_cells_valid = false;
+    for (0..tab.g_tab_count) |ti| {
+        if (tab.g_tabs[ti]) |tb| {
+            var it = tb.tree.iterator();
+            while (it.next()) |entry| {
+                entry.surface.surface_renderer.markDirty();
+            }
+        }
+    }
+}
+
+fn clearIconFont(allocator: std.mem.Allocator) void {
+    if (font.icon_face) |old_icon| old_icon.deinit();
+    font.icon_face = null;
+    font.icon_cache.deinit(allocator);
+    font.icon_cache = .empty;
+    if (font.g_icon_atlas) |*a| {
+        a.deinit(allocator);
+        font.g_icon_atlas = null;
+    }
+    if (font.g_icon_atlas_texture != 0) {
+        gl.DeleteTextures.?(1, &font.g_icon_atlas_texture);
+        font.g_icon_atlas_texture = 0;
+        font.g_icon_atlas_modified = 0;
+    }
+}
+
+fn rebuildIconFont(allocator: std.mem.Allocator, ft_lib: freetype.Library) void {
+    clearIconFont(allocator);
+
+    if (ft_lib.initFace("C:\\Windows\\Fonts\\segmdl2.ttf", 0)) |iface| {
+        // 10px at 96 DPI, scaled to the current monitor DPI.
+        const icon_size_26_6: i32 = @intCast(10 * 64 * font.g_dpi / 96);
+        iface.setCharSize(0, icon_size_26_6, 72, 72) catch {};
+        font.icon_face = iface;
+        std.debug.print("Loaded Segoe MDL2 Assets for caption icons (dpi={})\n", .{font.g_dpi});
+    } else |_| {
+        std.debug.print("Segoe MDL2 Assets not found, using quad-based caption icons\n", .{});
+    }
+}
+
 fn clearTitlebarFont(allocator: std.mem.Allocator) void {
     if (font.g_titlebar_face) |old_tb| old_tb.deinit();
     font.g_titlebar_face = null;
@@ -705,6 +733,55 @@ fn clearTitlebarFont(allocator: std.mem.Allocator) void {
         gl.DeleteTextures.?(1, &font.g_titlebar_atlas_texture);
         font.g_titlebar_atlas_texture = 0;
         font.g_titlebar_atlas_modified = 0;
+    }
+}
+
+fn reloadFontFaces(
+    allocator: std.mem.Allocator,
+    family: []const u8,
+    weight: directwrite.DWRITE_FONT_WEIGHT,
+    font_size: u32,
+    ft_lib: freetype.Library,
+) bool {
+    const new_face = font.loadFontFromConfig(allocator, family, weight, font_size, ft_lib) orelse return false;
+
+    if (font.glyph_face) |old| old.deinit();
+    font.clearGlyphCache(allocator);
+    font.clearFallbackFaces(allocator);
+    font.g_bell_cache = null;
+    if (font.g_bell_emoji_face) |f| f.deinit();
+    font.g_bell_emoji_face = null;
+
+    font.g_font_size = font_size;
+    font.preloadCharacters(new_face);
+
+    rebuildTitlebarFont(allocator, family, weight, uiFontSize(font_size), ft_lib);
+    rebuildIconFont(allocator, ft_lib);
+    if (g_window) |w| _ = syncWindowTitlebarHeight(w);
+    markAllRenderersDirty();
+    return true;
+}
+
+fn handleWindowDpiChanged(
+    allocator: std.mem.Allocator,
+    win: *win32_backend.Window,
+    ft_lib: freetype.Library,
+    family: []const u8,
+    weight: directwrite.DWRITE_FONT_WEIGHT,
+) void {
+    const new_dpi = if (win.dpi == 0) win32_backend.GetDpiForWindow(win.hwnd) else win.dpi;
+    if (new_dpi == 0) return;
+    if (font.g_dpi == new_dpi) {
+        onWin32Resize(win.width, win.height);
+        return;
+    }
+
+    std.debug.print("DPI changed: {} -> {}\n", .{ font.g_dpi, new_dpi });
+    font.g_dpi = new_dpi;
+    if (reloadFontFaces(allocator, family, weight, font.g_font_size, ft_lib)) {
+        onWin32Resize(win.width, win.height);
+    } else {
+        std.debug.print("DPI font reload failed, keeping previous font\n", .{});
     }
 }
 
@@ -802,6 +879,42 @@ fn syncImeCaretPosition(win: *win32_backend.Window, split_count: usize) void {
     );
 }
 
+fn renderImePreedit(win: *win32_backend.Window, fb_width: i32, fb_height: i32) void {
+    _ = fb_width;
+    const text = win.imePreeditText();
+    if (text.len == 0) return;
+
+    var view = std.unicode.Utf8View.init(text) catch return;
+    var count_it = view.iterator();
+    var cells: usize = 0;
+    while (count_it.nextCodepoint()) |_| cells += 1;
+    if (cells == 0) return;
+
+    const x = @as(f32, @floatFromInt(win.ime_caret_x));
+    const y = @as(f32, @floatFromInt(@max(0, fb_height - win.ime_caret_y - win.ime_caret_height)));
+    const width = @as(f32, @floatFromInt(cells)) * font.cell_width;
+    const height = @as(f32, @floatFromInt(win.ime_caret_height));
+
+    const bg = g_theme.selection_background;
+    const fg = g_theme.selection_foreground orelse g_theme.foreground;
+
+    gl.UseProgram.?(gl_init.shader_program);
+    gl.BindVertexArray.?(gl_init.vao);
+    gl_init.renderQuad(x, y, width, height, bg);
+    gl_init.renderQuad(x, y, width, @max(1.0, @as(f32, @floatFromInt(font.box_thickness))), g_theme.cursor_color);
+
+    view = std.unicode.Utf8View.init(text) catch return;
+    var it = view.iterator();
+    var cursor_x = x;
+    while (it.nextCodepoint()) |cp| {
+        cell_renderer.renderChar(@intCast(cp), cursor_x, y, fg);
+        cursor_x += font.cell_width;
+    }
+
+    gl.BindVertexArray.?(0);
+    gl.BindTexture.?(c.GL_TEXTURE_2D, 0);
+}
+
 /// Handle a bell notification from the terminal.
 /// Rate-limited to once per 100ms (matching Ghostty).
 fn handleBell(surface: *Surface, win: *win32_backend.Window, is_active_tab: bool) void {
@@ -873,6 +986,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     defer win32_window.deinit();
     win32_backend.setGlobalWindow(&win32_window);
     g_window = &win32_window;
+    font.g_dpi = win32_window.dpi;
 
     // --- Load OpenGL via GLAD ---
     {
@@ -950,7 +1064,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     // Don't defer face.deinit() here — glyph_face owns it and may be
     // replaced by hot-reload. Cleanup is in the defer block below.
 
-    face.setCharSize(0, @as(i32, @intCast(font_size)) * 64, 96, 96) catch |err| {
+    font.setFacePointSize(face, font_size) catch |err| {
         std.debug.print("Failed to set font size: {}\n", .{err});
         return err;
     };
@@ -970,17 +1084,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     _ = syncWindowTitlebarHeight(&win32_window);
 
     // Load Segoe MDL2 Assets for caption button icons (Windows system font)
-    // Size is DPI-dependent: 10px at 96 DPI, scales proportionally
-    if (ft_lib.initFace("C:\\Windows\\Fonts\\segmdl2.ttf", 0)) |iface| {
-        const dpi: u32 = if (g_window) |w| win32_backend.GetDpiForWindow(w.hwnd) else 96;
-        // 10px at 96 DPI = 10pt at 72 DPI. Scale for actual DPI.
-        const icon_size_26_6: i32 = @intCast(10 * 64 * dpi / 96);
-        iface.setCharSize(0, icon_size_26_6, 72, 72) catch {};
-        font.icon_face = iface;
-        std.debug.print("Loaded Segoe MDL2 Assets for caption icons (dpi={})\n", .{dpi});
-    } else |_| {
-        std.debug.print("Segoe MDL2 Assets not found, using quad-based caption icons\n", .{});
-    }
+    rebuildIconFont(allocator, ft_lib);
 
     defer {
         // Clean up icon font
@@ -1183,6 +1287,11 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         // Poll Win32 messages (fills event queues + checks WM_QUIT)
         running = win.pollEvents() and !g_should_close;
 
+        if (win.dpi_changed) {
+            win.dpi_changed = false;
+            handleWindowDpiChanged(allocator, win, ft_lib, requested_font, requested_weight);
+        }
+
         // Sync tab count to win32 for hit-testing
         win.tab_count = tab.g_tab_count;
         win.sidebar_width = @intFromFloat(titlebar.sidebarWidth());
@@ -1372,6 +1481,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderDebugOverlay(@floatFromInt(fb_width));
+        renderImePreedit(win, fb_width, fb_height);
 
         win.swapBuffers();
     }

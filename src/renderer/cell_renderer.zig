@@ -69,7 +69,8 @@ pub fn renderChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
     gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); gl_init.g_draw_call_count += 1;
+    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
+    gl_init.g_draw_call_count += 1;
 }
 
 /// Update terminal cells for a specific surface in a split tree.
@@ -187,11 +188,12 @@ pub fn updateTerminalCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) bool
         // Debug: check for cursor/content mismatch
         if (rend.cached_cursor_in_viewport and rend.cached_cursor_y >= rend.snap_rows and rend.snap_rows > 0) {
             std.log.warn("CURSOR MISMATCH: cursor_y={} snap_rows={} terminal.rows={} viewport={s}", .{
-                rend.cached_cursor_y, rend.snap_rows, terminal.rows,
+                rend.cached_cursor_y,
+                rend.snap_rows,
+                terminal.rows,
                 if (screen.pages.viewport == .active) "active" else "pin",
             });
         }
-
 
         rend.cells_valid = true;
         rend.last_cursor_blink_visible = rend.cursor_blink_visible;
@@ -410,7 +412,8 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
         gl.BindVertexArray.?(gl_init.bg_vao);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.bg_instance_vbo);
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellBg) * rend.bg_cell_count), &rend.bg_cells);
-        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.bg_cell_count)); gl_init.g_draw_call_count += 1;
+        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.bg_cell_count));
+        gl_init.g_draw_call_count += 1;
     }
 
     image_renderer.draw(rend, window_height, offset_x, offset_y, .below_text);
@@ -430,7 +433,8 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
         gl.BindVertexArray.?(gl_init.fg_vao);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.fg_instance_vbo);
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellFg) * rend.fg_cell_count), &rend.fg_cells);
-        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.fg_cell_count)); gl_init.g_draw_call_count += 1;
+        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.fg_cell_count));
+        gl_init.g_draw_call_count += 1;
     }
 
     // --- Draw color emoji cells ---
@@ -452,7 +456,8 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
         gl.BindVertexArray.?(gl_init.color_fg_vao);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.color_fg_instance_vbo);
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellFg) * rend.color_fg_cell_count), &rend.color_fg_cells);
-        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.color_fg_cell_count)); gl_init.g_draw_call_count += 1;
+        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.color_fg_cell_count));
+        gl_init.g_draw_call_count += 1;
 
         // Restore normal blend mode for subsequent draws (cursor, titlebar, etc.)
         gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
@@ -588,8 +593,10 @@ fn snapshotCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) void {
                 else => {},
             }
 
+            var inverse = false;
             if (cell.hasStyling()) {
                 const style = p.styles.get(p.memory, cell.style_id);
+                inverse = style.flags.inverse;
                 switch (style.fg_color) {
                     .none => {},
                     .palette => |idx| fg_color = font.indexToRgb(idx),
@@ -608,6 +615,15 @@ fn snapshotCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) void {
                         @as(f32, @floatFromInt(rgb.b)) / 255.0,
                     },
                 }
+            }
+
+            // SGR inverse (reverse video) swaps foreground/background. TUI apps
+            // such as Claude Code often use an inverse space as their input caret.
+            if (inverse) {
+                const normal_fg = fg_color;
+                const normal_bg = bg_color orelse g_theme.background;
+                fg_color = normal_bg;
+                bg_color = normal_fg;
             }
 
             if (row_base + col_idx < Renderer.MAX_CELLS) {
