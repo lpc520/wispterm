@@ -672,6 +672,12 @@ const SessionAction = enum {
     cancel,
 };
 
+const SshListMode = enum {
+    manage,
+    edit_select,
+    delete_select,
+};
+
 const SshProfile = struct {
     fields: [SSH_FIELD_COUNT][SSH_FIELD_MAX]u8 = undefined,
     lens: [SSH_FIELD_COUNT]usize = .{0} ** SSH_FIELD_COUNT,
@@ -698,6 +704,7 @@ threadlocal var g_ssh_profiles: [SSH_PROFILE_MAX]SshProfile = undefined;
 threadlocal var g_ssh_profile_count: usize = 0;
 threadlocal var g_ssh_profiles_loaded: bool = false;
 threadlocal var g_ssh_list_selected: usize = 0;
+threadlocal var g_ssh_list_mode: SshListMode = .manage;
 threadlocal var g_ssh_edit_index: usize = SSH_PROFILE_NONE;
 threadlocal var g_pending_ssh_password: [SSH_FIELD_MAX + 1]u8 = undefined;
 threadlocal var g_pending_ssh_password_len: usize = 0;
@@ -713,6 +720,7 @@ pub fn sessionLauncherOpen() void {
     g_session_launcher_selected = 0;
     g_ssh_list_visible = false;
     g_ssh_form_visible = false;
+    g_ssh_list_mode = .manage;
     g_command_palette_visible = false;
     g_settings_visible = false;
     g_startup_shortcuts_visible = false;
@@ -722,6 +730,7 @@ pub fn sessionLauncherClose() void {
     g_session_launcher_visible = false;
     g_ssh_list_visible = false;
     g_ssh_form_visible = false;
+    g_ssh_list_mode = .manage;
 }
 
 pub fn sessionLauncherInsertChar(codepoint: u21) void {
@@ -793,8 +802,8 @@ pub fn sessionLauncherExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_
         .wsl => openWslSession(),
         .connect_selected => runSshListRow(g_ssh_list_selected),
         .new_ssh => openSshFormNew(),
-        .edit_selected => if (g_ssh_profile_count > 0) openSshFormEdit(@min(g_ssh_list_selected, g_ssh_profile_count - 1)),
-        .delete_selected => deleteSelectedSshProfile(),
+        .edit_selected => openSshEditPicker(),
+        .delete_selected => openSshDeletePicker(),
         .connect => connectSshFromForm(),
         .save => saveSshFormOnly(),
         .cancel => sessionLauncherClose(),
@@ -826,7 +835,25 @@ fn openSshList() void {
     g_session_launcher_visible = false;
     g_ssh_list_visible = true;
     g_ssh_form_visible = false;
+    g_ssh_list_mode = .manage;
     g_ssh_list_selected = @min(g_ssh_list_selected, sshListRowCount() - 1);
+}
+
+fn openSshEditPicker() void {
+    openSshProfilePicker(.edit_select);
+}
+
+fn openSshDeletePicker() void {
+    openSshProfilePicker(.delete_select);
+}
+
+fn openSshProfilePicker(mode: SshListMode) void {
+    if (g_ssh_profile_count == 0) return;
+    g_session_launcher_visible = false;
+    g_ssh_list_visible = true;
+    g_ssh_form_visible = false;
+    g_ssh_list_mode = mode;
+    g_ssh_list_selected = if (g_ssh_list_selected < g_ssh_profile_count) g_ssh_list_selected else 0;
 }
 
 fn openSshFormNew() void {
@@ -876,7 +903,10 @@ fn handleSshListKey(ev: win32_backend.KeyEvent) void {
 }
 
 fn sshListRowCount() usize {
-    return g_ssh_profile_count + 4;
+    return switch (g_ssh_list_mode) {
+        .manage => g_ssh_profile_count + 4,
+        .edit_select, .delete_select => g_ssh_profile_count + 1,
+    };
 }
 
 fn sshField(field: SshField) []const u8 {
@@ -890,22 +920,41 @@ fn profileField(profile: *const SshProfile, field: SshField) []const u8 {
 }
 
 fn runSshListRow(row: usize) void {
-    if (row < g_ssh_profile_count) {
-        connectSshProfile(row);
-        return;
-    }
-    const action_row = row - g_ssh_profile_count;
-    switch (action_row) {
-        0 => openSshFormNew(),
-        1 => if (g_ssh_profile_count > 0) openSshFormEdit(@min(g_ssh_list_selected, g_ssh_profile_count - 1)),
-        2 => deleteSelectedSshProfile(),
-        else => sessionLauncherClose(),
+    switch (g_ssh_list_mode) {
+        .manage => {
+            if (row < g_ssh_profile_count) {
+                connectSshProfile(row);
+                return;
+            }
+            const action_row = row - g_ssh_profile_count;
+            switch (action_row) {
+                0 => openSshFormNew(),
+                1 => openSshEditPicker(),
+                2 => openSshDeletePicker(),
+                else => sessionLauncherClose(),
+            }
+        },
+        .edit_select => {
+            if (row < g_ssh_profile_count) {
+                openSshFormEdit(row);
+            } else {
+                openSshList();
+            }
+        },
+        .delete_select => {
+            if (row < g_ssh_profile_count) {
+                deleteSshProfile(row);
+                openSshList();
+            } else {
+                openSshList();
+            }
+        },
     }
 }
 
-fn deleteSelectedSshProfile() void {
+fn deleteSshProfile(idx: usize) void {
     if (g_ssh_profile_count == 0) return;
-    const idx = @min(g_ssh_list_selected, g_ssh_profile_count - 1);
+    if (idx >= g_ssh_profile_count) return;
     var i = idx;
     while (i + 1 < g_ssh_profile_count) : (i += 1) {
         g_ssh_profiles[i] = g_ssh_profiles[i + 1];
@@ -1141,9 +1190,33 @@ fn sessionTwoColumnWidth(left: []const u8, right: []const u8) f32 {
     return measureTitlebarText(left) + right_w + 80.0;
 }
 
+fn sessionLauncherTitle() []const u8 {
+    if (g_ssh_form_visible) return "SSH Server";
+    if (g_ssh_list_visible) {
+        return switch (g_ssh_list_mode) {
+            .manage => "SSH Servers",
+            .edit_select => "Edit SSH Server",
+            .delete_select => "Delete SSH Server",
+        };
+    }
+    return "New Session";
+}
+
+fn sessionLauncherHint() []const u8 {
+    if (g_ssh_form_visible) return "Tab changes field, Enter connects";
+    if (g_ssh_list_visible) {
+        return switch (g_ssh_list_mode) {
+            .manage => "Enter connects, New/Edit/Delete manage",
+            .edit_select => "Choose a server to edit",
+            .delete_select => "Choose a server to delete",
+        };
+    }
+    return "Up/Down select, Enter starts";
+}
+
 fn sessionDesiredBoxWidth() f32 {
-    const title = if (g_ssh_form_visible) "SSH Server" else if (g_ssh_list_visible) "SSH Servers" else "New Session";
-    const hint = if (g_ssh_form_visible) "Tab changes field, Enter connects" else if (g_ssh_list_visible) "Enter connects, New/Edit/Delete manage" else "Up/Down select, Enter starts";
+    const title = sessionLauncherTitle();
+    const hint = sessionLauncherHint();
     var desired = @max(measureTitlebarText(title), measureTitlebarText(hint)) + 48.0;
 
     if (g_ssh_form_visible) {
@@ -1172,10 +1245,17 @@ fn sessionDesiredBoxWidth() f32 {
                 std.fmt.bufPrint(&target_buf, "{s}@{s}", .{ user, host }) catch "";
             desired = @max(desired, sessionTwoColumnWidth(profileField(profile, .name), target));
         }
-        desired = @max(desired, sessionTwoColumnWidth("New SSH Server", "add"));
-        desired = @max(desired, sessionTwoColumnWidth("Edit Selected", if (g_ssh_profile_count > 0) "edit" else "no server"));
-        desired = @max(desired, sessionTwoColumnWidth("Delete Selected", if (g_ssh_profile_count > 0) "delete" else "no server"));
-        desired = @max(desired, sessionTwoColumnWidth("Cancel", "Esc"));
+        switch (g_ssh_list_mode) {
+            .manage => {
+                desired = @max(desired, sessionTwoColumnWidth("New SSH Server", "add"));
+                desired = @max(desired, sessionTwoColumnWidth("Edit SSH Server", if (g_ssh_profile_count > 0) "choose" else "no server"));
+                desired = @max(desired, sessionTwoColumnWidth("Delete SSH Server", if (g_ssh_profile_count > 0) "choose" else "no server"));
+                desired = @max(desired, sessionTwoColumnWidth("Cancel", "Esc"));
+            },
+            .edit_select, .delete_select => {
+                desired = @max(desired, sessionTwoColumnWidth("Back", "manage"));
+            },
+        }
         return desired;
     }
 
@@ -1220,6 +1300,7 @@ fn sessionHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, t
         if (row >= sshListRowCount()) return null;
         g_ssh_list_selected = row;
         if (row < g_ssh_profile_count) return .connect_selected;
+        if (g_ssh_list_mode != .manage) return .connect_selected;
         return switch (row - g_ssh_profile_count) {
             0 => .new_ssh,
             1 => .edit_selected,
@@ -1326,8 +1407,8 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
     renderRoundedQuadAlpha(layout.box_x - 1, box_y - 1, layout.box_w + 2, layout.box_h + 2, 11, border_color, 0.24);
     renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 10, panel_color, 0.96);
 
-    const title = if (g_ssh_form_visible) "SSH Server" else if (g_ssh_list_visible) "SSH Servers" else "New Session";
-    const hint = if (g_ssh_form_visible) "Tab changes field, Enter connects" else if (g_ssh_list_visible) "Enter connects, New/Edit/Delete manage" else "Up/Down select, Enter starts";
+    const title = sessionLauncherTitle();
+    const hint = sessionLauncherHint();
     const title_y = textYFromTop(window_height, layout.box_top_px + 18);
     const hint_y = textYFromTop(window_height, layout.box_top_px + 18 + overlayLineHeight());
     renderTitlebarTextStrong(title, layout.box_x + 24, title_y, title_color);
@@ -1339,13 +1420,20 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
             while (row < g_ssh_profile_count) : (row += 1) {
                 renderSshProfileRow(layout, window_height, row, &g_ssh_profiles[row], g_ssh_list_selected == row);
             }
-            renderSessionRow(layout, window_height, row, "New SSH Server", "add", g_ssh_list_selected == row);
-            row += 1;
-            renderSessionRow(layout, window_height, row, "Edit Selected", if (g_ssh_profile_count > 0) "edit" else "no server", g_ssh_list_selected == row);
-            row += 1;
-            renderSessionRow(layout, window_height, row, "Delete Selected", if (g_ssh_profile_count > 0) "delete" else "no server", g_ssh_list_selected == row);
-            row += 1;
-            renderSessionRow(layout, window_height, row, "Cancel", "Esc", g_ssh_list_selected == row);
+            switch (g_ssh_list_mode) {
+                .manage => {
+                    renderSessionRow(layout, window_height, row, "New SSH Server", "add", g_ssh_list_selected == row);
+                    row += 1;
+                    renderSessionRow(layout, window_height, row, "Edit SSH Server", if (g_ssh_profile_count > 0) "choose" else "no server", g_ssh_list_selected == row);
+                    row += 1;
+                    renderSessionRow(layout, window_height, row, "Delete SSH Server", if (g_ssh_profile_count > 0) "choose" else "no server", g_ssh_list_selected == row);
+                    row += 1;
+                    renderSessionRow(layout, window_height, row, "Cancel", "Esc", g_ssh_list_selected == row);
+                },
+                .edit_select, .delete_select => {
+                    renderSessionRow(layout, window_height, row, "Back", "manage", g_ssh_list_selected == row);
+                },
+            }
             return;
         }
         renderSessionRow(layout, window_height, 0, "PowerShell", "new terminal", g_session_launcher_selected == 0);
