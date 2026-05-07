@@ -21,6 +21,21 @@ Install dependencies:
 npm install
 ```
 
+Create a local Wrangler config from the example:
+
+```powershell
+Copy-Item .\wrangler.toml.example .\wrangler.toml
+```
+
+For deployment to your custom domain, uncomment and set this route in the local
+`wrangler.toml`:
+
+```toml
+[[routes]]
+pattern = "remote.example.com"
+custom_domain = true
+```
+
 Set Worker secrets:
 
 ```powershell
