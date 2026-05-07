@@ -34,6 +34,9 @@ type RelayMessage = {
 };
 
 type SurfaceView = {
+  panel: HTMLElement;
+  title: HTMLSpanElement;
+  meta: HTMLElement;
   host: HTMLDivElement;
   term: Terminal;
   fit: FitAddon;
@@ -43,6 +46,7 @@ type SurfaceView = {
   fitQueued: boolean;
   hasLiveOutput: boolean;
   snapshotApplied: boolean;
+  opened: boolean;
 };
 
 type ControlState = "idle" | "pending" | "granted";
@@ -64,6 +68,7 @@ let selectedSurfaceId: string | null = null;
 let surfaceViews = new Map<string, SurfaceView>();
 let notices: string[] = [];
 let controlState: ControlState = "idle";
+let hasSeenLayout = false;
 
 function api(path: string, init?: RequestInit): Promise<Response> {
   return fetch(path, {
@@ -184,6 +189,7 @@ function renderConsole(): void {
   });
 
   const sessionInput = document.querySelector<HTMLInputElement>("#connect-form input[name='session']");
+  sessionInput?.addEventListener("input", () => saveSessionKey(sessionInput.value.trim()));
   sessionInput?.addEventListener("change", () => saveSessionKey(sessionInput.value.trim()));
 
   document.querySelector<HTMLButtonElement>("#clear-session-button")?.addEventListener("click", () => {
@@ -194,6 +200,7 @@ function renderConsole(): void {
 
   document.querySelector<HTMLButtonElement>("#request-control-button")?.addEventListener("click", requestControl);
   updateControlUi();
+  if (savedSessionKey) queueMicrotask(() => connect(savedSessionKey));
 }
 
 function connect(sessionKey: string): void {
@@ -204,6 +211,7 @@ function connect(sessionKey: string): void {
   selectedSurfaceId = null;
   notices = [];
   controlState = "idle";
+  hasSeenLayout = false;
   saveSessionKey(sessionKey);
   renderRemoteWorkspace();
   updateControlUi();
@@ -231,11 +239,16 @@ function connect(sessionKey: string): void {
 
     if (isLayoutMessage(message)) {
       layoutState = normalizeLayout(message);
-      if (!layoutState.tabs.some((tab) => tab.index === selectedTabIndex)) {
+      if (!hasSeenLayout) {
+        selectedTabIndex = layoutState.activeTab;
+        hasSeenLayout = true;
+      } else if (!layoutState.tabs.some((tab) => tab.index === selectedTabIndex)) {
         selectedTabIndex = layoutState.activeTab;
       }
       const activeTab = currentTab();
-      selectedSurfaceId = activeTab?.focusedSurfaceId ?? activeTab?.surfaces[0]?.id ?? selectedSurfaceId;
+      if (!selectedSurfaceId || !activeTab?.surfaces.some((surface) => surface.id === selectedSurfaceId)) {
+        selectedSurfaceId = activeTab?.focusedSurfaceId ?? activeTab?.surfaces[0]?.id ?? selectedSurfaceId;
+      }
       reconcileSurfaceViews();
       renderRemoteWorkspace();
       return;
@@ -309,43 +322,33 @@ function renderRemotePanels(): void {
   const tab = currentTab();
   if (!tab || tab.surfaces.length === 0) {
     panelsRoot.className = "panels-stage empty";
-    panelsRoot.innerHTML = `<div class="empty-state">No panels for this tab yet.</div>`;
+    panelsRoot.replaceChildren(emptyState("No panels for this tab yet."));
     if (titleRoot) titleRoot.textContent = "Remote workspace";
     return;
   }
 
   if (titleRoot) titleRoot.textContent = tab.title || `Tab ${tab.index + 1}`;
   panelsRoot.className = "panels-stage";
-  panelsRoot.innerHTML = "";
+  const visible = new Set(tab.surfaces.map((surface) => surface.id));
 
   for (const surface of tab.surfaces) {
     const view = ensureSurfaceView(surface.id);
-    const panel = document.createElement("section");
-    panel.className = `remote-panel${surface.id === selectedSurfaceId ? " selected" : ""}`;
-    panel.style.left = `${(surface.x ?? 0) * 100}%`;
-    panel.style.top = `${(surface.y ?? 0) * 100}%`;
-    panel.style.width = `${Math.max(0.05, surface.w ?? 1) * 100}%`;
-    panel.style.height = `${Math.max(0.05, surface.h ?? 1) * 100}%`;
-    panel.dataset.surfaceId = surface.id;
+    view.panel.className = `remote-panel${surface.id === selectedSurfaceId ? " selected" : ""}`;
+    view.panel.style.left = `${(surface.x ?? 0) * 100}%`;
+    view.panel.style.top = `${(surface.y ?? 0) * 100}%`;
+    view.panel.style.width = `${Math.max(0.05, surface.w ?? 1) * 100}%`;
+    view.panel.style.height = `${Math.max(0.05, surface.h ?? 1) * 100}%`;
+    view.panel.dataset.surfaceId = surface.id;
+    view.title.textContent = surface.title || shortSurfaceId(surface.id);
+    view.meta.textContent = surface.focused ? "focused" : shortSurfaceId(surface.id);
 
-    const header = document.createElement("div");
-    header.className = "panel-header";
-    header.innerHTML = `
-      <span>${escapeText(surface.title || shortSurfaceId(surface.id))}</span>
-      <small>${surface.focused ? "focused" : shortSurfaceId(surface.id)}</small>
-    `;
+    if (view.panel.parentElement !== panelsRoot) {
+      panelsRoot.appendChild(view.panel);
+    }
 
-    const mount = document.createElement("div");
-    mount.className = "terminal-mount";
-    mount.appendChild(view.host);
-
-    panel.appendChild(header);
-    panel.appendChild(mount);
-    panelsRoot.appendChild(panel);
-
-    if (!view.host.dataset.opened) {
+    if (!view.opened) {
       view.term.open(view.host);
-      view.host.dataset.opened = "true";
+      view.opened = true;
       view.resizeObserver = new ResizeObserver(() => scheduleFit(view));
       view.resizeObserver.observe(view.host);
     }
@@ -353,11 +356,15 @@ function renderRemotePanels(): void {
     applyInitialSnapshot(view, surface.snapshot);
     scheduleFit(view);
 
-    panel.addEventListener("click", () => {
-      selectedSurfaceId = surface.id;
-      renderRemotePanels();
-      ensureSurfaceView(surface.id).term.focus();
-    });
+    if (surface.id === selectedSurfaceId && document.activeElement && view.panel.contains(document.activeElement)) {
+      view.term.focus();
+    }
+  }
+
+  for (const [surfaceId, view] of surfaceViews) {
+    if (!visible.has(surfaceId) && view.panel.parentElement === panelsRoot) {
+      view.panel.remove();
+    }
   }
 }
 
@@ -367,6 +374,30 @@ function ensureSurfaceView(surfaceId: string): SurfaceView {
 
   const host = document.createElement("div");
   host.className = "terminal-host";
+  const panel = document.createElement("section");
+  panel.className = "remote-panel";
+  panel.dataset.surfaceId = surfaceId;
+  const header = document.createElement("div");
+  header.className = "panel-header";
+  const title = document.createElement("span");
+  const meta = document.createElement("small");
+  header.appendChild(title);
+  header.appendChild(meta);
+  const mount = document.createElement("div");
+  mount.className = "terminal-mount";
+  mount.appendChild(host);
+  panel.appendChild(header);
+  panel.appendChild(mount);
+  panel.addEventListener("pointerdown", () => {
+    selectedSurfaceId = surfaceId;
+    renderRemotePanels();
+  });
+  panel.addEventListener("click", () => {
+    selectedSurfaceId = surfaceId;
+    renderRemotePanels();
+    ensureSurfaceView(surfaceId).term.focus();
+  });
+
   const fit = new FitAddon();
   const term = new Terminal({
     cursorBlink: true,
@@ -388,6 +419,9 @@ function ensureSurfaceView(surfaceId: string): SurfaceView {
   term.loadAddon(fit);
 
   const view: SurfaceView = {
+    panel,
+    title,
+    meta,
     host,
     term,
     fit,
@@ -397,6 +431,7 @@ function ensureSurfaceView(surfaceId: string): SurfaceView {
     fitQueued: false,
     hasLiveOutput: false,
     snapshotApplied: false,
+    opened: false,
   };
   surfaceViews.set(surfaceId, view);
   return view;
@@ -541,12 +576,22 @@ function readSavedSessionKey(): string {
 }
 
 function saveSessionKey(sessionKey: string): void {
-  if (!sessionKey) return;
+  if (!sessionKey) {
+    clearSessionKey();
+    return;
+  }
   try {
     localStorage.setItem(SESSION_KEY_STORAGE_KEY, sessionKey);
   } catch {
     // Storage may be unavailable in restricted browser contexts.
   }
+}
+
+function emptyState(text: string): HTMLDivElement {
+  const node = document.createElement("div");
+  node.className = "empty-state";
+  node.textContent = text;
+  return node;
 }
 
 function clearSessionKey(): void {
