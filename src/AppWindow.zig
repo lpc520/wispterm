@@ -29,6 +29,8 @@ pub const window_state = @import("apprt/window_state.zig");
 pub const fbo = @import("renderer/fbo.zig");
 pub const file_explorer = @import("file_explorer.zig");
 pub const file_explorer_renderer = @import("renderer/file_explorer_renderer.zig");
+pub const markdown_preview_panel = @import("markdown_preview_panel.zig");
+pub const markdown_preview_renderer = @import("renderer/markdown_preview_renderer.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -212,6 +214,8 @@ fn clearUiStateOnTabChange() void {
     input.g_sidebar_resize_dragging = false;
     input.g_explorer_resize_hover = false;
     input.g_explorer_resize_dragging = false;
+    input.g_markdown_preview_resize_hover = false;
+    input.g_markdown_preview_resize_dragging = false;
     input.g_divider_dragging = false;
     input.g_divider_drag_handle = null;
     input.g_divider_drag_layout = null;
@@ -451,7 +455,9 @@ fn onWin32Resize(width: i32, height: i32) void {
     const tb = currentTitlebarHeight();
     const sidebar_w = titlebar.sidebarWidth();
     const explorer_w = file_explorer.width();
-    const avail_w = @as(f32, @floatFromInt(width)) - sidebar_w - explorer_w - padding_left - padding_right;
+    const preview_w = markdown_preview_panel.width();
+    const right_panels_w = explorer_w + preview_w;
+    const avail_w = @as(f32, @floatFromInt(width)) - sidebar_w - right_panels_w - padding_left - padding_right;
     const avail_h = @as(f32, @floatFromInt(height)) - (render_padding * 2 + tb) - padding_top - padding_bottom;
     if (avail_w <= 0 or avail_h <= 0) return;
 
@@ -484,7 +490,7 @@ fn onWin32Resize(width: i32, height: i32) void {
         // which corrects the per-surface dimensions for splits.
         const content_x: i32 = @intFromFloat(sidebar_w + render_padding);
         const content_y: i32 = @intFromFloat(render_padding + tb);
-        const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(width)) - sidebar_w - explorer_w - render_padding * 2);
+        const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(width)) - sidebar_w - right_panels_w - render_padding * 2);
         const content_h: i32 = @intFromFloat(@as(f32, @floatFromInt(height)) - (render_padding + tb) - render_padding);
         const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, font.cell_width, font.cell_height);
 
@@ -510,6 +516,7 @@ fn onWin32Resize(width: i32, height: i32) void {
                 const pad_top = @as(f32, @floatFromInt(pad.top)) + titlebar_offset;
                 titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                 titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+                markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, explorer_w);
                 file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                 cell_renderer.drawCells(rend, @floatFromInt(fb_height), sidebar_w + @as(f32, @floatFromInt(pad.left)), pad_top);
                 overlays.renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
@@ -524,6 +531,7 @@ fn onWin32Resize(width: i32, height: i32) void {
 
             titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
             titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+            markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, explorer_w);
             file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
 
             for (0..split_count) |i| {
@@ -570,6 +578,7 @@ fn onWin32Resize(width: i32, height: i32) void {
         gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
         titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+        markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, explorer_w);
         file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     }
 
@@ -586,7 +595,7 @@ fn resizeWindowToGrid() void {
     const tb = currentTitlebarHeight();
     const content_w: f32 = font.cell_width * @as(f32, @floatFromInt(term_cols));
     const content_h: f32 = font.cell_height * @as(f32, @floatFromInt(term_rows));
-    const win_w: i32 = @intFromFloat(content_w + titlebar.sidebarWidth() + file_explorer.width() + padding * 2);
+    const win_w: i32 = @intFromFloat(content_w + titlebar.sidebarWidth() + file_explorer.width() + markdown_preview_panel.width() + padding * 2);
     const win_h: i32 = @intFromFloat(content_h + padding + (padding + tb));
     if (g_window) |w| w.setSize(win_w, win_h);
 }
@@ -1345,13 +1354,15 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         const titlebar_offset = syncWindowTitlebarHeight(win);
         const sidebar_w = titlebar.sidebarWidth();
         const explorer_w = file_explorer.width();
+        const preview_w = markdown_preview_panel.width();
+        const right_panels_w = explorer_w + preview_w;
         const top_padding: f32 = padding + titlebar_offset;
 
         if (activeTab()) |active_tab| {
             // Compute split layout for the active tab
             const content_x: i32 = @intFromFloat(sidebar_w + padding);
             const content_y: i32 = @intFromFloat(top_padding);
-            const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_width)) - sidebar_w - explorer_w - padding * 2);
+            const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_width)) - sidebar_w - right_panels_w - padding * 2);
             const content_h: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_height)) - top_padding - padding);
             const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, font.cell_width, font.cell_height);
             syncImeCaretPosition(win, split_count);
@@ -1400,6 +1411,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                     const pad_top = @as(f32, @floatFromInt(pad.top)) + titlebar_offset;
                     titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                     titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+                    markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, explorer_w);
                     file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                     cell_renderer.drawCells(rend, @floatFromInt(fb_height), sidebar_w + @as(f32, @floatFromInt(pad.left)), pad_top);
                     overlays.renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
@@ -1416,6 +1428,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
 
                 titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                 titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+                markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, explorer_w);
                 file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
 
                 // Render each split surface directly to screen using viewport
@@ -1482,6 +1495,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
             gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
             titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
             titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+            markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, explorer_w);
             file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         }
 

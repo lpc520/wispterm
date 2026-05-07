@@ -357,6 +357,34 @@ pub fn splitFocusedReturningSurface(
     defer if (split_command) |command| allocator.free(command);
     const shell_cmd = split_command orelse getShellCmd();
 
+    return splitFocusedSurfaceWithCommand(
+        allocator,
+        t,
+        focused_surface,
+        direction,
+        cell_w,
+        cell_h,
+        cursor_style,
+        cursor_blink,
+        cwd,
+        shell_cmd,
+        true,
+    );
+}
+
+fn splitFocusedSurfaceWithCommand(
+    allocator: std.mem.Allocator,
+    t: *TabState,
+    focused_surface: *Surface,
+    direction: SplitTree.Split.Direction,
+    cell_w: f32,
+    cell_h: f32,
+    cursor_style: CursorStyle,
+    cursor_blink: bool,
+    cwd: ?[*:0]const u16,
+    shell_cmd: [:0]const u16,
+    inherit_ssh_connection: bool,
+) ?*Surface {
     // Calculate exact dimensions for the new split surface
     const screen_w = focused_surface.size.screen.width;
     const screen_h = focused_surface.size.screen.height;
@@ -398,8 +426,10 @@ pub fn splitFocusedReturningSurface(
         return null;
     };
 
-    if (focused_surface.ssh_connection) |conn| {
-        new_surface.setSshConnection(conn.user(), conn.host(), conn.port(), conn.password(), conn.password_auth);
+    if (inherit_ssh_connection) {
+        if (focused_surface.ssh_connection) |conn| {
+            new_surface.setSshConnection(conn.user(), conn.host(), conn.port(), conn.password(), conn.password_auth);
+        }
     }
 
     // Pre-initialize size state to match what computeSplitLayout will compute

@@ -16,6 +16,7 @@ A Windows terminal written in Zig, powered by [libghostty-vt](https://github.com
 - **Sprite rendering** - Box drawing, block elements, braille patterns, powerline symbols
 - **Ghostty-style font metrics** - Proper ascent/descent/line_gap from hhea/OS2 tables
 - **Theme support** - Ghostty-compatible theme files (default: Poimandres)
+- **File Explorer and previews** - Browse local, WSL, and SSH files, then preview Markdown/text without leaving the terminal
 
 > [!NOTE]
 > Phantty is **Windows-only**. On macOS and Linux, use [Ghostty](https://ghostty.org/) instead.
@@ -64,10 +65,15 @@ publishes Windows release assets whenever a tag matching `vX.Y.Z` is pushed.
 Each tagged release uploads:
 
 - `phantty-windows-portable-vX.Y.Z.zip`
-- `phantty-windows-setup-vX.Y.Z.exe`
 
-GitHub generates the release notes automatically, and the workflow prepends a
-short asset summary for the portable and installer builds.
+The unsigned IExpress installer is not published for now because Windows
+Defender can quarantine it as a false positive. Use the portable zip release
+asset.
+
+Release notes are checked in under `release-notes/vX.Y.Z.md` when a release
+needs curated notes. If a matching file is present, the workflow prepends it to
+the GitHub release body; otherwise GitHub generated notes are used with the
+asset summary.
 
 ## Usage
 
@@ -102,6 +108,7 @@ Default chords are implemented in [`src/input.zig`](src/input.zig). Some keys ar
 | **Ctrl+Shift+B** | Toggle tab sidebar |
 | **Ctrl+Shift+O** | Split to the right |
 | **Ctrl+Shift+E** | Toggle file explorer sidebar |
+| Ctrl-click `.md` / `.txt` in terminal output or File Explorer | Preview local, WSL, or SSH Markdown/text in the right preview panel |
 | **Ctrl+Shift+W** | Close focused panel, tab, or window |
 | **Ctrl+Enter** | Maximize or restore window |
 | **Ctrl++** / **Ctrl+-** | Increase / decrease font size |
@@ -117,6 +124,28 @@ Default chords are implemented in [`src/input.zig`](src/input.zig). Some keys ar
 | **Ctrl+Shift+Tab** | Previous tab |
 | **Alt+1**–**9** | Switch to tab 1–9 (when that tab exists) |
 | **Ctrl+,** | Open config file in the default editor |
+
+## File Explorer and Markdown Preview
+
+Press `Ctrl+Shift+E` to open the right-side File Explorer. It follows the
+active environment:
+
+- Windows shells browse local Windows paths.
+- WSL sessions browse the default WSL distro through `wsl.exe`.
+- Phantty SSH profile sessions browse the remote host through OpenSSH helpers.
+
+Hold `Ctrl` and click a `.md` or `.txt` file in terminal output or in the File
+Explorer to open the right-side preview panel. Markdown previews render
+headings, lists, blockquotes, code blocks, inline code, links, and horizontal
+rules. Text files are shown as plain text.
+
+The preview panel can be resized by dragging its left edge and scrolled with the
+mouse wheel. `Ctrl+Shift+W` closes the preview panel before closing a split.
+
+SSH previews require Phantty's SSH profile metadata, so sessions launched from
+the built-in SSH launcher are supported. Manually typing `ssh user@host` inside
+a local shell is still treated as that local shell and cannot use remote file
+preview yet.
 
 ## Remote Image Viewing
 

@@ -13,6 +13,10 @@ const overlays = AppWindow.overlays;
 const split_layout = AppWindow.split_layout;
 const window_state = AppWindow.window_state;
 const file_explorer = AppWindow.file_explorer;
+const file_backend = @import("file_backend.zig");
+const markdown_preview = @import("markdown_preview.zig");
+const markdown_preview_panel = AppWindow.markdown_preview_panel;
+const scp = @import("scp.zig");
 const win32_backend = @import("apprt/win32.zig");
 const Config = @import("config.zig");
 const Surface = @import("Surface.zig");
@@ -200,7 +204,6 @@ fn ensureSshAskPassScript(allocator: std.mem.Allocator) ?[]u8 {
 }
 
 fn uploadClipboardImageForSsh(allocator: std.mem.Allocator, surface: *const Surface, local_path: []const u8) ?[]u8 {
-    const scp = @import("scp.zig");
     const conn = surface.ssh_connection orelse {
         std.debug.print("SSH image paste skipped: no SSH profile metadata for this surface\n", .{});
         return null;
@@ -369,6 +372,8 @@ pub threadlocal var g_sidebar_resize_hover: bool = false; // Mouse is over the s
 pub threadlocal var g_sidebar_resize_dragging: bool = false; // Currently dragging the sidebar edge
 pub threadlocal var g_explorer_resize_hover: bool = false; // Mouse is over the file explorer resize edge
 pub threadlocal var g_explorer_resize_dragging: bool = false; // Currently dragging the file explorer edge
+pub threadlocal var g_markdown_preview_resize_hover: bool = false; // Mouse is over the preview resize edge
+pub threadlocal var g_markdown_preview_resize_dragging: bool = false; // Currently dragging the preview edge
 
 // Internal state (moved from win32_input struct)
 threadlocal var plus_btn_pressed: bool = false;
@@ -384,13 +389,13 @@ fn syncGridFromWindowSize(width: i32, height: i32) void {
     const render_padding: f32 = 10;
     const tb_offset: f32 = @floatCast(titlebarHeight());
     const sidebar_w = titlebar.sidebarWidth();
-    const explorer_w = file_explorer.width();
+    const right_panels_w = file_explorer.width() + markdown_preview_panel.width();
     const explicit_left: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
     const explicit_right: f32 = @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING)) + overlays.SCROLLBAR_WIDTH;
     const explicit_top: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
     const explicit_bottom: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
 
-    const total_width_padding = sidebar_w + explorer_w + explicit_left + explicit_right;
+    const total_width_padding = sidebar_w + right_panels_w + explicit_left + explicit_right;
     const total_height_padding = render_padding * 2 + tb_offset + explicit_top + explicit_bottom;
 
     const avail_width = @as(f32, @floatFromInt(width)) - total_width_padding;
@@ -428,6 +433,10 @@ pub fn toggleFileExplorer() void {
                     const cwd = surface.getCwd() orelse "";
                     file_explorer.enterRemoteMode(&conn, cwd);
                 }
+            } else if (surface.launch_kind == .wsl) {
+                // WSL session: keep Linux paths and list through wsl.exe.
+                const cwd = surface.getCwd() orelse "~";
+                file_explorer.enterWslMode(cwd);
             } else {
                 var root_set = false;
                 if (surface.getCwd()) |unix_path| {
@@ -744,6 +753,13 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     // Ctrl+Shift+W = close focused panel/tab/window
     if (ev.ctrl and ev.shift and ev.vk == 0x57) { // 'W'
         if (tab.g_tab_rename_active) tab.commitTabRename();
+        if (markdown_preview_panel.g_visible) {
+            markdown_preview_panel.close();
+            if (AppWindow.g_window) |win| syncGridFromWindowSize(win.width, win.height);
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+            return;
+        }
         AppWindow.closeFocusedSplit();
         return;
     }
@@ -980,6 +996,37 @@ fn hitTestFileExplorer(xpos: f64, ypos: f64) bool {
     return xpos >= panel_x;
 }
 
+fn hitTestMarkdownPreviewPanel(xpos: f64, ypos: f64) bool {
+    if (!markdown_preview_panel.g_visible) return false;
+    if (ypos < titlebarHeight()) return false;
+    const win = AppWindow.g_window orelse return false;
+    const explorer_w: f64 = @floatCast(file_explorer.width());
+    const preview_w: f64 = @floatCast(markdown_preview_panel.width());
+    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - explorer_w - preview_w;
+    return xpos >= panel_x and xpos < panel_x + preview_w;
+}
+
+fn hitTestMarkdownPreviewResizeHandle(xpos: f64, ypos: f64) bool {
+    if (!markdown_preview_panel.g_visible) return false;
+    if (ypos < titlebarHeight()) return false;
+    const win = AppWindow.g_window orelse return false;
+    const explorer_w: f64 = @floatCast(file_explorer.width());
+    const preview_w: f64 = @floatCast(markdown_preview_panel.width());
+    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - explorer_w - preview_w;
+    const half_hit: f64 = @as(f64, @floatCast(markdown_preview_panel.RESIZE_HIT_WIDTH)) / 2;
+    return xpos >= panel_x - half_hit and xpos <= panel_x + half_hit;
+}
+
+fn applyMarkdownPreviewWidthFromMouse(xpos: f64) void {
+    const win = AppWindow.g_window orelse return;
+    const right_edge = @as(f64, @floatFromInt(win.width)) - @as(f64, @floatCast(file_explorer.width()));
+    const new_width = right_edge - xpos;
+    if (!markdown_preview_panel.setWidth(@floatCast(new_width), @floatFromInt(win.width))) return;
+    syncGridFromWindowSize(win.width, win.height);
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+}
+
 fn hitTestFileExplorerResizeHandle(xpos: f64, ypos: f64) bool {
     if (!file_explorer.g_visible) return false;
     if (ypos < titlebarHeight()) return false;
@@ -1135,7 +1182,7 @@ fn openFileDialogAndUpload() void {
     }
 }
 
-fn handleFileExplorerPress(xpos: f64, ypos: f64) void {
+fn handleFileExplorerPress(xpos: f64, ypos: f64, ctrl: bool, shift: bool, alt: bool) void {
     file_explorer.g_focused = true;
 
     // Check resize handle first
@@ -1167,6 +1214,12 @@ fn handleFileExplorerPress(xpos: f64, ypos: f64) void {
 
     if (row_idx < file_explorer.g_entry_count) {
         file_explorer.g_selected = row_idx;
+        if (!file_explorer.g_entries[row_idx].is_dir and ctrl and !shift and !alt) {
+            if (openFileExplorerPreview(row_idx)) {
+                AppWindow.g_force_rebuild = true;
+                return;
+            }
+        }
         if (file_explorer.g_entries[row_idx].is_dir) {
             file_explorer.toggleExpand(row_idx);
         }
@@ -1296,6 +1349,7 @@ fn isPreviewImagePath(path: []const u8) bool {
 fn looksLikePreviewPath(path: []const u8) bool {
     if (path.len == 0) return false;
     if (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://")) return false;
+    if (markdown_preview.detectKind(path) != null) return true;
     if (path[0] == '~') return true;
     if (path.len >= 2 and path[1] == ':') return true;
     if (std.mem.indexOfScalar(u8, path, '/') != null) return true;
@@ -1467,7 +1521,7 @@ fn updateUrlUnderlineAtMouse(xpos: f64, ypos: f64) void {
         clearUrlUnderline();
         return;
     }
-    if (ypos < titlebarHeight() or hitTestFileExplorer(xpos, ypos)) {
+    if (ypos < titlebarHeight() or hitTestFileExplorer(xpos, ypos) or hitTestMarkdownPreviewPanel(xpos, ypos)) {
         clearUrlUnderline();
         return;
     }
@@ -1501,6 +1555,143 @@ fn appendShellQuoted(list: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
         }
     }
     try list.append(allocator, '\'');
+}
+
+fn readLocalPreviewSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var file = blk: {
+        if (std.fs.path.isAbsolute(path)) {
+            break :blk std.fs.openFileAbsolute(path, .{}) catch return error.PreviewFailed;
+        }
+        break :blk std.fs.cwd().openFile(path, .{}) catch return error.PreviewFailed;
+    };
+    defer file.close();
+
+    const source = file.readToEndAlloc(allocator, markdown_preview.MAX_SOURCE_BYTES + 1) catch return error.PreviewFailed;
+    errdefer allocator.free(source);
+    if (source.len > markdown_preview.MAX_SOURCE_BYTES) return error.PreviewTooLarge;
+    return source;
+}
+
+fn buildRemotePreviewReadCommand(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var path_buf: [1024]u8 = undefined;
+    const path_expr = file_backend.shellPathExpr(&path_buf, path) orelse return error.PreviewFailed;
+    return std.fmt.allocPrint(allocator, "head -c {} -- {s}", .{ markdown_preview.MAX_SOURCE_BYTES + 1, path_expr });
+}
+
+fn readSshPreviewSource(allocator: std.mem.Allocator, conn: *const Surface.SshConnection, path: []const u8) ![]u8 {
+    const command = buildRemotePreviewReadCommand(allocator, path) catch return error.PreviewFailed;
+    defer allocator.free(command);
+
+    const source = scp.sshExec(allocator, conn, command) orelse return error.PreviewFailed;
+    errdefer allocator.free(source);
+    if (source.len > markdown_preview.MAX_SOURCE_BYTES) return error.PreviewTooLarge;
+    return source;
+}
+
+fn readRemotePreviewSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (!file_explorer.g_has_ssh_conn) return error.PreviewFailed;
+    return readSshPreviewSource(allocator, &file_explorer.g_ssh_conn, path);
+}
+
+fn buildWslPreviewReadCommand(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var path_buf: [1024]u8 = undefined;
+    const path_expr = file_backend.wslPathExpr(&path_buf, path) orelse return error.PreviewFailed;
+    return std.fmt.allocPrint(allocator, "head -c {} -- {s}", .{ markdown_preview.MAX_SOURCE_BYTES + 1, path_expr });
+}
+
+fn readWslPreviewSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const command = buildWslPreviewReadCommand(allocator, path) catch return error.PreviewFailed;
+    defer allocator.free(command);
+
+    const source = file_backend.wslExec(allocator, command) orelse return error.PreviewFailed;
+    errdefer allocator.free(source);
+    if (source.len > markdown_preview.MAX_SOURCE_BYTES) return error.PreviewTooLarge;
+    return source;
+}
+
+fn basenameForPreview(path: []const u8) []const u8 {
+    var start: usize = 0;
+    for (path, 0..) |ch, i| {
+        if (ch == '/' or ch == '\\') start = i + 1;
+    }
+    return path[start..];
+}
+
+fn isUnixAbsoluteOrHome(path: []const u8) bool {
+    return path.len > 0 and (path[0] == '/' or path[0] == '~');
+}
+
+fn joinUnixPreviewPath(allocator: std.mem.Allocator, cwd: []const u8, path: []const u8) ![]u8 {
+    if (isUnixAbsoluteOrHome(path)) return allocator.dupe(u8, path);
+    if (cwd.len == 0) return allocator.dupe(u8, path);
+    if (std.mem.eql(u8, cwd, "/")) return std.fmt.allocPrint(allocator, "/{s}", .{path});
+    const base = std.mem.trimRight(u8, cwd, "/");
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ base, path });
+}
+
+fn resolveTerminalPreviewPath(allocator: std.mem.Allocator, surface: *Surface, path: []const u8) ![]u8 {
+    return switch (surface.launch_kind) {
+        .wsl, .ssh => blk: {
+            const cwd = surface.getCwd() orelse "~";
+            break :blk try joinUnixPreviewPath(allocator, cwd, path);
+        },
+        .windows => blk: {
+            if (std.fs.path.isAbsolute(path) or (path.len >= 2 and path[1] == ':')) {
+                break :blk try allocator.dupe(u8, path);
+            }
+            const cwd = surface.getInitialCwd() orelse {
+                break :blk try allocator.dupe(u8, path);
+            };
+            break :blk try std.fs.path.join(allocator, &.{ cwd, path });
+        },
+    };
+}
+
+fn readTerminalPreviewSource(allocator: std.mem.Allocator, surface: *Surface, path: []const u8) ![]u8 {
+    return switch (surface.launch_kind) {
+        .wsl => readWslPreviewSource(allocator, path),
+        .ssh => blk: {
+            const conn = surface.ssh_connection orelse {
+                std.debug.print("Markdown preview over SSH needs Phantty SSH connection metadata; manual ssh sessions are not supported yet\n", .{});
+                return error.PreviewFailed;
+            };
+            break :blk try readSshPreviewSource(allocator, &conn, path);
+        },
+        .windows => readLocalPreviewSource(allocator, path),
+    };
+}
+
+fn openRenderedPreview(allocator: std.mem.Allocator, kind: markdown_preview.Kind, title: []const u8, path: []const u8, source: []const u8) bool {
+    _ = allocator;
+    markdown_preview_panel.open(kind, title, path, source);
+    if (AppWindow.g_window) |win| syncGridFromWindowSize(win.width, win.height);
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+    file_explorer.setTransferStatus(.success, title);
+    return true;
+}
+
+fn openFileExplorerPreview(row_idx: usize) bool {
+    if (row_idx >= file_explorer.g_entry_count) return false;
+    const entry = &file_explorer.g_entries[row_idx];
+    if (entry.is_dir) return false;
+
+    const path = entry.path_buf[0..entry.path_len];
+    const kind = markdown_preview.detectKind(path) orelse return false;
+    const allocator = AppWindow.g_allocator orelse return false;
+    const title = entry.name_buf[0..entry.name_len];
+
+    const source = switch (file_explorer.g_mode) {
+        .local => readLocalPreviewSource(allocator, path),
+        .wsl => readWslPreviewSource(allocator, path),
+        .remote => readRemotePreviewSource(allocator, path),
+    } catch |err| {
+        file_explorer.setTransferStatus(.failed, if (err == error.PreviewTooLarge) "Preview too large" else "Preview failed");
+        return true;
+    };
+    defer allocator.free(source);
+
+    return openRenderedPreview(allocator, kind, title, path, source);
 }
 
 fn buildPreviewCommand(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
@@ -1540,6 +1731,22 @@ fn openPreviewPanelForCell(surface: *Surface, cell_pos: CellPos) bool {
     const allocator = AppWindow.g_allocator orelse return false;
     const path = extractPreviewPathAtCell(allocator, surface, cell_pos) orelse return false;
     defer allocator.free(path);
+
+    if (markdown_preview.detectKind(path)) |kind| {
+        const resolved_path = resolveTerminalPreviewPath(allocator, surface, path) catch {
+            file_explorer.setTransferStatus(.failed, "Preview failed");
+            return true;
+        };
+        defer allocator.free(resolved_path);
+
+        const source = readTerminalPreviewSource(allocator, surface, resolved_path) catch |err| {
+            file_explorer.setTransferStatus(.failed, if (err == error.PreviewTooLarge) "Preview too large" else "Preview failed");
+            return true;
+        };
+        defer allocator.free(source);
+
+        return openRenderedPreview(allocator, kind, basenameForPreview(path), resolved_path, source);
+    }
 
     const command = buildPreviewCommand(allocator, path) orelse return false;
     defer allocator.free(command);
@@ -1659,6 +1866,12 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
                 return;
             }
+            if (hitTestMarkdownPreviewResizeHandle(xpos, ypos)) {
+                g_markdown_preview_resize_dragging = true;
+                g_markdown_preview_resize_hover = true;
+                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+                return;
+            }
 
             if (tab.g_sidebar_visible and xpos < @as(f64, @floatCast(titlebar.sidebarWidth()))) {
                 handleSidebarPress(xpos, ypos);
@@ -1667,7 +1880,13 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
 
             // File explorer right sidebar click
             if (hitTestFileExplorer(xpos, ypos)) {
-                handleFileExplorerPress(xpos, ypos);
+                handleFileExplorerPress(xpos, ypos, ev.ctrl, ev.shift, ev.alt);
+                return;
+            }
+
+            if (hitTestMarkdownPreviewPanel(xpos, ypos)) {
+                file_explorer.g_focused = false;
+                if (file_explorer.g_op_mode != .none) file_explorer.cancelOp();
                 return;
             }
 
@@ -1766,6 +1985,13 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 g_explorer_resize_dragging = false;
                 g_explorer_resize_hover = hitTestFileExplorerResizeHandle(xpos, ypos);
                 const cursor_id = if (g_explorer_resize_hover) win32_backend.IDC_SIZEWE else win32_backend.IDC_ARROW;
+                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, cursor_id));
+                return;
+            }
+            if (g_markdown_preview_resize_dragging) {
+                g_markdown_preview_resize_dragging = false;
+                g_markdown_preview_resize_hover = hitTestMarkdownPreviewResizeHandle(xpos, ypos);
+                const cursor_id = if (g_markdown_preview_resize_hover) win32_backend.IDC_SIZEWE else win32_backend.IDC_ARROW;
                 _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, cursor_id));
                 return;
             }
@@ -1950,6 +2176,11 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
         _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
         return;
     }
+    if (g_markdown_preview_resize_dragging) {
+        applyMarkdownPreviewWidthFromMouse(xpos);
+        _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+        return;
+    }
 
     // Handle divider dragging
     if (g_divider_dragging) {
@@ -1965,10 +2196,10 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
             const win = AppWindow.g_window orelse return;
             const fb = win.getFramebufferSize();
             const sidebar_w = titlebar.sidebarWidth();
-            const fe_w = file_explorer.width();
+            const right_panels_w = file_explorer.width() + markdown_preview_panel.width();
             const content_x: f32 = sidebar_w + @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING));
             const content_y: f32 = @floatCast(titlebarHeight());
-            const content_w: f32 = @as(f32, @floatFromInt(fb.width)) - sidebar_w - fe_w - @as(f32, @floatFromInt(2 * split_layout.DEFAULT_PADDING));
+            const content_w: f32 = @as(f32, @floatFromInt(fb.width)) - sidebar_w - right_panels_w - @as(f32, @floatFromInt(2 * split_layout.DEFAULT_PADDING));
             const content_h: f32 = @as(f32, @floatFromInt(fb.height)) - content_y - @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING));
 
             const slot = spatial.slots[handle.idx()];
@@ -2018,6 +2249,15 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
         } else if (g_explorer_resize_hover) {
             _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_ARROW));
             g_explorer_resize_hover = false;
+        }
+        const over_preview_resize = hitTestMarkdownPreviewResizeHandle(xpos, ypos);
+        if (over_preview_resize) {
+            _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+            g_markdown_preview_resize_hover = true;
+            return;
+        } else if (g_markdown_preview_resize_hover) {
+            _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_ARROW));
+            g_markdown_preview_resize_hover = false;
         }
     }
 
@@ -2169,6 +2409,17 @@ fn appendAlternateScrollKeys(surface: *Surface, ev: win32_backend.MouseWheelEven
 fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
     overlays.startupShortcutsDismiss();
     if (tab.g_sidebar_visible and ev.xpos >= 0 and ev.xpos < @as(i32, @intFromFloat(titlebar.sidebarWidth()))) return;
+    if (markdown_preview_panel.g_visible) {
+        const win = AppWindow.g_window orelse return;
+        const panel_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(win.width)) - file_explorer.width() - markdown_preview_panel.width()));
+        const panel_right = @as(i32, @intFromFloat(@as(f32, @floatFromInt(win.width)) - file_explorer.width()));
+        if (ev.xpos >= panel_x and ev.xpos < panel_right) {
+            const delta: f32 = -@as(f32, @floatFromInt(ev.delta)) * 72.0 / 120.0;
+            markdown_preview_panel.scrollBy(delta);
+            AppWindow.g_force_rebuild = true;
+            return;
+        }
+    }
     // Scroll in file explorer
     if (file_explorer.g_visible) {
         const win = AppWindow.g_window orelse return;

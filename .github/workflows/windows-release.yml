@@ -125,13 +125,25 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag $portableAsset --repo $env:GITHUB_REPOSITORY --clobber
           } else {
-            $notes = @(
+            $assetNotes = @(
               "Windows assets included in this release:",
               "",
               "- Portable: zip archive containing phantty.exe",
               "",
               "The unsigned IExpress setup executable is not published because Windows Defender can quarantine it as a false positive. Use the portable zip for now."
             ) -join "`n"
+
+            $releaseNotesPath = Join-Path "release-notes" "$tag.md"
+            if (Test-Path $releaseNotesPath) {
+              $curatedNotes = (Get-Content $releaseNotesPath -Raw).Trim()
+              if (![string]::IsNullOrWhiteSpace($curatedNotes)) {
+                $notes = @($curatedNotes, "", $assetNotes) -join "`n"
+              } else {
+                $notes = $assetNotes
+              }
+            } else {
+              $notes = $assetNotes
+            }
 
             gh release create $tag $portableAsset `
               --repo $env:GITHUB_REPOSITORY `

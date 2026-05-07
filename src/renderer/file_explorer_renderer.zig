@@ -70,8 +70,12 @@ pub fn render(window_width: f32, window_height: f32, titlebar_h: f32) void {
 
     // Header with mode indicator
     const header_y = window_height - titlebar_h - header_h;
-    const mode_label = if (file_explorer.g_mode == .remote) "REMOTE" else "LOCAL";
-    const mode_color = if (file_explorer.g_mode == .remote) accent else header_text;
+    const mode_label = switch (file_explorer.g_mode) {
+        .remote => "REMOTE",
+        .wsl => "WSL",
+        .local => "LOCAL",
+    };
+    const mode_color = if (file_explorer.g_mode == .local) header_text else accent;
     const header_text_y = header_y + (header_h - font.g_titlebar_cell_height) / 2;
     const label_end = titlebar.renderTextLimited(mode_label, panel_x + 12, header_text_y, mode_color, explorer_w - 24);
     _ = titlebar.renderTextLimited(" Explorer", label_end, header_text_y, header_text, explorer_w - (label_end - panel_x) - 12);

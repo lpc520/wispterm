@@ -2,7 +2,7 @@
 //!
 //! Manages the right-side file explorer sidebar: visibility, width, directory
 //! scanning, tree expand/collapse, selection, scroll, and file operations.
-//! Supports both local (std.fs) and remote (ssh ls / scp) modes.
+//! Supports local (std.fs), WSL (wsl.exe), and remote (ssh ls / scp) modes.
 
 const std = @import("std");
 const Surface = @import("Surface.zig");
@@ -19,7 +19,7 @@ pub const HEADER_HEIGHT: f32 = 36;
 pub const INDENT_WIDTH: f32 = 16;
 pub const MAX_ENTRIES: usize = 2048;
 
-pub const Mode = enum { local, remote };
+pub const Mode = enum { local, wsl, remote };
 
 pub threadlocal var g_visible: bool = false;
 pub threadlocal var g_width: f32 = DEFAULT_WIDTH;
@@ -163,6 +163,20 @@ pub fn enterLocalMode() void {
     g_root_path_len = 0;
 }
 
+/// Enter WSL mode. Paths are Linux-style and listed via wsl.exe.
+pub fn enterWslMode(wsl_cwd: []const u8) void {
+    g_async_context_id +%= 1;
+    g_pending_async_list = null;
+    g_loading = false;
+    g_mode = .wsl;
+    g_has_ssh_conn = false;
+    if (wsl_cwd.len > 0) {
+        setRoot(wsl_cwd);
+    } else {
+        setRoot("~");
+    }
+}
+
 pub fn setRoot(path: []const u8) void {
     g_async_context_id +%= 1;
     const len = @min(path.len, g_root_path.len);
@@ -234,9 +248,15 @@ pub fn rescan() void {
     if (g_root_path_len == 0) return;
 
     const path = g_root_path[0..g_root_path_len];
-    const result = loadBackendEntries(.local, path, 0, path, '\\');
+    const backend: file_backend.Backend = switch (g_mode) {
+        .local => .local,
+        .wsl => .wsl,
+        .remote => unreachable,
+    };
+    const sep: u8 = if (g_mode == .wsl) '/' else '\\';
+    const result = loadBackendEntries(backend, path, 0, path, sep);
     if (result != .ok) {
-        setTransferStatus(.failed, "Cannot open folder");
+        setTransferStatus(.failed, if (g_mode == .wsl) "WSL list failed" else "Cannot open folder");
     }
 }
 
@@ -343,6 +363,8 @@ pub fn toggleExpand(idx: usize) void {
     } else {
         if (g_mode == .remote and g_has_ssh_conn) {
             expandRemote(idx);
+        } else if (g_mode == .wsl) {
+            expandWsl(idx);
         } else {
             expand(idx);
         }
@@ -381,7 +403,11 @@ fn expandWithBackend(idx: usize, backend: file_backend.Backend, sep: u8) void {
         entry.expanded = false;
         setTransferStatus(
             .failed,
-            if (g_mode == .remote) "SSH list failed" else "Cannot open folder",
+            switch (g_mode) {
+                .remote => "SSH list failed",
+                .wsl => "WSL list failed",
+                .local => "Cannot open folder",
+            },
         );
         return;
     }
@@ -549,6 +575,10 @@ fn setLoading(msg: []const u8) void {
 
 fn expand(idx: usize) void {
     expandWithBackend(idx, .local, '\\');
+}
+
+fn expandWsl(idx: usize) void {
+    expandWithBackend(idx, .wsl, '/');
 }
 
 fn collapse(idx: usize) void {
@@ -792,7 +822,7 @@ fn ensureSelectedVisible() void {
 // SCP Transfer Operations
 // ============================================================================
 
-fn setTransferStatus(status: TransferStatus, msg: []const u8) void {
+pub fn setTransferStatus(status: TransferStatus, msg: []const u8) void {
     g_transfer_status = status;
     g_transfer_msg_len = @intCast(@min(msg.len, g_transfer_msg.len));
     @memcpy(g_transfer_msg[0..g_transfer_msg_len], msg[0..g_transfer_msg_len]);
@@ -890,6 +920,7 @@ test "buildChildPathInto avoids duplicate separators" {
 
 test "Mode enum values" {
     try std.testing.expectEqual(Mode.local, .local);
+    try std.testing.expectEqual(Mode.wsl, .wsl);
     try std.testing.expectEqual(Mode.remote, .remote);
     // Default state
     g_mode = .local;
