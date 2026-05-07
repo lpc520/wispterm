@@ -63,6 +63,12 @@ export class RemoteSession extends DurableObject<Env> {
       const message = safeJson(event.data);
       if (!message) return;
 
+      if (message.type === "ping") {
+        try { socket.send(JSON.stringify({ type: "pong" })); } catch { /* ignore */ }
+        return;
+      }
+      if (message.type === "pong") return;
+
       if (message.type === "output" && typeof message.data === "string") {
         this.broadcast({ type: "output", data: message.data });
       } else if (message.type === "output-bytes" && typeof message.data === "string") {
@@ -95,6 +101,12 @@ export class RemoteSession extends DurableObject<Env> {
       if (typeof event.data !== "string") return;
       const message = safeJson(event.data);
       if (!message) return;
+
+      if (message.type === "ping") {
+        try { socket.send(JSON.stringify({ type: "pong" })); } catch { /* ignore */ }
+        return;
+      }
+      if (message.type === "pong") return;
 
       if (
         message.type === "input-bytes" &&

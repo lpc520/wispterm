@@ -8,10 +8,16 @@
   --muted: #8fa0b5;
   --line: rgba(144, 163, 186, 0.2);
   --accent: #f6c76f;
+  --accent-soft: rgba(246, 199, 111, 0.18);
   --accent-ink: #19130a;
   --danger: #ff6978;
   --ok: #64d69a;
   --radius: 22px;
+  --radius-sm: 12px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
   font-family: "Aptos", "Segoe UI", sans-serif;
 }
 
@@ -34,6 +40,8 @@ body {
     radial-gradient(circle at bottom right, rgba(83, 177, 255, 0.13), transparent 30rem),
     var(--bg);
   color: var(--text);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 
 button,
@@ -41,11 +49,14 @@ input {
   font: inherit;
 }
 
+/* ─── Auth screen ────────────────────────────────────────────── */
+
 .shell {
-  min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
   place-items: center;
-  padding: 32px;
+  padding: max(32px, var(--safe-top)) max(32px, var(--safe-right)) max(32px, var(--safe-bottom))
+    max(32px, var(--safe-left));
 }
 
 .auth-shell {
@@ -152,24 +163,47 @@ button:disabled {
   color: var(--danger);
 }
 
+/* ─── Console layout ─────────────────────────────────────────── */
+
 .console-shell {
-  height: 100vh;
+  height: 100dvh;
   min-height: 0;
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
+  position: relative;
+}
+
+.sidebar-backdrop {
+  display: none;
 }
 
 .sidebar {
+  grid-column: 1;
+  grid-row: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 18px;
   padding: 28px;
+  padding-top: max(28px, var(--safe-top));
+  padding-left: max(28px, var(--safe-left));
   overflow-y: auto;
   border-right: 1px solid var(--line);
   background: rgba(8, 13, 19, 0.72);
   backdrop-filter: blur(20px);
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: -4px 0 4px;
+}
+
+.sidebar-head .icon-button {
+  display: none;
 }
 
 .sidebar .panel {
@@ -178,6 +212,75 @@ button:disabled {
 
 .sidebar h1 {
   font-size: 24px;
+}
+
+.workspace {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.mobile-bar {
+  display: none;
+}
+
+.terminal-panel {
+  grid-row: 3;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 24px;
+  padding-right: max(24px, var(--safe-right));
+}
+
+.surface-strip {
+  display: none;
+}
+
+.terminal-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 18px;
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  border-radius: 20px 20px 0 0;
+  background: var(--panel-strong);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.toolbar-hint {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.terminal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.control-state {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.control-state[data-state="granted"] {
+  border-color: rgba(100, 214, 154, 0.6);
+  color: var(--ok);
 }
 
 .status-panel {
@@ -225,7 +328,7 @@ button:disabled {
 
 .tab-chip.active {
   border-color: rgba(246, 199, 111, 0.72);
-  background: rgba(246, 199, 111, 0.16);
+  background: var(--accent-soft);
 }
 
 .tab-chip span {
@@ -259,56 +362,7 @@ button:disabled {
   background: var(--ok);
 }
 
-.terminal-panel {
-  min-width: 0;
-  min-height: 0;
-  height: 100vh;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  padding: 24px;
-}
-
-.terminal-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 18px;
-  border: 1px solid var(--line);
-  border-bottom: 0;
-  border-radius: 20px 20px 0 0;
-  background: var(--panel-strong);
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 800;
-}
-
-.toolbar-hint {
-  color: var(--accent);
-  font-size: 12px;
-}
-
-.terminal-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  min-width: 0;
-  flex-wrap: wrap;
-}
-
-.control-state {
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 7px 10px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.control-state[data-state="granted"] {
-  border-color: rgba(100, 214, 154, 0.6);
-  color: var(--ok);
-}
+/* ─── Panels stage (terminal surfaces) ───────────────────────── */
 
 .panels-stage {
   position: relative;
@@ -400,6 +454,7 @@ button:disabled {
 
 .terminal-host {
   overflow: hidden;
+  touch-action: none;
 }
 
 .terminal-host .xterm {
@@ -415,31 +470,498 @@ button:disabled {
   display: none;
 }
 
-@media (max-width: 860px) {
+/* ─── Mobile chrome (hidden on desktop) ──────────────────────── */
+
+.icon-button {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(8, 13, 19, 0.6);
+  color: var(--text);
+  padding: 0;
+  cursor: pointer;
+}
+
+.icon-button:active {
+  background: rgba(246, 199, 111, 0.14);
+}
+
+.status-pip {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--danger);
+  box-shadow: 0 0 0 4px rgba(255, 105, 120, 0.16);
+  flex-shrink: 0;
+}
+
+.status-pip[data-state="connecting"] {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(246, 199, 111, 0.18);
+}
+
+.status-pip[data-state="online"] {
+  background: var(--ok);
+  box-shadow: 0 0 0 4px rgba(100, 214, 154, 0.18);
+}
+
+/* ─── Virtual keyboard ───────────────────────────────────────── */
+
+.vkbd {
+  display: none;
+  grid-column: 1 / -1;
+  position: relative;
+  padding: 10px max(10px, var(--safe-right)) max(10px, var(--safe-bottom)) max(10px, var(--safe-left));
+  background:
+    linear-gradient(180deg, rgba(15, 23, 34, 0.96), rgba(7, 11, 16, 0.98)),
+    var(--bg);
+  border-top: 1px solid var(--line);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.vkbd::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 64px;
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, var(--accent-soft), transparent);
+}
+
+.vkbd-rows {
+  display: grid;
+  gap: 6px;
+}
+
+.vkbd-row {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 5px;
+}
+
+.vkbd-key {
+  -webkit-appearance: none;
+  appearance: none;
+  display: grid;
+  place-items: center;
+  height: 42px;
+  min-width: 0;
+  padding: 0 6px;
+  border-radius: 10px;
+  border: 1px solid rgba(144, 163, 186, 0.22);
+  background:
+    linear-gradient(180deg, rgba(31, 43, 60, 0.95), rgba(15, 23, 34, 0.95));
+  color: var(--text);
+  font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: transform 80ms ease, background 120ms ease, border-color 120ms ease;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 1px 0 rgba(0, 0, 0, 0.4);
+}
+
+.vkbd-key:active {
+  transform: translateY(1px) scale(0.97);
+  background: linear-gradient(180deg, rgba(40, 56, 78, 0.95), rgba(20, 31, 46, 0.95));
+}
+
+.vkbd-key.vkbd-pill {
+  color: var(--accent);
+  border-color: rgba(246, 199, 111, 0.32);
+  background: linear-gradient(180deg, rgba(40, 31, 18, 0.92), rgba(22, 17, 10, 0.95));
+}
+
+.vkbd-key.vkbd-mod[data-active="true"] {
+  color: var(--accent-ink);
+  background: linear-gradient(180deg, #ffd279, var(--accent));
+  border-color: var(--accent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    0 0 0 1px rgba(246, 199, 111, 0.5),
+    0 0 22px rgba(246, 199, 111, 0.4);
+}
+
+.vkbd-key.vkbd-wide {
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.vkbd-key:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ─── Sidebar drawer (shared with mobile + tri-fold) ─────────── */
+
+.console-shell[data-drawer-open="true"] .sidebar-backdrop {
+  display: block;
+}
+
+/* ─── Responsive: phone / tablet portrait ────────────────────── */
+
+@media (max-width: 860px), (pointer: coarse) and (max-width: 1024px) {
   html,
   body,
   #app {
-    overflow: auto;
+    overflow: hidden;
   }
 
   .console-shell {
     grid-template-columns: 1fr;
-    height: auto;
-    min-height: 100vh;
-    overflow: visible;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(2px);
+    z-index: 80;
+    animation: fade-in 200ms ease both;
   }
 
   .sidebar {
-    overflow: visible;
-    border-right: 0;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(340px, 86vw);
+    z-index: 90;
+    transform: translateX(-102%);
+    transition: transform 280ms cubic-bezier(0.2, 0.7, 0.2, 1);
+    border-right: 1px solid var(--line);
+    border-bottom: 0;
+    box-shadow: 24px 0 60px rgba(0, 0, 0, 0.5);
+  }
+
+  .console-shell[data-drawer-open="true"] .sidebar {
+    transform: translateX(0);
+  }
+
+  .sidebar-head .icon-button {
+    display: grid;
+  }
+
+  .workspace {
+    grid-column: 1;
+    grid-row: 1;
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .mobile-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px max(12px, var(--safe-right)) 10px max(12px, var(--safe-left));
+    padding-top: max(10px, var(--safe-top));
     border-bottom: 1px solid var(--line);
+    background: rgba(8, 13, 19, 0.85);
+    backdrop-filter: blur(20px);
+  }
+
+  .mobile-bar-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-weight: 800;
+    font-size: 14px;
+    letter-spacing: 0.02em;
+  }
+
+  .terminal-toolbar {
+    display: none;
   }
 
   .terminal-panel {
-    height: auto;
+    grid-row: 3;
+    grid-template-rows: minmax(0, 1fr);
+    padding: 8px;
+    padding-right: max(8px, var(--safe-right));
+    padding-left: max(8px, var(--safe-left));
   }
 
   .panels-stage {
-    height: 62vh;
+    border-radius: 16px;
+  }
+
+  .surface-strip {
+    grid-row: 2;
+    display: flex;
+    gap: 6px;
+    padding: 6px max(10px, var(--safe-right)) 6px max(10px, var(--safe-left));
+    overflow-x: auto;
+    scrollbar-width: none;
+    border-bottom: 1px solid var(--line);
+    background: rgba(8, 13, 19, 0.5);
+  }
+
+  .surface-strip::-webkit-scrollbar {
+    display: none;
+  }
+
+  .surface-strip:empty {
+    display: none;
+  }
+
+  .surface-chip {
+    flex: 0 0 auto;
+    max-width: 60vw;
+    padding: 7px 11px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: rgba(8, 13, 19, 0.7);
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+
+  .surface-chip.active {
+    color: var(--accent);
+    border-color: rgba(246, 199, 111, 0.5);
+    background: var(--accent-soft);
+  }
+
+  /* On mobile, override absolute layout so each surface fills the stage. */
+  .panels-stage[data-mobile-mode="single"] .remote-panel {
+    inset: 0 !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    display: none;
+  }
+
+  .panels-stage[data-mobile-mode="single"] .remote-panel.selected {
+    display: grid;
+  }
+
+  /* Two-row console layout: workspace + virtual keyboard. */
+  .console-shell[data-kbd-visible="true"] {
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .console-shell[data-kbd-visible="true"] .vkbd {
+    display: block;
+    grid-row: 2;
+  }
+}
+
+/* ─── Foldable: dual-fold horizontal crease (top/bottom) ─────── */
+
+@media (vertical-viewport-segments: 2) {
+  .console-shell[data-kbd-visible="true"] {
+    grid-template-columns: 1fr;
+    grid-template-rows:
+      env(viewport-segment-top 0 1)
+      calc(100dvh - env(viewport-segment-bottom 0 0));
+  }
+
+  .vkbd {
+    align-content: center;
+    padding-top: 16px;
+    padding-bottom: max(16px, var(--safe-bottom));
+  }
+
+  .vkbd-rows {
+    gap: 8px;
+    max-width: min(720px, 100%);
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  .vkbd-key {
+    height: clamp(42px, 7dvh, 64px);
+  }
+}
+
+/* ─── Foldable: dual-fold vertical crease (book mode) ────────── */
+
+@media (horizontal-viewport-segments: 2) and (pointer: coarse) {
+  .console-shell[data-kbd-visible="true"] {
+    grid-template-columns:
+      env(viewport-segment-right 0 0)
+      calc(100vw - env(viewport-segment-left 1 0));
+    grid-template-rows: 1fr;
+  }
+
+  .console-shell[data-kbd-visible="true"] .workspace {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .console-shell[data-kbd-visible="true"] .vkbd {
+    display: block;
+    grid-column: 2;
+    grid-row: 1;
+    padding: 14px;
+    padding-right: max(14px, var(--safe-right));
+    padding-bottom: max(14px, var(--safe-bottom));
+    overflow-y: auto;
+    border-top: 0;
+    border-left: 1px solid var(--line);
+  }
+
+  .console-shell[data-kbd-visible="true"] .vkbd::before {
+    top: 50%;
+    left: -1px;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 64px;
+    background: linear-gradient(180deg, transparent, var(--accent-soft), transparent);
+  }
+
+  .vkbd-key {
+    height: clamp(44px, 7dvh, 56px);
+  }
+}
+
+/* ─── Foldable: tri-fold horizontal (3 vertical segments) ────── */
+
+@media (horizontal-viewport-segments: 3) and (pointer: coarse) {
+  .console-shell[data-kbd-visible="true"] {
+    grid-template-columns:
+      env(viewport-segment-right 0 0)
+      calc(env(viewport-segment-right 1 0) - env(viewport-segment-left 1 0))
+      calc(100vw - env(viewport-segment-left 2 0));
+    grid-template-rows: 1fr;
+  }
+
+  /* Sidebar inhabits the leftmost segment as a permanent rail. */
+  .console-shell[data-kbd-visible="true"] .sidebar {
+    position: relative;
+    transform: none;
+    grid-column: 1;
+    grid-row: 1;
+    width: 100%;
+    box-shadow: none;
+  }
+
+  .console-shell[data-kbd-visible="true"] .sidebar-head {
+    display: none;
+  }
+
+  .console-shell[data-kbd-visible="true"] .sidebar-backdrop {
+    display: none !important;
+  }
+
+  .console-shell[data-kbd-visible="true"] .workspace {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .console-shell[data-kbd-visible="true"] .mobile-bar {
+    display: none;
+  }
+
+  .console-shell[data-kbd-visible="true"] .terminal-toolbar {
+    display: flex;
+  }
+
+  .console-shell[data-kbd-visible="true"] .vkbd {
+    display: block;
+    grid-column: 3;
+    grid-row: 1;
+    padding: 16px;
+    padding-bottom: max(16px, var(--safe-bottom));
+    border-top: 0;
+    border-left: 1px solid var(--line);
+  }
+
+  .console-shell[data-kbd-visible="true"] .vkbd::before {
+    top: 50%;
+    left: -1px;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 64px;
+    background: linear-gradient(180deg, transparent, var(--accent-soft), transparent);
+  }
+}
+
+/* ─── Foldable: tri-fold vertical (3 horizontal segments) ────── */
+
+@media (vertical-viewport-segments: 3) {
+  .console-shell[data-kbd-visible="true"] {
+    grid-template-columns: 1fr;
+    grid-template-rows:
+      env(viewport-segment-bottom 0 0)
+      calc(env(viewport-segment-bottom 0 1) - env(viewport-segment-top 0 1))
+      calc(100dvh - env(viewport-segment-top 0 2));
+  }
+
+  .console-shell[data-kbd-visible="true"] .workspace {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+
+  .console-shell[data-kbd-visible="true"] .vkbd {
+    grid-row: 3;
+  }
+}
+
+/* ─── Tiny phones / very narrow ──────────────────────────────── */
+
+@media (max-width: 380px) {
+  .vkbd-key {
+    font-size: 13px;
+    height: 38px;
+  }
+
+  .vkbd-rows {
+    gap: 5px;
+  }
+
+  .vkbd-row {
+    gap: 4px;
+  }
+}
+
+/* ─── Landscape phones with no fold: keep keyboard compact ───── */
+
+@media (max-height: 500px) and (max-width: 1024px) {
+  .vkbd-key {
+    height: 36px;
+    font-size: 12px;
+  }
+
+  .vkbd {
+    padding-top: 6px;
+    padding-bottom: max(6px, var(--safe-bottom));
+  }
+
+  .vkbd-rows {
+    gap: 4px;
+  }
+
+  .mobile-bar {
+    padding-top: max(6px, var(--safe-top));
+    padding-bottom: 6px;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }

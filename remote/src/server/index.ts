@@ -26,6 +26,7 @@ type LoginBody = {
 
 const COOKIE_NAME = "phantty_remote";
 const SESSION_TTL_SECONDS = 8 * 60 * 60;
+const HEARTBEAT_INTERVAL_MS = 25_000;
 
 const PORT = Number(process.env.PORT ?? 8787);
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -56,11 +57,17 @@ class RemoteSession {
       // ignore
     }
     this.phantty = socket;
+    trackHeartbeat(socket);
     this.broadcast({ type: "notice", message: "Phantty connected" });
 
     socket.on("message", (raw) => {
       const message = safeJson(raw.toString());
       if (!message) return;
+      if (message.type === "ping") {
+        safeSend(socket, { type: "pong" });
+        return;
+      }
+      if (message.type === "pong") return;
       if (message.type === "output" && typeof message.data === "string") {
         this.broadcast({ type: "output", data: message.data });
       } else if (message.type === "output-bytes" && typeof message.data === "string") {
@@ -85,6 +92,7 @@ class RemoteSession {
 
   attachBrowser(socket: WebSocket): void {
     this.browsers.add(socket);
+    trackHeartbeat(socket);
     safeSend(socket, { type: "notice", message: "Browser paired; input enabled" });
     if (this.phantty) safeSend(socket, { type: "notice", message: "Phantty connected" });
     if (this.lastLayout) safeSend(socket, this.lastLayout);
@@ -92,6 +100,11 @@ class RemoteSession {
     socket.on("message", (raw) => {
       const message = safeJson(raw.toString());
       if (!message) return;
+      if (message.type === "ping") {
+        safeSend(socket, { type: "pong" });
+        return;
+      }
+      if (message.type === "pong") return;
       if (
         message.type === "input-bytes" &&
         typeof message.surfaceId === "string" &&
@@ -152,6 +165,41 @@ function safeJson(data: string): RelayMessage | null {
 }
 
 const wss = new WebSocketServer({ noServer: true });
+
+const heartbeatState = new WeakMap<WebSocket, { alive: boolean }>();
+
+function trackHeartbeat(socket: WebSocket): void {
+  heartbeatState.set(socket, { alive: true });
+  socket.on("pong", () => {
+    const state = heartbeatState.get(socket);
+    if (state) state.alive = true;
+  });
+  socket.on("close", () => {
+    heartbeatState.delete(socket);
+  });
+}
+
+const heartbeatTimer = setInterval(() => {
+  for (const ws of wss.clients) {
+    const state = heartbeatState.get(ws);
+    if (!state) continue;
+    if (!state.alive) {
+      try {
+        ws.terminate();
+      } catch {
+        // ignore
+      }
+      continue;
+    }
+    state.alive = false;
+    try {
+      ws.ping();
+    } catch {
+      // ignore
+    }
+  }
+}, HEARTBEAT_INTERVAL_MS);
+heartbeatTimer.unref?.();
 
 const server = createServer((req, res) => {
   void routeHttp(req, res).catch((err) => {
