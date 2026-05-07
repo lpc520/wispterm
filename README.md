@@ -106,6 +106,7 @@ Default chords are implemented in [`src/input.zig`](src/input.zig). Some keys ar
 | **Ctrl+Enter** | Maximize or restore window |
 | **Ctrl++** / **Ctrl+-** | Increase / decrease font size |
 | **Ctrl+Shift+C** | Copy selection |
+| Right-click a selection | Copy selection |
 | **Ctrl+V** | Paste text |
 | **Ctrl+Shift+V** | Paste clipboard image |
 | **Alt** + arrow keys | Move focus to adjacent panel (spatial) |

@@ -1498,6 +1498,12 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
         return;
     }
 
+    // Right-click copies the current terminal selection, if any.
+    if (ev.button == .right and ev.action == .release) {
+        copySelectionToClipboard();
+        return;
+    }
+
     if (ev.button == .left) {
         const xpos: f64 = @floatFromInt(ev.x);
         const ypos: f64 = @floatFromInt(ev.y);
