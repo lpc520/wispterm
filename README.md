@@ -110,7 +110,7 @@ Default chords are implemented in [`src/input.zig`](src/input.zig). Some keys ar
 | **Ctrl+Shift+E** | Toggle file explorer sidebar |
 | Ctrl-click `.md` / `.txt` in terminal output or File Explorer | Preview local, WSL, or SSH Markdown/text in the right preview panel |
 | **Ctrl+Shift+W** | Close focused panel, tab, or window |
-| **Ctrl+Enter** | Maximize or restore window |
+| **Alt+Enter** | Maximize or restore window |
 | **Ctrl++** / **Ctrl+-** | Increase / decrease font size |
 | **Ctrl+Shift+C** | Copy selection |
 | Right-click a selection | Copy selection |

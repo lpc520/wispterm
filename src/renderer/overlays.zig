@@ -122,7 +122,7 @@ const STARTUP_SHORTCUT_ENTRIES = [_]StartupShortcut{
     .{ .keys = "Ctrl+Shift+V", .action = "Paste image" },
     .{ .keys = "Ctrl+,", .action = "Open config" },
     .{ .keys = "Ctrl++ / Ctrl+-", .action = "Font size" },
-    .{ .keys = "Ctrl+Enter", .action = "Maximize / restore" },
+    .{ .keys = "Alt+Enter", .action = "Maximize / restore" },
 };
 
 pub threadlocal var g_startup_shortcuts_visible: bool = false;
@@ -204,7 +204,7 @@ const COMMAND_ENTRIES = [_]CommandEntry{
     .{ .title = "Open Config", .detail = "Open the Phantty config file", .shortcut = "Ctrl+,", .action = .open_config },
     .{ .title = "Decrease Font Size", .detail = "Make terminal text smaller", .shortcut = "Ctrl+-", .action = .font_size_decrease },
     .{ .title = "Increase Font Size", .detail = "Make terminal text larger", .shortcut = "Ctrl++", .action = .font_size_increase },
-    .{ .title = "Toggle Maximize", .detail = "Maximize or restore the window", .shortcut = "Ctrl+Enter", .action = .toggle_maximize },
+    .{ .title = "Toggle Maximize", .detail = "Maximize or restore the window", .shortcut = "Alt+Enter", .action = .toggle_maximize },
     .{ .title = "Copy Remote Key", .detail = "Copy the active Phantty remote session key", .shortcut = "click Remote key", .action = .copy_remote_key },
 };
 

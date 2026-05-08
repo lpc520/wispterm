@@ -768,8 +768,8 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         AppWindow.closeFocusedSplit();
         return;
     }
-    // Ctrl+Enter = maximize / restore window
-    if (ev.ctrl and !ev.shift and !ev.alt and ev.vk == win32_backend.VK_RETURN) {
+    // Alt+Enter = maximize / restore window
+    if (ev.alt and !ev.ctrl and !ev.shift and ev.vk == win32_backend.VK_RETURN) {
         if (tab.g_tab_rename_active) tab.commitTabRename();
         toggleMaximize();
         return;
@@ -859,10 +859,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         if (AppWindow.g_allocator) |alloc| Config.openConfigInEditor(alloc);
         return;
     }
-    // Legacy fullscreen chord is intentionally unused; Ctrl+Enter owns maximize/restore.
-    if (ev.alt and !ev.ctrl and ev.vk == win32_backend.VK_RETURN) {
-        return;
-    }
+    // Alt+Enter handled above as maximize/restore.
 
     // Don't send input to PTY if active tab isn't the terminal
     if (!AppWindow.isActiveTabTerminal()) return;
