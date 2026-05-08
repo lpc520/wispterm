@@ -16,6 +16,8 @@ const MAX_URL_BYTES = 2048;
 const MAX_SSH_DEST_BYTES = 280;
 const MAX_TUNNEL_SPEC_BYTES = 96;
 const MAX_LOCAL_HOST_BYTES = 32;
+const TUNNEL_READY_TIMEOUT_MS = 8000;
+const TUNNEL_READY_POLL_NS = 50 * std.time.ns_per_ms;
 const BrowserHandle = opaque {};
 
 extern fn phantty_webview2_create(
@@ -376,15 +378,62 @@ fn ensureSshTunnel(allocator: std.mem.Allocator, conn: *const Surface.SshConnect
     };
 
     g_tunnel = SshTunnel.init(child, conn, remote_port, local_port, local_host);
+    if (!waitForTunnelReady(allocator, local_host, local_port)) {
+        std.debug.print("SSH browser tunnel did not become ready on {s}:{d}\n", .{ local_host, local_port });
+        stopTunnel();
+        return null;
+    }
+
     std.debug.print("SSH browser tunnel: {s}:{d} -> remote 127.0.0.1:{d}\n", .{ local_host, local_port, remote_port });
     return local_port;
 }
 
 fn stopTunnel() void {
     if (g_tunnel) |*tunnel| {
-        _ = tunnel.child.kill() catch {};
+        if (childHasExited(&tunnel.child)) {
+            _ = tunnel.child.wait() catch {};
+        } else {
+            _ = tunnel.child.kill() catch {};
+        }
         g_tunnel = null;
     }
+}
+
+fn waitForTunnelReady(allocator: std.mem.Allocator, local_host: []const u8, local_port: u16) bool {
+    const deadline = std.time.milliTimestamp() + TUNNEL_READY_TIMEOUT_MS;
+    while (std.time.milliTimestamp() < deadline) {
+        if (canConnectToLocalPort(allocator, local_host, local_port)) return true;
+        if (g_tunnel) |*tunnel| {
+            if (childHasExited(&tunnel.child)) return false;
+        } else {
+            return false;
+        }
+        std.Thread.sleep(TUNNEL_READY_POLL_NS);
+    }
+    return false;
+}
+
+fn canConnectToLocalPort(allocator: std.mem.Allocator, local_host: []const u8, local_port: u16) bool {
+    if (std.mem.eql(u8, local_host, "127.0.0.1") or std.mem.eql(u8, local_host, "localhost")) {
+        const address = std.net.Address.parseIp4("127.0.0.1", local_port) catch return false;
+        var stream = std.net.tcpConnectToAddress(address) catch {
+            if (!std.mem.eql(u8, local_host, "localhost")) return false;
+            return canConnectToLocalHostName(allocator, local_host, local_port);
+        };
+        stream.close();
+        return true;
+    }
+    return canConnectToLocalHostName(allocator, local_host, local_port);
+}
+
+fn canConnectToLocalHostName(allocator: std.mem.Allocator, local_host: []const u8, local_port: u16) bool {
+    var stream = std.net.tcpConnectToHost(allocator, local_host, local_port) catch return false;
+    stream.close();
+    return true;
+}
+
+fn childHasExited(child: *const std.process.Child) bool {
+    return win32.WaitForSingleObject(child.id, 0) == win32.WAIT_OBJECT_0;
 }
 
 fn reserveLocalPort() ?u16 {

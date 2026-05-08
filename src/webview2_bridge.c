@@ -167,9 +167,11 @@ typedef struct EventRegistrationToken {
 } EventRegistrationToken;
 
 struct PhanttyWebView2Browser {
+    LONG refs;
     HWND parent;
     RECT bounds;
     BOOL visible;
+    BOOL closing;
     BOOL com_initialized;
     HRESULT last_error;
     HMODULE loader;
@@ -179,10 +181,18 @@ struct PhanttyWebView2Browser {
     EnvCompletedHandler env_handler;
     ControllerCompletedHandler controller_handler;
     AcceleratorKeyPressedHandler accelerator_handler;
+    BOOL env_async_pending;
+    BOOL controller_async_pending;
     EventRegistrationToken accelerator_token;
     BOOL accelerator_registered;
     WCHAR pending_url[2048];
 };
+
+static void browser_release(PhanttyWebView2Browser *browser);
+
+static void browser_add_ref(PhanttyWebView2Browser *browser) {
+    if (browser) InterlockedIncrement(&browser->refs);
+}
 
 static void copy_url(WCHAR *dst, size_t dst_len, const WCHAR *src) {
     if (!dst || dst_len == 0) return;
@@ -191,6 +201,10 @@ static void copy_url(WCHAR *dst, size_t dst_len, const WCHAR *src) {
     wcsncpy(dst, src, dst_len - 1);
     dst[dst_len - 1] = 0;
 }
+
+static ULONG STDMETHODCALLTYPE env_AddRef(ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *This);
+static ULONG STDMETHODCALLTYPE controller_AddRef(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *This);
+static ULONG STDMETHODCALLTYPE accelerator_AddRef(ICoreWebView2AcceleratorKeyPressedEventHandler *This);
 
 static HRESULT handler_qi(void *This, void **ppvObject) {
     if (!ppvObject) return E_POINTER;
@@ -203,7 +217,9 @@ static HRESULT STDMETHODCALLTYPE env_QueryInterface(
     REFIID riid,
     void **ppvObject) {
     (void)riid;
-    return handler_qi(This, ppvObject);
+    HRESULT hr = handler_qi(This, ppvObject);
+    if (SUCCEEDED(hr)) env_AddRef(This);
+    return hr;
 }
 
 static ULONG STDMETHODCALLTYPE env_AddRef(ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *This) {
@@ -214,6 +230,11 @@ static ULONG STDMETHODCALLTYPE env_AddRef(ICoreWebView2CreateCoreWebView2Environ
 static ULONG STDMETHODCALLTYPE env_Release(ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *This) {
     EnvCompletedHandler *handler = (EnvCompletedHandler *)This;
     LONG refs = InterlockedDecrement(&handler->refs);
+    PhanttyWebView2Browser *browser = handler->browser;
+    if (refs == 1 && browser && browser->env_async_pending) {
+        browser->env_async_pending = FALSE;
+        browser_release(browser);
+    }
     return refs < 0 ? 0 : (ULONG)refs;
 }
 
@@ -222,7 +243,9 @@ static HRESULT STDMETHODCALLTYPE controller_QueryInterface(
     REFIID riid,
     void **ppvObject) {
     (void)riid;
-    return handler_qi(This, ppvObject);
+    HRESULT hr = handler_qi(This, ppvObject);
+    if (SUCCEEDED(hr)) controller_AddRef(This);
+    return hr;
 }
 
 static ULONG STDMETHODCALLTYPE controller_AddRef(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *This) {
@@ -233,6 +256,11 @@ static ULONG STDMETHODCALLTYPE controller_AddRef(ICoreWebView2CreateCoreWebView2
 static ULONG STDMETHODCALLTYPE controller_Release(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *This) {
     ControllerCompletedHandler *handler = (ControllerCompletedHandler *)This;
     LONG refs = InterlockedDecrement(&handler->refs);
+    PhanttyWebView2Browser *browser = handler->browser;
+    if (refs == 1 && browser && browser->controller_async_pending) {
+        browser->controller_async_pending = FALSE;
+        browser_release(browser);
+    }
     return refs < 0 ? 0 : (ULONG)refs;
 }
 
@@ -241,7 +269,9 @@ static HRESULT STDMETHODCALLTYPE accelerator_QueryInterface(
     REFIID riid,
     void **ppvObject) {
     (void)riid;
-    return handler_qi(This, ppvObject);
+    HRESULT hr = handler_qi(This, ppvObject);
+    if (SUCCEEDED(hr)) accelerator_AddRef(This);
+    return hr;
 }
 
 static ULONG STDMETHODCALLTYPE accelerator_AddRef(ICoreWebView2AcceleratorKeyPressedEventHandler *This) {
@@ -386,10 +416,49 @@ static void build_user_data_folder(WCHAR *buf, size_t len) {
 }
 
 static void browser_apply_bounds(PhanttyWebView2Browser *browser) {
-    if (!browser || !browser->controller) return;
+    if (!browser || browser->closing || !browser->controller) return;
     browser->controller->lpVtbl->put_Bounds(browser->controller, browser->bounds);
     browser->controller->lpVtbl->put_IsVisible(browser->controller, browser->visible);
     browser->controller->lpVtbl->NotifyParentWindowPositionChanged(browser->controller);
+}
+
+static void browser_release_webview_resources(PhanttyWebView2Browser *browser) {
+    if (!browser) return;
+    if (browser->controller) {
+        if (browser->accelerator_registered) {
+            browser->controller->lpVtbl->remove_AcceleratorKeyPressed(browser->controller, browser->accelerator_token.value);
+            browser->accelerator_registered = FALSE;
+        }
+        browser->controller->lpVtbl->Close(browser->controller);
+    }
+    if (browser->webview) {
+        browser->webview->lpVtbl->Release(browser->webview);
+        browser->webview = NULL;
+    }
+    if (browser->controller) {
+        browser->controller->lpVtbl->Release(browser->controller);
+        browser->controller = NULL;
+    }
+    if (browser->environment) {
+        browser->environment->lpVtbl->Release(browser->environment);
+        browser->environment = NULL;
+    }
+}
+
+static void browser_release(PhanttyWebView2Browser *browser) {
+    if (!browser) return;
+    if (InterlockedDecrement(&browser->refs) != 0) return;
+
+    browser_release_webview_resources(browser);
+    if (browser->loader) {
+        FreeLibrary(browser->loader);
+        browser->loader = NULL;
+    }
+    if (browser->com_initialized) {
+        CoUninitialize();
+        browser->com_initialized = FALSE;
+    }
+    free(browser);
 }
 
 static HRESULT STDMETHODCALLTYPE accelerator_Invoke(
@@ -399,7 +468,7 @@ static HRESULT STDMETHODCALLTYPE accelerator_Invoke(
     (void)sender;
     AcceleratorKeyPressedHandler *handler = (AcceleratorKeyPressedHandler *)This;
     PhanttyWebView2Browser *browser = handler->browser;
-    if (!browser || !browser->parent || !args) return S_OK;
+    if (!browser || browser->closing || !browser->parent || !args) return S_OK;
 
     int key_kind = 0;
     UINT virtual_key = 0;
@@ -429,6 +498,10 @@ static HRESULT STDMETHODCALLTYPE controller_Invoke(
     PhanttyWebView2Browser *browser = handler->browser;
     if (!browser) return E_FAIL;
     browser->last_error = errorCode;
+    if (browser->closing) {
+        if (result) result->lpVtbl->Close(result);
+        return S_OK;
+    }
     if (FAILED(errorCode) || !result) return S_OK;
 
     browser->controller = result;
@@ -460,14 +533,20 @@ static HRESULT STDMETHODCALLTYPE env_Invoke(
     PhanttyWebView2Browser *browser = handler->browser;
     if (!browser) return E_FAIL;
     browser->last_error = errorCode;
-    if (FAILED(errorCode) || !result) return S_OK;
+    if (browser->closing || FAILED(errorCode) || !result) return S_OK;
 
     browser->environment = result;
     browser->environment->lpVtbl->AddRef(browser->environment);
+    browser_add_ref(browser);
+    browser->controller_async_pending = TRUE;
     browser->last_error = browser->environment->lpVtbl->CreateCoreWebView2Controller(
         browser->environment,
         browser->parent,
         &browser->controller_handler.iface);
+    if (FAILED(browser->last_error) && browser->controller_async_pending) {
+        browser->controller_async_pending = FALSE;
+        browser_release(browser);
+    }
     return S_OK;
 }
 
@@ -486,6 +565,7 @@ PhanttyWebView2Browser *phantty_webview2_create(
         return NULL;
     }
 
+    browser->refs = 1;
     browser->parent = parent;
     browser->bounds.left = left;
     browser->bounds.top = top;
@@ -525,16 +605,22 @@ PhanttyWebView2Browser *phantty_webview2_create(
 
     WCHAR user_data[MAX_PATH];
     build_user_data_folder(user_data, sizeof(user_data) / sizeof(user_data[0]));
+    browser_add_ref(browser);
+    browser->env_async_pending = TRUE;
     browser->last_error = create_environment(
         NULL,
         user_data[0] ? user_data : NULL,
         NULL,
         &browser->env_handler.iface);
+    if (FAILED(browser->last_error) && browser->env_async_pending) {
+        browser->env_async_pending = FALSE;
+        browser_release(browser);
+    }
     return browser;
 }
 
 void phantty_webview2_set_bounds(PhanttyWebView2Browser *browser, int left, int top, int right, int bottom) {
-    if (!browser) return;
+    if (!browser || browser->closing) return;
     browser->bounds.left = left;
     browser->bounds.top = top;
     browser->bounds.right = right;
@@ -543,18 +629,18 @@ void phantty_webview2_set_bounds(PhanttyWebView2Browser *browser, int left, int 
 }
 
 void phantty_webview2_set_visible(PhanttyWebView2Browser *browser, int visible) {
-    if (!browser) return;
+    if (!browser || browser->closing) return;
     browser->visible = visible ? TRUE : FALSE;
     browser_apply_bounds(browser);
 }
 
 void phantty_webview2_focus(PhanttyWebView2Browser *browser) {
-    if (!browser || !browser->controller) return;
+    if (!browser || browser->closing || !browser->controller) return;
     browser->controller->lpVtbl->MoveFocus(browser->controller, 0);
 }
 
 void phantty_webview2_navigate(PhanttyWebView2Browser *browser, const WCHAR *url) {
-    if (!browser) return;
+    if (!browser || browser->closing) return;
     copy_url(browser->pending_url, sizeof(browser->pending_url) / sizeof(browser->pending_url[0]), url);
     if (browser->webview && browser->pending_url[0] != 0) {
         browser->last_error = browser->webview->lpVtbl->Navigate(browser->webview, browser->pending_url);
@@ -562,7 +648,7 @@ void phantty_webview2_navigate(PhanttyWebView2Browser *browser, const WCHAR *url
 }
 
 int phantty_webview2_is_ready(PhanttyWebView2Browser *browser) {
-    return browser && browser->controller && browser->webview;
+    return browser && !browser->closing && browser->controller && browser->webview;
 }
 
 HRESULT phantty_webview2_last_error(PhanttyWebView2Browser *browser) {
@@ -571,32 +657,7 @@ HRESULT phantty_webview2_last_error(PhanttyWebView2Browser *browser) {
 
 void phantty_webview2_destroy(PhanttyWebView2Browser *browser) {
     if (!browser) return;
-    if (browser->controller) {
-        if (browser->accelerator_registered) {
-            browser->controller->lpVtbl->remove_AcceleratorKeyPressed(browser->controller, browser->accelerator_token.value);
-            browser->accelerator_registered = FALSE;
-        }
-        browser->controller->lpVtbl->Close(browser->controller);
-    }
-    if (browser->webview) {
-        browser->webview->lpVtbl->Release(browser->webview);
-        browser->webview = NULL;
-    }
-    if (browser->controller) {
-        browser->controller->lpVtbl->Release(browser->controller);
-        browser->controller = NULL;
-    }
-    if (browser->environment) {
-        browser->environment->lpVtbl->Release(browser->environment);
-        browser->environment = NULL;
-    }
-    if (browser->loader) {
-        FreeLibrary(browser->loader);
-        browser->loader = NULL;
-    }
-    if (browser->com_initialized) {
-        CoUninitialize();
-        browser->com_initialized = FALSE;
-    }
-    free(browser);
+    browser->closing = TRUE;
+    browser_release_webview_resources(browser);
+    browser_release(browser);
 }
