@@ -461,8 +461,10 @@ pub fn toggleFileExplorer() void {
 }
 
 pub fn toggleBrowserPanel() void {
+    const allocator = AppWindow.g_allocator orelse return;
     const parent = if (AppWindow.g_window) |win| win.hwnd else null;
-    browser_panel.toggle(parent);
+    const surface = AppWindow.activeSurface();
+    if (!browser_panel.toggleForSurface(allocator, parent, surface)) return;
     if (AppWindow.g_window) |win| {
         syncGridFromWindowSize(win.width, win.height);
     }
@@ -1519,7 +1521,7 @@ fn extractPreviewPathAtCell(allocator: std.mem.Allocator, surface: *Surface, cel
     return token;
 }
 
-fn openUrl(url: []const u8) bool {
+fn openUrl(surface: *Surface, url: []const u8) bool {
     const allocator = AppWindow.g_allocator orelse return false;
     const target = if (std.mem.startsWith(u8, url, "www."))
         std.fmt.allocPrint(allocator, "https://{s}", .{url}) catch return false
@@ -1527,19 +1529,14 @@ fn openUrl(url: []const u8) bool {
         allocator.dupe(u8, url) catch return false;
     defer allocator.free(target);
 
-    const target_w = std.unicode.utf8ToUtf16LeAllocZ(allocator, target) catch return false;
-    defer allocator.free(target_w);
-
     const hwnd = if (AppWindow.g_window) |win| win.hwnd else null;
-    const result = win32_backend.ShellExecuteW(
-        hwnd,
-        std.unicode.utf8ToUtf16LeStringLiteral("open"),
-        target_w.ptr,
-        null,
-        null,
-        win32_backend.SW_SHOW,
-    );
-    return result > 32;
+    if (!browser_panel.openForSurface(allocator, hwnd, target, surface)) return false;
+    if (AppWindow.g_window) |win| {
+        syncGridFromWindowSize(win.width, win.height);
+    }
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+    return true;
 }
 
 fn openUrlAtCell(surface: *Surface, cell_pos: CellPos) bool {
@@ -1547,7 +1544,7 @@ fn openUrlAtCell(surface: *Surface, cell_pos: CellPos) bool {
     const token = extractUrlRangeAtCell(allocator, surface, cell_pos) orelse return false;
     defer token.deinit(allocator);
     setUrlUnderline(surface, viewportOffsetForSurface(surface) + token.row, token.start_col, token.end_col);
-    return openUrl(token.text);
+    return openUrl(surface, token.text);
 }
 
 fn updateUrlUnderlineAtMouse(xpos: f64, ypos: f64) void {

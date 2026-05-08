@@ -2,6 +2,8 @@
 
 const std = @import("std");
 const win32 = @import("apprt/win32.zig");
+const Surface = @import("Surface.zig");
+const browser_url = @import("browser_url.zig");
 
 pub const DEFAULT_WIDTH: f32 = 720;
 pub const MIN_WIDTH: f32 = 360;
@@ -10,6 +12,9 @@ pub const MIN_CONTENT_WIDTH: f32 = 320;
 pub const DEFAULT_URL = "http://localhost:3000";
 
 const MAX_URL_BYTES = 2048;
+const MAX_SSH_DEST_BYTES = 280;
+const MAX_TUNNEL_SPEC_BYTES = 96;
+const MAX_LOCAL_HOST_BYTES = 32;
 const BrowserHandle = opaque {};
 
 extern fn phantty_webview2_create(
@@ -41,6 +46,58 @@ pub threadlocal var g_last_error: win32.HRESULT = 0;
 threadlocal var g_browser: ?*BrowserHandle = null;
 threadlocal var g_url_buf: [MAX_URL_BYTES]u8 = undefined;
 threadlocal var g_url_len: usize = 0;
+threadlocal var g_tunnel: ?SshTunnel = null;
+
+const SshTunnel = struct {
+    child: std.process.Child,
+    local_port: u16,
+    remote_port: u16,
+    local_host_buf: [MAX_LOCAL_HOST_BYTES]u8 = undefined,
+    local_host_len: usize = 0,
+    user_buf: [128]u8 = undefined,
+    user_len: usize = 0,
+    host_buf: [128]u8 = undefined,
+    host_len: usize = 0,
+    ssh_port_buf: [16]u8 = undefined,
+    ssh_port_len: usize = 0,
+
+    fn init(child: std.process.Child, conn: *const Surface.SshConnection, remote_port: u16, local_port: u16, local_host: []const u8) SshTunnel {
+        var tunnel: SshTunnel = .{
+            .child = child,
+            .local_port = local_port,
+            .remote_port = remote_port,
+        };
+        tunnel.local_host_len = copyBounded(tunnel.local_host_buf[0..], local_host);
+        tunnel.user_len = copyBounded(tunnel.user_buf[0..], conn.user());
+        tunnel.host_len = copyBounded(tunnel.host_buf[0..], conn.host());
+        tunnel.ssh_port_len = copyBounded(tunnel.ssh_port_buf[0..], conn.port());
+        return tunnel;
+    }
+
+    fn matches(self: *const SshTunnel, conn: *const Surface.SshConnection, remote_port: u16, local_host: []const u8) bool {
+        return self.remote_port == remote_port and
+            std.mem.eql(u8, self.localHost(), local_host) and
+            std.mem.eql(u8, self.user(), conn.user()) and
+            std.mem.eql(u8, self.host(), conn.host()) and
+            std.mem.eql(u8, self.sshPort(), conn.port());
+    }
+
+    fn localHost(self: *const SshTunnel) []const u8 {
+        return self.local_host_buf[0..self.local_host_len];
+    }
+
+    fn user(self: *const SshTunnel) []const u8 {
+        return self.user_buf[0..self.user_len];
+    }
+
+    fn host(self: *const SshTunnel) []const u8 {
+        return self.host_buf[0..self.host_len];
+    }
+
+    fn sshPort(self: *const SshTunnel) []const u8 {
+        return self.ssh_port_buf[0..self.ssh_port_len];
+    }
+};
 
 pub fn width() f32 {
     return if (g_visible) g_width else 0;
@@ -60,6 +117,23 @@ pub fn open(parent: ?win32.HWND, url: []const u8) void {
     _ = parent;
 }
 
+pub fn openForSurface(allocator: std.mem.Allocator, parent: ?win32.HWND, url: []const u8, surface: ?*const Surface) bool {
+    var target = url;
+    var tunneled_url: ?[]u8 = null;
+    defer if (tunneled_url) |owned| allocator.free(owned);
+
+    if (sshLoopbackUrl(surface, target)) |request| {
+        const local_port = ensureSshTunnel(allocator, &request.conn, request.parsed.port, browser_url.localTunnelHost(request.parsed.host)) orelse return false;
+        tunneled_url = browser_url.buildLocalTunnelUrl(allocator, request.parsed, local_port) orelse return false;
+        target = tunneled_url.?;
+    } else {
+        stopTunnel();
+    }
+
+    open(parent, target);
+    return true;
+}
+
 pub fn toggle(parent: ?win32.HWND) void {
     if (g_visible) {
         close();
@@ -68,8 +142,17 @@ pub fn toggle(parent: ?win32.HWND) void {
     }
 }
 
+pub fn toggleForSurface(allocator: std.mem.Allocator, parent: ?win32.HWND, surface: ?*const Surface) bool {
+    if (g_visible) {
+        close();
+        return true;
+    }
+    return openForSurface(allocator, parent, DEFAULT_URL, surface);
+}
+
 pub fn close() void {
     g_visible = false;
+    stopTunnel();
     if (g_browser) |browser| {
         phantty_webview2_set_visible(browser, 0);
     }
@@ -125,6 +208,7 @@ pub fn deinit() void {
         phantty_webview2_destroy(browser);
         g_browser = null;
     }
+    stopTunnel();
     g_visible = false;
 }
 
@@ -170,4 +254,162 @@ fn panelBounds(window_width: i32, window_height: i32, titlebar_height: f32, righ
         .right = @intFromFloat(@round(right)),
         .bottom = @intFromFloat(@round(bottom)),
     };
+}
+
+const SshLoopbackUrl = struct {
+    conn: Surface.SshConnection,
+    parsed: browser_url.HttpUrl,
+};
+
+fn sshLoopbackUrl(surface: ?*const Surface, url: []const u8) ?SshLoopbackUrl {
+    const s = surface orelse return null;
+    if (s.launch_kind != .ssh) return null;
+    const conn = s.ssh_connection orelse return null;
+    const parsed = browser_url.parseHttpUrl(url) orelse return null;
+    if (!browser_url.isLoopbackHost(parsed.host)) return null;
+    return .{ .conn = conn, .parsed = parsed };
+}
+
+fn ensureSshTunnel(allocator: std.mem.Allocator, conn: *const Surface.SshConnection, remote_port: u16, local_host: []const u8) ?u16 {
+    if (g_tunnel) |*tunnel| {
+        if (tunnel.matches(conn, remote_port, local_host)) return tunnel.local_port;
+    }
+
+    stopTunnel();
+
+    const local_port = reserveLocalPort() orelse return null;
+    var local_spec_buf: [MAX_TUNNEL_SPEC_BYTES]u8 = undefined;
+    const local_spec = std.fmt.bufPrint(
+        &local_spec_buf,
+        "{s}:{d}:127.0.0.1:{d}",
+        .{ local_host, local_port, remote_port },
+    ) catch return null;
+
+    var dest_buf: [MAX_SSH_DEST_BYTES]u8 = undefined;
+    const dest = sshDestination(&dest_buf, conn) orelse return null;
+
+    var askpass_path: ?[]u8 = null;
+    defer if (askpass_path) |path| allocator.free(path);
+    var env_map: ?std.process.EnvMap = null;
+    defer if (env_map) |*map| map.deinit();
+
+    if (conn.password_auth) {
+        askpass_path = ensureAskPassScript(allocator) orelse return null;
+        env_map = std.process.getEnvMap(allocator) catch return null;
+        if (env_map) |*map| {
+            map.put("SSH_ASKPASS", askpass_path.?) catch return null;
+            map.put("SSH_ASKPASS_REQUIRE", "force") catch return null;
+            map.put("DISPLAY", "phantty") catch return null;
+            map.put("PHANTTY_SSH_PASSWORD", conn.password()) catch return null;
+        }
+    }
+
+    var argv_buf: [48][]const u8 = undefined;
+    var argc: usize = 0;
+    argv_buf[argc] = "ssh.exe";
+    argc += 1;
+    argv_buf[argc] = "-N";
+    argc += 1;
+    argv_buf[argc] = "-T";
+    argc += 1;
+    argv_buf[argc] = "-L";
+    argc += 1;
+    argv_buf[argc] = local_spec;
+    argc += 1;
+
+    appendSshOption(&argv_buf, &argc, "ExitOnForwardFailure=yes");
+    appendSshOption(&argv_buf, &argc, "StrictHostKeyChecking=accept-new");
+    appendSshOption(&argv_buf, &argc, "ConnectTimeout=8");
+    appendSshOption(&argv_buf, &argc, "ServerAliveInterval=60");
+    appendSshOption(&argv_buf, &argc, "ServerAliveCountMax=3");
+    if (conn.password_auth) {
+        appendSshOption(&argv_buf, &argc, "PreferredAuthentications=publickey,password,keyboard-interactive");
+        appendSshOption(&argv_buf, &argc, "NumberOfPasswordPrompts=1");
+    } else {
+        appendSshOption(&argv_buf, &argc, "BatchMode=yes");
+    }
+    if (conn.port().len > 0) {
+        argv_buf[argc] = "-p";
+        argc += 1;
+        argv_buf[argc] = conn.port();
+        argc += 1;
+    }
+    argv_buf[argc] = dest;
+    argc += 1;
+
+    // Keep this helper independent. Windows OpenSSH ControlMaster options are
+    // intentionally not used here; they break on Windows socket semantics.
+    var child = std.process.Child.init(argv_buf[0..argc], allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Inherit;
+    if (env_map) |*map| child.env_map = map;
+    child.spawn() catch |err| {
+        std.debug.print("SSH browser tunnel spawn failed: {}\n", .{err});
+        return null;
+    };
+
+    g_tunnel = SshTunnel.init(child, conn, remote_port, local_port, local_host);
+    std.debug.print("SSH browser tunnel: {s}:{d} -> remote 127.0.0.1:{d}\n", .{ local_host, local_port, remote_port });
+    return local_port;
+}
+
+fn stopTunnel() void {
+    if (g_tunnel) |*tunnel| {
+        _ = tunnel.child.kill() catch {};
+        g_tunnel = null;
+    }
+}
+
+fn reserveLocalPort() ?u16 {
+    const address = std.net.Address.parseIp4("127.0.0.1", 0) catch return null;
+    var server = address.listen(.{}) catch return null;
+    const port = server.listen_address.getPort();
+    server.deinit();
+    return if (port == 0) null else port;
+}
+
+fn sshDestination(buf: *[MAX_SSH_DEST_BYTES]u8, conn: *const Surface.SshConnection) ?[]const u8 {
+    const user = conn.user();
+    const host = conn.host();
+    const len = user.len + 1 + host.len;
+    if (len > buf.len) return null;
+    @memcpy(buf[0..user.len], user);
+    buf[user.len] = '@';
+    @memcpy(buf[user.len + 1 ..][0..host.len], host);
+    return buf[0..len];
+}
+
+fn appendSshOption(argv_buf: *[48][]const u8, argc: *usize, option: []const u8) void {
+    argv_buf[argc.*] = "-o";
+    argc.* += 1;
+    argv_buf[argc.*] = option;
+    argc.* += 1;
+}
+
+fn copyBounded(dest: []u8, text: []const u8) usize {
+    const n = @min(dest.len, text.len);
+    @memcpy(dest[0..n], text[0..n]);
+    return n;
+}
+
+fn askPassScriptPath(allocator: std.mem.Allocator) ?[]u8 {
+    const temp = std.process.getEnvVarOwned(allocator, "TEMP") catch
+        std.process.getEnvVarOwned(allocator, "TMP") catch return null;
+    defer allocator.free(temp);
+    return std.fmt.allocPrint(allocator, "{s}\\phantty-ssh-askpass.cmd", .{temp}) catch null;
+}
+
+fn ensureAskPassScript(allocator: std.mem.Allocator) ?[]u8 {
+    const path = askPassScriptPath(allocator) orelse return null;
+    errdefer allocator.free(path);
+
+    const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch return null;
+    defer file.close();
+
+    file.writeAll(
+        "@echo off\r\n" ++
+            "powershell.exe -NoLogo -NoProfile -Command \"[Console]::Out.Write($env:PHANTTY_SSH_PASSWORD)\"\r\n",
+    ) catch return null;
+    return path;
 }

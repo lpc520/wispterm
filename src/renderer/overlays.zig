@@ -201,7 +201,7 @@ const COMMAND_ENTRIES = [_]CommandEntry{
     .{ .title = "Close Panel / Tab", .detail = "Close the focused panel, tab, or window", .shortcut = "Ctrl+Shift+W", .action = .close_split_or_tab },
     .{ .title = "Toggle Sidebar", .detail = "Show or hide the tab sidebar", .shortcut = "Ctrl+Shift+B", .action = .toggle_sidebar },
     .{ .title = "Toggle File Explorer", .detail = "Show or hide the right-side file explorer", .shortcut = "Ctrl+Shift+E", .action = .toggle_file_explorer },
-    .{ .title = "Toggle Browser", .detail = "Show or hide the right-side WebView2 browser", .shortcut = "", .action = .toggle_browser_panel },
+    .{ .title = "Toggle Browser", .detail = "Show WebView2 browser for local or SSH URLs", .shortcut = "", .action = .toggle_browser_panel },
     .{ .title = "Keyboard Shortcuts", .detail = "Show the shortcut reference overlay", .shortcut = "Ctrl+Shift+P", .action = .show_shortcuts },
     .{ .title = "Open Config", .detail = "Open the Phantty config file", .shortcut = "Ctrl+,", .action = .open_config },
     .{ .title = "Decrease Font Size", .detail = "Make terminal text smaller", .shortcut = "Ctrl+-", .action = .font_size_decrease },
