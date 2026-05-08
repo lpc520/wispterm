@@ -10,6 +10,7 @@ const font = AppWindow.font;
 const tab = AppWindow.tab;
 const gl_init = AppWindow.gl_init;
 const split_layout = AppWindow.split_layout;
+const browser_panel = AppWindow.browser_panel;
 const Surface = @import("../Surface.zig");
 const SplitTree = @import("../split_tree.zig");
 const Config = @import("../config.zig");
@@ -173,6 +174,7 @@ const CommandAction = enum {
     close_split_or_tab,
     toggle_sidebar,
     toggle_file_explorer,
+    toggle_browser_panel,
     show_shortcuts,
     open_config,
     font_size_decrease,
@@ -199,7 +201,8 @@ const COMMAND_ENTRIES = [_]CommandEntry{
     .{ .title = "Equalize Panels", .detail = "Reset split sizes in the current tab", .shortcut = "Ctrl+Shift+Z", .action = .equalize_splits },
     .{ .title = "Close Panel / Tab", .detail = "Close the focused panel, tab, or window", .shortcut = "Ctrl+Shift+W", .action = .close_split_or_tab },
     .{ .title = "Toggle Sidebar", .detail = "Show or hide the tab sidebar", .shortcut = "Ctrl+Shift+B", .action = .toggle_sidebar },
-    .{ .title = "Toggle File Explorer", .detail = "Show or hide the right-side file browser", .shortcut = "Ctrl+Shift+E", .action = .toggle_file_explorer },
+    .{ .title = "Toggle File Explorer", .detail = "Show or hide the right-side file explorer", .shortcut = "Ctrl+Shift+E", .action = .toggle_file_explorer },
+    .{ .title = "Toggle Browser", .detail = "Show WebView2 browser for local or SSH URLs", .shortcut = "", .action = .toggle_browser_panel },
     .{ .title = "Keyboard Shortcuts", .detail = "Show the shortcut reference overlay", .shortcut = "Ctrl+Shift+P", .action = .show_shortcuts },
     .{ .title = "Open Config", .detail = "Open the Phantty config file", .shortcut = "Ctrl+,", .action = .open_config },
     .{ .title = "Decrease Font Size", .detail = "Make terminal text smaller", .shortcut = "Ctrl+-", .action = .font_size_decrease },
@@ -330,9 +333,10 @@ fn executeCommand(action: CommandAction) void {
         .focus_previous => AppWindow.gotoSplit(.previous_wrapped),
         .focus_next => AppWindow.gotoSplit(.next_wrapped),
         .equalize_splits => AppWindow.equalizeSplits(),
-        .close_split_or_tab => AppWindow.closeFocusedSplit(),
+        .close_split_or_tab => AppWindow.input.closePanelOrTab(),
         .toggle_sidebar => AppWindow.input.toggleSidebar(),
         .toggle_file_explorer => AppWindow.input.toggleFileExplorer(),
+        .toggle_browser_panel => AppWindow.input.toggleBrowserPanel(),
         .show_shortcuts => startupShortcutsShow(),
         .open_config => if (AppWindow.g_allocator) |alloc| Config.openConfigInEditor(alloc),
         .font_size_decrease => AppWindow.input.adjustFontSize(-1),
@@ -373,8 +377,15 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 fn commandEntryMatches(entry: CommandEntry) bool {
     const filter = commandPaletteFilter();
     if (filter.len == 0) return true;
-    return containsIgnoreCase(entry.title, filter) or
-        containsIgnoreCase(entry.detail, filter) or
+    return commandEntryTitleMatches(entry, filter) or commandEntrySecondaryMatches(entry, filter);
+}
+
+fn commandEntryTitleMatches(entry: CommandEntry, filter: []const u8) bool {
+    return containsIgnoreCase(entry.title, filter);
+}
+
+fn commandEntrySecondaryMatches(entry: CommandEntry, filter: []const u8) bool {
+    return containsIgnoreCase(entry.detail, filter) or
         containsIgnoreCase(entry.shortcut, filter);
 }
 
@@ -393,7 +404,14 @@ fn rebuildPaletteScratch() void {
     }
 
     for (COMMAND_ENTRIES, 0..) |entry, idx| {
-        if (!commandEntryMatches(entry)) continue;
+        if (!commandEntryTitleMatches(entry, filter)) continue;
+        if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+        g_palette_scratch[g_palette_scratch_len] = .{ .command = idx };
+        g_palette_scratch_len += 1;
+    }
+    for (COMMAND_ENTRIES, 0..) |entry, idx| {
+        if (commandEntryTitleMatches(entry, filter)) continue;
+        if (!commandEntrySecondaryMatches(entry, filter)) continue;
         if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
         g_palette_scratch[g_palette_scratch_len] = .{ .command = idx };
         g_palette_scratch_len += 1;
@@ -564,6 +582,69 @@ fn renderTitlebarTextStrongLimited(text: []const u8, x_start: f32, y: f32, color
     const y_aligned = @round(y);
     renderTitlebarTextLimited(text, x, y_aligned, color, max_w);
     renderTitlebarTextLimited(text, x + 1, y_aligned, color, max_w - 1);
+}
+
+pub fn renderBrowserUrlBar(window_width: f32, window_height: f32, top_offset: f32) void {
+    if (!browser_panel.g_visible) return;
+
+    const bounds = browser_panel.boundsForWindow(
+        @intFromFloat(@round(window_width)),
+        @intFromFloat(@round(window_height)),
+        top_offset,
+        AppWindow.browserPanelRightOffset(),
+    );
+    const url_bar = browser_panel.urlBarBounds(bounds) orelse return;
+
+    const gl = &AppWindow.gl;
+    gl.Enable.?(c.GL_BLEND);
+    gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
+    gl.UseProgram.?(gl_init.shader_program);
+    gl.ActiveTexture.?(c.GL_TEXTURE0);
+    gl.BindVertexArray.?(gl_init.vao);
+
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const panel_bg = mixColor(bg, fg, 0.055);
+    const field_bg = mixColor(bg, fg, 0.12);
+    const field_border = if (browser_panel.urlBarFocused()) accent else mixColor(bg, fg, 0.28);
+    const text_color = mixColor(bg, fg, 0.88);
+    const placeholder_color = mixColor(bg, fg, 0.48);
+
+    const panel_x: f32 = @floatFromInt(bounds.left);
+    const panel_w: f32 = @floatFromInt(bounds.right - bounds.left);
+    const bar_top: f32 = @floatFromInt(url_bar.top);
+    const bar_bottom: f32 = @floatFromInt(url_bar.bottom);
+    const bar_h = @max(1.0, bar_bottom - bar_top);
+    const bar_y = @round(window_height - bar_bottom);
+    gl_init.renderQuadAlpha(panel_x, bar_y, panel_w, bar_h, panel_bg, 0.98);
+
+    const margin = browser_panel.URL_BAR_MARGIN;
+    const input_x = @round(@as(f32, @floatFromInt(url_bar.left)) + margin);
+    const input_w = @max(1.0, @as(f32, @floatFromInt(url_bar.right - url_bar.left)) - margin * 2);
+    const input_h = @max(24.0, bar_h - margin * 2);
+    const input_y = @round(bar_y + margin);
+    renderRoundedQuadAlpha(input_x - 1, input_y - 1, input_w + 2, input_h + 2, 6, field_border, if (browser_panel.urlBarFocused()) 0.70 else 0.34);
+    renderRoundedQuadAlpha(input_x, input_y, input_w, input_h, 5, field_bg, 0.96);
+
+    const text = browser_panel.urlBarText();
+    const shown_text = if (text.len == 0) "Enter URL" else text;
+    const shown_color = if (text.len == 0) placeholder_color else text_color;
+    const text_x = input_x + 10;
+    const text_y = @round(input_y + (input_h - font.g_titlebar_cell_height) / 2);
+    const text_max_w = @max(1.0, input_w - 22);
+    if (browser_panel.urlBarSelectAll()) {
+        const selection_w = @min(text_max_w, measureTitlebarText(shown_text) + 6);
+        renderRoundedQuadAlpha(text_x - 3, input_y + 5, selection_w, @max(8.0, input_h - 10), 3, mixColor(bg, accent, 0.58), 0.64);
+    }
+    const text_end = titlebar.renderTextLimited(shown_text, text_x, text_y, shown_color, text_max_w);
+
+    if (browser_panel.urlBarFocused() and !browser_panel.urlBarSelectAll()) {
+        const cursor_x = @min(input_x + input_w - 10, @max(text_x, text_end + 1));
+        gl_init.renderQuadAlpha(cursor_x, input_y + 6, 1.5, @max(8.0, input_h - 12), accent, 0.90);
+    }
+
+    gl_init.renderQuadAlpha(panel_x, bar_y, panel_w, 1, mixColor(bg, fg, 0.18), 0.55);
 }
 
 /// Render the command center overlay.
@@ -1930,7 +2011,7 @@ pub const ScrollbarGeometry = struct {
 /// Compute scrollbar geometry for a specific surface.
 /// Returns null if there's no scrollback (nothing to scroll).
 pub fn scrollbarGeometryForSurface(surface: *Surface, view_height: f32, top_padding: f32) ?ScrollbarGeometry {
-    const sb = surface.terminal.screens.active.pages.scrollbar();
+    const sb = AppWindow.input.scrollbarForSurface(surface);
     if (sb.total <= sb.len) return null; // No scrollback, no scrollbar
 
     // Track spans the terminal content area (below top padding, all the way to bottom)
@@ -2057,7 +2138,7 @@ pub fn scrollbarThumbHitTest(ypos: f64, window_height: f32, top_padding: f32) bo
 /// Handle scrollbar drag: convert pixel y to scroll position.
 pub fn scrollbarDrag(ypos: f64, window_height: f32, top_padding: f32) void {
     const surface = AppWindow.activeSurface() orelse return;
-    const sb = surface.terminal.screens.active.pages.scrollbar();
+    const sb = AppWindow.input.scrollbarForSurface(surface);
     if (sb.total <= sb.len) return;
 
     const padding: f32 = 10;

@@ -35,12 +35,13 @@ development should use PowerShell and direct `zig` commands.
 
 ## Packaging
 
-Phantty now supports two Windows distribution formats:
+Phantty supports two portable Windows packages plus the local installer build:
 
-- `phantty.exe` — portable build, run directly without installation
+- `portable` — lightweight portable build, run directly without installation
+- `portable-webview2` — portable build with `WebView2Loader.dll` for the embedded browser
 - `phantty-setup.exe` — installer build, installs to the current user's profile and creates a Start menu shortcut
 
-Build both artifacts with:
+Build the artifacts with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\packaging\windows\package.ps1
@@ -50,6 +51,8 @@ This produces:
 
 ```text
 zig-out\dist\portable\phantty.exe
+zig-out\dist\portable-webview2\phantty.exe
+zig-out\dist\portable-webview2\WebView2Loader.dll
 zig-out\dist\installer\phantty-setup.exe
 ```
 
@@ -65,10 +68,11 @@ publishes Windows release assets whenever a tag matching `vX.Y.Z` is pushed.
 Each tagged release uploads:
 
 - `phantty-windows-portable-vX.Y.Z.zip`
+- `phantty-windows-portable-webview2-vX.Y.Z.zip`
 
 The unsigned IExpress installer is not published for now because Windows
 Defender can quarantine it as a false positive. Use the portable zip release
-asset.
+asset, or the `portable-webview2` zip when using the embedded browser panel.
 
 Release notes are checked in under `release-notes/vX.Y.Z.md` when a release
 needs curated notes. If a matching file is present, the workflow prepends it to
@@ -138,6 +142,15 @@ Hold `Ctrl` and click a `.md` or `.txt` file in terminal output or in the File
 Explorer to open the right-side preview panel. Markdown previews render
 headings, lists, blockquotes, code blocks, inline code, links, and horizontal
 rules. Text files are shown as plain text.
+
+Open the command center with `Ctrl+Shift+P` and run `Toggle Browser` to open
+the embedded WebView2 browser panel. `Ctrl`-clicking an `http://` or `https://`
+URL in terminal output opens it in the same right-side WebView2 panel. In SSH
+profile sessions, loopback URLs such as `http://127.0.0.1:4232` and
+`http://localhost:43455` are opened through an automatic local SSH tunnel;
+non-loopback URLs such as `https://10.10.x.x` or public websites open directly.
+Click the browser panel's URL bar to type a new address; press `Enter` to
+navigate. Drag the browser panel's left edge to resize it.
 
 The preview panel can be resized by dragging its left edge and scrolled with the
 mouse wheel. `Ctrl+Shift+W` closes the preview panel before closing a split.

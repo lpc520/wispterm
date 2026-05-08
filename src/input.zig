@@ -16,6 +16,7 @@ const file_explorer = AppWindow.file_explorer;
 const file_backend = @import("file_backend.zig");
 const markdown_preview = @import("markdown_preview.zig");
 const markdown_preview_panel = AppWindow.markdown_preview_panel;
+const browser_panel = AppWindow.browser_panel;
 const scp = @import("scp.zig");
 const win32_backend = @import("apprt/win32.zig");
 const Config = @import("config.zig");
@@ -366,6 +367,8 @@ pub threadlocal var g_explorer_resize_hover: bool = false; // Mouse is over the 
 pub threadlocal var g_explorer_resize_dragging: bool = false; // Currently dragging the file explorer edge
 pub threadlocal var g_markdown_preview_resize_hover: bool = false; // Mouse is over the preview resize edge
 pub threadlocal var g_markdown_preview_resize_dragging: bool = false; // Currently dragging the preview edge
+pub threadlocal var g_browser_resize_hover: bool = false; // Mouse is over the WebView2 browser edge
+pub threadlocal var g_browser_resize_dragging: bool = false; // Currently dragging the browser edge
 
 // Internal state (moved from win32_input struct)
 threadlocal var plus_btn_pressed: bool = false;
@@ -381,7 +384,7 @@ fn syncGridFromWindowSize(width: i32, height: i32) void {
     const render_padding: f32 = 10;
     const tb_offset: f32 = @floatCast(titlebarHeight());
     const sidebar_w = titlebar.sidebarWidth();
-    const right_panels_w = file_explorer.width() + markdown_preview_panel.width();
+    const right_panels_w = AppWindow.rightPanelsWidth();
     const explicit_left: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
     const explicit_right: f32 = @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING)) + overlays.SCROLLBAR_WIDTH;
     const explicit_top: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
@@ -402,6 +405,17 @@ fn syncGridFromWindowSize(width: i32, height: i32) void {
         AppWindow.g_pending_rows = new_rows;
         AppWindow.g_last_resize_time = std.time.milliTimestamp();
     }
+}
+
+fn markBrowserUrlBarDirty() void {
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+}
+
+fn blurBrowserUrlBarIfFocused() void {
+    if (!browser_panel.urlBarFocused()) return;
+    browser_panel.blurUrlBar();
+    markBrowserUrlBarDirty();
 }
 
 pub fn toggleSidebar() void {
@@ -459,6 +473,36 @@ pub fn toggleFileExplorer() void {
     AppWindow.g_cells_valid = false;
 }
 
+pub fn toggleBrowserPanel() void {
+    const allocator = AppWindow.g_allocator orelse return;
+    const parent = if (AppWindow.g_window) |win| win.hwnd else null;
+    const surface = AppWindow.activeSurface();
+    if (!browser_panel.toggleForSurface(allocator, parent, surface)) return;
+    if (AppWindow.g_window) |win| {
+        syncGridFromWindowSize(win.width, win.height);
+    }
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+}
+
+pub fn closePanelOrTab() void {
+    if (markdown_preview_panel.g_visible) {
+        markdown_preview_panel.close();
+        if (AppWindow.g_window) |win| syncGridFromWindowSize(win.width, win.height);
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
+        return;
+    }
+    if (browser_panel.g_visible) {
+        browser_panel.close();
+        if (AppWindow.g_window) |win| syncGridFromWindowSize(win.width, win.height);
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
+        return;
+    }
+    AppWindow.closeFocusedSplit();
+}
+
 pub fn adjustFontSize(delta: i32) void {
     const allocator = AppWindow.g_allocator orelse return;
     var cfg = Config.load(allocator) catch Config{};
@@ -496,8 +540,14 @@ pub fn copyRemoteSessionKeyToClipboard() bool {
 /// Row 0 on screen corresponds to absolute row `viewportOffset()`.
 pub fn viewportOffset() usize {
     const surface = AppWindow.activeSurface() orelse return 0;
-    return surface.terminal.screens.active.pages.scrollbar().offset;
+    return viewportOffsetForSurface(surface);
 }
+
+pub const ScrollbarState = struct {
+    total: usize,
+    offset: usize,
+    len: usize,
+};
 
 /// Convert mouse position to terminal cell coordinates.
 pub fn mouseToCell(xpos: f64, ypos: f64) CellPos {
@@ -522,7 +572,26 @@ fn splitRectForSurface(surface: *Surface) ?split_layout.SplitRect {
 }
 
 pub fn viewportOffsetForSurface(surface: *Surface) usize {
-    return surface.terminal.screens.active.pages.scrollbar().offset;
+    return scrollbarForSurface(surface).offset;
+}
+
+pub fn scrollbarForSurface(surface: *Surface) ScrollbarState {
+    var pages = &surface.terminal.screens.active.pages;
+    const rows: usize = @intCast(pages.rows);
+    if (pages.total_rows <= rows) {
+        return .{
+            .total = rows,
+            .offset = 0,
+            .len = rows,
+        };
+    }
+
+    const sb = pages.scrollbar();
+    return .{
+        .total = sb.total,
+        .offset = sb.offset,
+        .len = sb.len,
+    };
 }
 
 /// Convert a window mouse position to a cell in the clicked split surface.
@@ -637,6 +706,13 @@ fn handleChar(ev: win32_backend.CharEvent) void {
     }
     if (overlays.commandPaletteVisible()) {
         if (!ev.ctrl and !ev.alt) overlays.commandPaletteInsertChar(ev.codepoint);
+        return;
+    }
+    if (browser_panel.urlBarFocused()) {
+        if (!ev.ctrl and !ev.alt) {
+            browser_panel.insertUrlBarChar(ev.codepoint);
+            markBrowserUrlBarDirty();
+        }
         return;
     }
     // File explorer inline editing
@@ -758,14 +834,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     // Ctrl+Shift+W = close focused panel/tab/window
     if (ev.ctrl and ev.shift and ev.vk == 0x57) { // 'W'
         if (tab.g_tab_rename_active) tab.commitTabRename();
-        if (markdown_preview_panel.g_visible) {
-            markdown_preview_panel.close();
-            if (AppWindow.g_window) |win| syncGridFromWindowSize(win.width, win.height);
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
-            return;
-        }
-        AppWindow.closeFocusedSplit();
+        closePanelOrTab();
         return;
     }
     // Alt+Enter = maximize / restore window
@@ -790,6 +859,10 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         AppWindow.g_cursor_blink_visible = true;
         AppWindow.g_last_blink_time = std.time.milliTimestamp();
         tab.handleRenameKey(ev);
+        return;
+    }
+    if (browser_panel.urlBarFocused()) {
+        handleBrowserUrlBarKey(ev);
         return;
     }
     // Ctrl+Shift+C = copy
@@ -935,6 +1008,40 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     }
 }
 
+fn handleBrowserUrlBarKey(ev: win32_backend.KeyEvent) void {
+    if (ev.ctrl and !ev.shift and !ev.alt and ev.vk == 0x41) { // Ctrl+A
+        browser_panel.selectAllUrlBar();
+        markBrowserUrlBarDirty();
+        return;
+    }
+    if (ev.ctrl and !ev.shift and !ev.alt and ev.vk == 0x56) { // Ctrl+V
+        if (pasteClipboardIntoBrowserUrlBar()) markBrowserUrlBarDirty();
+        return;
+    }
+
+    switch (ev.vk) {
+        win32_backend.VK_ESCAPE => {
+            browser_panel.blurUrlBar();
+            markBrowserUrlBarDirty();
+        },
+        win32_backend.VK_RETURN => {
+            const allocator = AppWindow.g_allocator orelse return;
+            const parent = if (AppWindow.g_window) |win| win.hwnd else null;
+            _ = browser_panel.submitUrlBar(allocator, parent, AppWindow.activeSurface());
+            markBrowserUrlBarDirty();
+        },
+        win32_backend.VK_BACK => {
+            browser_panel.backspaceUrlBar();
+            markBrowserUrlBarDirty();
+        },
+        win32_backend.VK_DELETE => {
+            browser_panel.clearUrlBar();
+            markBrowserUrlBarDirty();
+        },
+        else => {},
+    }
+}
+
 fn hitTestSidebarTab(xpos: f64, ypos: f64) ?usize {
     if (!tab.g_sidebar_visible) return null;
     if (xpos < 0 or xpos >= @as(f64, @floatCast(titlebar.sidebarWidth()))) return null;
@@ -1006,6 +1113,56 @@ fn hitTestMarkdownPreviewPanel(xpos: f64, ypos: f64) bool {
     const preview_w: f64 = @floatCast(markdown_preview_panel.width());
     const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - explorer_w - preview_w;
     return xpos >= panel_x and xpos < panel_x + preview_w;
+}
+
+fn browserPanelBounds() ?browser_panel.Bounds {
+    if (!browser_panel.g_visible) return null;
+    const win = AppWindow.g_window orelse return null;
+    return browser_panel.boundsForWindow(
+        win.width,
+        win.height,
+        @floatCast(titlebarHeight()),
+        AppWindow.browserPanelRightOffset(),
+    );
+}
+
+fn hitTestBrowserPanel(xpos: f64, ypos: f64) bool {
+    const bounds = browserPanelBounds() orelse return false;
+    return xpos >= @as(f64, @floatFromInt(bounds.left)) and
+        xpos < @as(f64, @floatFromInt(bounds.right)) and
+        ypos >= @as(f64, @floatFromInt(bounds.top)) and
+        ypos < @as(f64, @floatFromInt(bounds.bottom));
+}
+
+fn hitTestBrowserUrlBar(xpos: f64, ypos: f64) bool {
+    const bounds = browserPanelBounds() orelse return false;
+    const url_bar = browser_panel.urlBarBounds(bounds) orelse return false;
+    return xpos >= @as(f64, @floatFromInt(url_bar.left)) and
+        xpos < @as(f64, @floatFromInt(url_bar.right)) and
+        ypos >= @as(f64, @floatFromInt(url_bar.top)) and
+        ypos < @as(f64, @floatFromInt(url_bar.bottom));
+}
+
+fn hitTestBrowserResizeHandle(xpos: f64, ypos: f64) bool {
+    if (!browser_panel.g_visible) return false;
+    if (ypos < titlebarHeight()) return false;
+    const win = AppWindow.g_window orelse return false;
+    const right_offset: f64 = @floatCast(AppWindow.browserPanelRightOffset());
+    const browser_w: f64 = @floatCast(browser_panel.width());
+    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - right_offset - browser_w;
+    const half_hit: f64 = @as(f64, @floatCast(browser_panel.RESIZE_HIT_WIDTH)) / 2;
+    return xpos >= panel_x - half_hit and xpos <= panel_x + half_hit;
+}
+
+fn applyBrowserWidthFromMouse(xpos: f64) void {
+    const win = AppWindow.g_window orelse return;
+    const right_edge = @as(f64, @floatFromInt(win.width)) - @as(f64, @floatCast(AppWindow.browserPanelRightOffset()));
+    const new_width = right_edge - xpos;
+    const available_width: f32 = @as(f32, @floatFromInt(win.width)) - AppWindow.browserPanelRightOffset();
+    if (!browser_panel.setWidth(@floatCast(new_width), available_width)) return;
+    syncGridFromWindowSize(win.width, win.height);
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
 }
 
 fn hitTestMarkdownPreviewResizeHandle(xpos: f64, ypos: f64) bool {
@@ -1487,7 +1644,7 @@ fn extractPreviewPathAtCell(allocator: std.mem.Allocator, surface: *Surface, cel
     return token;
 }
 
-fn openUrl(url: []const u8) bool {
+fn openUrl(surface: *Surface, url: []const u8) bool {
     const allocator = AppWindow.g_allocator orelse return false;
     const target = if (std.mem.startsWith(u8, url, "www."))
         std.fmt.allocPrint(allocator, "https://{s}", .{url}) catch return false
@@ -1495,19 +1652,14 @@ fn openUrl(url: []const u8) bool {
         allocator.dupe(u8, url) catch return false;
     defer allocator.free(target);
 
-    const target_w = std.unicode.utf8ToUtf16LeAllocZ(allocator, target) catch return false;
-    defer allocator.free(target_w);
-
     const hwnd = if (AppWindow.g_window) |win| win.hwnd else null;
-    const result = win32_backend.ShellExecuteW(
-        hwnd,
-        std.unicode.utf8ToUtf16LeStringLiteral("open"),
-        target_w.ptr,
-        null,
-        null,
-        win32_backend.SW_SHOW,
-    );
-    return result > 32;
+    if (!browser_panel.openForSurface(allocator, hwnd, target, surface)) return false;
+    if (AppWindow.g_window) |win| {
+        syncGridFromWindowSize(win.width, win.height);
+    }
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+    return true;
 }
 
 fn openUrlAtCell(surface: *Surface, cell_pos: CellPos) bool {
@@ -1515,7 +1667,9 @@ fn openUrlAtCell(surface: *Surface, cell_pos: CellPos) bool {
     const token = extractUrlRangeAtCell(allocator, surface, cell_pos) orelse return false;
     defer token.deinit(allocator);
     setUrlUnderline(surface, viewportOffsetForSurface(surface) + token.row, token.start_col, token.end_col);
-    return openUrl(token.text);
+    const opened = openUrl(surface, token.text);
+    if (opened) clearUrlUnderline();
+    return opened;
 }
 
 fn updateUrlUnderlineAtMouse(xpos: f64, ypos: f64) void {
@@ -1523,7 +1677,7 @@ fn updateUrlUnderlineAtMouse(xpos: f64, ypos: f64) void {
         clearUrlUnderline();
         return;
     }
-    if (ypos < titlebarHeight() or hitTestFileExplorer(xpos, ypos) or hitTestMarkdownPreviewPanel(xpos, ypos)) {
+    if (ypos < titlebarHeight() or hitTestFileExplorer(xpos, ypos) or hitTestMarkdownPreviewPanel(xpos, ypos) or hitTestBrowserPanel(xpos, ypos)) {
         clearUrlUnderline();
         return;
     }
@@ -1869,9 +2023,12 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
 
             // Check if click is in the titlebar (tab bar area)
             if (ypos < titlebar_h) {
+                blurBrowserUrlBarIfFocused();
                 handleTopbarPress(xpos);
                 return;
             }
+            const over_browser_url_bar = hitTestBrowserUrlBar(xpos, ypos);
+            if (!over_browser_url_bar) blurBrowserUrlBarIfFocused();
             if (hitTestSidebarResizeHandle(xpos, ypos)) {
                 g_sidebar_resize_dragging = true;
                 g_sidebar_resize_hover = true;
@@ -1884,9 +2041,32 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
                 return;
             }
+            if (hitTestBrowserResizeHandle(xpos, ypos)) {
+                g_browser_resize_dragging = true;
+                g_browser_resize_hover = true;
+                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+                return;
+            }
+
+            if (over_browser_url_bar) {
+                file_explorer.g_focused = false;
+                if (file_explorer.g_op_mode != .none) file_explorer.cancelOp();
+                browser_panel.focusUrlBar();
+                markBrowserUrlBarDirty();
+                return;
+            }
 
             if (tab.g_sidebar_visible and xpos < @as(f64, @floatCast(titlebar.sidebarWidth()))) {
                 handleSidebarPress(xpos, ypos);
+                return;
+            }
+
+            if (hitTestBrowserPanel(xpos, ypos)) {
+                file_explorer.g_focused = false;
+                if (file_explorer.g_op_mode != .none) file_explorer.cancelOp();
+                browser_panel.blurUrlBar();
+                markBrowserUrlBarDirty();
+                browser_panel.focus();
                 return;
             }
 
@@ -2004,6 +2184,13 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 g_markdown_preview_resize_dragging = false;
                 g_markdown_preview_resize_hover = hitTestMarkdownPreviewResizeHandle(xpos, ypos);
                 const cursor_id = if (g_markdown_preview_resize_hover) win32_backend.IDC_SIZEWE else win32_backend.IDC_ARROW;
+                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, cursor_id));
+                return;
+            }
+            if (g_browser_resize_dragging) {
+                g_browser_resize_dragging = false;
+                g_browser_resize_hover = hitTestBrowserResizeHandle(xpos, ypos);
+                const cursor_id = if (g_browser_resize_hover) win32_backend.IDC_SIZEWE else win32_backend.IDC_ARROW;
                 _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, cursor_id));
                 return;
             }
@@ -2193,6 +2380,11 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
         _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
         return;
     }
+    if (g_browser_resize_dragging) {
+        applyBrowserWidthFromMouse(xpos);
+        _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+        return;
+    }
 
     // Handle divider dragging
     if (g_divider_dragging) {
@@ -2208,7 +2400,7 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
             const win = AppWindow.g_window orelse return;
             const fb = win.getFramebufferSize();
             const sidebar_w = titlebar.sidebarWidth();
-            const right_panels_w = file_explorer.width() + markdown_preview_panel.width();
+            const right_panels_w = AppWindow.rightPanelsWidth();
             const content_x: f32 = sidebar_w + @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING));
             const content_y: f32 = @floatCast(titlebarHeight());
             const content_w: f32 = @as(f32, @floatFromInt(fb.width)) - sidebar_w - right_panels_w - @as(f32, @floatFromInt(2 * split_layout.DEFAULT_PADDING));
@@ -2271,6 +2463,20 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
             _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_ARROW));
             g_markdown_preview_resize_hover = false;
         }
+        const over_browser_resize = hitTestBrowserResizeHandle(xpos, ypos);
+        if (over_browser_resize) {
+            _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+            g_browser_resize_hover = true;
+            return;
+        } else if (g_browser_resize_hover) {
+            _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_ARROW));
+            g_browser_resize_hover = false;
+        }
+    }
+
+    if (hitTestBrowserPanel(xpos, ypos)) {
+        clearUrlUnderline();
+        return;
     }
 
     // Focus follows mouse: check if mouse is over a different split
@@ -2421,6 +2627,7 @@ fn appendAlternateScrollKeys(surface: *Surface, ev: win32_backend.MouseWheelEven
 fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
     overlays.startupShortcutsDismiss();
     if (tab.g_sidebar_visible and ev.xpos >= 0 and ev.xpos < @as(i32, @intFromFloat(titlebar.sidebarWidth()))) return;
+    if (hitTestBrowserPanel(@floatFromInt(ev.xpos), @floatFromInt(ev.ypos))) return;
     if (markdown_preview_panel.g_visible) {
         const win = AppWindow.g_window orelse return;
         const panel_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(win.width)) - file_explorer.width() - markdown_preview_panel.width()));
@@ -2537,7 +2744,7 @@ pub fn copySelectionToClipboard() void {
     // Lock while reading terminal cells
     surface.render_state.mutex.lock();
     const screen = surface.terminal.screens.active;
-    const vp_off = surface.terminal.screens.active.pages.scrollbar().offset;
+    const vp_off = viewportOffsetForSurface(surface);
     var row: usize = start_row;
     while (row <= end_row) : (row += 1) {
         // Convert absolute row to viewport-relative for getCell
@@ -2621,6 +2828,32 @@ pub fn pasteFromClipboard() void {
         }
         return;
     }
+}
+
+fn pasteClipboardIntoBrowserUrlBar() bool {
+    const win = AppWindow.g_window orelse return false;
+    const allocator = AppWindow.g_allocator orelse return false;
+
+    if (win32_backend.OpenClipboard(win.hwnd) == 0) return false;
+    defer {
+        _ = win32_backend.CloseClipboard();
+    }
+
+    if (win32_backend.GetClipboardData(CF_UNICODETEXT)) |hmem| {
+        const text = readClipboardUnicodeText(allocator, hmem) orelse return false;
+        defer allocator.free(text);
+        browser_panel.appendUrlBarText(text);
+        return text.len > 0;
+    }
+
+    if (win32_backend.GetClipboardData(CF_TEXT)) |hmem| {
+        const text = readClipboardAnsiText(allocator, hmem) orelse return false;
+        defer allocator.free(text);
+        browser_panel.appendUrlBarText(text);
+        return text.len > 0;
+    }
+
+    return false;
 }
 
 pub fn pasteImageFromClipboard() void {

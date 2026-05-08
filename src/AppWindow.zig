@@ -32,6 +32,7 @@ pub const file_explorer = @import("file_explorer.zig");
 pub const file_explorer_renderer = @import("renderer/file_explorer_renderer.zig");
 pub const markdown_preview_panel = @import("markdown_preview_panel.zig");
 pub const markdown_preview_renderer = @import("renderer/markdown_preview_renderer.zig");
+pub const browser_panel = @import("browser_panel.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -131,6 +132,7 @@ pub fn deinit(self: *AppWindow) void {
     }
     tab.g_tab_count = 0;
     tab.g_remote_client = null;
+    browser_panel.deinit();
 }
 
 // ============================================================================
@@ -197,6 +199,14 @@ pub fn currentTitlebarHeight() f32 {
     return titlebar.titlebarHeight();
 }
 
+pub fn rightPanelsWidth() f32 {
+    return file_explorer.width() + markdown_preview_panel.width() + browser_panel.width();
+}
+
+pub fn browserPanelRightOffset() f32 {
+    return file_explorer.width() + markdown_preview_panel.width();
+}
+
 fn syncWindowTitlebarHeight(win: *win32_backend.Window) f32 {
     const next: i32 = @intFromFloat(titlebar.titlebarHeight());
     win.titlebar_height = next;
@@ -220,6 +230,9 @@ fn clearUiStateOnTabChange() void {
     input.g_explorer_resize_dragging = false;
     input.g_markdown_preview_resize_hover = false;
     input.g_markdown_preview_resize_dragging = false;
+    input.g_browser_resize_hover = false;
+    input.g_browser_resize_dragging = false;
+    browser_panel.blurUrlBar();
     input.g_divider_dragging = false;
     input.g_divider_drag_handle = null;
     input.g_divider_drag_layout = null;
@@ -459,8 +472,7 @@ fn onWin32Resize(width: i32, height: i32) void {
     const tb = currentTitlebarHeight();
     const sidebar_w = titlebar.sidebarWidth();
     const explorer_w = file_explorer.width();
-    const preview_w = markdown_preview_panel.width();
-    const right_panels_w = explorer_w + preview_w;
+    const right_panels_w = rightPanelsWidth();
     const avail_w = @as(f32, @floatFromInt(width)) - sidebar_w - right_panels_w - padding_left - padding_right;
     const avail_h = @as(f32, @floatFromInt(height)) - (render_padding * 2 + tb) - padding_top - padding_bottom;
     if (avail_w <= 0 or avail_h <= 0) return;
@@ -487,6 +499,9 @@ fn onWin32Resize(width: i32, height: i32) void {
     const fb_width: c_int = width;
     const fb_height: c_int = height;
     const titlebar_offset: f32 = tb;
+    if (g_window) |w| {
+        browser_panel.sync(w.hwnd, width, height, titlebar_offset, browserPanelRightOffset());
+    }
 
     // Snapshot + rebuild + draw (split-aware, mirrors main loop)
     if (activeTab()) |active_tab| {
@@ -587,6 +602,7 @@ fn onWin32Resize(width: i32, height: i32) void {
         file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     }
 
+    overlays.renderBrowserUrlBar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderCommandPalette(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
@@ -600,7 +616,7 @@ fn resizeWindowToGrid() void {
     const tb = currentTitlebarHeight();
     const content_w: f32 = font.cell_width * @as(f32, @floatFromInt(term_cols));
     const content_h: f32 = font.cell_height * @as(f32, @floatFromInt(term_rows));
-    const win_w: i32 = @intFromFloat(content_w + titlebar.sidebarWidth() + file_explorer.width() + markdown_preview_panel.width() + padding * 2);
+    const win_w: i32 = @intFromFloat(content_w + titlebar.sidebarWidth() + rightPanelsWidth() + padding * 2);
     const win_h: i32 = @intFromFloat(content_h + padding + (padding + tb));
     if (g_window) |w| w.setSize(win_w, win_h);
 }
@@ -1549,9 +1565,9 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         const titlebar_offset = syncWindowTitlebarHeight(win);
         const sidebar_w = titlebar.sidebarWidth();
         const explorer_w = file_explorer.width();
-        const preview_w = markdown_preview_panel.width();
-        const right_panels_w = explorer_w + preview_w;
+        const right_panels_w = rightPanelsWidth();
         const top_padding: f32 = padding + titlebar_offset;
+        browser_panel.sync(win.hwnd, fb_width, fb_height, titlebar_offset, browserPanelRightOffset());
 
         if (activeTab()) |active_tab| {
             // Compute split layout for the active tab
@@ -1697,6 +1713,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
 
         gl.Viewport.?(0, 0, fb_width, fb_height);
         gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
+        overlays.renderBrowserUrlBar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderStartupShortcutsOverlay(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderCommandPalette(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
@@ -1723,6 +1740,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
 
     // Clean up file explorer async state (join background thread, free job)
     file_explorer.deinit();
+    browser_panel.deinit();
 
     // Tab cleanup is handled by AppWindow.deinit()
 }
