@@ -35,12 +35,13 @@ development should use PowerShell and direct `zig` commands.
 
 ## Packaging
 
-Phantty now supports two Windows distribution formats:
+Phantty supports two portable Windows packages plus the local installer build:
 
-- `phantty.exe` — portable build, run directly without installation
+- `portable` — lightweight portable build, run directly without installation
+- `portable-webview2` — portable build with `WebView2Loader.dll` for the embedded browser
 - `phantty-setup.exe` — installer build, installs to the current user's profile and creates a Start menu shortcut
 
-Build both artifacts with:
+Build the artifacts with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\packaging\windows\package.ps1
@@ -50,6 +51,8 @@ This produces:
 
 ```text
 zig-out\dist\portable\phantty.exe
+zig-out\dist\portable-webview2\phantty.exe
+zig-out\dist\portable-webview2\WebView2Loader.dll
 zig-out\dist\installer\phantty-setup.exe
 ```
 
@@ -65,10 +68,11 @@ publishes Windows release assets whenever a tag matching `vX.Y.Z` is pushed.
 Each tagged release uploads:
 
 - `phantty-windows-portable-vX.Y.Z.zip`
+- `phantty-windows-portable-webview2-vX.Y.Z.zip`
 
 The unsigned IExpress installer is not published for now because Windows
 Defender can quarantine it as a false positive. Use the portable zip release
-asset.
+asset, or the `portable-webview2` zip when using the embedded browser panel.
 
 Release notes are checked in under `release-notes/vX.Y.Z.md` when a release
 needs curated notes. If a matching file is present, the workflow prepends it to

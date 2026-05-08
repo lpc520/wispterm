@@ -40,6 +40,7 @@ $appName = 'Phantty'
 $publisher = 'Phantty'
 $exeName = 'phantty.exe'
 $sourceExe = Join-Path $PSScriptRoot $exeName
+$sourceWebView2Loader = Join-Path $PSScriptRoot 'WebView2Loader.dll'
 
 if (-not (Test-Path $sourceExe)) {
     throw "Missing payload: $sourceExe"
@@ -47,10 +48,14 @@ if (-not (Test-Path $sourceExe)) {
 
 $resolvedInstallDir = [System.IO.Path]::GetFullPath($InstallDir)
 $installedExe = Join-Path $resolvedInstallDir $exeName
+$installedWebView2Loader = Join-Path $resolvedInstallDir 'WebView2Loader.dll'
 $version = Get-PhanttyVersion
 
 New-Item -ItemType Directory -Path $resolvedInstallDir -Force | Out-Null
 Copy-Item -Path $sourceExe -Destination $installedExe -Force
+if (Test-Path $sourceWebView2Loader) {
+    Copy-Item -Path $sourceWebView2Loader -Destination $installedWebView2Loader -Force
+}
 Set-Content -Path (Join-Path $resolvedInstallDir 'version.txt') -Value $version -Encoding ASCII
 
 $startMenuDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Phantty'

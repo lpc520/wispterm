@@ -69,6 +69,8 @@ const SshTunnel = struct {
     remote_port: u16,
     local_host_buf: [MAX_LOCAL_HOST_BYTES]u8 = undefined,
     local_host_len: usize = 0,
+    remote_host_buf: [MAX_LOCAL_HOST_BYTES]u8 = undefined,
+    remote_host_len: usize = 0,
     user_buf: [128]u8 = undefined,
     user_len: usize = 0,
     host_buf: [128]u8 = undefined,
@@ -76,22 +78,24 @@ const SshTunnel = struct {
     ssh_port_buf: [16]u8 = undefined,
     ssh_port_len: usize = 0,
 
-    fn init(child: std.process.Child, conn: *const Surface.SshConnection, remote_port: u16, local_port: u16, local_host: []const u8) SshTunnel {
+    fn init(child: std.process.Child, conn: *const Surface.SshConnection, remote_port: u16, local_port: u16, local_host: []const u8, remote_host: []const u8) SshTunnel {
         var tunnel: SshTunnel = .{
             .child = child,
             .local_port = local_port,
             .remote_port = remote_port,
         };
         tunnel.local_host_len = copyBounded(tunnel.local_host_buf[0..], local_host);
+        tunnel.remote_host_len = copyBounded(tunnel.remote_host_buf[0..], remote_host);
         tunnel.user_len = copyBounded(tunnel.user_buf[0..], conn.user());
         tunnel.host_len = copyBounded(tunnel.host_buf[0..], conn.host());
         tunnel.ssh_port_len = copyBounded(tunnel.ssh_port_buf[0..], conn.port());
         return tunnel;
     }
 
-    fn matches(self: *const SshTunnel, conn: *const Surface.SshConnection, remote_port: u16, local_host: []const u8) bool {
+    fn matches(self: *const SshTunnel, conn: *const Surface.SshConnection, remote_port: u16, local_host: []const u8, remote_host: []const u8) bool {
         return self.remote_port == remote_port and
             std.mem.eql(u8, self.localHost(), local_host) and
+            std.mem.eql(u8, self.remoteHost(), remote_host) and
             std.mem.eql(u8, self.user(), conn.user()) and
             std.mem.eql(u8, self.host(), conn.host()) and
             std.mem.eql(u8, self.sshPort(), conn.port());
@@ -99,6 +103,10 @@ const SshTunnel = struct {
 
     fn localHost(self: *const SshTunnel) []const u8 {
         return self.local_host_buf[0..self.local_host_len];
+    }
+
+    fn remoteHost(self: *const SshTunnel) []const u8 {
+        return self.remote_host_buf[0..self.remote_host_len];
     }
 
     fn user(self: *const SshTunnel) []const u8 {
@@ -149,7 +157,7 @@ pub fn openForSurface(allocator: std.mem.Allocator, parent: ?win32.HWND, url: []
     defer if (tunneled_url) |owned| allocator.free(owned);
 
     if (sshLoopbackUrl(surface, target)) |request| {
-        const local_port = ensureSshTunnel(allocator, &request.conn, request.parsed.port, browser_url.localTunnelHost(request.parsed.host)) orelse return false;
+        const local_port = ensureSshTunnel(allocator, &request.conn, request.parsed.port, browser_url.localTunnelHost(request.parsed.host), request.parsed.host) orelse return false;
         tunneled_url = browser_url.buildLocalTunnelUrl(allocator, request.parsed, local_port) orelse return false;
         target = tunneled_url.?;
     } else {
@@ -298,9 +306,14 @@ fn sshLoopbackUrl(surface: ?*const Surface, url: []const u8) ?SshLoopbackUrl {
     return .{ .conn = conn, .parsed = parsed };
 }
 
-fn ensureSshTunnel(allocator: std.mem.Allocator, conn: *const Surface.SshConnection, remote_port: u16, local_host: []const u8) ?u16 {
+fn ensureSshTunnel(allocator: std.mem.Allocator, conn: *const Surface.SshConnection, remote_port: u16, local_host: []const u8, remote_host: []const u8) ?u16 {
     if (g_tunnel) |*tunnel| {
-        if (tunnel.matches(conn, remote_port, local_host)) return tunnel.local_port;
+        if (tunnel.matches(conn, remote_port, local_host, remote_host) and
+            !childHasExited(&tunnel.child) and
+            canConnectToLocalPort(allocator, tunnel.localHost(), tunnel.local_port))
+        {
+            return tunnel.local_port;
+        }
     }
 
     stopTunnel();
@@ -309,8 +322,8 @@ fn ensureSshTunnel(allocator: std.mem.Allocator, conn: *const Surface.SshConnect
     var local_spec_buf: [MAX_TUNNEL_SPEC_BYTES]u8 = undefined;
     const local_spec = std.fmt.bufPrint(
         &local_spec_buf,
-        "{s}:{d}:127.0.0.1:{d}",
-        .{ local_host, local_port, remote_port },
+        "{s}:{d}:{s}:{d}",
+        .{ local_host, local_port, remote_host, remote_port },
     ) catch return null;
 
     var dest_buf: [MAX_SSH_DEST_BYTES]u8 = undefined;
@@ -377,14 +390,14 @@ fn ensureSshTunnel(allocator: std.mem.Allocator, conn: *const Surface.SshConnect
         return null;
     };
 
-    g_tunnel = SshTunnel.init(child, conn, remote_port, local_port, local_host);
+    g_tunnel = SshTunnel.init(child, conn, remote_port, local_port, local_host, remote_host);
     if (!waitForTunnelReady(allocator, local_host, local_port)) {
         std.debug.print("SSH browser tunnel did not become ready on {s}:{d}\n", .{ local_host, local_port });
         stopTunnel();
         return null;
     }
 
-    std.debug.print("SSH browser tunnel: {s}:{d} -> remote 127.0.0.1:{d}\n", .{ local_host, local_port, remote_port });
+    std.debug.print("SSH browser tunnel: {s}:{d} -> remote {s}:{d}\n", .{ local_host, local_port, remote_host, remote_port });
     return local_port;
 }
 

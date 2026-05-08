@@ -81,6 +81,9 @@ jobs:
         run: |
           $portableExe = "zig-out\dist\portable\phantty.exe"
           $portableVersion = "zig-out\dist\portable\version.txt"
+          $portableWebView2Exe = "zig-out\dist\portable-webview2\phantty.exe"
+          $portableWebView2Version = "zig-out\dist\portable-webview2\version.txt"
+          $portableWebView2Loader = "zig-out\dist\portable-webview2\WebView2Loader.dll"
 
           if (!(Test-Path $portableExe)) {
             throw "Portable executable not found: $portableExe"
@@ -90,23 +93,47 @@ jobs:
             throw "Portable version file not found: $portableVersion"
           }
 
+          if (!(Test-Path $portableWebView2Exe)) {
+            throw "Portable WebView2 executable not found: $portableWebView2Exe"
+          }
+
+          if (!(Test-Path $portableWebView2Version)) {
+            throw "Portable WebView2 version file not found: $portableWebView2Version"
+          }
+
+          if (!(Test-Path $portableWebView2Loader)) {
+            throw "Portable WebView2 loader not found: $portableWebView2Loader"
+          }
+
       - name: Create release assets
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $portableAsset = "phantty-windows-portable-$tag.zip"
+          $portableWebView2Asset = "phantty-windows-portable-webview2-$tag.zip"
 
           if (Test-Path $portableAsset) {
             Remove-Item $portableAsset -Force
           }
+          if (Test-Path $portableWebView2Asset) {
+            Remove-Item $portableWebView2Asset -Force
+          }
 
           Compress-Archive -Path zig-out\dist\portable\* -DestinationPath $portableAsset -Force
+          Compress-Archive -Path zig-out\dist\portable-webview2\* -DestinationPath $portableWebView2Asset -Force
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
           name: phantty-windows-portable-${{ github.ref_name }}
           path: phantty-windows-portable-${{ github.ref_name }}.zip
+          if-no-files-found: error
+
+      - name: Upload portable WebView2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phantty-windows-portable-webview2-${{ github.ref_name }}
+          path: phantty-windows-portable-webview2-${{ github.ref_name }}.zip
           if-no-files-found: error
 
       - name: Publish GitHub release
@@ -116,19 +143,24 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $portableAsset = "phantty-windows-portable-$tag.zip"
+          $portableWebView2Asset = "phantty-windows-portable-webview2-$tag.zip"
 
           if (!(Test-Path $portableAsset)) {
             throw "Portable release asset not found: $portableAsset"
           }
+          if (!(Test-Path $portableWebView2Asset)) {
+            throw "Portable WebView2 release asset not found: $portableWebView2Asset"
+          }
 
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $portableAsset --repo $env:GITHUB_REPOSITORY --clobber
+            gh release upload $tag $portableAsset $portableWebView2Asset --repo $env:GITHUB_REPOSITORY --clobber
           } else {
             $assetNotes = @(
               "Windows assets included in this release:",
               "",
-              "- Portable: zip archive containing phantty.exe",
+              "- Portable: lightweight zip archive containing phantty.exe",
+              "- Portable WebView2: zip archive containing phantty.exe and WebView2Loader.dll for the embedded browser",
               "",
               "The unsigned IExpress setup executable is not published because Windows Defender can quarantine it as a false positive. Use the portable zip for now."
             ) -join "`n"
@@ -145,7 +177,7 @@ jobs:
               $notes = $assetNotes
             }
 
-            gh release create $tag $portableAsset `
+            gh release create $tag $portableAsset $portableWebView2Asset `
               --repo $env:GITHUB_REPOSITORY `
               --verify-tag `
               --generate-notes `
