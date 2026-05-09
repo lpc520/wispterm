@@ -21,9 +21,28 @@ const Link = struct {
 
 pub fn detectKind(path: []const u8) ?Kind {
     if (endsWithIgnoreCase(path, ".md") or endsWithIgnoreCase(path, ".markdown")) return .markdown;
-    if (endsWithIgnoreCase(path, ".txt") or endsWithIgnoreCase(path, ".text")) return .text;
+    inline for (text_file_suffixes) |suffix| {
+        if (endsWithIgnoreCase(path, suffix)) return .text;
+    }
     return null;
 }
+
+const text_file_suffixes = &.{
+    ".txt",
+    ".text",
+    ".rs",
+    ".c",
+    ".h",
+    ".cpp",
+    ".zig",
+    ".py",
+    ".js",
+    ".ts",
+    ".json",
+    ".yaml",
+    ".toml",
+    ".sh",
+};
 
 pub fn render(allocator: std.mem.Allocator, kind: Kind, title: []const u8, source: []const u8) ![]u8 {
     return switch (kind) {
@@ -304,6 +323,18 @@ test "detect preview kind" {
     try std.testing.expectEqual(Kind.markdown, detectKind("README.md").?);
     try std.testing.expectEqual(Kind.markdown, detectKind("notes.MARKDOWN").?);
     try std.testing.expectEqual(Kind.text, detectKind("log.TXT").?);
+    try std.testing.expectEqual(Kind.text, detectKind("main.rs").?);
+    try std.testing.expectEqual(Kind.text, detectKind("main.c").?);
+    try std.testing.expectEqual(Kind.text, detectKind("main.h").?);
+    try std.testing.expectEqual(Kind.text, detectKind("main.cpp").?);
+    try std.testing.expectEqual(Kind.text, detectKind("main.zig").?);
+    try std.testing.expectEqual(Kind.text, detectKind("script.py").?);
+    try std.testing.expectEqual(Kind.text, detectKind("app.js").?);
+    try std.testing.expectEqual(Kind.text, detectKind("app.ts").?);
+    try std.testing.expectEqual(Kind.text, detectKind("package.json").?);
+    try std.testing.expectEqual(Kind.text, detectKind("config.yaml").?);
+    try std.testing.expectEqual(Kind.text, detectKind("Cargo.toml").?);
+    try std.testing.expectEqual(Kind.text, detectKind("deploy.sh").?);
     try std.testing.expect(detectKind("image.png") == null);
 }
 
