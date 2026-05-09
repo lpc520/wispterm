@@ -117,6 +117,33 @@ kbd {
   color: var(--accent);
 }
 
+.lang-switch {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  font-size: 0.82rem;
+}
+.lang-switch .lang {
+  padding: 5px 12px;
+  color: var(--fg-muted);
+  line-height: 1.2;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.lang-switch .lang:hover {
+  color: var(--fg);
+  background: var(--bg-elev-2);
+}
+.lang-switch .lang.active {
+  background: var(--accent);
+  color: #0e1117;
+  font-weight: 600;
+}
+.lang-switch .lang.active:hover {
+  background: var(--accent);
+  color: #0e1117;
+}
+
 /* Hero */
 .hero {
   padding: 80px 0 56px;
@@ -449,8 +476,10 @@ pre.code-block code {
 
 /* Responsive */
 @media (max-width: 720px) {
-  .nav-links { gap: 14px; }
-  .nav-links a:not(.github) { display: none; }
+  .nav-links { gap: 12px; }
+  .nav-links a:not(.github):not(.lang) { display: none; }
+  .lang-switch { font-size: 0.78rem; }
+  .lang-switch .lang { padding: 4px 10px; }
   .hero { padding: 56px 0 32px; }
   .section { padding: 56px 0; }
   .tp-tab { padding: 8px 10px; font-size: 0.78rem; }
