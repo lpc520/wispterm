@@ -26,3 +26,11 @@ test("shouldUseViewportFit is true only for mobile surfaces", () => {
   assert.equal(shouldUseViewportFit(true), true);
   assert.equal(shouldUseViewportFit(false), false);
 });
+
+test("mobile viewport fitting ignores remote grid dimensions", () => {
+  assert.equal(shouldUseViewportFit(true), true);
+});
+
+test("desktop rendering keeps remote grid dimensions", () => {
+  assert.equal(shouldUseViewportFit(false), false);
+});

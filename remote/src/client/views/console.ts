@@ -14,6 +14,8 @@ import {
 } from "../surfaces";
 import { bindVirtualKeyboard, renderVirtualKeyboardMarkup } from "../vkbd";
 
+let viewportRefitBound = false;
+
 export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   const savedSessionKey = readSavedSessionKey();
   const hasSavedSessionKey = savedSessionKey.length > 0;
@@ -132,6 +134,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   });
 
   bindMobileChrome();
+  bindViewportRefit();
   bindVirtualKeyboard(() => setKbdVisible(false));
   bindThemeToggleButtons();
   updateInputUi();
@@ -256,6 +259,19 @@ function bindMobileChrome(): void {
   });
 }
 
+function bindViewportRefit(): void {
+  if (viewportRefitBound) return;
+  viewportRefitBound = true;
+
+  const refit = (): void => {
+    refitAllSurfaces();
+  };
+
+  window.addEventListener("resize", refit, { passive: true });
+  window.visualViewport?.addEventListener("resize", refit);
+  window.visualViewport?.addEventListener("scroll", refit);
+}
+
 function setDrawerOpen(open: boolean): void {
   state.drawerOpen = open;
   const shell = document.querySelector<HTMLElement>(".console-shell");
@@ -267,5 +283,5 @@ function setKbdVisible(visible: boolean): void {
   saveKbdVisible(visible);
   const shell = document.querySelector<HTMLElement>(".console-shell");
   if (shell) shell.dataset.kbdVisible = String(visible);
-  refitAllSurfaces();
+  requestAnimationFrame(() => refitAllSurfaces());
 }
