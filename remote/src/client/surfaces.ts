@@ -2,7 +2,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 
 import type { LayoutSurface, SurfaceView } from "./types";
-import { isMobileRemoteShell, shouldUseViewportFit } from "./mobile_layout";
+import { shouldUseViewportFit } from "./mobile_layout";
 import { focusMobileTextInput } from "./mobile_text_input";
 import { cursorMoveSequence, emptyState, shortSurfaceId, validPositiveInteger } from "./utils";
 import { activeSurfaceIdForInput, currentTab, resetSurfaceViews, state } from "./state";
@@ -235,7 +235,8 @@ function updateSurfaceCursor(view: SurfaceView, surfaceId: string): void {
 }
 
 function fitOrResize(view: SurfaceView): void {
-  const useViewportFit = shouldUseViewportFit(isMobileRemoteShell());
+  const hasRemoteGridDimensions = view.remoteCols !== null && view.remoteRows !== null;
+  const useViewportFit = shouldUseViewportFit(hasRemoteGridDimensions);
   if (!useViewportFit && view.remoteCols && view.remoteRows) {
     if (view.term.cols !== view.remoteCols || view.term.rows !== view.remoteRows) {
       view.term.resize(view.remoteCols, view.remoteRows);

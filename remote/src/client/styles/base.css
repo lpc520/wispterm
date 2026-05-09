@@ -114,6 +114,14 @@ button:disabled {
   color: var(--accent);
 }
 
+.web-version {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
 .panel {
   border: 1px solid var(--line);
   border-radius: var(--radius);

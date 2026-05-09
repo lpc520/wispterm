@@ -14,23 +14,19 @@ test("mobile media query matches the responsive CSS breakpoint", () => {
   );
 });
 
-test("fitModeForSurface uses viewport fitting on mobile", () => {
-  assert.equal(fitModeForSurface(true), "viewport");
+test("fitModeForSurface uses viewport fitting when remote dimensions are unknown", () => {
+  assert.equal(fitModeForSurface(false), "viewport");
 });
 
-test("fitModeForSurface preserves remote-grid sizing on desktop", () => {
-  assert.equal(fitModeForSurface(false), "remote-grid");
+test("fitModeForSurface preserves remote-grid sizing when dimensions are known", () => {
+  assert.equal(fitModeForSurface(true), "remote-grid");
 });
 
-test("shouldUseViewportFit is true only for mobile surfaces", () => {
-  assert.equal(shouldUseViewportFit(true), true);
-  assert.equal(shouldUseViewportFit(false), false);
+test("shouldUseViewportFit is true only when remote grid dimensions are unknown", () => {
+  assert.equal(shouldUseViewportFit(false), true);
+  assert.equal(shouldUseViewportFit(true), false);
 });
 
-test("mobile viewport fitting ignores remote grid dimensions", () => {
-  assert.equal(shouldUseViewportFit(true), true);
-});
-
-test("desktop rendering keeps remote grid dimensions", () => {
-  assert.equal(shouldUseViewportFit(false), false);
+test("mobile rendering keeps remote grid dimensions", () => {
+  assert.equal(shouldUseViewportFit(true), false);
 });

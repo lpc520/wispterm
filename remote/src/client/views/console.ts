@@ -5,6 +5,7 @@ import { currentTab, state, pushNotice } from "../state";
 import { clearSessionKey, maskSessionKey, readSavedSessionKey, saveKbdVisible, saveSessionKey } from "../storage";
 import { escapeText, shortSurfaceId } from "../utils";
 import { api, connect, disconnect } from "../transport";
+import { webVersionLabel } from "../version";
 import {
   disposeSurfaceViews,
   focusAndFitSelectedSurface,
@@ -28,7 +29,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
       <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-head">
-          <div class="brand">Phantty Remote</div>
+          <div class="brand">Phantty Remote <span class="web-version">${webVersionLabel()}</span></div>
           <div class="sidebar-head-actions">
             ${themeToggleMarkup()}
             <button type="button" class="icon-button" id="drawer-close" aria-label="Close menu">

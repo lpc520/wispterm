@@ -3,12 +3,12 @@ export const MOBILE_REMOTE_MEDIA_QUERY =
 
 export type SurfaceFitMode = "remote-grid" | "viewport";
 
-export function fitModeForSurface(isMobile: boolean): SurfaceFitMode {
-  return isMobile ? "viewport" : "remote-grid";
+export function fitModeForSurface(hasRemoteGridDimensions: boolean): SurfaceFitMode {
+  return hasRemoteGridDimensions ? "remote-grid" : "viewport";
 }
 
-export function shouldUseViewportFit(isMobile: boolean): boolean {
-  return fitModeForSurface(isMobile) === "viewport";
+export function shouldUseViewportFit(hasRemoteGridDimensions: boolean): boolean {
+  return fitModeForSurface(hasRemoteGridDimensions) === "viewport";
 }
 
 export function isMobileRemoteShell(win: Pick<Window, "matchMedia"> = window): boolean {
