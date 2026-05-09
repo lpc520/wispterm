@@ -1,5 +1,6 @@
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
+import type { CanvasPoint } from "./mobile_canvas";
 
 export type MeResponse = { authenticated: boolean; username?: string };
 
@@ -41,14 +42,18 @@ export type SurfaceView = {
   panel: HTMLElement;
   title: HTMLSpanElement;
   meta: HTMLElement;
+  mount: HTMLDivElement;
   host: HTMLDivElement;
   term: Terminal;
   fit: FitAddon;
   decoder: TextDecoder;
   disposeInput: { dispose(): void };
   disposeMiddleClickGesture: (() => void) | null;
+  disposeCanvasPan: (() => void) | null;
   resizeObserver: ResizeObserver | null;
   fitQueued: boolean;
+  canvasPan: CanvasPoint;
+  wasSelected: boolean;
   hasLiveOutput: boolean;
   snapshotApplied: boolean;
   opened: boolean;

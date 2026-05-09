@@ -335,6 +335,8 @@
   position: relative;
   overflow: hidden;
   touch-action: none;
+  transform-origin: 0 0;
+  will-change: transform;
 }
 
 .terminal-host .xterm {

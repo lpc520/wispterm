@@ -2,7 +2,14 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 
 import type { LayoutSurface, SurfaceView } from "./types";
-import { shouldUseViewportFit } from "./mobile_layout";
+import {
+  clampCanvasPan,
+  isCanvasDrag,
+  panCanvasBy,
+  type CanvasPoint,
+  type CanvasSize,
+} from "./mobile_canvas";
+import { isMobileRemoteShell, shouldUseViewportFit } from "./mobile_layout";
 import { focusMobileTextInput } from "./mobile_text_input";
 import { cursorMoveSequence, emptyState, shortSurfaceId, validPositiveInteger } from "./utils";
 import { activeSurfaceIdForInput, currentTab, resetSurfaceViews, state } from "./state";
@@ -78,14 +85,18 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     panel,
     title,
     meta,
+    mount,
     host,
     term,
     fit,
     decoder: new TextDecoder(),
     disposeInput: term.onData((data) => inputHandler(surfaceId, data)),
     disposeMiddleClickGesture: null,
+    disposeCanvasPan: null,
     resizeObserver: null,
     fitQueued: false,
+    canvasPan: { x: 0, y: 0 },
+    wasSelected: false,
     hasLiveOutput: false,
     snapshotApplied: false,
     opened: false,
@@ -94,6 +105,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     remoteRows: null,
   };
   view.disposeMiddleClickGesture = bindTwoFingerMiddleClick(view);
+  view.disposeCanvasPan = bindMobileCanvasPan(view);
   state.surfaceViews.set(surfaceId, view);
   return view;
 }
@@ -126,15 +138,21 @@ export function renderRemotePanels(): void {
 
   for (const surface of tab.surfaces) {
     const view = ensureSurfaceView(surface.id);
-    view.panel.className = `remote-panel${surface.id === state.selectedSurfaceId ? " selected" : ""}`;
+    const selected = surface.id === state.selectedSurfaceId;
+    view.panel.className = `remote-panel${selected ? " selected" : ""}`;
     view.panel.style.left = `${(surface.x ?? 0) * 100}%`;
     view.panel.style.top = `${(surface.y ?? 0) * 100}%`;
     view.panel.style.width = `${Math.max(0.05, surface.w ?? 1) * 100}%`;
     view.panel.style.height = `${Math.max(0.05, surface.h ?? 1) * 100}%`;
     view.panel.dataset.surfaceId = surface.id;
     view.title.textContent = surface.title || shortSurfaceId(surface.id);
-    view.remoteCols = validPositiveInteger(surface.cols);
-    view.remoteRows = validPositiveInteger(surface.rows);
+    const nextRemoteCols = validPositiveInteger(surface.cols);
+    const nextRemoteRows = validPositiveInteger(surface.rows);
+    const gridChanged = view.remoteCols !== nextRemoteCols || view.remoteRows !== nextRemoteRows;
+    view.remoteCols = nextRemoteCols;
+    view.remoteRows = nextRemoteRows;
+    if (gridChanged || (selected && !view.wasSelected)) resetCanvasPan(view);
+    view.wasSelected = selected;
     const grid = view.remoteCols && view.remoteRows ? `${view.remoteCols}×${view.remoteRows}` : null;
     const stateLabel = surface.focused ? "focused" : shortSurfaceId(surface.id);
     view.meta.textContent = grid ? `${grid} · ${stateLabel}` : stateLabel;
@@ -183,6 +201,7 @@ export function reconcileSurfaceViews(): void {
       view.resizeObserver?.disconnect();
       view.disposeInput.dispose();
       view.disposeMiddleClickGesture?.();
+      view.disposeCanvasPan?.();
       view.term.dispose();
       state.surfaceViews.delete(surfaceId);
     }
@@ -194,6 +213,7 @@ export function disposeSurfaceViews(): void {
     view.resizeObserver?.disconnect();
     view.disposeInput.dispose();
     view.disposeMiddleClickGesture?.();
+    view.disposeCanvasPan?.();
     view.term.dispose();
   }
   resetSurfaceViews();
@@ -255,6 +275,7 @@ function scheduleFit(view: SurfaceView): void {
     if (!view.host.isConnected) return;
     try {
       fitOrResize(view);
+      updateCanvasPan(view);
       view.term.refresh(0, Math.max(0, view.term.rows - 1));
     } catch {
       // xterm can briefly report zero-sized panels while layout is settling.
@@ -269,6 +290,7 @@ function applyInitialSnapshot(view: SurfaceView, surface: LayoutSurface): void {
     if (!view.host.isConnected || view.hasLiveOutput) return;
     try {
       fitOrResize(view);
+      updateCanvasPan(view);
     } catch {
       // xterm can briefly report zero-sized panels while layout is settling.
     }
@@ -297,6 +319,129 @@ function flushPendingOutput(view: SurfaceView): void {
 
 function capPendingOutput(value: string): string {
   return value.length > PENDING_OUTPUT_LIMIT ? value.slice(value.length - PENDING_OUTPUT_LIMIT) : value;
+}
+
+function bindMobileCanvasPan(view: SurfaceView): () => void {
+  const mount = view.mount;
+  let activePointerId: number | null = null;
+  let startClient: CanvasPoint = { x: 0, y: 0 };
+  let startPan: CanvasPoint = { x: 0, y: 0 };
+  let dragged = false;
+  let suppressClick = false;
+
+  const onPointerDown = (event: PointerEvent): void => {
+    if (!isMobileRemoteShell() || !event.isPrimary || event.button !== 0) return;
+    updateCanvasPan(view);
+    const viewport = canvasViewportSize(view);
+    const canvas = canvasContentSize(view);
+    if (canvas.width <= viewport.width && canvas.height <= viewport.height) return;
+
+    activePointerId = event.pointerId;
+    startClient = { x: event.clientX, y: event.clientY };
+    startPan = view.canvasPan;
+    dragged = false;
+    try {
+      mount.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture can fail if the browser cancels the touch during layout changes.
+    }
+  };
+
+  const onPointerMove = (event: PointerEvent): void => {
+    if (activePointerId !== event.pointerId) return;
+    const delta = { x: event.clientX - startClient.x, y: event.clientY - startClient.y };
+    if (!dragged && !isCanvasDrag(delta)) return;
+    dragged = true;
+    event.preventDefault();
+    view.canvasPan = panCanvasBy(startPan, delta, canvasViewportSize(view), canvasContentSize(view));
+    applyCanvasPan(view);
+  };
+
+  const finishPointer = (event: PointerEvent): void => {
+    if (activePointerId !== event.pointerId) return;
+    activePointerId = null;
+    if (dragged) {
+      suppressClick = true;
+      event.preventDefault();
+    }
+    try {
+      mount.releasePointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture may already be gone after pointercancel.
+    }
+  };
+
+  const onClick = (event: MouseEvent): void => {
+    if (!suppressClick) return;
+    suppressClick = false;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  mount.addEventListener("pointerdown", onPointerDown);
+  mount.addEventListener("pointermove", onPointerMove);
+  mount.addEventListener("pointerup", finishPointer);
+  mount.addEventListener("pointercancel", finishPointer);
+  mount.addEventListener("click", onClick, true);
+
+  return () => {
+    mount.removeEventListener("pointerdown", onPointerDown);
+    mount.removeEventListener("pointermove", onPointerMove);
+    mount.removeEventListener("pointerup", finishPointer);
+    mount.removeEventListener("pointercancel", finishPointer);
+    mount.removeEventListener("click", onClick, true);
+  };
+}
+
+function resetCanvasPan(view: SurfaceView): void {
+  view.canvasPan = { x: 0, y: 0 };
+  applyCanvasPan(view);
+}
+
+function updateCanvasPan(view: SurfaceView): void {
+  if (!isMobileRemoteShell()) {
+    resetCanvasPan(view);
+    return;
+  }
+  view.canvasPan = clampCanvasPan(view.canvasPan, canvasViewportSize(view), canvasContentSize(view));
+  applyCanvasPan(view);
+}
+
+function applyCanvasPan(view: SurfaceView): void {
+  const pan = view.canvasPan;
+  view.host.style.transform = pan.x === 0 && pan.y === 0 ? "" : `translate3d(${pan.x}px, ${pan.y}px, 0)`;
+}
+
+function canvasViewportSize(view: SurfaceView): CanvasSize {
+  return {
+    width: view.mount.clientWidth,
+    height: view.mount.clientHeight,
+  };
+}
+
+function canvasContentSize(view: SurfaceView): CanvasSize {
+  const screen = view.host.querySelector<HTMLElement>(".xterm-screen");
+  const xterm = view.host.querySelector<HTMLElement>(".xterm");
+  return {
+    width: Math.max(
+      view.mount.clientWidth,
+      view.host.offsetWidth,
+      view.host.scrollWidth,
+      xterm?.offsetWidth ?? 0,
+      xterm?.scrollWidth ?? 0,
+      screen?.offsetWidth ?? 0,
+      screen?.scrollWidth ?? 0,
+    ),
+    height: Math.max(
+      view.mount.clientHeight,
+      view.host.offsetHeight,
+      view.host.scrollHeight,
+      xterm?.offsetHeight ?? 0,
+      xterm?.scrollHeight ?? 0,
+      screen?.offsetHeight ?? 0,
+      screen?.scrollHeight ?? 0,
+    ),
+  };
 }
 
 function bindTwoFingerMiddleClick(view: SurfaceView): () => void {

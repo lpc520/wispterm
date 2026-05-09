@@ -170,6 +170,8 @@
   .panels-stage[data-mobile-mode="single"] .terminal-mount {
     padding: 4px;
     border-radius: 0 0 10px 10px;
+    overflow: hidden;
+    touch-action: none;
   }
 
   .panels-stage[data-mobile-mode="single"] .terminal-mount::after {
@@ -177,7 +179,8 @@
   }
 
   .panels-stage[data-mobile-mode="single"] .terminal-host {
-    touch-action: manipulation;
+    overflow: visible;
+    touch-action: none;
   }
 
   .console-shell[data-kbd-visible="true"] {
