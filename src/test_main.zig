@@ -10,4 +10,5 @@ comptime {
     _ = @import("input_shortcuts.zig");
     _ = @import("markdown_preview.zig");
     _ = @import("remote_client.zig");
+    _ = @import("selection_unit.zig");
 }
