@@ -23,6 +23,7 @@ __pycache__/
 # Local agent / MCP tooling artifacts
 .codex
 .playwright-mcp/
+.superpowers/
 
 # Node/Cloudflare remote console artifacts
 node_modules/
