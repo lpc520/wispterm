@@ -382,28 +382,70 @@ h1 {
 .install-grid {
   display: grid;
   gap: 18px;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
 }
 .install-card {
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  padding: 24px;
+  padding: 26px 24px 24px;
   border-radius: var(--radius);
   display: flex;
   flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.install-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+.install-card .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+.install-card .badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(93, 228, 199, 0.6);
 }
 .install-card h3 {
-  margin: 0 0 8px;
-  font-size: 1.1rem;
+  margin: 0;
+  font-size: 1.12rem;
   color: var(--fg);
+  font-weight: 600;
 }
 .install-card p {
   color: var(--fg-muted);
   font-size: 0.94rem;
-  margin: 0 0 16px;
+  margin: 0;
+  flex-grow: 1;
 }
-.install-card .cta { align-self: flex-start; margin-top: auto; }
-.install-card pre.code-block { margin-top: auto; }
+.install-card .cta { align-self: flex-start; margin-top: 6px; }
+
+.install-card pre.code-block {
+  margin: 6px 0 0;
+  padding: 14px 16px;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #0e1117;
+  border-color: rgba(93, 228, 199, 0.15);
+}
+
+@media (max-width: 880px) {
+  .install-grid { grid-template-columns: 1fr; }
+}
 
 /* Code block */
 pre.code-block {
