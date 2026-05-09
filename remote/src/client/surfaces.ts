@@ -2,6 +2,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 
 import type { LayoutSurface, SurfaceView } from "./types";
+import { isMobileRemoteShell, shouldUseViewportFit } from "./mobile_layout";
+import { focusMobileTextInput } from "./mobile_text_input";
 import { cursorMoveSequence, emptyState, shortSurfaceId, validPositiveInteger } from "./utils";
 import { activeSurfaceIdForInput, currentTab, resetSurfaceViews, state } from "./state";
 import { getTerminalPalette, subscribeToTheme } from "./theme";
@@ -54,7 +56,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
   panel.addEventListener("pointerdown", selectThis);
   panel.addEventListener("click", () => {
     selectThis();
-    ensureSurfaceView(surfaceId).term.focus();
+    if (!focusMobileTextInput()) ensureSurfaceView(surfaceId).term.focus();
   });
 
   const fit = new FitAddon();
@@ -169,7 +171,7 @@ export function focusAndFitSelectedSurface(): void {
   if (!id) return;
   const view = state.surfaceViews.get(id);
   if (!view) return;
-  view.term.focus();
+  if (!focusMobileTextInput()) view.term.focus();
   scheduleFit(view);
 }
 
@@ -232,6 +234,18 @@ function updateSurfaceCursor(view: SurfaceView, surfaceId: string): void {
   view.term.options.cursorInactiveStyle = selected ? "outline" : "none";
 }
 
+function fitOrResize(view: SurfaceView): void {
+  const useViewportFit = shouldUseViewportFit(isMobileRemoteShell());
+  if (!useViewportFit && view.remoteCols && view.remoteRows) {
+    if (view.term.cols !== view.remoteCols || view.term.rows !== view.remoteRows) {
+      view.term.resize(view.remoteCols, view.remoteRows);
+    }
+    return;
+  }
+
+  view.fit.fit();
+}
+
 function scheduleFit(view: SurfaceView): void {
   if (view.fitQueued) return;
   view.fitQueued = true;
@@ -239,13 +253,7 @@ function scheduleFit(view: SurfaceView): void {
     view.fitQueued = false;
     if (!view.host.isConnected) return;
     try {
-      if (view.remoteCols && view.remoteRows) {
-        if (view.term.cols !== view.remoteCols || view.term.rows !== view.remoteRows) {
-          view.term.resize(view.remoteCols, view.remoteRows);
-        }
-      } else {
-        view.fit.fit();
-      }
+      fitOrResize(view);
       view.term.refresh(0, Math.max(0, view.term.rows - 1));
     } catch {
       // xterm can briefly report zero-sized panels while layout is settling.
@@ -259,11 +267,7 @@ function applyInitialSnapshot(view: SurfaceView, surface: LayoutSurface): void {
   requestAnimationFrame(() => {
     if (!view.host.isConnected || view.hasLiveOutput) return;
     try {
-      if (view.remoteCols && view.remoteRows) {
-        view.term.resize(view.remoteCols, view.remoteRows);
-      } else {
-        view.fit.fit();
-      }
+      fitOrResize(view);
     } catch {
       // xterm can briefly report zero-sized panels while layout is settling.
     }

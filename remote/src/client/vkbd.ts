@@ -1,3 +1,5 @@
+import { applyStickyMods, ctrlLetter, keyToSequence } from "./input_sequences";
+import { focusMobileTextInput } from "./mobile_text_input";
 import { activeSurfaceIdForInput, state } from "./state";
 
 const kbdMods = { ctrl: false, alt: false };
@@ -85,7 +87,7 @@ function dispatchVirtualKey(button: HTMLButtonElement, onHide: () => void): void
   if (!surfaceId) return;
 
   if (button.dataset.vkKey === "type") {
-    state.surfaceViews.get(surfaceId)?.term.focus();
+    if (!focusMobileTextInput()) state.surfaceViews.get(surfaceId)?.term.focus();
     return;
   }
 
@@ -95,23 +97,14 @@ function dispatchVirtualKey(button: HTMLButtonElement, onHide: () => void): void
   }
 
   if (button.dataset.vkCtrl) {
-    const letter = button.dataset.vkCtrl.toLowerCase();
-    if (letter.length === 1 && letter >= "a" && letter <= "z") {
-      sender(surfaceId, String.fromCharCode(letter.charCodeAt(0) - 96));
-    }
+    const seq = ctrlLetter(button.dataset.vkCtrl);
+    if (seq) sender(surfaceId, seq);
+    clearStickyMods();
     return;
   }
 
   if (button.dataset.vkText !== undefined) {
-    let text = button.dataset.vkText;
-    if (kbdMods.ctrl && text.length === 1) {
-      const lower = text.toLowerCase();
-      if (lower >= "a" && lower <= "z") {
-        text = String.fromCharCode(lower.charCodeAt(0) - 96);
-      }
-    } else if (kbdMods.alt && text.length === 1) {
-      text = `\x1b${text}`;
-    }
+    const text = applyStickyMods(button.dataset.vkText, kbdMods);
     sender(surfaceId, text);
     clearStickyMods();
     return;
@@ -119,30 +112,10 @@ function dispatchVirtualKey(button: HTMLButtonElement, onHide: () => void): void
 
   if (button.dataset.vkKey) {
     const seq = keyToSequence(button.dataset.vkKey);
-    if (seq) sender(surfaceId, seq);
-  }
-}
-
-function keyToSequence(key: string): string | null {
-  switch (key) {
-    case "esc":
-      return "\x1b";
-    case "tab":
-      return "\t";
-    case "up":
-      return "\x1b[A";
-    case "down":
-      return "\x1b[B";
-    case "right":
-      return "\x1b[C";
-    case "left":
-      return "\x1b[D";
-    case "bksp":
-      return "\x7f";
-    case "enter":
-      return "\r";
-    default:
-      return null;
+    if (seq) {
+      sender(surfaceId, seq);
+      clearStickyMods();
+    }
   }
 }
 

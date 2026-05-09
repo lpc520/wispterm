@@ -12,7 +12,10 @@ import {
   renderRemotePanels,
   updateSurfaceCursors,
 } from "../surfaces";
+import { bindMobileTextInput, renderMobileTextInputMarkup } from "../mobile_text_input";
 import { bindVirtualKeyboard, renderVirtualKeyboardMarkup } from "../vkbd";
+
+let viewportRefitBound = false;
 
 export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   const savedSessionKey = readSavedSessionKey();
@@ -85,6 +88,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
         </section>
       </section>
       ${renderVirtualKeyboardMarkup()}
+      ${renderMobileTextInputMarkup()}
     </section>
   `;
 
@@ -132,7 +136,9 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   });
 
   bindMobileChrome();
+  bindViewportRefit();
   bindVirtualKeyboard(() => setKbdVisible(false));
+  bindMobileTextInput();
   bindThemeToggleButtons();
   updateInputUi();
   if (savedSessionKey) queueMicrotask(() => connect(savedSessionKey));
@@ -256,6 +262,19 @@ function bindMobileChrome(): void {
   });
 }
 
+function bindViewportRefit(): void {
+  if (viewportRefitBound) return;
+  viewportRefitBound = true;
+
+  const refit = (): void => {
+    refitAllSurfaces();
+  };
+
+  window.addEventListener("resize", refit, { passive: true });
+  window.visualViewport?.addEventListener("resize", refit);
+  window.visualViewport?.addEventListener("scroll", refit);
+}
+
 function setDrawerOpen(open: boolean): void {
   state.drawerOpen = open;
   const shell = document.querySelector<HTMLElement>(".console-shell");
@@ -267,5 +286,5 @@ function setKbdVisible(visible: boolean): void {
   saveKbdVisible(visible);
   const shell = document.querySelector<HTMLElement>(".console-shell");
   if (shell) shell.dataset.kbdVisible = String(visible);
-  refitAllSurfaces();
+  requestAnimationFrame(() => refitAllSurfaces());
 }
