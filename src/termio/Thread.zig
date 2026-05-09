@@ -166,6 +166,9 @@ fn applyResize(surface: *Surface, grid: renderer.size.GridSize) void {
     // The ReadThread is concurrently in blocking ReadFile, which keeps
     // a kernel IRP pending on the pipe. This drains the pipe while
     // ResizePseudoConsole sends its full screen redraw through it.
+    surface.resize_in_progress.store(true, .release);
+    defer surface.resize_in_progress.store(false, .release);
+
     surface.pty.setSize(.{ .ws_col = grid.cols, .ws_row = grid.rows }) catch {};
 
     surface.render_state.mutex.lock();

@@ -194,6 +194,11 @@ dirty: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
 /// Set when the PTY process has exited.
 exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
+/// Set while the IO writer thread is resizing ConPTY and terminal state.
+/// The reader thread still drains ConPTY output during this window, but
+/// delays VT parsing until terminal.resize has caught up to the new grid.
+resize_in_progress: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
 // ============================================================================
 // Bell state
 // ============================================================================
@@ -348,6 +353,7 @@ pub fn init(
     errdefer surface.vt_stream.deinit();
     surface.dirty = std.atomic.Value(bool).init(true);
     surface.exited = std.atomic.Value(bool).init(false);
+    surface.resize_in_progress = std.atomic.Value(bool).init(false);
 
     // Initialize mailbox for main thread → IO writer communication
     surface.mailbox = termio.Mailbox.init() catch |err| {

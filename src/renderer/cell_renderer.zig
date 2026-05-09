@@ -104,6 +104,7 @@ pub fn updateTerminalCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) bool
     const viewport_active = screen.pages.viewport == .active;
     const selection_active = currentRenderSelection().active;
     const viewport_pin = screen.pages.getTopLeft(.viewport);
+    rend.cached_viewport_offset = AppWindow.input.viewportOffsetForSurfaceLocked(rend.surface);
     const terminal_cursor_visible = terminal.modes.get(.cursor_visible);
     const terminal_cursor_blinking = terminal.modes.get(.cursor_blinking);
     const terminal_cursor_style: Renderer.CursorStyle = switch (screen.cursor.cursor_style) {
@@ -249,7 +250,7 @@ pub fn rebuildCells(rend: *Renderer) void {
             const sc = rend.snap[snap_idx];
 
             const is_cursor = rend.cached_cursor_in_viewport and (col_idx == rend.cached_cursor_x and row_idx == rend.cached_cursor_y);
-            const is_selected = isCellSelected(col_idx, row_idx);
+            const is_selected = isCellSelected(rend, col_idx, row_idx);
             const col_f: f32 = @floatFromInt(col_idx);
 
             var fg_color = sc.fg;
@@ -539,13 +540,11 @@ fn drawUrlUnderline(rend: *const Renderer, window_height: f32, offset_x: f32, of
 /// Check if a cell is within the current selection.
 /// `col` and `row` are screen-relative (viewport) coordinates.
 /// Selection rows are stored as absolute scrollback positions.
-pub fn isCellSelected(col: usize, row: usize) bool {
+pub fn isCellSelected(rend: *const Renderer, col: usize, row: usize) bool {
     const selection = currentRenderSelection();
     if (!selection.active) return false;
 
-    // Convert screen row to absolute
-    const vp_off = AppWindow.input.viewportOffset();
-    const abs_row = vp_off + row;
+    const abs_row = rend.cached_viewport_offset + row;
 
     var start_row = selection.start_row;
     var start_col = selection.start_col;

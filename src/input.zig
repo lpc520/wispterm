@@ -576,6 +576,16 @@ pub fn viewportOffsetForSurface(surface: *Surface) usize {
 }
 
 pub fn scrollbarForSurface(surface: *Surface) ScrollbarState {
+    surface.render_state.mutex.lock();
+    defer surface.render_state.mutex.unlock();
+    return scrollbarForSurfaceLocked(surface);
+}
+
+pub fn viewportOffsetForSurfaceLocked(surface: *Surface) usize {
+    return scrollbarForSurfaceLocked(surface).offset;
+}
+
+pub fn scrollbarForSurfaceLocked(surface: *Surface) ScrollbarState {
     var pages = &surface.terminal.screens.active.pages;
     const rows: usize = @intCast(pages.rows);
     if (pages.total_rows <= rows) {
@@ -2744,7 +2754,7 @@ pub fn copySelectionToClipboard() void {
     // Lock while reading terminal cells
     surface.render_state.mutex.lock();
     const screen = surface.terminal.screens.active;
-    const vp_off = viewportOffsetForSurface(surface);
+    const vp_off = viewportOffsetForSurfaceLocked(surface);
     var row: usize = start_row;
     while (row <= end_row) : (row += 1) {
         // Convert absolute row to viewport-relative for getCell
