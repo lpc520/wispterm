@@ -2795,6 +2795,9 @@ pub fn copySelectionToClipboard() void {
     if (text.items.len == 0) return;
 
     if (copyTextToClipboard(text.items)) {
+        overlays.showCopyToast(text.items.len);
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
         std.debug.print("Copied {} bytes to clipboard\n", .{text.items.len});
     }
 }

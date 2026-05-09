@@ -107,6 +107,13 @@ threadlocal var g_remote_key_copied_until_ms: i64 = 0;
 // Stored as the raw key bytes so a new session (different key) re-shows it.
 threadlocal var g_remote_key_dismissed_for: ?[32]u8 = null;
 
+// Selection copy toast — flashes "Copied" briefly after right-click /
+// Ctrl+Shift+C so the user can see that the clipboard write succeeded.
+const COPY_TOAST_DURATION_MS: i64 = 1500;
+threadlocal var g_copy_toast_until_ms: i64 = 0;
+threadlocal var g_copy_toast_buf: [64]u8 = undefined;
+threadlocal var g_copy_toast_len: usize = 0;
+
 const STARTUP_SHORTCUT_ENTRIES = [_]StartupShortcut{
     .{ .keys = "Ctrl+Shift+P", .action = "Command center" },
     .{ .keys = "Ctrl+Shift+T", .action = "New session" },
@@ -2675,6 +2682,43 @@ pub fn renderDebugOverlay(window_width: f32) void {
 
 pub fn remoteKeyCopiedFlash() void {
     g_remote_key_copied_until_ms = std.time.milliTimestamp() + 1200;
+}
+
+pub fn showCopyToast(byte_count: usize) void {
+    const msg = std.fmt.bufPrint(&g_copy_toast_buf, "Copied ({d} bytes)", .{byte_count}) catch return;
+    g_copy_toast_len = msg.len;
+    g_copy_toast_until_ms = std.time.milliTimestamp() + COPY_TOAST_DURATION_MS;
+}
+
+pub fn renderCopyToast(window_width: f32, window_height: f32) void {
+    _ = window_height;
+    const now = std.time.milliTimestamp();
+    if (now >= g_copy_toast_until_ms) return;
+    if (g_copy_toast_len == 0) return;
+
+    const text = g_copy_toast_buf[0..g_copy_toast_len];
+    const pad_h: f32 = 14;
+    const pad_v: f32 = 6;
+    const line_h = font.g_titlebar_cell_height + pad_v * 2;
+
+    var text_width: f32 = 0;
+    for (text) |ch| {
+        text_width += titlebar.titlebarGlyphAdvance(@intCast(ch));
+    }
+
+    const bg_w = text_width + pad_h * 2;
+    const bg_x = (window_width - bg_w) / 2;
+    const bg_y: f32 = 60; // GL y=0 at bottom — float above the prompt area
+
+    gl_init.renderQuad(bg_x, bg_y, bg_w, line_h, .{ 0.10, 0.14, 0.10 });
+
+    var x = bg_x + pad_h;
+    const y = bg_y + pad_v;
+    const text_color: [3]f32 = .{ 0.55, 0.95, 0.55 };
+    for (text) |ch| {
+        titlebar.renderTitlebarChar(@intCast(ch), x, y, text_color);
+        x += titlebar.titlebarGlyphAdvance(@intCast(ch));
+    }
 }
 
 pub fn remoteKeyOverlayDismiss(key: []const u8) void {

@@ -616,6 +616,7 @@ fn onWin32Resize(width: i32, height: i32) void {
     overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderDebugOverlay(@floatFromInt(fb_width));
+    overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
 
     if (g_window) |w| w.swapBuffers();
 }
@@ -1749,6 +1750,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderDebugOverlay(@floatFromInt(fb_width));
+        overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
         renderImePreedit(win, fb_width, fb_height);
 
         win.swapBuffers();
