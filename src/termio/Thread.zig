@@ -16,7 +16,6 @@
 ///   Main thread → mailbox.send(.resize) → mailbox.notify()
 ///   Writer thread → wakeup → drainMailbox → coalesce timer (25ms)
 ///   Writer thread → coalesceCallback → pty.setSize + terminal.resize
-
 const std = @import("std");
 const xev = @import("xev");
 const Surface = @import("../Surface.zig");
@@ -102,6 +101,7 @@ fn drainMailbox(self: *Thread) void {
 
         switch (msg) {
             .resize => |grid| self.handleResize(grid),
+            .resize_immediate => |grid| self.handleResizeImmediate(grid),
             .write_small => |payload| writeToPty(surface, payload.data[0..payload.len]),
             .write_alloc => |payload| writeToPty(surface, payload.data),
         }
@@ -137,6 +137,13 @@ fn handleResize(self: *Thread, grid: renderer.size.GridSize) void {
     // Start 25ms coalesce timer
     self.coalesce_active = true;
     self.coalesce.run(&self.loop, &self.coalesce_c, COALESCE_MS, Thread, self, coalesceCallback);
+}
+
+fn handleResizeImmediate(self: *Thread, grid: renderer.size.GridSize) void {
+    // Drop any older coalesced resize so a delayed timer cannot undo the
+    // immediate layout change.
+    self.coalesce_data = null;
+    applyResize(self.surface.?, grid);
 }
 
 fn coalesceCallback(
@@ -181,6 +188,7 @@ fn applyResize(surface: *Surface, grid: renderer.size.GridSize) void {
     // Match Ghostty's Termio.resize behavior: a resize is allowed to break
     // synchronized output mode so TUI redraws become visible immediately.
     surface.terminal.modes.set(.synchronized_output, false);
+    surface.surface_renderer.force_rebuild = true;
 
     surface.terminal.scrollViewport(.{ .bottom = {} });
     surface.dirty.store(true, .release);

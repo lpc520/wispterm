@@ -142,6 +142,11 @@ pub fn computeSplitLayout(
     _ = cw;
     _ = ch;
 
+    const resize_policy: Surface.ResizePolicy = if (AppWindow.consumeImmediateLayoutResize())
+        .immediate
+    else
+        .coalesced;
+
     var count: usize = 0;
     var it = active_tab.tree.iterator();
     while (it.next()) |entry| {
@@ -203,12 +208,13 @@ pub fn computeSplitLayout(
             .right = scrollbar_padding,
         };
 
-        const resized = surface.setScreenSize(
+        const resized = surface.setScreenSizeWithPolicy(
             if (pw > 0) @intCast(pw) else 1,
             if (ph > 0) @intCast(ph) else 1,
             font.cell_width,
             font.cell_height,
             explicit_padding,
+            resize_policy,
         );
 
         if (resized) {

@@ -555,6 +555,11 @@ pub fn setSshConnection(
 // Size and Resize
 // ============================================================================
 
+pub const ResizePolicy = enum {
+    coalesced,
+    immediate,
+};
+
 /// Update the surface size and queue a resize to the IO thread if needed.
 /// This is called by the split layout computation to set each surface
 /// to its correct dimensions based on the split geometry.
@@ -571,6 +576,18 @@ pub fn setScreenSize(
     cell_width: f32,
     cell_height: f32,
     explicit_padding: renderer.size.Padding,
+) bool {
+    return self.setScreenSizeWithPolicy(screen_width, screen_height, cell_width, cell_height, explicit_padding, .coalesced);
+}
+
+pub fn setScreenSizeWithPolicy(
+    self: *Surface,
+    screen_width: u32,
+    screen_height: u32,
+    cell_width: f32,
+    cell_height: f32,
+    explicit_padding: renderer.size.Padding,
+    resize_policy: ResizePolicy,
 ) bool {
     // Update screen size
     self.size.screen.width = screen_width;
@@ -602,7 +619,11 @@ pub fn setScreenSize(
     if (changed) {
         // Terminal rows/cols and pixel dimensions are updated together in
         // the IO thread, under the render-state lock.
-        self.queueIo(.{ .resize = .{ .cols = new_cols, .rows = new_rows } });
+        const grid: renderer.size.GridSize = .{ .cols = new_cols, .rows = new_rows };
+        switch (resize_policy) {
+            .coalesced => self.queueIo(.{ .resize = grid }),
+            .immediate => self.queueIo(.{ .resize_immediate = grid }),
+        }
         return true;
     }
 

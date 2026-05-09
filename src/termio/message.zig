@@ -3,7 +3,6 @@
 /// The main thread sends these to the IO writer thread via the Mailbox.
 /// The tagged union is trivially extensible — adding a new variant requires
 /// only adding the field here and a switch case in Thread.drainMailbox().
-
 const std = @import("std");
 const renderer = @import("../renderer.zig");
 
@@ -23,6 +22,10 @@ pub const Message = union(enum) {
     /// Resize the terminal grid to the given dimensions.
     /// Coalesced with a 25ms timer before applying.
     resize: renderer.size.GridSize,
+
+    /// Resize the terminal grid immediately.
+    /// Used for one-shot layout changes where TUI redraw latency is visible.
+    resize_immediate: renderer.size.GridSize,
 
     /// Write data to the PTY input pipe from the IO writer thread.
     write_small: WriteSmall,

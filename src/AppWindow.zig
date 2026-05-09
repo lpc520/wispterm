@@ -251,6 +251,7 @@ fn clearUiStateOnTabChange() void {
     overlays.g_resize_overlay_visible = false;
     overlays.g_resize_overlay_opacity = 0;
     overlays.g_resize_overlay_suppress_until = std.time.milliTimestamp() + 100;
+    requestImmediateLayoutResize();
     g_force_rebuild = true;
     g_cells_valid = false;
 }
@@ -346,6 +347,7 @@ pub fn splitFocusedReturningSurface(direction: SplitTree.Split.Direction) ?*Surf
     }
     {
         overlays.g_resize_active = false;
+        requestImmediateLayoutResize();
         g_force_rebuild = true;
         g_cells_valid = false;
     }
@@ -356,6 +358,7 @@ pub fn closeFocusedSplit() void {
     const allocator = g_allocator orelse return;
     switch (tab.closeFocusedSplit(allocator)) {
         .closed_split => {
+            requestImmediateLayoutResize();
             g_force_rebuild = true;
             g_cells_valid = false;
         },
@@ -383,6 +386,7 @@ pub fn equalizeSplits() void {
     const allocator = g_allocator orelse return;
     if (tab.equalizeSplits(allocator)) {
         overlays.g_split_resize_overlay_until = std.time.milliTimestamp() + overlays.RESIZE_OVERLAY_DURATION_MS;
+        requestImmediateLayoutResize();
         g_force_rebuild = true;
         g_cells_valid = false;
     }
@@ -417,6 +421,20 @@ pub threadlocal var g_pending_cols: u16 = 0;
 pub threadlocal var g_pending_rows: u16 = 0;
 pub threadlocal var g_last_resize_time: i64 = 0;
 const RESIZE_COALESCE_MS: i64 = 25; // Same as Ghostty
+
+// One-shot layout changes such as opening a browser panel or creating a split
+// should not wait for the drag/window-resize coalescing timer.
+pub threadlocal var g_layout_resize_immediate: bool = false;
+
+pub fn requestImmediateLayoutResize() void {
+    g_layout_resize_immediate = true;
+}
+
+pub fn consumeImmediateLayoutResize() bool {
+    const immediate = g_layout_resize_immediate;
+    g_layout_resize_immediate = false;
+    return immediate;
+}
 
 pub threadlocal var g_cursor_style: CursorStyle = .block; // Default cursor style
 pub threadlocal var g_cursor_blink: bool = true; // Whether cursor should blink (default: true like Ghostty)

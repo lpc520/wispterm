@@ -415,6 +415,11 @@ fn syncGridFromWindowSize(width: i32, height: i32) void {
     }
 }
 
+fn syncGridFromWindowSizeImmediate(width: i32, height: i32) void {
+    AppWindow.requestImmediateLayoutResize();
+    syncGridFromWindowSize(width, height);
+}
+
 fn markBrowserUrlBarDirty() void {
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
@@ -429,7 +434,7 @@ fn blurBrowserUrlBarIfFocused() void {
 pub fn toggleSidebar() void {
     tab.g_sidebar_visible = !tab.g_sidebar_visible;
     if (AppWindow.g_window) |win| {
-        syncGridFromWindowSize(win.width, win.height);
+        syncGridFromWindowSizeImmediate(win.width, win.height);
         win.sidebar_width = @intFromFloat(titlebar.sidebarWidth());
     }
     AppWindow.g_force_rebuild = true;
@@ -475,7 +480,7 @@ pub fn toggleFileExplorer() void {
         }
     }
     if (AppWindow.g_window) |win| {
-        syncGridFromWindowSize(win.width, win.height);
+        syncGridFromWindowSizeImmediate(win.width, win.height);
     }
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
@@ -487,7 +492,7 @@ pub fn toggleBrowserPanel() void {
     const surface = AppWindow.activeSurface();
     if (!browser_panel.toggleForSurface(allocator, parent, surface)) return;
     if (AppWindow.g_window) |win| {
-        syncGridFromWindowSize(win.width, win.height);
+        syncGridFromWindowSizeImmediate(win.width, win.height);
     }
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
@@ -496,14 +501,14 @@ pub fn toggleBrowserPanel() void {
 pub fn closePanelOrTab() void {
     if (markdown_preview_panel.g_visible) {
         markdown_preview_panel.close();
-        if (AppWindow.g_window) |win| syncGridFromWindowSize(win.width, win.height);
+        if (AppWindow.g_window) |win| syncGridFromWindowSizeImmediate(win.width, win.height);
         AppWindow.g_force_rebuild = true;
         AppWindow.g_cells_valid = false;
         return;
     }
     if (browser_panel.g_visible) {
         browser_panel.close();
-        if (AppWindow.g_window) |win| syncGridFromWindowSize(win.width, win.height);
+        if (AppWindow.g_window) |win| syncGridFromWindowSizeImmediate(win.width, win.height);
         AppWindow.g_force_rebuild = true;
         AppWindow.g_cells_valid = false;
         return;
@@ -1770,7 +1775,7 @@ fn openUrl(surface: *Surface, url: []const u8) bool {
     const hwnd = if (AppWindow.g_window) |win| win.hwnd else null;
     if (!browser_panel.openForSurface(allocator, hwnd, target, surface)) return false;
     if (AppWindow.g_window) |win| {
-        syncGridFromWindowSize(win.width, win.height);
+        syncGridFromWindowSizeImmediate(win.width, win.height);
     }
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
@@ -1935,7 +1940,7 @@ fn readTerminalPreviewSource(allocator: std.mem.Allocator, surface: *Surface, pa
 fn openRenderedPreview(allocator: std.mem.Allocator, kind: markdown_preview.Kind, title: []const u8, path: []const u8, source: []const u8) bool {
     _ = allocator;
     markdown_preview_panel.open(kind, title, path, source);
-    if (AppWindow.g_window) |win| syncGridFromWindowSize(win.width, win.height);
+    if (AppWindow.g_window) |win| syncGridFromWindowSizeImmediate(win.width, win.height);
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
     file_explorer.setTransferStatus(.success, title);
