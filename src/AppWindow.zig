@@ -125,6 +125,27 @@ pub fn getHwnd(self: *AppWindow) ?win32_backend.HWND {
 
 /// Clean up resources.
 pub fn deinit(self: *AppWindow) void {
+    // Persist the session to disk if restore-tabs-on-startup is enabled.
+    // Only the LAST window to close performs the dump — this matches the
+    // first-window-only restore behavior in run() and avoids losing the
+    // tabs of other still-open windows when one window closes early.
+    // (When this deinit runs, the window has already been swap-removed
+    // from app.windows by the caller in App.run/windowThreadMain.)
+    //
+    // Errors are logged inside dumpSessionToFile and must not block shutdown.
+    {
+        const restore_enabled = self.app.restore_tabs_on_startup;
+        var is_last_window = false;
+        {
+            self.app.mutex.lock();
+            defer self.app.mutex.unlock();
+            is_last_window = self.app.windows.items.len == 0;
+        }
+        if (restore_enabled and is_last_window) {
+            tab.dumpSessionToFile(self.allocator);
+        }
+    }
+
     // Clean up all tabs
     for (0..tab.g_tab_count) |ti| {
         if (tab.g_tabs[ti]) |t| {
