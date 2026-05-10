@@ -10,6 +10,7 @@ const Surface = @import("../Surface.zig");
 const SplitTree = @import("../split_tree.zig");
 const win32_backend = @import("../apprt/win32.zig");
 const remote_client = @import("../remote_client.zig");
+const session_persist = @import("../session_persist.zig");
 
 const CursorStyle = Config.CursorStyle;
 const Selection = Surface.Selection;
@@ -739,4 +740,115 @@ pub fn handleRenameChar(codepoint: u21) void {
     @memcpy(g_tab_rename_buf[g_tab_rename_cursor .. g_tab_rename_cursor + len], buf[0..len]);
     g_tab_rename_len += len;
     g_tab_rename_cursor += len;
+}
+
+// ============================================================================
+// Session persistence — snapshot live tabs into POD for serialization
+// ============================================================================
+
+/// Build a session_persist.TabSnap from a live TabState by walking its
+/// SplitTree. The returned snapshot owns its strings via `arena`. The arena
+/// is the caller's responsibility to free (via Session.deinit pattern, or
+/// shared across all tabs in a session).
+pub fn snapshotTab(arena: std.mem.Allocator, t: *const TabState) !session_persist.TabSnap {
+    if (t.tree.isEmpty()) return error.EmptyTree;
+
+    // 1. Build NodeSnap tree.
+    const tree = try snapshotNode(arena, &t.tree, .root);
+
+    // 2. Find the focused leaf's index in pre-order. If `focused == .root`
+    //    on a single-leaf tree, the root IS the leaf and computeFocusedLeafIndex
+    //    correctly returns 0.
+    const focused_leaf: u32 = computeFocusedLeafIndex(&t.tree, t.focused);
+
+    // 3. Translate the optional zoomed handle to a pre-order leaf index.
+    const zoomed_leaf: ?u32 = if (t.tree.zoomed) |z| computeFocusedLeafIndex(&t.tree, z) else null;
+
+    return session_persist.TabSnap{
+        .title_override = null,
+        .focused_leaf = focused_leaf,
+        .zoomed_leaf = zoomed_leaf,
+        .tree = tree,
+    };
+}
+
+fn snapshotNode(
+    arena: std.mem.Allocator,
+    tree: *const SplitTree,
+    handle: SplitTree.Node.Handle,
+) !session_persist.NodeSnap {
+    const node = tree.nodes[handle.idx()];
+    return switch (node) {
+        .leaf => |surface| .{ .leaf = .{ .surface = try snapshotSurface(arena, surface) } },
+        .split => |sp| blk: {
+            const left = try arena.create(session_persist.NodeSnap);
+            left.* = try snapshotNode(arena, tree, sp.left);
+            const right = try arena.create(session_persist.NodeSnap);
+            right.* = try snapshotNode(arena, tree, sp.right);
+            break :blk .{ .split = .{
+                .layout = switch (sp.layout) {
+                    .horizontal => .horizontal,
+                    .vertical => .vertical,
+                },
+                .ratio = @as(f64, @floatCast(sp.ratio)),
+                .left = left,
+                .right = right,
+            } };
+        },
+    };
+}
+
+fn snapshotSurface(arena: std.mem.Allocator, surface: *const Surface) !session_persist.SurfaceSnap {
+    const cwd_opt: ?[]const u8 = surface.getCwd() orelse surface.getInitialCwd();
+    const cwd_dup: ?[]const u8 = if (cwd_opt) |c| try arena.dupe(u8, c) else null;
+
+    return switch (surface.surfaceKind()) {
+        .local_shell => .{ .local_shell = .{
+            .cwd = cwd_dup,
+            .command = null,
+        } },
+        .ssh => blk: {
+            // surfaceKind() returned .ssh, so ssh_connection is non-null.
+            const conn = &surface.ssh_connection.?;
+            const port_str = conn.port();
+            const port_num: u16 = if (port_str.len == 0)
+                22
+            else
+                std.fmt.parseInt(u16, port_str, 10) catch 22;
+            break :blk .{ .ssh = .{
+                .cwd = cwd_dup,
+                .user = try arena.dupe(u8, conn.user()),
+                .host = try arena.dupe(u8, conn.host()),
+                .port = port_num,
+            } };
+        },
+    };
+}
+
+fn computeFocusedLeafIndex(tree: *const SplitTree, target: SplitTree.Node.Handle) u32 {
+    var idx: u32 = 0;
+    var found: ?u32 = null;
+    walkTreePreOrder(tree, .root, target, &idx, &found);
+    return found orelse 0;
+}
+
+fn walkTreePreOrder(
+    tree: *const SplitTree,
+    handle: SplitTree.Node.Handle,
+    target: SplitTree.Node.Handle,
+    idx: *u32,
+    found: *?u32,
+) void {
+    if (found.* != null) return;
+    const node = tree.nodes[handle.idx()];
+    switch (node) {
+        .leaf => {
+            if (handle == target) found.* = idx.*;
+            idx.* += 1;
+        },
+        .split => |sp| {
+            walkTreePreOrder(tree, sp.left, target, idx, found);
+            walkTreePreOrder(tree, sp.right, target, idx, found);
+        },
+    }
 }
