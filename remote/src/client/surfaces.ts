@@ -3,11 +3,11 @@ import { FitAddon } from "@xterm/addon-fit";
 
 import type { LayoutSurface, SurfaceView } from "./types";
 import {
-  clampCanvasPan,
   defaultCanvasPan,
   isCanvasDrag,
   panCanvasBy,
   panCanvasByWheel,
+  resizeCanvasPan,
   type CanvasPoint,
   type CanvasSize,
 } from "./mobile_canvas";
@@ -18,6 +18,7 @@ import { activeSurfaceIdForInput, currentTab, resetSurfaceViews, state } from ".
 import { getTerminalPalette, subscribeToTheme } from "./theme";
 
 const PENDING_OUTPUT_LIMIT = 128 * 1024;
+const MOBILE_CANVAS_BOTTOM_GUTTER = 12;
 
 type InputHandler = (surfaceId: string, data: string) => void;
 let inputHandler: InputHandler = () => {
@@ -98,6 +99,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     resizeObserver: null,
     fitQueued: false,
     canvasPan: { x: 0, y: 0 },
+    lastCanvasViewport: null,
     needsDefaultCanvasPan: false,
     hasLiveOutput: false,
     snapshotApplied: false,
@@ -419,6 +421,7 @@ function bindCanvasPan(view: SurfaceView): () => void {
 
 function resetCanvasPan(view: SurfaceView): void {
   view.canvasPan = { x: 0, y: 0 };
+  view.lastCanvasViewport = null;
   applyCanvasPan(view);
 }
 
@@ -432,12 +435,20 @@ function updateCanvasPan(view: SurfaceView): void {
   const viewport = canvasViewportSize(view);
   const canvas = canvasContentSize(view);
   if (viewport.width <= 0 || viewport.height <= 0 || canvas.width <= 0 || canvas.height <= 0) return;
+  const bottomGutter = isMobileRemoteShell() ? MOBILE_CANVAS_BOTTOM_GUTTER : 0;
   if (view.needsDefaultCanvasPan) {
-    view.canvasPan = defaultCanvasPan(viewport, canvas);
+    view.canvasPan = defaultCanvasPan(viewport, canvas, { bottomGutter });
     view.needsDefaultCanvasPan = false;
   } else {
-    view.canvasPan = clampCanvasPan(view.canvasPan, viewport, canvas);
+    view.canvasPan = resizeCanvasPan({
+      pan: view.canvasPan,
+      previousViewport: view.lastCanvasViewport,
+      viewport,
+      canvas,
+      bottomGutter,
+    });
   }
+  view.lastCanvasViewport = viewport;
   applyCanvasPan(view);
 }
 

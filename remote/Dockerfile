@@ -9,7 +9,8 @@ RUN npm ci
 
 COPY . .
 
-RUN npm run build:docker
+ARG PHANTTY_WEB_BUILD_TIME
+RUN VITE_PHANTTY_WEB_BUILD_TIME="${PHANTTY_WEB_BUILD_TIME:-$(date '+%Y %m %d %H:%M')}" npm run build:docker
 
 FROM node:22-alpine AS runtime
 WORKDIR /app

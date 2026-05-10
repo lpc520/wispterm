@@ -1,6 +1,6 @@
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
-import type { CanvasPoint } from "./mobile_canvas";
+import type { CanvasPoint, CanvasSize } from "./mobile_canvas";
 
 export type MeResponse = { authenticated: boolean; username?: string };
 
@@ -53,6 +53,7 @@ export type SurfaceView = {
   resizeObserver: ResizeObserver | null;
   fitQueued: boolean;
   canvasPan: CanvasPoint;
+  lastCanvasViewport: CanvasSize | null;
   needsDefaultCanvasPan: boolean;
   hasLiveOutput: boolean;
   snapshotApplied: boolean;

@@ -8,6 +8,7 @@ import {
   isCanvasDrag,
   panCanvasBy,
   panCanvasByWheel,
+  resizeCanvasPan,
 } from "../../src/client/mobile_canvas";
 
 test("clampCanvasPan keeps an oversized canvas inside the viewport", () => {
@@ -32,6 +33,43 @@ test("defaultCanvasPan starts at the bottom-left of an oversized terminal canvas
   assert.deepEqual(
     defaultCanvasPan({ width: 390, height: 500 }, { width: 900, height: 900 }),
     { x: 0, y: -400 },
+  );
+});
+
+test("defaultCanvasPan can leave a bottom gutter for mobile clip edges", () => {
+  assert.deepEqual(
+    defaultCanvasPan(
+      { width: 390, height: 500 },
+      { width: 900, height: 900 },
+      { bottomGutter: 12 },
+    ),
+    { x: 0, y: -412 },
+  );
+});
+
+test("resizeCanvasPan keeps the bottom row visible when the viewport shrinks", () => {
+  assert.deepEqual(
+    resizeCanvasPan({
+      pan: { x: 0, y: 0 },
+      previousViewport: { width: 390, height: 920 },
+      viewport: { width: 390, height: 500 },
+      canvas: { width: 900, height: 900 },
+      bottomGutter: 12,
+    }),
+    { x: 0, y: -412 },
+  );
+});
+
+test("resizeCanvasPan preserves an intentionally panned-away canvas", () => {
+  assert.deepEqual(
+    resizeCanvasPan({
+      pan: { x: 0, y: -120 },
+      previousViewport: { width: 390, height: 500 },
+      viewport: { width: 390, height: 460 },
+      canvas: { width: 900, height: 900 },
+      bottomGutter: 12,
+    }),
+    { x: 0, y: -120 },
   );
 });
 
