@@ -278,6 +278,11 @@ shell: []const u8 = "cmd",
 /// When true, moving the mouse into a split pane focuses it.
 @"focus-follows-mouse": bool = false,
 
+/// When true, persist tab/split layout to %APPDATA%\phantty\session.json on
+/// close, and restore it on next launch (unless CLI args specify otherwise).
+/// Default false: the file is neither written nor read when this is off.
+@"restore-tabs-on-startup": bool = false,
+
 /// Load an additional config file. Can be repeated. Relative paths are
 /// resolved relative to the file containing the directive. Prefix with
 /// `?` to make optional (missing file is silently ignored).
@@ -608,6 +613,14 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
             self.@"focus-follows-mouse" = false;
         } else {
             log.warn("invalid focus-follows-mouse: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "restore-tabs-on-startup")) {
+        if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1")) {
+            self.@"restore-tabs-on-startup" = true;
+        } else if (std.mem.eql(u8, value, "false") or std.mem.eql(u8, value, "0")) {
+            self.@"restore-tabs-on-startup" = false;
+        } else {
+            log.warn("invalid restore-tabs-on-startup: {s}", .{value});
         }
     } else if (std.mem.eql(u8, key, "config-file")) {
         self.loadConfigFileDirective(allocator, value, base_dir);
@@ -1249,4 +1262,32 @@ test "config: sessionFilePath sits next to configFilePath" {
     defer allocator.free(session);
     try std.testing.expect(std.mem.endsWith(u8, session, "session.json"));
     try std.testing.expect(std.mem.indexOf(u8, session, "phantty") != null);
+}
+
+test "config: restore-tabs-on-startup parses true/false" {
+    const allocator = std.testing.allocator;
+    var cfg: Config = .{};
+
+    // Default is false.
+    try std.testing.expectEqual(false, cfg.@"restore-tabs-on-startup");
+
+    // Set to true.
+    cfg.applyKeyValue(allocator, "restore-tabs-on-startup", "true", ".");
+    try std.testing.expectEqual(true, cfg.@"restore-tabs-on-startup");
+
+    // Set back to false.
+    cfg.applyKeyValue(allocator, "restore-tabs-on-startup", "false", ".");
+    try std.testing.expectEqual(false, cfg.@"restore-tabs-on-startup");
+
+    // "1" alias.
+    cfg.applyKeyValue(allocator, "restore-tabs-on-startup", "1", ".");
+    try std.testing.expectEqual(true, cfg.@"restore-tabs-on-startup");
+
+    // "0" alias.
+    cfg.applyKeyValue(allocator, "restore-tabs-on-startup", "0", ".");
+    try std.testing.expectEqual(false, cfg.@"restore-tabs-on-startup");
+
+    // Invalid value leaves the previous state untouched (still false).
+    cfg.applyKeyValue(allocator, "restore-tabs-on-startup", "maybe", ".");
+    try std.testing.expectEqual(false, cfg.@"restore-tabs-on-startup");
 }
