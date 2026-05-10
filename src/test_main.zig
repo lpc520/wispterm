@@ -5,6 +5,7 @@ comptime {
     _ = @import("scp.zig");
     _ = @import("browser_panel.zig");
     _ = @import("browser_url.zig");
+    _ = @import("config.zig");
     _ = @import("file_backend.zig");
     _ = @import("file_explorer.zig");
     _ = @import("input_shortcuts.zig");

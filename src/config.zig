@@ -433,6 +433,23 @@ pub fn configFilePath(allocator: std.mem.Allocator) ![]const u8 {
     return error.NoConfigPath;
 }
 
+/// Return the default session-state file path: <config-dir>/session.json
+pub fn sessionFilePath(allocator: std.mem.Allocator) ![]const u8 {
+    if (std.process.getEnvVarOwned(allocator, "APPDATA")) |appdata| {
+        defer allocator.free(appdata);
+        return std.fs.path.join(allocator, &.{ appdata, "phantty", "session.json" });
+    } else |_| {}
+    if (std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME")) |xdg| {
+        defer allocator.free(xdg);
+        return std.fs.path.join(allocator, &.{ xdg, "phantty", "session.json" });
+    } else |_| {}
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+        defer allocator.free(home);
+        return std.fs.path.join(allocator, &.{ home, ".config", "phantty", "session.json" });
+    } else |_| {}
+    return error.NoConfigPath;
+}
+
 /// Print the path that would be used for the config file.
 pub fn printConfigPath(allocator: std.mem.Allocator) void {
     if (configFilePath(allocator)) |path| {
@@ -1237,4 +1254,12 @@ pub fn parseColor(s: []const u8) ?Color {
 
     const hex = std.fmt.parseInt(u24, hex_str, 16) catch return null;
     return hexToColor(hex);
+}
+
+test "config: sessionFilePath sits next to configFilePath" {
+    const allocator = std.testing.allocator;
+    const session = sessionFilePath(allocator) catch return; // skip if no env
+    defer allocator.free(session);
+    try std.testing.expect(std.mem.endsWith(u8, session, "session.json"));
+    try std.testing.expect(std.mem.indexOf(u8, session, "phantty") != null);
 }
