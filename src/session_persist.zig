@@ -1,6 +1,8 @@
 // src/session_persist.zig
 const std = @import("std");
 
+const log = std.log.scoped(.session_persist);
+
 // On-disk JSON uses std.json's default tagged-union encoding:
 // nodes appear as {"leaf": {...}} or {"split": {...}}, not {"kind": ..., ...}.
 // Surface kinds appear as {"local_shell": {...}} or {"ssh": {...}}.
@@ -427,4 +429,101 @@ test "session_persist: shellSingleQuoteEscape handles common paths" {
         defer allocator.free(got);
         try std.testing.expectEqualStrings(c.want, got);
     }
+}
+
+/// Serialize and atomically write the session to `path`. Pattern: write to
+/// `path.tmp`, then rename over `path`. On any I/O failure, log a warning
+/// and return the error; callers in the close path swallow the error.
+pub fn dumpSession(allocator: std.mem.Allocator, path: []const u8, session: Session) !void {
+    const json = try dumpSessionToString(allocator, session);
+    defer allocator.free(json);
+
+    const tmp_path = try std.mem.concat(allocator, u8, &.{ path, ".tmp" });
+    defer allocator.free(tmp_path);
+
+    if (std.fs.path.dirname(path)) |dir| {
+        std.fs.cwd().makePath(dir) catch |err| {
+            log.warn("failed to create session dir {s}: {}", .{ dir, err });
+            return err;
+        };
+    }
+
+    {
+        const file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(json);
+    }
+
+    try std.fs.cwd().rename(tmp_path, path);
+}
+
+/// Read and parse the session file. Returns null on any failure (missing,
+/// corrupt, empty), and renames a corrupt file to `path.bak` so the next
+/// launch starts clean. Callers own the returned `std.json.Parsed` and must
+/// call `.deinit()`.
+pub fn loadSession(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+) !?std.json.Parsed(Session) {
+    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => {
+            log.warn("failed to read {s}: {}", .{ path, err });
+            return null;
+        },
+    };
+    defer allocator.free(bytes);
+
+    const parsed = loadSessionFromString(allocator, bytes) catch |err| {
+        log.warn("session.json corrupt ({}); renaming to .bak", .{err});
+        const bak = std.mem.concat(allocator, u8, &.{ path, ".bak" }) catch return null;
+        defer allocator.free(bak);
+        std.fs.cwd().rename(path, bak) catch |rerr| {
+            log.warn("failed to rename {s} to .bak: {}", .{ path, rerr });
+        };
+        return null;
+    };
+    if (parsed.value.tabs.len == 0) {
+        var p = parsed;
+        p.deinit();
+        return null;
+    }
+    return parsed;
+}
+
+test "session_persist: dumpSession writes atomically and loadSession reads back" {
+    const allocator = std.testing.allocator;
+
+    var tmpdir = std.testing.tmpDir(.{});
+    defer tmpdir.cleanup();
+
+    const realpath = try tmpdir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(realpath);
+    const path = try std.fs.path.join(allocator, &.{ realpath, "sess.json" });
+    defer allocator.free(path);
+
+    const leaf = NodeSnap{ .leaf = .{ .surface = .{ .local_shell = .{ .cwd = "/x" } } } };
+    const tabs = [_]TabSnap{.{ .focused_leaf = 0, .tree = leaf }};
+    const session: Session = .{ .active_tab = 0, .tabs = @constCast(&tabs) };
+
+    try dumpSession(allocator, path, session);
+
+    var loaded = try loadSession(allocator, path);
+    defer {
+        if (loaded) |*l| {
+            var lm = l.*;
+            lm.deinit();
+        }
+    }
+    try std.testing.expect(loaded != null);
+    try std.testing.expectEqual(@as(usize, 1), loaded.?.value.tabs.len);
+
+    // Verify no .tmp leftover
+    const tmp_path = try std.mem.concat(allocator, u8, &.{ path, ".tmp" });
+    defer allocator.free(tmp_path);
+    const tmp_exists = blk: {
+        std.fs.cwd().access(tmp_path, .{}) catch break :blk false;
+        break :blk true;
+    };
+    try std.testing.expect(!tmp_exists);
 }
