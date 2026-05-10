@@ -990,6 +990,88 @@ fn dimensions(self: *const SplitTree, current: Node.Handle) struct {
     };
 }
 
+/// Create a SplitTree from a session_persist NodeSnap. The factory callback
+/// is responsible for materializing one *Surface per leaf snapshot. Returning
+/// null from the factory aborts the rebuild with error.SurfaceCreationFailed.
+///
+/// Splits are always binary; ratios are clamped to [0.05, 0.95] for safety.
+/// Pre-order traversal: root first, then left subtree, then right subtree.
+/// Pre-order leaf order matches session_persist.leafByIndex semantics, so
+/// `focused_leaf` from a TabSnap can be resolved against the resulting nodes.
+pub fn fromSnapshot(
+    gpa: Allocator,
+    snap: *const @import("session_persist.zig").NodeSnap,
+    factory: *const fn (
+        snap: *const @import("session_persist.zig").SurfaceSnap,
+        gpa: Allocator,
+    ) ?*Surface,
+) !SplitTree {
+    const session_persist = @import("session_persist.zig");
+    const total = countSnapNodes(snap);
+
+    var arena = ArenaAllocator.init(gpa);
+    errdefer arena.deinit();
+    const alloc = arena.allocator();
+
+    const nodes = try alloc.alloc(Node, total);
+
+    const Ctx = struct {
+        nodes: []Node,
+        idx: usize = 0,
+        gpa: Allocator,
+        factory: *const fn (
+            snap: *const session_persist.SurfaceSnap,
+            gpa: Allocator,
+        ) ?*Surface,
+
+        fn writeNode(self: *@This(), n: *const session_persist.NodeSnap) !Node.Handle {
+            const my_handle: Node.Handle = @enumFromInt(@as(Node.Handle.Backing, @intCast(self.idx)));
+            self.idx += 1;
+            switch (n.*) {
+                .leaf => |leaf| {
+                    const surface = self.factory(&leaf.surface, self.gpa) orelse return error.SurfaceCreationFailed;
+                    self.nodes[my_handle.idx()] = .{ .leaf = surface };
+                },
+                .split => |sp| {
+                    // Reserve current index, then write children in pre-order.
+                    const left = try self.writeNode(sp.left);
+                    const right = try self.writeNode(sp.right);
+                    var ratio: f64 = sp.ratio;
+                    if (ratio < session_persist.RATIO_MIN) ratio = session_persist.RATIO_MIN;
+                    if (ratio > session_persist.RATIO_MAX) ratio = session_persist.RATIO_MAX;
+                    if (std.math.isNan(ratio)) ratio = 0.5;
+                    self.nodes[my_handle.idx()] = .{ .split = .{
+                        .layout = switch (sp.layout) {
+                            .horizontal => .horizontal,
+                            .vertical => .vertical,
+                        },
+                        .ratio = @floatCast(ratio),
+                        .left = left,
+                        .right = right,
+                    } };
+                },
+            }
+            return my_handle;
+        }
+    };
+
+    var ctx = Ctx{ .nodes = nodes, .gpa = gpa, .factory = factory };
+    _ = try ctx.writeNode(snap);
+
+    return .{
+        .arena = arena,
+        .nodes = nodes,
+        .zoomed = null, // resolved by the caller (tab.zig) after the tree is built
+    };
+}
+
+fn countSnapNodes(snap: *const @import("session_persist.zig").NodeSnap) usize {
+    return switch (snap.*) {
+        .leaf => 1,
+        .split => |sp| 1 + countSnapNodes(sp.left) + countSnapNodes(sp.right),
+    };
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1026,4 +1108,82 @@ test "SplitTree: empty tree" {
     try std.testing.expect(tree.isEmpty());
     try std.testing.expect(!tree.isSplit());
     try std.testing.expectEqual(@as(usize, 0), tree.nodes.len);
+}
+
+test "SplitTree: fromSnapshot rebuilds nested topology with correct handles and ratios" {
+    const session_persist = @import("session_persist.zig");
+
+    var leaf_a = session_persist.NodeSnap{ .leaf = .{ .surface = .{ .local_shell = .{} } } };
+    var leaf_b = session_persist.NodeSnap{ .leaf = .{ .surface = .{ .local_shell = .{} } } };
+    var leaf_c = session_persist.NodeSnap{ .leaf = .{ .surface = .{ .local_shell = .{} } } };
+    var inner = session_persist.NodeSnap{ .split = .{ .layout = .vertical, .ratio = 0.4, .left = &leaf_a, .right = &leaf_b } };
+    var root = session_persist.NodeSnap{ .split = .{ .layout = .horizontal, .ratio = 0.6, .left = &inner, .right = &leaf_c } };
+
+    // Stub factory: returns sentinel pointers so we can verify topology
+    // without spinning up real Surfaces (which need PTY).
+    const Stub = struct {
+        var counter: usize = 0;
+        var sentinels: [16]usize = undefined;
+        fn make(_: *const session_persist.SurfaceSnap, _: Allocator) ?*Surface {
+            const ptr = &sentinels[counter];
+            counter += 1;
+            return @ptrCast(@alignCast(ptr));
+        }
+    };
+    Stub.counter = 0;
+
+    var tree = try fromSnapshot(std.testing.allocator, &root, Stub.make);
+    defer {
+        // Sentinel leaves can't be unref'd via the real Surface path, so we
+        // free the arena directly without invoking the destructor.
+        if (tree.nodes.len > 0) tree.arena.deinit();
+        tree = undefined;
+    }
+
+    // Pre-order layout: [root_split, inner_split, leaf_a, leaf_b, leaf_c]
+    try std.testing.expectEqual(@as(usize, 5), tree.nodes.len);
+    const root_node = tree.nodes[0];
+    try std.testing.expect(root_node == .split);
+    try std.testing.expectEqual(SplitTree.Split.Layout.horizontal, root_node.split.layout);
+    try std.testing.expectApproxEqAbs(@as(f16, 0.6), root_node.split.ratio, 0.01);
+    try std.testing.expectEqual(@as(SplitTree.Node.Handle.Backing, 1), @intFromEnum(root_node.split.left));
+    try std.testing.expectEqual(@as(SplitTree.Node.Handle.Backing, 4), @intFromEnum(root_node.split.right));
+
+    const inner_node = tree.nodes[1];
+    try std.testing.expect(inner_node == .split);
+    try std.testing.expectEqual(SplitTree.Split.Layout.vertical, inner_node.split.layout);
+    try std.testing.expectApproxEqAbs(@as(f16, 0.4), inner_node.split.ratio, 0.01);
+    try std.testing.expectEqual(@as(SplitTree.Node.Handle.Backing, 2), @intFromEnum(inner_node.split.left));
+    try std.testing.expectEqual(@as(SplitTree.Node.Handle.Backing, 3), @intFromEnum(inner_node.split.right));
+
+    try std.testing.expect(tree.nodes[2] == .leaf);
+    try std.testing.expect(tree.nodes[3] == .leaf);
+    try std.testing.expect(tree.nodes[4] == .leaf);
+}
+
+test "SplitTree: fromSnapshot clamps ratios" {
+    const session_persist = @import("session_persist.zig");
+
+    var l = session_persist.NodeSnap{ .leaf = .{ .surface = .{ .local_shell = .{} } } };
+    var r = session_persist.NodeSnap{ .leaf = .{ .surface = .{ .local_shell = .{} } } };
+    var root = session_persist.NodeSnap{ .split = .{ .layout = .horizontal, .ratio = 5.0, .left = &l, .right = &r } };
+
+    const Stub = struct {
+        var counter: usize = 0;
+        var sentinels: [16]usize = undefined;
+        fn make(_: *const session_persist.SurfaceSnap, _: Allocator) ?*Surface {
+            const ptr = &sentinels[counter];
+            counter += 1;
+            return @ptrCast(@alignCast(ptr));
+        }
+    };
+    Stub.counter = 0;
+
+    var tree = try fromSnapshot(std.testing.allocator, &root, Stub.make);
+    defer {
+        if (tree.nodes.len > 0) tree.arena.deinit();
+        tree = undefined;
+    }
+
+    try std.testing.expect(tree.nodes[0].split.ratio <= 0.95);
 }
