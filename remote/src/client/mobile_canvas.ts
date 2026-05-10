@@ -43,12 +43,19 @@ export type CanvasScrollbarMetrics = {
   thumbHeight: number;
 };
 
+export type MeaningfulTerminalCanvasHeightInput = {
+  measuredHeight: number;
+  rows: number;
+  cursorY: number;
+  lastNonBlankRow: number;
+};
+
 export const CANVAS_WHEEL_EVENT_OPTIONS: AddEventListenerOptions = {
   capture: true,
   passive: false,
 };
 
-const BOTTOM_ANCHOR_EPSILON = 2;
+const BOTTOM_ANCHOR_EPSILON = 24;
 
 export function clampCanvasPan(
   pan: CanvasPoint,
@@ -171,6 +178,19 @@ export function panYFromVerticalScrollbarThumb(
   const thumbTravel = Math.max(1, metrics.trackHeight - metrics.thumbHeight);
   const progress = clamp(thumbTop / thumbTravel, 0, 1);
   return Math.round(bottomPanLimit(viewport, canvas, options) * progress);
+}
+
+export function meaningfulTerminalCanvasHeight(input: MeaningfulTerminalCanvasHeightInput): number {
+  const measuredHeight = Math.max(0, input.measuredHeight);
+  const rows = Math.max(0, Math.floor(input.rows));
+  if (measuredHeight <= 0 || rows <= 0) return measuredHeight;
+
+  const rowHeight = measuredHeight / rows;
+  if (!Number.isFinite(rowHeight) || rowHeight <= 0) return measuredHeight;
+
+  const maxRow = rows - 1;
+  const meaningfulRow = clamp(Math.max(input.cursorY, input.lastNonBlankRow, 0), 0, maxRow);
+  return Math.min(measuredHeight, Math.ceil((meaningfulRow + 1) * rowHeight));
 }
 
 function clamp(value: number, min: number, max: number): number {

@@ -6,6 +6,7 @@ import {
   clampCanvasPan,
   defaultCanvasPan,
   isCanvasDrag,
+  meaningfulTerminalCanvasHeight,
   panCanvasBy,
   panCanvasByWheel,
   resizeCanvasPan,
@@ -62,6 +63,18 @@ test("resizeCanvasPan keeps the bottom row visible when the viewport shrinks", (
       bottomGutter: 12,
     }),
     { x: 0, y: -412 },
+  );
+});
+
+test("resizeCanvasPan keeps the bottom row visible for small zoom rounding overflow", () => {
+  assert.deepEqual(
+    resizeCanvasPan({
+      pan: { x: 0, y: 0 },
+      previousViewport: { width: 399, height: 835 },
+      viewport: { width: 399, height: 835 },
+      canvas: { width: 744, height: 855 },
+    }),
+    { x: 0, y: -20 },
   );
 });
 
@@ -149,5 +162,29 @@ test("vertical scrollbar maps thumb bottom to canvas bottom", () => {
   assert.equal(
     panYFromVerticalScrollbarThumb(metrics.thumbTop, 400, viewport, canvas, { bottomGutter: 12 }),
     -412,
+  );
+});
+
+test("meaningfulTerminalCanvasHeight trims blank rows below the active input", () => {
+  assert.equal(
+    meaningfulTerminalCanvasHeight({
+      measuredHeight: 855,
+      rows: 57,
+      cursorY: 20,
+      lastNonBlankRow: 20,
+    }),
+    315,
+  );
+});
+
+test("meaningfulTerminalCanvasHeight keeps populated rows below the cursor reachable", () => {
+  assert.equal(
+    meaningfulTerminalCanvasHeight({
+      measuredHeight: 855,
+      rows: 57,
+      cursorY: 10,
+      lastNonBlankRow: 56,
+    }),
+    855,
   );
 });

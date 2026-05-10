@@ -6,6 +6,7 @@ import {
   CANVAS_WHEEL_EVENT_OPTIONS,
   defaultCanvasPan,
   isCanvasDrag,
+  meaningfulTerminalCanvasHeight,
   panYFromVerticalScrollbarThumb,
   panCanvasBy,
   panCanvasByWheel,
@@ -603,17 +604,18 @@ function hideCanvasScrollbar(view: SurfaceView): void {
 
 function canvasViewportSize(view: SurfaceView): CanvasSize {
   return {
-    width: view.mount.clientWidth,
-    height: view.mount.clientHeight,
+    width: view.host.clientWidth,
+    height: view.host.clientHeight,
   };
 }
 
 function canvasContentSize(view: SurfaceView): CanvasSize {
   const screen = view.host.querySelector<HTMLElement>(".xterm-screen");
   const xterm = view.host.querySelector<HTMLElement>(".xterm");
+  const terminalHeight = terminalCanvasHeight(view, screen);
   return {
     width: Math.max(
-      view.mount.clientWidth,
+      view.host.clientWidth,
       view.host.offsetWidth,
       view.host.scrollWidth,
       xterm?.offsetWidth ?? 0,
@@ -622,15 +624,44 @@ function canvasContentSize(view: SurfaceView): CanvasSize {
       screen?.scrollWidth ?? 0,
     ),
     height: Math.max(
-      view.mount.clientHeight,
+      view.host.clientHeight,
+      terminalHeight,
+    ),
+  };
+}
+
+function terminalCanvasHeight(view: SurfaceView, screen: HTMLElement | null): number {
+  const measuredHeight = Math.max(
+    screen?.offsetHeight ?? 0,
+    screen?.scrollHeight ?? 0,
+  );
+  if (measuredHeight <= 0) {
+    const xterm = view.host.querySelector<HTMLElement>(".xterm");
+    return Math.max(
       view.host.offsetHeight,
       view.host.scrollHeight,
       xterm?.offsetHeight ?? 0,
       xterm?.scrollHeight ?? 0,
-      screen?.offsetHeight ?? 0,
-      screen?.scrollHeight ?? 0,
-    ),
-  };
+    );
+  }
+
+  const buffer = view.term.buffer.active;
+  return meaningfulTerminalCanvasHeight({
+    measuredHeight,
+    rows: view.term.rows,
+    cursorY: buffer.cursorY,
+    lastNonBlankRow: lastNonBlankTerminalRow(view),
+  });
+}
+
+function lastNonBlankTerminalRow(view: SurfaceView): number {
+  const buffer = view.term.buffer.active;
+  const rows = Math.max(0, view.term.rows);
+  for (let row = rows - 1; row >= 0; row -= 1) {
+    const line = buffer.getLine(buffer.baseY + row);
+    if (line && line.translateToString(true).trim().length > 0) return row;
+  }
+  return Math.max(0, Math.min(rows - 1, buffer.cursorY));
 }
 
 function wheelDelta(event: WheelEvent, viewport: CanvasSize): CanvasPoint {
