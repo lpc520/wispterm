@@ -1062,3 +1062,37 @@ pub fn dumpSessionToFile(allocator: std.mem.Allocator) void {
         std.debug.print("dumpSessionToFile: dumpSession failed: {}\n", .{err});
     };
 }
+
+/// Read the session file and rebuild tabs. Returns true iff at least one
+/// tab was restored (caller should then skip openDefaultTab).
+///
+/// Caller passes the same cols/rows/cursor that openDefaultTab would use.
+pub fn restoreSessionFromFile(
+    allocator: std.mem.Allocator,
+    cols: u16,
+    rows: u16,
+    cursor_style: CursorStyle,
+    cursor_blink: bool,
+) bool {
+    const path = Config.sessionFilePath(allocator) catch return false;
+    defer allocator.free(path);
+
+    var loaded = (session_persist.loadSession(allocator, path) catch return false) orelse return false;
+    defer loaded.deinit();
+
+    session_persist.normalize(&loaded.value);
+
+    var rebuilt: usize = 0;
+    for (loaded.value.tabs) |*snap| {
+        if (restoreTab(allocator, snap, cols, rows, cursor_style, cursor_blink)) {
+            rebuilt += 1;
+        } else {
+            std.debug.print("restoreSessionFromFile: skipping failed tab\n", .{});
+        }
+    }
+    if (rebuilt == 0) return false;
+
+    const target = @min(@as(usize, loaded.value.active_tab), rebuilt - 1);
+    switchTab(target);
+    return true;
+}
