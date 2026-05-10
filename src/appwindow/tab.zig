@@ -852,3 +852,164 @@ fn walkTreePreOrder(
         },
     }
 }
+
+// ============================================================================
+// Session persistence — restore one TabSnap into a live TabState
+// ============================================================================
+//
+// SplitTree.fromSnapshot takes a free-function factory `(snap, gpa) -> ?*Surface`
+// with no closure capture. The cols/rows/cursor settings the caller wants to
+// apply to every restored Surface are conveyed through the thread-local
+// "restore context" below: restoreTab sets it before calling fromSnapshot and
+// the factory reads it for each leaf. This is safe because tab operations are
+// single-threaded per appwindow and restore is synchronous.
+
+threadlocal var g_restore_cols: u16 = 80;
+threadlocal var g_restore_rows: u16 = 24;
+threadlocal var g_restore_cursor_style: CursorStyle = .block;
+threadlocal var g_restore_cursor_blink: bool = true;
+
+/// Free-function factory passed to SplitTree.fromSnapshot. Reads dimensions
+/// and cursor settings from the thread-local restore context populated by
+/// restoreTab. Returns null on any failure so fromSnapshot can roll back the
+/// whole tree.
+fn surfaceFromSnap(
+    snap: *const session_persist.SurfaceSnap,
+    gpa: std.mem.Allocator,
+) ?*Surface {
+    return surfaceFromSnapImpl(snap, gpa) catch null;
+}
+
+fn surfaceFromSnapImpl(
+    snap: *const session_persist.SurfaceSnap,
+    gpa: std.mem.Allocator,
+) !*Surface {
+    const cols: u16 = @max(1, g_restore_cols);
+    const rows: u16 = @max(1, g_restore_rows);
+    const cursor_style = g_restore_cursor_style;
+    const cursor_blink = g_restore_cursor_blink;
+
+    switch (snap.*) {
+        .local_shell => |sh| {
+            // Convert cwd to UTF-16 (CreateProcessW copies the string during
+            // Surface.init, so freeing after init is safe).
+            var cwd_w_buf: ?[:0]u16 = null;
+            defer if (cwd_w_buf) |b| gpa.free(b);
+            const cwd_w: ?[*:0]const u16 = if (sh.cwd) |c| blk: {
+                cwd_w_buf = try std.unicode.utf8ToUtf16LeAllocZ(gpa, c);
+                break :blk cwd_w_buf.?.ptr;
+            } else null;
+
+            const command = getShellCmd();
+            const surface = try Surface.init(gpa, cols, rows, command, g_scrollback_limit, cursor_style, cursor_blink, cwd_w);
+            surface.attachRemoteClient(g_remote_client);
+            return surface;
+        },
+        .ssh => |s| {
+            // Build SSH command equivalent to splitSshCommand, with optional
+            // trailing `cd <cwd>` argument when cwd is present. Mirrors the
+            // password_auth=false (key-auth) branch since persisted SSH snaps
+            // do not carry the password_auth flag — empty password + the
+            // existing prompt flow handles auth on first use.
+            var stack_buf: [1024]u8 = undefined;
+            const auth_flags = "-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 -o ServerAliveCountMax=3 ";
+
+            // Render the port to a stable scratch buffer first; we need the
+            // port string both inside the spawned command and to pass to
+            // setSshConnection below.
+            var port_buf: [8]u8 = undefined;
+            const port_slice = std.fmt.bufPrint(&port_buf, "{}", .{s.port}) catch return error.CommandTooLong;
+
+            const base = std.fmt.bufPrint(&stack_buf, "cmd.exe /k ssh.exe -tt {s}-p {s} {s}@{s}", .{ auth_flags, port_slice, s.user, s.host }) catch return error.CommandTooLong;
+            var final_len: usize = base.len;
+
+            if (s.cwd) |cwd_str| {
+                const escaped = try session_persist.shellSingleQuoteEscape(gpa, cwd_str);
+                defer gpa.free(escaped);
+                var trailing_buf: [768]u8 = undefined;
+                const trail = std.fmt.bufPrint(&trailing_buf, " \"cd '{s}' 2>/dev/null; exec $SHELL -l\"", .{escaped}) catch return error.CommandTooLong;
+                if (final_len + trail.len > stack_buf.len) return error.CommandTooLong;
+                @memcpy(stack_buf[final_len..][0..trail.len], trail);
+                final_len += trail.len;
+            }
+
+            const command_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, stack_buf[0..final_len]);
+            defer gpa.free(command_w);
+            const surface = try Surface.init(gpa, cols, rows, command_w, g_scrollback_limit, cursor_style, cursor_blink, null);
+            surface.attachRemoteClient(g_remote_client);
+            // Empty password + password_auth=false triggers the existing prompt flow.
+            surface.setSshConnection(s.user, s.host, port_slice, "", false);
+            return surface;
+        },
+    }
+}
+
+/// Materialize one TabSnap into a new live tab. Returns true on success.
+/// On any leaf failure, the SplitTree is rolled back, no tab is appended,
+/// and false is returned — the caller (Task 18 wrapper) skips the failed tab.
+///
+/// cols/rows/cursor are sourced from the caller (AppWindow) since tab.zig
+/// does not maintain its own copy of those values.
+pub fn restoreTab(
+    allocator: std.mem.Allocator,
+    snap: *const session_persist.TabSnap,
+    cols: u16,
+    rows: u16,
+    cursor_style: CursorStyle,
+    cursor_blink: bool,
+) bool {
+    if (g_tab_count >= MAX_TABS) return false;
+
+    // Populate the thread-local restore context so surfaceFromSnap can read
+    // these values without changing the SplitTree.fromSnapshot factory ABI.
+    g_restore_cols = cols;
+    g_restore_rows = rows;
+    g_restore_cursor_style = cursor_style;
+    g_restore_cursor_blink = cursor_blink;
+
+    var tree = SplitTree.fromSnapshot(allocator, &snap.tree, &surfaceFromSnap) catch |err| {
+        std.debug.print("restoreTab: fromSnapshot failed: {}\n", .{err});
+        return false;
+    };
+    errdefer tree.deinit();
+
+    const t = allocator.create(TabState) catch {
+        tree.deinit();
+        return false;
+    };
+    t.tree = tree;
+
+    // Resolve focused_leaf from pre-order index back to a Handle.
+    t.focused = handleOfNthLeaf(&t.tree, snap.focused_leaf) orelse .root;
+
+    g_tabs[g_tab_count] = t;
+    g_active_tab = g_tab_count;
+    g_tab_count += 1;
+    return true;
+}
+
+fn handleOfNthLeaf(tree: *const SplitTree, target_idx: u32) ?SplitTree.Node.Handle {
+    var idx: u32 = 0;
+    return findLeafHandle(tree, .root, target_idx, &idx);
+}
+
+fn findLeafHandle(
+    tree: *const SplitTree,
+    handle: SplitTree.Node.Handle,
+    target: u32,
+    idx: *u32,
+) ?SplitTree.Node.Handle {
+    const node = tree.nodes[handle.idx()];
+    return switch (node) {
+        .leaf => blk: {
+            if (idx.* == target) break :blk handle;
+            idx.* += 1;
+            break :blk null;
+        },
+        .split => |sp| blk: {
+            if (findLeafHandle(tree, sp.left, target, idx)) |h| break :blk h;
+            if (findLeafHandle(tree, sp.right, target, idx)) |h| break :blk h;
+            break :blk null;
+        },
+    };
+}
