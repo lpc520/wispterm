@@ -994,6 +994,11 @@ fn dimensions(self: *const SplitTree, current: Node.Handle) struct {
 /// is responsible for materializing one *Surface per leaf snapshot. Returning
 /// null from the factory aborts the rebuild with error.SurfaceCreationFailed.
 ///
+/// On error.SurfaceCreationFailed, any *Surface values returned by previous
+/// successful factory calls are NOT freed by this function — they are leaked.
+/// The factory must either track created surfaces externally for cleanup,
+/// or the caller must accept this leak as a fatal error path.
+///
 /// Splits are always binary; ratios are clamped to [0.05, 0.95] for safety.
 /// Pre-order traversal: root first, then left subtree, then right subtree.
 /// Pre-order leaf order matches session_persist.leafByIndex semantics, so
@@ -1159,6 +1164,14 @@ test "SplitTree: fromSnapshot rebuilds nested topology with correct handles and 
     try std.testing.expect(tree.nodes[2] == .leaf);
     try std.testing.expect(tree.nodes[3] == .leaf);
     try std.testing.expect(tree.nodes[4] == .leaf);
+    // Pre-order: leaf_a got sentinel[0], leaf_b got sentinel[1], leaf_c got sentinel[2].
+    // This catches any future bug that swaps left/right traversal order.
+    const sentinel_a: *Surface = @ptrCast(@alignCast(&Stub.sentinels[0]));
+    const sentinel_b: *Surface = @ptrCast(@alignCast(&Stub.sentinels[1]));
+    const sentinel_c: *Surface = @ptrCast(@alignCast(&Stub.sentinels[2]));
+    try std.testing.expectEqual(sentinel_a, tree.nodes[2].leaf);
+    try std.testing.expectEqual(sentinel_b, tree.nodes[3].leaf);
+    try std.testing.expectEqual(sentinel_c, tree.nodes[4].leaf);
 }
 
 test "SplitTree: fromSnapshot clamps ratios" {
