@@ -13,6 +13,7 @@ import {
   renderRemotePanels,
   updateSurfaceCursors,
 } from "../surfaces";
+import { applyVisualViewportSizing } from "../mobile_layout";
 import { bindMobileTextInput, renderMobileTextInputMarkup } from "../mobile_text_input";
 import { bindVirtualKeyboard, renderVirtualKeyboardMarkup } from "../vkbd";
 
@@ -264,12 +265,14 @@ function bindMobileChrome(): void {
 }
 
 function bindViewportRefit(): void {
-  if (viewportRefitBound) return;
-  viewportRefitBound = true;
-
   const refit = (): void => {
+    applyVisualViewportSizing(document.querySelector<HTMLElement>(".console-shell"));
     refitAllSurfaces();
   };
+
+  refit();
+  if (viewportRefitBound) return;
+  viewportRefitBound = true;
 
   window.addEventListener("resize", refit, { passive: true });
   window.visualViewport?.addEventListener("resize", refit);

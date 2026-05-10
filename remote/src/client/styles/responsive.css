@@ -10,7 +10,7 @@
   .console-shell {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr);
-    height: 100dvh;
+    height: var(--remote-visual-viewport-height, 100dvh);
   }
 
   .sidebar-backdrop {

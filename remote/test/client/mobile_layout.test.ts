@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   MOBILE_REMOTE_MEDIA_QUERY,
+  applyVisualViewportSizing,
   fitModeForSurface,
   shouldUseCanvasPan,
   shouldUseViewportFit,
@@ -39,4 +40,27 @@ test("desktop remote-grid surfaces keep canvas panning enabled", () => {
 
   assert.equal(shouldUseCanvasPan(true, desktopWindow), true);
   assert.equal(shouldUseCanvasPan(false, desktopWindow), false);
+});
+
+test("applyVisualViewportSizing exposes the unobscured viewport to CSS", () => {
+  const styleValues = new Map<string, string>();
+  const root = {
+    style: {
+      setProperty(name: string, value: string): void {
+        styleValues.set(name, value);
+      },
+    },
+  } as HTMLElement;
+  const mobileWindow = {
+    innerHeight: 780,
+    visualViewport: {
+      height: 412,
+      offsetTop: 18,
+    },
+  } as Window;
+
+  applyVisualViewportSizing(root, mobileWindow);
+
+  assert.equal(styleValues.get("--remote-visual-viewport-height"), "412px");
+  assert.equal(styleValues.get("--remote-visual-viewport-offset-top"), "18px");
 });
