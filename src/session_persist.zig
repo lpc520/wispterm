@@ -1,6 +1,11 @@
 // src/session_persist.zig
 const std = @import("std");
 
+// On-disk JSON uses std.json's default tagged-union encoding:
+// nodes appear as {"leaf": {...}} or {"split": {...}}, not {"kind": ..., ...}.
+// Surface kinds appear as {"local_shell": {...}} or {"ssh": {...}}.
+// The spec illustrates the conceptual schema; this is the literal wire format.
+
 pub const SCHEMA_VERSION: u32 = 1;
 
 pub const Layout = enum { horizontal, vertical };
@@ -107,4 +112,58 @@ test "session_persist: round-trip simple local-shell session via JSON" {
     };
     try std.testing.expectEqualStrings("/home/user", sh.cwd.?);
     try std.testing.expect(sh.command == null);
+}
+
+test "session_persist: round-trip nested split with SSH leaf" {
+    const allocator = std.testing.allocator;
+
+    var ssh_leaf = NodeSnap{ .leaf = .{ .surface = .{ .ssh = .{
+        .cwd = "/var/log",
+        .user = "root",
+        .host = "srvA.example.com",
+        .port = 2222,
+    } } } };
+    var local_leaf = NodeSnap{ .leaf = .{ .surface = .{ .local_shell = .{
+        .cwd = "C:\\Users\\xzg",
+        .command = null,
+    } } } };
+    const split = NodeSnap{ .split = .{
+        .layout = .horizontal,
+        .ratio = 0.6,
+        .left = &ssh_leaf,
+        .right = &local_leaf,
+    } };
+    const tabs = [_]TabSnap{.{
+        .title_override = "work",
+        .focused_leaf = 1,
+        .zoomed_leaf = null,
+        .tree = split,
+    }};
+    const original: Session = .{ .active_tab = 0, .tabs = @constCast(&tabs) };
+
+    const json = try dumpSessionToString(allocator, original);
+    defer allocator.free(json);
+
+    var parsed = try loadSessionFromString(allocator, json);
+    defer parsed.deinit();
+
+    const sp = switch (parsed.value.tabs[0].tree) {
+        .split => |s| s,
+        .leaf => return error.UnexpectedLeaf,
+    };
+    try std.testing.expectEqual(Layout.horizontal, sp.layout);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.6), sp.ratio, 0.0001);
+    const ssh = switch (sp.left.*) {
+        .leaf => |l| switch (l.surface) {
+            .ssh => |s| s,
+            .local_shell => return error.UnexpectedShell,
+        },
+        .split => return error.UnexpectedSplit,
+    };
+    try std.testing.expectEqualStrings("root", ssh.user);
+    try std.testing.expectEqualStrings("srvA.example.com", ssh.host);
+    try std.testing.expectEqual(@as(u16, 2222), ssh.port);
+    try std.testing.expectEqualStrings("/var/log", ssh.cwd.?);
+    try std.testing.expectEqualStrings("work", parsed.value.tabs[0].title_override.?);
+    try std.testing.expectEqual(@as(u32, 1), parsed.value.tabs[0].focused_leaf);
 }
