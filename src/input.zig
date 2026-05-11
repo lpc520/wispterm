@@ -579,6 +579,7 @@ pub fn mouseToCell(xpos: f64, ypos: f64) CellPos {
 fn splitRectForSurface(surface: *Surface) ?split_layout.SplitRect {
     for (0..split_layout.g_split_rect_count) |i| {
         const rect = split_layout.g_split_rects[i];
+        if (!split_layout.cachedRectIsLive(rect)) continue;
         if (rect.surface == surface) return rect;
     }
     return null;
@@ -651,6 +652,7 @@ pub fn updateFocusFromMouse(mouse_x: i32, mouse_y: i32) void {
     const t = tab.activeTab() orelse return;
     for (0..split_layout.g_split_rect_count) |i| {
         const rect = split_layout.g_split_rects[i];
+        if (!split_layout.cachedRectIsLive(rect)) continue;
         if (mouse_x >= rect.x and mouse_x < rect.x + rect.width and
             mouse_y >= rect.y and mouse_y < rect.y + rect.height)
         {
@@ -2269,8 +2271,10 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             // Focus the clicked split if different from current focus
             if (AppWindow.activeTab()) |tb| {
                 for (0..split_layout.g_split_rect_count) |i| {
-                    if (split_layout.g_split_rects[i].surface == clicked_surface) {
-                        tb.focused = split_layout.g_split_rects[i].handle;
+                    const rect = split_layout.g_split_rects[i];
+                    if (!split_layout.cachedRectIsLive(rect)) continue;
+                    if (rect.surface == clicked_surface) {
+                        tb.focused = rect.handle;
                         break;
                     }
                 }

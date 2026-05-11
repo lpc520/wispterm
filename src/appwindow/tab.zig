@@ -39,6 +39,7 @@ pub const TabState = struct {
     /// Get the focused surface in this tab, or null if tree is empty
     pub fn focusedSurface(self: *const TabState) ?*Surface {
         if (self.tree.isEmpty()) return null;
+        if (self.focused.idx() >= self.tree.nodes.len) return null;
         return switch (self.tree.nodes[self.focused.idx()]) {
             .leaf => |surface| surface,
             .split => null,

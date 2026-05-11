@@ -260,6 +260,11 @@ pub fn isActiveTabTerminal() bool {
 }
 
 /// Clear UI state after tab creation or switch.
+fn syncActiveSurfaceCaches() void {
+    split_layout.invalidateCachedRects();
+    cell_renderer.g_current_render_surface = activeSurface();
+}
+
 fn clearUiStateOnTabChange() void {
     input.g_selecting = false;
     input.g_sidebar_resize_hover = false;
@@ -277,6 +282,7 @@ fn clearUiStateOnTabChange() void {
     overlays.g_resize_overlay_visible = false;
     overlays.g_resize_overlay_opacity = 0;
     overlays.g_resize_overlay_suppress_until = std.time.milliTimestamp() + 100;
+    syncActiveSurfaceCaches();
     requestImmediateLayoutResize();
     g_force_rebuild = true;
     g_cells_valid = false;
@@ -346,6 +352,7 @@ pub fn closeTab(idx: usize) void {
     const allocator = g_allocator orelse return;
     tab.closeTab(idx, allocator);
     input.g_selecting = false;
+    syncActiveSurfaceCaches();
     g_force_rebuild = true;
     g_cells_valid = false;
 }
@@ -384,16 +391,21 @@ pub fn closeFocusedSplit() void {
     const allocator = g_allocator orelse return;
     switch (tab.closeFocusedSplit(allocator)) {
         .closed_split => {
+            input.g_selecting = false;
+            syncActiveSurfaceCaches();
             requestImmediateLayoutResize();
             g_force_rebuild = true;
             g_cells_valid = false;
         },
         .closed_tab => {
             input.g_selecting = false;
+            syncActiveSurfaceCaches();
             g_force_rebuild = true;
             g_cells_valid = false;
         },
         .close_window => {
+            split_layout.invalidateCachedRects();
+            cell_renderer.g_current_render_surface = null;
             g_should_close = true;
         },
         .no_op => {},
@@ -578,6 +590,7 @@ fn onWin32Resize(width: i32, height: i32) void {
                 {
                     surface.render_state.mutex.lock();
                     defer surface.render_state.mutex.unlock();
+                    cell_renderer.g_current_render_surface = surface;
                     rend.force_rebuild = true;
                     needs_rebuild = cell_renderer.updateTerminalCells(rend, &surface.terminal);
                 }

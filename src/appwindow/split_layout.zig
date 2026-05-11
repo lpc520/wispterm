@@ -41,11 +41,27 @@ pub const DividerHit = struct {
 pub threadlocal var g_split_rects: [MAX_SPLITS_PER_TAB]SplitRect = undefined;
 pub threadlocal var g_split_rect_count: usize = 0;
 
+/// Clear cached split rectangles after a split tree mutation.
+pub fn invalidateCachedRects() void {
+    g_split_rect_count = 0;
+}
+
+/// Returns true if a cached split rect still points at the active tab's tree.
+pub fn cachedRectIsLive(rect: SplitRect) bool {
+    const active_tab = tab.activeTab() orelse return false;
+    if (rect.handle.idx() >= active_tab.tree.nodes.len) return false;
+    return switch (active_tab.tree.nodes[rect.handle.idx()]) {
+        .leaf => |surface| surface == rect.surface,
+        .split => false,
+    };
+}
+
 /// Find the surface under a given point (window coordinates).
 /// Returns null if no surface is found at that position.
 pub fn surfaceAtPoint(x: i32, y: i32) ?*Surface {
     for (0..g_split_rect_count) |i| {
         const rect = g_split_rects[i];
+        if (!cachedRectIsLive(rect)) continue;
         if (x >= rect.x and x < rect.x + rect.width and
             y >= rect.y and y < rect.y + rect.height)
         {
@@ -132,6 +148,7 @@ pub fn computeSplitLayout(
     cw: f32, // font.cell_width
     ch: f32, // font.cell_height
 ) usize {
+    g_split_rect_count = 0;
     if (active_tab.tree.isEmpty()) return 0;
 
     // Get spatial representation (normalized 0-1 coordinates)
