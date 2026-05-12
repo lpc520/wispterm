@@ -14,9 +14,10 @@ const c = @cImport({
 pub const LINE_PAD_X: f32 = 18;
 const HEADER_H: f32 = 54;
 pub const INPUT_H: f32 = 92;
-const PERMISSION_CHIP_W: f32 = 112;
+const PERMISSION_CHIP_W: f32 = 104;
 const PERMISSION_CHIP_H: f32 = 24;
-const STATUS_SLOT_W: f32 = 92;
+const STATUS_SLOT_W: f32 = 120;
+const MODE_SLOT_W: f32 = 112;
 const BUBBLE_PAD_X: f32 = 14;
 const BUBBLE_PAD_Y: f32 = 10;
 const BUBBLE_GAP: f32 = 12;
@@ -64,23 +65,18 @@ pub fn render(
     const header_y = window_height - top - HEADER_H;
     gl_init.renderQuadAlpha(x, header_y, w, HEADER_H, panel, 0.95);
     gl_init.renderQuadAlpha(x, header_y, w, 1, line, 0.8);
-    _ = titlebar.renderTextLimited(session.title(), x + LINE_PAD_X, header_y + 10, mixColor(fg, accent, 0.12), w * 0.45);
+    _ = titlebar.renderTextLimited(session.model(), x + LINE_PAD_X, header_y + 10, mixColor(fg, accent, 0.12), w * 0.48);
 
-    var meta_buf: [256]u8 = undefined;
-    const mode = if (session.agent_enabled) "Agent" else "Chat";
-    const meta = std.fmt.bufPrint(&meta_buf, "{s}  {s}", .{ session.model(), mode }) catch session.model();
-    const meta_w = measureText(meta);
     const permission = ai_chat.agentPermission();
     const chip_x = permissionChipX(x, w);
-    const meta_right = chip_x - 10;
-    const meta_limit = @max(80.0, meta_right - (x + LINE_PAD_X + w * 0.28));
-    _ = titlebar.renderTextLimited(meta, meta_right - @min(meta_w, meta_limit), header_y + 10, muted, meta_limit);
+    const mode_text = if (session.agent_enabled) "Agent" else "Chat";
+    const mode_x = chip_x - MODE_SLOT_W - 8;
+    _ = titlebar.renderTextLimited(mode_text, mode_x, header_y + 10, mixColor(fg, accent, 0.18), MODE_SLOT_W);
 
-    var perm_buf: [48]u8 = undefined;
-    const perm_text = std.fmt.bufPrint(&perm_buf, "perm: {s}", .{permission.name()}) catch permission.name();
+    const perm_text = permissionDisplayName(permission);
     const perm_color = if (permission == .full) mixColor(fg, accent, 0.25) else mixColor(bg, fg, 0.66);
     _ = titlebar.renderTextLimited(perm_text, chip_x, header_y + 10, perm_color, PERMISSION_CHIP_W);
-    gl_init.renderQuadAlpha(chip_x, header_y + 8, PERMISSION_CHIP_W - 10, 1, accent, if (permission == .full) 0.38 else 0.16);
+    gl_init.renderQuadAlpha(chip_x, header_y + 8, PERMISSION_CHIP_W - 8, 1, accent, if (permission == .full) 0.38 else 0.16);
 
     const status_w = measureText(session.status());
     const status_limit = STATUS_SLOT_W;
@@ -192,7 +188,14 @@ pub fn permissionChipHitTest(
 }
 
 fn permissionChipX(x: f32, w: f32) f32 {
-    return x + w - LINE_PAD_X - STATUS_SLOT_W - PERMISSION_CHIP_W;
+    return x + w - LINE_PAD_X - STATUS_SLOT_W - 12 - PERMISSION_CHIP_W;
+}
+
+fn permissionDisplayName(permission: ai_chat.AgentPermission) []const u8 {
+    return switch (permission) {
+        .confirm => "Ask",
+        .full => "Full",
+    };
 }
 
 fn renderApprovalCard(view: ai_chat.ApprovalView, x: f32, y: f32, w: f32, h: f32) void {
