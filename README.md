@@ -125,7 +125,7 @@ Default chords are implemented in [`src/input.zig`](src/input.zig). Some keys ar
 | **Ctrl+Shift+B** | Toggle tab sidebar |
 | **Ctrl+Shift+O** | Split to the right |
 | **Ctrl+Shift+E** | Toggle file explorer sidebar |
-| Ctrl-click `.md` / `.txt` in terminal output or File Explorer | Preview local, WSL, or SSH Markdown/text in the right preview panel |
+| Ctrl-click `.md` / `.txt` in terminal output, or double-click in File Explorer | Preview local, WSL, or SSH Markdown/text in the right preview panel |
 | **Ctrl+Shift+W** | Close focused panel, tab, or window; press again to confirm closing the last panel |
 | **Alt+Enter** | Maximize or restore window |
 | **Ctrl++** / **Ctrl+-** | Increase / decrease font size |
@@ -151,8 +151,9 @@ active environment:
 - WSL sessions browse the default WSL distro through `wsl.exe`.
 - Phantty SSH profile sessions browse the remote host through OpenSSH helpers.
 
-Hold `Ctrl` and click a `.md` or `.txt` file in terminal output or in the File
-Explorer to open the right-side preview panel. Markdown previews render
+Hold `Ctrl` and click a `.md` or `.txt` file in terminal output, or double-click
+a supported text file in the File Explorer, to open the right-side preview panel.
+Markdown previews render
 headings, lists, blockquotes, code blocks, inline code, links, and horizontal
 rules. Text files are shown as plain text.
 

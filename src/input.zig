@@ -1459,8 +1459,9 @@ fn handleFileExplorerPress(xpos: f64, ypos: f64, ctrl: bool, shift: bool, alt: b
     const row_idx: usize = @intFromFloat((ypos - list_top + scroll) / row_h);
 
     if (row_idx < file_explorer.g_entry_count) {
+        const click_count = nextLeftClickCount(xpos, ypos);
         file_explorer.g_selected = row_idx;
-        if (!file_explorer.g_entries[row_idx].is_dir and ctrl and !shift and !alt) {
+        if (!file_explorer.g_entries[row_idx].is_dir and ((ctrl and !shift and !alt) or click_count == 2)) {
             if (openFileExplorerPreview(row_idx)) {
                 AppWindow.g_force_rebuild = true;
                 return;
@@ -2156,6 +2157,10 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
         const xpos: f64 = @floatFromInt(ev.x);
         const titlebar_h: f64 = titlebarHeight();
         const ypos: f64 = @floatFromInt(ev.y);
+        if (hitTestFileExplorer(xpos, ypos)) {
+            handleFileExplorerPress(xpos, ypos, ev.ctrl, ev.shift, ev.alt);
+            return;
+        }
         if (ypos < titlebar_h) {
             if (hitTestConfigButton(xpos, ypos)) {
                 overlays.settingsPageOpen();
