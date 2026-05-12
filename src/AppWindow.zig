@@ -357,6 +357,11 @@ pub fn closeTab(idx: usize) void {
     g_cells_valid = false;
 }
 
+pub fn closeFocusedSplitWouldCloseWindow() bool {
+    const active_tab = activeTab() orelse return false;
+    return tab.g_tab_count <= 1 and !active_tab.tree.isSplit();
+}
+
 pub fn switchTab(idx: usize) void {
     tab.switchTab(idx);
     clearUiStateOnTabChange();
@@ -673,7 +678,9 @@ fn onWin32Resize(width: i32, height: i32) void {
     overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderDebugOverlay(@floatFromInt(fb_width));
+    overlays.renderCloseShortcutConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
+    overlays.renderWindowCloseConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
 
     if (g_window) |w| w.swapBuffers();
 }
@@ -1629,6 +1636,12 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
 
         // Poll Win32 messages (fills event queues + checks WM_QUIT)
         running = win.pollEvents() and !g_should_close;
+        if (win.close_requested) {
+            win.close_requested = false;
+            overlays.windowCloseConfirmOpen();
+            g_force_rebuild = true;
+            g_cells_valid = false;
+        }
 
         if (win.dpi_changed) {
             win.dpi_changed = false;
@@ -1832,7 +1845,9 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderDebugOverlay(@floatFromInt(fb_width));
+        overlays.renderCloseShortcutConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
+        overlays.renderWindowCloseConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
         renderImePreedit(win, fb_width, fb_height);
 
         win.swapBuffers();

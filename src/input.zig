@@ -383,6 +383,8 @@ threadlocal var plus_btn_pressed: bool = false;
 threadlocal var saved_style: win32_backend.DWORD = 0;
 threadlocal var saved_rect: win32_backend.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
 threadlocal var is_fullscreen: bool = false;
+const CLOSE_SHORTCUT_CONFIRM_MS: i64 = 5000;
+threadlocal var g_close_shortcut_confirm_until_ms: i64 = 0;
 
 fn titlebarHeight() f64 {
     return @floatCast(AppWindow.currentTitlebarHeight());
@@ -521,6 +523,7 @@ pub fn toggleBrowserPanel() void {
 
 pub fn closePanelOrTab() void {
     if (markdown_preview_panel.g_visible) {
+        g_close_shortcut_confirm_until_ms = 0;
         markdown_preview_panel.close();
         if (AppWindow.g_window) |win| syncGridFromWindowSizeImmediate(win.width, win.height);
         AppWindow.g_force_rebuild = true;
@@ -528,12 +531,27 @@ pub fn closePanelOrTab() void {
         return;
     }
     if (browser_panel.g_visible) {
+        g_close_shortcut_confirm_until_ms = 0;
         browser_panel.close();
         if (AppWindow.g_window) |win| syncGridFromWindowSizeImmediate(win.width, win.height);
         AppWindow.g_force_rebuild = true;
         AppWindow.g_cells_valid = false;
         return;
     }
+    if (AppWindow.closeFocusedSplitWouldCloseWindow()) {
+        const now = std.time.milliTimestamp();
+        if (now < g_close_shortcut_confirm_until_ms) {
+            g_close_shortcut_confirm_until_ms = 0;
+            AppWindow.closeFocusedSplit();
+            return;
+        }
+        g_close_shortcut_confirm_until_ms = now + CLOSE_SHORTCUT_CONFIRM_MS;
+        overlays.showCloseShortcutConfirm(CLOSE_SHORTCUT_CONFIRM_MS);
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
+        return;
+    }
+    g_close_shortcut_confirm_until_ms = 0;
     AppWindow.closeFocusedSplit();
 }
 
@@ -810,6 +828,14 @@ fn handleChar(ev: win32_backend.CharEvent) void {
 
 fn handleKey(ev: win32_backend.KeyEvent) void {
     overlays.startupShortcutsDismiss();
+    if (overlays.windowCloseConfirmVisible()) {
+        overlays.windowCloseConfirmHandleKey(ev);
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
+        return;
+    }
+    const is_close_shortcut = ev.ctrl and ev.shift and ev.vk == 0x57;
+    if (!is_close_shortcut and !isModifierKey(ev.vk)) g_close_shortcut_confirm_until_ms = 0;
     if (overlays.sessionLauncherVisible()) {
         overlays.sessionLauncherHandleKey(ev);
         return;
@@ -1056,6 +1082,18 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         surface.terminal.scrollViewport(.bottom);
         surface.render_state.mutex.unlock();
     }
+}
+
+fn isModifierKey(vk: win32_backend.WPARAM) bool {
+    return vk == win32_backend.VK_SHIFT or
+        vk == win32_backend.VK_CONTROL or
+        vk == win32_backend.VK_MENU or
+        vk == win32_backend.VK_LSHIFT or
+        vk == win32_backend.VK_RSHIFT or
+        vk == win32_backend.VK_LCONTROL or
+        vk == win32_backend.VK_RCONTROL or
+        vk == win32_backend.VK_LMENU or
+        vk == win32_backend.VK_RMENU;
 }
 
 fn handleBrowserUrlBarKey(ev: win32_backend.KeyEvent) void {
@@ -2072,6 +2110,19 @@ fn openPreviewPanelForCell(surface: *Surface, cell_pos: CellPos) bool {
 }
 
 fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
+    if (ev.action == .press) g_close_shortcut_confirm_until_ms = 0;
+    if (overlays.windowCloseConfirmVisible()) {
+        if (ev.button == .left and ev.action == .press) {
+            const win = AppWindow.g_window orelse return;
+            const fb = win.getFramebufferSize();
+            const xpos: f64 = @floatFromInt(ev.x);
+            const ypos: f64 = @floatFromInt(ev.y);
+            _ = overlays.windowCloseConfirmExecuteAt(xpos, ypos, @floatFromInt(fb.width), @floatFromInt(fb.height));
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+        }
+        return;
+    }
     if (!hitTestHelpButton(@floatFromInt(ev.x), @floatFromInt(ev.y)))
         overlays.startupShortcutsDismiss();
     if (overlays.sessionLauncherVisible()) {

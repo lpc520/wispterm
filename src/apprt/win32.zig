@@ -361,7 +361,6 @@ extern "user32" fn ReleaseCapture() callconv(.winapi) BOOL;
 extern "user32" fn MessageBeep(uType: UINT) callconv(.winapi) BOOL;
 extern "user32" fn FlashWindowEx(pfwi: *const FLASHWINFO) callconv(.winapi) BOOL;
 extern "user32" fn GetForegroundWindow() callconv(.winapi) ?HWND;
-
 extern "imm32" fn ImmGetContext(hWnd: HWND) callconv(.winapi) ?HIMC;
 extern "imm32" fn ImmReleaseContext(hWnd: HWND, hIMC: HIMC) callconv(.winapi) BOOL;
 extern "imm32" fn ImmSetCompositionWindow(hIMC: HIMC, lpCompForm: *COMPOSITIONFORM) callconv(.winapi) BOOL;
@@ -788,6 +787,7 @@ pub const Window = struct {
     hdc: HDC,
     hglrc: HGLRC,
     should_close: bool = false,
+    close_requested: bool = false,
     width: i32 = 800,
     height: i32 = 600,
     dpi: u32 = 96,
@@ -1449,7 +1449,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
 
     switch (msg) {
         WM_CLOSE => {
-            w.should_close = true;
+            w.close_requested = true;
             return 0;
         },
         WM_DESTROY => {
@@ -1678,7 +1678,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             if (pressed == w.hovered_button) {
                 switch (pressed) {
                     .close => {
-                        w.should_close = true;
+                        w.close_requested = true;
                         return 0;
                     },
                     .maximize => {

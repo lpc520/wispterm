@@ -114,6 +114,26 @@ threadlocal var g_copy_toast_until_ms: i64 = 0;
 threadlocal var g_copy_toast_buf: [64]u8 = undefined;
 threadlocal var g_copy_toast_len: usize = 0;
 
+const CLOSE_SHORTCUT_CONFIRM_TEXT = "Press Ctrl+Shift+W again to close Phantty";
+threadlocal var g_close_shortcut_confirm_until_ms: i64 = 0;
+
+threadlocal var g_window_close_confirm_visible: bool = false;
+
+const WindowCloseConfirmLayout = struct {
+    panel_x: f32,
+    panel_top_px: f32,
+    panel_w: f32,
+    panel_h: f32,
+    close_x: f32,
+    close_top_px: f32,
+    close_w: f32,
+    close_h: f32,
+    cancel_x: f32,
+    cancel_top_px: f32,
+    cancel_w: f32,
+    cancel_h: f32,
+};
+
 const STARTUP_SHORTCUT_ENTRIES = [_]StartupShortcut{
     .{ .keys = "Ctrl+Shift+P", .action = "Command center" },
     .{ .keys = "Ctrl+Shift+T", .action = "New session" },
@@ -124,7 +144,7 @@ const STARTUP_SHORTCUT_ENTRIES = [_]StartupShortcut{
     .{ .keys = "Ctrl+Shift+[ / ]", .action = "Previous / next panel" },
     .{ .keys = "Alt+Arrows", .action = "Focus panel" },
     .{ .keys = "Ctrl+Shift+Z", .action = "Equalize panels" },
-    .{ .keys = "Ctrl+Shift+W", .action = "Close panel / tab" },
+    .{ .keys = "Ctrl+Shift+W", .action = "Close panel / tab; confirm last" },
     .{ .keys = "Ctrl+Shift+C / Ctrl+V", .action = "Copy / paste text" },
     .{ .keys = "Right-click selection", .action = "Copy selection" },
     .{ .keys = "Ctrl+Shift+V", .action = "Paste image" },
@@ -206,7 +226,7 @@ const COMMAND_ENTRIES = [_]CommandEntry{
     .{ .title = "Previous Panel", .detail = "Move focus to the previous panel", .shortcut = "Ctrl+Shift+[", .action = .focus_previous },
     .{ .title = "Next Panel", .detail = "Move focus to the next panel", .shortcut = "Ctrl+Shift+]", .action = .focus_next },
     .{ .title = "Equalize Panels", .detail = "Reset split sizes in the current tab", .shortcut = "Ctrl+Shift+Z", .action = .equalize_splits },
-    .{ .title = "Close Panel / Tab", .detail = "Close the focused panel, tab, or window", .shortcut = "Ctrl+Shift+W", .action = .close_split_or_tab },
+    .{ .title = "Close Panel / Tab", .detail = "Close focused panel or tab; press again for the last panel", .shortcut = "Ctrl+Shift+W", .action = .close_split_or_tab },
     .{ .title = "Toggle Sidebar", .detail = "Show or hide the tab sidebar", .shortcut = "Ctrl+Shift+B", .action = .toggle_sidebar },
     .{ .title = "Toggle File Explorer", .detail = "Show or hide the right-side file explorer", .shortcut = "Ctrl+Shift+E", .action = .toggle_file_explorer },
     .{ .title = "Toggle Browser", .detail = "Show WebView2 browser for local or SSH URLs", .shortcut = "", .action = .toggle_browser_panel },
@@ -328,6 +348,43 @@ pub fn commandPaletteContainsPoint(xpos: f64, ypos: f64, window_width: f32, wind
     const y: f32 = @floatCast(ypos);
     return x >= layout.box_x and x <= layout.box_x + layout.box_w and
         y >= layout.box_top_px and y <= layout.box_top_px + layout.box_h;
+}
+
+pub fn windowCloseConfirmOpen() void {
+    g_window_close_confirm_visible = true;
+}
+
+pub fn windowCloseConfirmClose() void {
+    g_window_close_confirm_visible = false;
+}
+
+pub fn windowCloseConfirmVisible() bool {
+    return g_window_close_confirm_visible;
+}
+
+pub fn windowCloseConfirmHandleKey(ev: win32_backend.KeyEvent) void {
+    if (!g_window_close_confirm_visible) return;
+    switch (ev.vk) {
+        win32_backend.VK_ESCAPE,
+        win32_backend.VK_RETURN,
+        => windowCloseConfirmClose(),
+        else => {},
+    }
+}
+
+pub fn windowCloseConfirmExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_height: f32) bool {
+    if (!g_window_close_confirm_visible) return false;
+    const layout = windowCloseConfirmLayout(window_width, window_height);
+    if (pointInTopRect(xpos, ypos, layout.close_x, layout.close_top_px, layout.close_w, layout.close_h)) {
+        g_window_close_confirm_visible = false;
+        AppWindow.g_should_close = true;
+        return true;
+    }
+    if (pointInTopRect(xpos, ypos, layout.cancel_x, layout.cancel_top_px, layout.cancel_w, layout.cancel_h)) {
+        windowCloseConfirmClose();
+        return true;
+    }
+    return pointInTopRect(xpos, ypos, layout.panel_x, layout.panel_top_px, layout.panel_w, layout.panel_h);
 }
 
 fn executeCommand(action: CommandAction) void {
@@ -546,6 +603,42 @@ fn commandPaletteHitTest(xpos: f64, ypos: f64, window_width: f32, window_height:
     const item_idx = commandPaletteFirstVisibleIndex(layout.rendered_rows) + row;
     if (item_idx >= g_palette_scratch_len) return null;
     return g_palette_scratch[item_idx];
+}
+
+fn windowCloseConfirmLayout(window_width: f32, window_height: f32) WindowCloseConfirmLayout {
+    const panel_w = @round(@min(@max(620.0, window_width - 128.0), 860.0));
+    const panel_h = @round(@max(250.0, overlayTextHeight() * 4.0 + 132.0));
+    const panel_x = @round(@max(24.0, (window_width - panel_w) / 2.0));
+    const panel_top_px = @round(@max(48.0, (window_height - panel_h) / 2.0));
+
+    const button_h = @round(@max(38.0, overlayTextHeight() + 16.0));
+    const button_w = @round(@max(142.0, measureTitlebarText("Close") + 40.0));
+    const cancel_w = @round(@max(130.0, measureTitlebarText("Cancel") + 42.0));
+    const gap: f32 = 12.0;
+    const button_top_px = panel_top_px + panel_h - 30.0 - button_h;
+    const cancel_x = panel_x + panel_w - 32.0 - cancel_w;
+    const close_x = cancel_x - gap - button_w;
+
+    return .{
+        .panel_x = panel_x,
+        .panel_top_px = panel_top_px,
+        .panel_w = panel_w,
+        .panel_h = panel_h,
+        .close_x = close_x,
+        .close_top_px = button_top_px,
+        .close_w = button_w,
+        .close_h = button_h,
+        .cancel_x = cancel_x,
+        .cancel_top_px = button_top_px,
+        .cancel_w = cancel_w,
+        .cancel_h = button_h,
+    };
+}
+
+fn pointInTopRect(xpos: f64, ypos: f64, x: f32, top_px: f32, w: f32, h: f32) bool {
+    const x_f: f32 = @floatCast(xpos);
+    const y_f: f32 = @floatCast(ypos);
+    return x_f >= x and x_f <= x + w and y_f >= top_px and y_f <= top_px + h;
 }
 
 fn renderTitlebarText(text: []const u8, x_start: f32, y: f32, color: [3]f32) void {
@@ -2688,6 +2781,96 @@ pub fn showCopyToast(byte_count: usize) void {
     const msg = std.fmt.bufPrint(&g_copy_toast_buf, "Copied ({d} bytes)", .{byte_count}) catch return;
     g_copy_toast_len = msg.len;
     g_copy_toast_until_ms = std.time.milliTimestamp() + COPY_TOAST_DURATION_MS;
+}
+
+pub fn showCloseShortcutConfirm(duration_ms: i64) void {
+    g_close_shortcut_confirm_until_ms = std.time.milliTimestamp() + duration_ms;
+}
+
+pub fn renderWindowCloseConfirm(window_width: f32, window_height: f32) void {
+    if (!g_window_close_confirm_visible) return;
+
+    const gl = &AppWindow.gl;
+    gl.Enable.?(c.GL_BLEND);
+    gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
+    gl.UseProgram.?(gl_init.shader_program);
+    gl.ActiveTexture.?(c.GL_TEXTURE0);
+    gl.BindVertexArray.?(gl_init.vao);
+
+    const layout = windowCloseConfirmLayout(window_width, window_height);
+    const panel_y = @round(window_height - layout.panel_top_px - layout.panel_h);
+    const close_y = @round(window_height - layout.close_top_px - layout.close_h);
+    const cancel_y = @round(window_height - layout.cancel_top_px - layout.cancel_h);
+
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const panel = mixColor(bg, fg, 0.050);
+    const panel_top = mixColor(bg, fg, 0.073);
+    const panel_border = mixColor(bg, fg, 0.24);
+    const quiet_border = mixColor(bg, fg, 0.15);
+    const muted = mixColor(bg, fg, 0.56);
+    const body = mixColor(bg, fg, 0.80);
+    const danger = .{ 0.86, 0.22, 0.20 };
+    const danger_soft = mixColor(bg, danger, 0.20);
+    const warning = .{ 0.95, 0.62, 0.18 };
+
+    gl_init.renderQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.46);
+    renderRoundedQuadAlpha(layout.panel_x + 10, panel_y - 10, layout.panel_w, layout.panel_h, 13, .{ 0.0, 0.0, 0.0 }, 0.26);
+    renderRoundedQuadAlpha(layout.panel_x - 1, panel_y - 1, layout.panel_w + 2, layout.panel_h + 2, 13, panel_border, 0.42);
+    renderRoundedQuadAlpha(layout.panel_x, panel_y, layout.panel_w, layout.panel_h, 12, panel, 0.99);
+    renderRoundedQuadAlpha(layout.panel_x + 1, panel_y + layout.panel_h - 76, layout.panel_w - 2, 75, 12, panel_top, 0.78);
+    gl_init.renderQuadAlpha(layout.panel_x + 1, panel_y + layout.panel_h - 76, layout.panel_w - 2, 1, quiet_border, 0.40);
+    renderRoundedQuadAlpha(layout.panel_x, panel_y, 5, layout.panel_h, 12, danger, 0.84);
+
+    const pad: f32 = 34;
+    const icon_size: f32 = 34;
+    const icon_x = layout.panel_x + pad;
+    const title_y = @round(panel_y + layout.panel_h - 52);
+    const icon_y = @round(title_y - (icon_size - overlayTextHeight()) / 2.0 - 2.0);
+    renderRoundedQuadAlpha(icon_x, icon_y, icon_size, icon_size, 17, warning, 0.18);
+    renderRoundedQuadAlpha(icon_x + 5, icon_y + 5, icon_size - 10, icon_size - 10, 12, warning, 0.88);
+    renderTitlebarTextStrong("!", icon_x + (icon_size - measureTitlebarText("!")) / 2, rowTextY(icon_y, icon_size), .{ 0.11, 0.09, 0.07 });
+
+    const text_x = icon_x + icon_size + 18;
+    const text_right = layout.panel_x + layout.panel_w - pad;
+    renderTitlebarTextStrongLimited("Close Phantty?", text_x, title_y, fg, text_right - text_x);
+
+    const body_y = title_y - overlayTextHeight() - 16;
+    renderTitlebarTextLimited("Running panels in this window will be terminated.", text_x, body_y, body, text_right - text_x);
+
+    const hint_y = body_y - overlayTextHeight() - 8;
+    renderTitlebarTextLimited("Press Esc or Cancel to keep working.", text_x, hint_y, muted, text_right - text_x);
+
+    const footer_y = close_y + layout.close_h + 20;
+    gl_init.renderQuadAlpha(layout.panel_x + 5, footer_y, layout.panel_w - 5, 1, quiet_border, 0.46);
+
+    renderRoundedQuadAlpha(layout.close_x - 1, close_y - 1, layout.close_w + 2, layout.close_h + 2, 8, danger, 0.48);
+    renderRoundedQuadAlpha(layout.close_x, close_y, layout.close_w, layout.close_h, 7, danger_soft, 0.96);
+    const close_label = "Close";
+    renderTitlebarTextStrong(close_label, layout.close_x + (layout.close_w - measureTitlebarText(close_label)) / 2, rowTextY(close_y, layout.close_h), .{ 1.0, 0.72, 0.68 });
+
+    renderRoundedQuadAlpha(layout.cancel_x - 1, cancel_y - 1, layout.cancel_w + 2, layout.cancel_h + 2, 8, mixColor(accent, fg, 0.20), 0.76);
+    renderRoundedQuadAlpha(layout.cancel_x, cancel_y, layout.cancel_w, layout.cancel_h, 7, mixColor(bg, accent, 0.22), 0.96);
+    const cancel_label = "Cancel";
+    renderTitlebarTextStrong(cancel_label, layout.cancel_x + (layout.cancel_w - measureTitlebarText(cancel_label)) / 2, rowTextY(cancel_y, layout.cancel_h), mixColor(fg, accent, 0.18));
+}
+
+pub fn renderCloseShortcutConfirm(window_width: f32, window_height: f32) void {
+    _ = window_height;
+    if (std.time.milliTimestamp() >= g_close_shortcut_confirm_until_ms) return;
+
+    const pad_h: f32 = 18;
+    const pad_v: f32 = 8;
+    const line_h = font.g_titlebar_cell_height + pad_v * 2;
+    const text_w = measureTitlebarText(CLOSE_SHORTCUT_CONFIRM_TEXT);
+    const bg_w = text_w + pad_h * 2;
+    const bg_x = @round((window_width - bg_w) / 2);
+    const bg_y: f32 = 60;
+
+    gl_init.renderQuad(bg_x, bg_y, bg_w, line_h, .{ 0.18, 0.11, 0.08 });
+    gl_init.renderQuad(bg_x, bg_y + line_h - 2, bg_w, 2, .{ 0.86, 0.48, 0.20 });
+    renderTitlebarText(CLOSE_SHORTCUT_CONFIRM_TEXT, bg_x + pad_h, bg_y + pad_v, .{ 1.0, 0.82, 0.56 });
 }
 
 pub fn renderCopyToast(window_width: f32, window_height: f32) void {
