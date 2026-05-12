@@ -119,6 +119,27 @@ pub const ToolSurface = struct {
         allocator.free(self.cwd);
         allocator.free(self.snapshot);
     }
+
+    pub fn clone(self: ToolSurface, allocator: std.mem.Allocator) !ToolSurface {
+        const id = try allocator.dupe(u8, self.id);
+        errdefer allocator.free(id);
+        const title = try allocator.dupe(u8, self.title);
+        errdefer allocator.free(title);
+        const cwd = try allocator.dupe(u8, self.cwd);
+        errdefer allocator.free(cwd);
+        const snapshot = try allocator.dupe(u8, self.snapshot);
+        errdefer allocator.free(snapshot);
+        return .{
+            .id = id,
+            .title = title,
+            .cwd = cwd,
+            .snapshot = snapshot,
+            .tab_index = self.tab_index,
+            .focused = self.focused,
+            .is_ssh = self.is_ssh,
+            .ptr = self.ptr,
+        };
+    }
 };
 
 pub const ToolSnapshot = struct {
@@ -128,6 +149,23 @@ pub const ToolSnapshot = struct {
     pub fn deinit(self: ToolSnapshot, allocator: std.mem.Allocator) void {
         for (self.surfaces) |surface| surface.deinit(allocator);
         allocator.free(self.surfaces);
+    }
+
+    pub fn clone(self: ToolSnapshot, allocator: std.mem.Allocator) !ToolSnapshot {
+        const surfaces = try allocator.alloc(ToolSurface, self.surfaces.len);
+        errdefer allocator.free(surfaces);
+        var written: usize = 0;
+        errdefer {
+            for (surfaces[0..written]) |surface| surface.deinit(allocator);
+        }
+        for (self.surfaces) |surface| {
+            surfaces[written] = try surface.clone(allocator);
+            written += 1;
+        }
+        return .{
+            .surfaces = surfaces,
+            .active_tab = self.active_tab,
+        };
     }
 };
 
@@ -225,6 +263,8 @@ pub const Session = struct {
     messages: std.ArrayListUnmanaged(Message) = .empty,
     input_buf: [8192]u8 = undefined,
     input_len: usize = 0,
+    input_select_all: bool = false,
+    transcript_select_all: bool = false,
     status_buf: [512]u8 = undefined,
     status_len: usize = 0,
     title_buf: [128]u8 = undefined,
@@ -243,8 +283,10 @@ pub const Session = struct {
     stream: bool = false,
     agent_enabled: bool = false,
     request_inflight: bool = false,
+    request_stopping: bool = false,
     request_thread: ?std.Thread = null,
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     scroll_px: f32 = 0,
     approval_mutex: std.Thread.Mutex = .{},
     approval_cond: std.Thread.Condition = .{},
@@ -359,6 +401,11 @@ pub const Session = struct {
 
         self.mutex.lock();
         defer self.mutex.unlock();
+        if (self.input_select_all) {
+            self.input_len = 0;
+            self.input_select_all = false;
+        }
+        self.transcript_select_all = false;
         if (self.input_len + len > self.input_buf.len) return;
         @memcpy(self.input_buf[self.input_len..][0..len], buf[0..len]);
         self.input_len += len;
@@ -367,6 +414,11 @@ pub const Session = struct {
     pub fn appendInputText(self: *Session, text: []const u8) void {
         self.mutex.lock();
         defer self.mutex.unlock();
+        if (self.input_select_all) {
+            self.input_len = 0;
+            self.input_select_all = false;
+        }
+        self.transcript_select_all = false;
         const len = @min(text.len, self.input_buf.len - self.input_len);
         if (len == 0) return;
         @memcpy(self.input_buf[self.input_len..][0..len], text[0..len]);
@@ -376,9 +428,14 @@ pub const Session = struct {
     pub fn handleKey(self: *Session, ev: win32_backend.KeyEvent) void {
         if (self.handleApprovalKey(ev)) return;
 
+        if (ev.ctrl and !ev.alt and ev.vk == 0x41) {
+            self.selectAll();
+            return;
+        }
         if (ev.ctrl and !ev.alt and ev.vk == 0x55) {
             self.mutex.lock();
             self.input_len = 0;
+            self.clearSelectionLocked();
             self.mutex.unlock();
             return;
         }
@@ -389,6 +446,7 @@ pub const Session = struct {
 
         switch (ev.vk) {
             win32_backend.VK_BACK => self.backspaceInput(),
+            win32_backend.VK_ESCAPE => self.clearSelection(),
             win32_backend.VK_RETURN => {
                 if (ev.shift) {
                     self.appendInputText("\n");
@@ -398,6 +456,65 @@ pub const Session = struct {
             },
             else => {},
         }
+    }
+
+    pub fn stopRequest(self: *Session) void {
+        self.stop_requested.store(true, .release);
+
+        self.approval_mutex.lock();
+        if (self.approval_pending and !self.approval_resolved) {
+            self.approval_allowed = false;
+            self.approval_resolved = true;
+            self.approval_pending = false;
+            self.approval_cond.signal();
+        }
+        self.approval_mutex.unlock();
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (!self.request_inflight) {
+            self.stop_requested.store(false, .release);
+            self.request_stopping = false;
+            return;
+        }
+        self.request_stopping = true;
+        self.setStatusLocked("Stopping...");
+    }
+
+    pub fn selectAll(self: *Session) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.input_select_all = self.input_len > 0;
+        self.transcript_select_all = !self.input_select_all and self.messages.items.len > 0;
+    }
+
+    pub fn clearSelection(self: *Session) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.clearSelectionLocked();
+    }
+
+    pub fn allocClipboardText(self: *Session, allocator: std.mem.Allocator) ![]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.input_select_all and self.input_len > 0) {
+            return allocator.dupe(u8, self.input());
+        }
+        if (self.messages.items.len > 0) {
+            return self.allocTranscriptClipboardTextLocked(allocator);
+        }
+        if (self.input_len > 0) {
+            return allocator.dupe(u8, self.input());
+        }
+        return allocator.dupe(u8, "");
+    }
+
+    pub fn allocMessageClipboardText(self: *Session, allocator: std.mem.Allocator, message_index: usize) ![]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (message_index >= self.messages.items.len) return allocator.dupe(u8, "");
+        return allocator.dupe(u8, self.messages.items[message_index].content);
     }
 
     pub fn approvalView(self: *Session) ?ApprovalView {
@@ -430,6 +547,7 @@ pub const Session = struct {
     }
 
     fn requestApproval(self: *Session, tool: []const u8, command: []const u8, reason: []const u8) bool {
+        if (self.stop_requested.load(.acquire)) return false;
         self.approval_mutex.lock();
         self.copyApprovalLocked(tool, command, reason);
         self.approval_pending = true;
@@ -441,10 +559,10 @@ pub const Session = struct {
 
         self.approval_mutex.lock();
         defer self.approval_mutex.unlock();
-        while (!self.approval_resolved and !self.closing.load(.acquire)) {
+        while (!self.approval_resolved and !self.closing.load(.acquire) and !self.stop_requested.load(.acquire)) {
             self.approval_cond.wait(&self.approval_mutex);
         }
-        const allowed = self.approval_resolved and self.approval_allowed and !self.closing.load(.acquire);
+        const allowed = self.approval_resolved and self.approval_allowed and !self.closing.load(.acquire) and !self.stop_requested.load(.acquire);
         self.approval_pending = false;
         self.approval_resolved = false;
         self.approval_allowed = false;
@@ -496,6 +614,7 @@ pub const Session = struct {
             return;
         };
         self.input_len = 0;
+        self.clearSelectionLocked();
         self.scroll_px = 1_000_000;
 
         const request = self.buildRequestLocked() catch {
@@ -504,6 +623,8 @@ pub const Session = struct {
             return;
         };
 
+        self.stop_requested.store(false, .release);
+        self.request_stopping = false;
         self.request_inflight = true;
         self.setStatusLocked("Thinking...");
         self.mutex.unlock();
@@ -532,6 +653,7 @@ pub const Session = struct {
         }
         self.messages.clearRetainingCapacity();
         self.scroll_px = 0;
+        self.clearSelectionLocked();
         self.setStatusLocked("Cleared");
     }
 
@@ -544,11 +666,34 @@ pub const Session = struct {
     fn backspaceInput(self: *Session) void {
         self.mutex.lock();
         defer self.mutex.unlock();
+        if (self.input_select_all) {
+            self.input_len = 0;
+            self.clearSelectionLocked();
+            return;
+        }
+        self.transcript_select_all = false;
         if (self.input_len == 0) return;
         self.input_len -= 1;
         while (self.input_len > 0 and (self.input_buf[self.input_len] & 0xC0) == 0x80) {
             self.input_len -= 1;
         }
+    }
+
+    fn clearSelectionLocked(self: *Session) void {
+        self.input_select_all = false;
+        self.transcript_select_all = false;
+    }
+
+    fn allocTranscriptClipboardTextLocked(self: *Session, allocator: std.mem.Allocator) ![]u8 {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(allocator);
+        for (self.messages.items) |msg| {
+            try appendClipboardSection(allocator, &out, msg.role.label(), msg.content);
+            if (msg.reasoning) |reasoning| {
+                if (reasoning.len > 0) try appendClipboardSection(allocator, &out, "Reasoning", reasoning);
+            }
+        }
+        return out.toOwnedSlice(allocator);
     }
 
     fn buildRequestLocked(self: *Session) !*ChatRequest {
@@ -581,6 +726,14 @@ pub const Session = struct {
         const settings = currentAgentSettings();
         const agent_enabled = self.agent_enabled or settings.enabled;
         const tool_host = if (agent_enabled) currentToolHost() else null;
+        var tool_snapshot: ?ToolSnapshot = null;
+        errdefer if (tool_snapshot) |snapshot| snapshot.deinit(self.allocator);
+        if (tool_host) |host| {
+            // The tab model is thread-local to the UI thread. Capture the agent
+            // view before spawning the request worker so tools do not read an
+            // empty thread-local copy from the background thread.
+            tool_snapshot = host.collectSnapshot(host.ctx, self.allocator) catch null;
+        }
 
         req.* = .{
             .allocator = self.allocator,
@@ -595,7 +748,7 @@ pub const Session = struct {
             .stream = self.stream and !agent_enabled,
             .agent_enabled = agent_enabled,
             .tool_host = tool_host,
-            .tool_snapshot = null,
+            .tool_snapshot = tool_snapshot,
         };
         return req;
     }
@@ -642,36 +795,91 @@ pub const Session = struct {
     }
 };
 
+fn appendClipboardSection(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    label: []const u8,
+    text: []const u8,
+) !void {
+    if (out.items.len > 0) try out.appendSlice(allocator, "\r\n\r\n");
+    try out.appendSlice(allocator, label);
+    try out.appendSlice(allocator, ":\r\n");
+    try out.appendSlice(allocator, text);
+}
+
 fn requestThreadMain(request: *ChatRequest) void {
     const allocator = request.allocator;
     defer request.deinit();
 
     if (request.agent_enabled) {
         const result = runAgentRequest(request) catch |err| blk: {
+            if (requestCancelled(request)) {
+                finishStoppedRequest(request.session);
+                return;
+            }
             const text = std.fmt.allocPrint(allocator, "Agent request failed: {}", .{err}) catch return;
             break :blk ApiResult{ .content = text };
         };
         defer result.deinit(allocator);
+        if (requestCancelled(request)) {
+            finishStoppedRequest(request.session);
+            return;
+        }
         appendAssistantResult(request.session, result);
         return;
     }
 
     if (request.stream) {
         runChatRequestStreaming(request) catch |err| {
+            if (requestCancelled(request)) {
+                finishStoppedRequest(request.session);
+                return;
+            }
             const text = std.fmt.allocPrint(allocator, "AI stream failed: {}", .{err}) catch return;
             defer allocator.free(text);
             appendAssistantResult(request.session, .{ .content = text });
         };
+        if (requestCancelled(request)) {
+            finishStoppedRequest(request.session);
+            return;
+        }
         return;
     }
 
     const result = runChatRequest(request) catch |err| blk: {
+        if (requestCancelled(request)) {
+            finishStoppedRequest(request.session);
+            return;
+        }
         const text = std.fmt.allocPrint(allocator, "AI request failed: {}", .{err}) catch return;
         break :blk ApiResult{ .content = text };
     };
     defer result.deinit(allocator);
 
+    if (requestCancelled(request)) {
+        finishStoppedRequest(request.session);
+        return;
+    }
     appendAssistantResult(request.session, result);
+}
+
+fn requestCancelled(request: *const ChatRequest) bool {
+    return request.session.closing.load(.acquire) or request.session.stop_requested.load(.acquire);
+}
+
+fn sessionCancelled(session: *Session) bool {
+    return session.closing.load(.acquire) or session.stop_requested.load(.acquire);
+}
+
+fn finishStoppedRequest(session: *Session) void {
+    if (session.closing.load(.acquire)) return;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    if (session.closing.load(.acquire)) return;
+    session.request_inflight = false;
+    session.request_stopping = false;
+    session.stop_requested.store(false, .release);
+    session.setStatusLocked("Stopped");
 }
 
 fn runAgentRequest(request: *const ChatRequest) !ApiResult {
@@ -686,9 +894,14 @@ fn runAgentRequest(request: *const ChatRequest) !ApiResult {
     }
 
     for (0..MAX_AGENT_ITERATIONS) |_| {
-        if (request.session.closing.load(.acquire)) return error.Closing;
+        if (requestCancelled(request)) return error.Canceled;
         const result = try runChatRequestForMessages(request, transcript.items, true);
+        if (requestCancelled(request)) {
+            result.deinit(request.allocator);
+            return error.Canceled;
+        }
         if (result.tool_calls == null or result.tool_calls.?.len == 0) return result;
+        errdefer result.deinit(request.allocator);
 
         if (result.content.len > 0) {
             appendProgressMessage(request.session, result.content) catch {};
@@ -696,12 +909,14 @@ fn runAgentRequest(request: *const ChatRequest) !ApiResult {
 
         try transcript.append(request.allocator, try assistantToolCallMessage(request.allocator, result.content, result.reasoning, result.tool_calls.?));
         for (result.tool_calls.?) |call| {
+            if (requestCancelled(request)) return error.Canceled;
             const progress = try std.fmt.allocPrint(request.allocator, "running {s} {s}", .{ call.name, call.arguments });
             defer request.allocator.free(progress);
             appendProgressMessage(request.session, progress) catch {};
 
             const tool_result = try executeToolCall(request, call);
             defer request.allocator.free(tool_result);
+            if (requestCancelled(request)) return error.Canceled;
             try transcript.append(request.allocator, .{
                 .role = .tool,
                 .content = try request.allocator.dupe(u8, tool_result),
@@ -754,10 +969,21 @@ fn assistantToolCallMessage(allocator: std.mem.Allocator, content: []const u8, r
 fn appendAssistantResult(session: *Session, result: ApiResult) void {
     const allocator = session.allocator;
     if (session.closing.load(.acquire)) return;
+    if (session.stop_requested.load(.acquire)) {
+        finishStoppedRequest(session);
+        return;
+    }
 
     session.mutex.lock();
     defer session.mutex.unlock();
     if (session.closing.load(.acquire)) return;
+    if (session.stop_requested.load(.acquire)) {
+        session.request_inflight = false;
+        session.request_stopping = false;
+        session.stop_requested.store(false, .release);
+        session.setStatusLocked("Stopped");
+        return;
+    }
 
     const content = allocator.dupe(u8, result.content) catch {
         session.request_inflight = false;
@@ -785,14 +1011,14 @@ fn appendAssistantResult(session: *Session, result: ApiResult) void {
 }
 
 fn appendProgressMessage(session: *Session, text: []const u8) !void {
-    if (session.closing.load(.acquire)) return error.Closing;
+    if (sessionCancelled(session)) return error.Canceled;
     const allocator = session.allocator;
     const content = try allocator.dupe(u8, text);
     errdefer allocator.free(content);
 
     session.mutex.lock();
     defer session.mutex.unlock();
-    if (session.closing.load(.acquire)) return error.Closing;
+    if (sessionCancelled(session)) return error.Canceled;
     try session.messages.append(allocator, .{
         .role = .tool,
         .content = content,
@@ -804,11 +1030,11 @@ fn appendProgressMessage(session: *Session, text: []const u8) !void {
 
 fn beginAssistantStream(session: *Session) !usize {
     const allocator = session.allocator;
-    if (session.closing.load(.acquire)) return error.Closing;
+    if (sessionCancelled(session)) return error.Canceled;
 
     session.mutex.lock();
     defer session.mutex.unlock();
-    if (session.closing.load(.acquire)) return error.Closing;
+    if (sessionCancelled(session)) return error.Canceled;
 
     const content = try allocator.dupe(u8, "");
     errdefer allocator.free(content);
@@ -825,11 +1051,11 @@ fn beginAssistantStream(session: *Session) !usize {
 fn appendAssistantStreamDelta(session: *Session, message_idx: usize, content_delta: []const u8, reasoning_delta: []const u8) !void {
     if (content_delta.len == 0 and reasoning_delta.len == 0) return;
     const allocator = session.allocator;
-    if (session.closing.load(.acquire)) return;
+    if (sessionCancelled(session)) return;
 
     session.mutex.lock();
     defer session.mutex.unlock();
-    if (session.closing.load(.acquire)) return;
+    if (sessionCancelled(session)) return;
     if (message_idx >= session.messages.items.len) return error.StreamMessageMissing;
 
     var msg = &session.messages.items[message_idx];
@@ -854,10 +1080,21 @@ fn appendAssistantStreamDelta(session: *Session, message_idx: usize, content_del
 
 fn finishAssistantStream(session: *Session, message_idx: usize) void {
     if (session.closing.load(.acquire)) return;
+    if (session.stop_requested.load(.acquire)) {
+        finishStoppedRequest(session);
+        return;
+    }
 
     session.mutex.lock();
     defer session.mutex.unlock();
     if (session.closing.load(.acquire)) return;
+    if (session.stop_requested.load(.acquire)) {
+        session.request_inflight = false;
+        session.request_stopping = false;
+        session.stop_requested.store(false, .release);
+        session.setStatusLocked("Stopped");
+        return;
+    }
     if (message_idx < session.messages.items.len) {
         const msg = &session.messages.items[message_idx];
         if (msg.content.len == 0 and msg.reasoning == null) {
@@ -871,6 +1108,10 @@ fn finishAssistantStream(session: *Session, message_idx: usize) void {
 }
 
 fn failAssistantStream(session: *Session, message_idx: ?usize, text: []const u8) void {
+    if (session.stop_requested.load(.acquire)) {
+        finishStoppedRequest(session);
+        return;
+    }
     if (message_idx) |idx| {
         appendAssistantStreamDelta(session, idx, text, "") catch {};
         finishAssistantStream(session, idx);
@@ -885,6 +1126,7 @@ fn runChatRequest(request: *const ChatRequest) !ApiResult {
 }
 
 fn runChatRequestForMessages(request: *const ChatRequest, messages: []const RequestMessage, include_tools: bool) !ApiResult {
+    if (requestCancelled(request)) return error.Canceled;
     const allocator = request.allocator;
     const endpoint = try chatEndpoint(allocator, request.base_url);
     defer allocator.free(endpoint);
@@ -914,6 +1156,7 @@ fn runChatRequestForMessages(request: *const ChatRequest, messages: []const Requ
         },
         .response_writer = &resp_buf.writer,
     }) catch return error.RequestFailed;
+    if (requestCancelled(request)) return error.Canceled;
 
     var resp_list = resp_buf.toArrayList();
     defer resp_list.deinit(allocator);
@@ -931,6 +1174,7 @@ fn runChatRequestForMessages(request: *const ChatRequest, messages: []const Requ
 }
 
 fn runChatRequestStreaming(request: *const ChatRequest) !void {
+    if (requestCancelled(request)) return error.Canceled;
     const allocator = request.allocator;
     const endpoint = try chatEndpoint(allocator, request.base_url);
     defer allocator.free(endpoint);
@@ -961,6 +1205,7 @@ fn runChatRequestStreaming(request: *const ChatRequest) !void {
 
     var redirect_buffer: [8 * 1024]u8 = undefined;
     var response = try req.receiveHead(&redirect_buffer);
+    if (requestCancelled(request)) return error.Canceled;
     var transfer_buffer: [16 * 1024]u8 = undefined;
     const reader = response.reader(&transfer_buffer);
 
@@ -983,14 +1228,16 @@ fn runChatRequestStreaming(request: *const ChatRequest) !void {
 
     const message_idx = try beginAssistantStream(request.session);
     while (true) {
-        if (request.session.closing.load(.acquire)) return;
+        if (requestCancelled(request)) return error.Canceled;
         const line = reader.takeDelimiter('\n') catch |err| {
+            if (requestCancelled(request)) return error.Canceled;
             const msg = std.fmt.allocPrint(allocator, "Stream read failed: {}", .{err}) catch return err;
             defer allocator.free(msg);
             failAssistantStream(request.session, message_idx, msg);
             return;
         } orelse break;
 
+        if (requestCancelled(request)) return error.Canceled;
         if (try applyApiStreamLineToSession(allocator, request.session, message_idx, line)) break;
     }
     finishAssistantStream(request.session, message_idx);
@@ -1097,6 +1344,7 @@ fn toolSchema(comptime name: []const u8, comptime description: []const u8, compt
 }
 
 fn executeToolCall(request: *const ChatRequest, call: ToolCall) ![]u8 {
+    if (requestCancelled(request)) return request.allocator.dupe(u8, "Canceled.");
     if (std.mem.eql(u8, call.name, "terminal_list")) {
         return terminalListTool(request);
     }
@@ -1191,19 +1439,23 @@ fn terminalSnapshotTool(request: *const ChatRequest, surface_id: ?[]const u8) ![
 }
 
 fn collectToolSnapshot(request: *const ChatRequest) !ToolSnapshot {
+    if (request.tool_snapshot) |snapshot| {
+        return snapshot.clone(request.allocator);
+    }
     const host = request.tool_host orelse return error.NoTerminalSnapshotHost;
     return host.collectSnapshot(host.ctx, request.allocator);
 }
 
 fn powershellExecTool(request: *const ChatRequest, command: []const u8, cwd: ?[]const u8, timeout_ms: u32) ![]u8 {
     const settings = currentAgentSettings();
+    if (requestCancelled(request)) return request.allocator.dupe(u8, "Canceled.");
     if (settings.permission != .full) {
         if (!request.session.requestApproval("powershell_exec", command, "Run local PowerShell command")) {
             return deniedResult(request.allocator, command, "operator rejected local PowerShell command");
         }
     }
     const warning = if (isDangerousCommand(command)) "warning: command matched a dangerous-command pattern; full-permission allowed it.\n" else "";
-    const result = runShellCommand(request.allocator, command, cwd, settings.output_limit, timeout_ms) catch |err| {
+    const result = runShellCommand(request.allocator, command, cwd, settings.output_limit, timeout_ms, request.session) catch |err| {
         return std.fmt.allocPrint(request.allocator, "{s}PowerShell failed: {}", .{ warning, err });
     };
     defer request.allocator.free(result.stdout);
@@ -1223,13 +1475,13 @@ const ShellResult = struct {
     timed_out: bool = false,
 };
 
-fn runShellCommand(allocator: std.mem.Allocator, command: []const u8, cwd: ?[]const u8, output_limit: u32, timeout_ms: u32) !ShellResult {
+fn runShellCommand(allocator: std.mem.Allocator, command: []const u8, cwd: ?[]const u8, output_limit: u32, timeout_ms: u32, session: ?*Session) !ShellResult {
     const pwsh_argv = [_][]const u8{ "pwsh.exe", "-NoProfile", "-Command", command };
-    if (runArgv(allocator, pwsh_argv[0..], cwd, output_limit, timeout_ms)) |result| return result else |_| {}
+    if (runArgv(allocator, pwsh_argv[0..], cwd, output_limit, timeout_ms, session)) |result| return result else |_| {}
     const powershell_argv = [_][]const u8{ "powershell.exe", "-NoProfile", "-Command", command };
-    if (runArgv(allocator, powershell_argv[0..], cwd, output_limit, timeout_ms)) |result| return result else |_| {}
+    if (runArgv(allocator, powershell_argv[0..], cwd, output_limit, timeout_ms, session)) |result| return result else |_| {}
     const cmd_argv = [_][]const u8{ "cmd.exe", "/C", command };
-    return runArgv(allocator, cmd_argv[0..], cwd, output_limit, timeout_ms);
+    return runArgv(allocator, cmd_argv[0..], cwd, output_limit, timeout_ms, session);
 }
 
 const CaptureOutput = struct {
@@ -1246,7 +1498,7 @@ const CaptureOutput = struct {
     }
 };
 
-fn runArgv(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8, output_limit: u32, timeout_ms: u32) !ShellResult {
+fn runArgv(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8, output_limit: u32, timeout_ms: u32, session: ?*Session) !ShellResult {
     var child = std.process.Child.init(argv, allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Pipe;
@@ -1273,9 +1525,17 @@ fn runArgv(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const
     const wait_ms = @max(timeout_ms, 1);
     const deadline = std.time.milliTimestamp() + @as(i64, @intCast(wait_ms));
     var timed_out = false;
+    var canceled = false;
     while (true) {
         const rc = win32_backend.WaitForSingleObject(child.id, 25);
         if (rc == win32_backend.WAIT_OBJECT_0) break;
+        if (session) |s| {
+            if (sessionCancelled(s)) {
+                canceled = true;
+                _ = child.kill() catch {};
+                break;
+            }
+        }
         if (std.time.milliTimestamp() >= deadline) {
             timed_out = true;
             _ = child.kill() catch {};
@@ -1286,7 +1546,7 @@ fn runArgv(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const
     stdout_thread.join();
     stderr_thread.join();
 
-    const exit_code: i32 = if (timed_out) 124 else blk: {
+    const exit_code: i32 = if (timed_out or canceled) 124 else blk: {
         const term = try child.wait();
         break :blk switch (term) {
             .Exited => |code| @intCast(code),
@@ -1299,7 +1559,7 @@ fn runArgv(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const
         .exit_code = exit_code,
         .stdout = stdout_capture.data,
         .stderr = stderr_capture.data,
-        .timed_out = timed_out,
+        .timed_out = timed_out or canceled,
     };
 }
 
@@ -1339,6 +1599,7 @@ fn captureOutputThread(capture: *CaptureOutput) void {
 
 fn sshSessionExecTool(request: *const ChatRequest, surface_id: []const u8, command: []const u8, timeout_ms: u32) ![]u8 {
     const settings = currentAgentSettings();
+    if (requestCancelled(request)) return request.allocator.dupe(u8, "Canceled.");
     if (settings.permission != .full) {
         if (!request.session.requestApproval("ssh_session_exec", command, "Type command into opened SSH terminal")) {
             return deniedResult(request.allocator, command, "operator rejected SSH PTY command");
@@ -1372,6 +1633,7 @@ fn sshSessionExecTool(request: *const ChatRequest, surface_id: []const u8, comma
     defer if (last) |text| request.allocator.free(text);
 
     while (std.time.milliTimestamp() < deadline) {
+        if (requestCancelled(request)) return request.allocator.dupe(u8, "Canceled.");
         if (last) |old| request.allocator.free(old);
         last = host.surfaceSnapshot(host.ctx, request.allocator, surface.ptr) catch null;
         if (last) |text| {
@@ -1795,6 +2057,152 @@ test "ai chat parses OpenAI tool calls" {
     try std.testing.expectEqualStrings("call_1", result.tool_calls.?[0].id);
     try std.testing.expectEqualStrings("terminal_list", result.tool_calls.?[0].name);
     try std.testing.expectEqualStrings("{}", result.tool_calls.?[0].arguments);
+}
+
+test "ai chat tools prefer request-local terminal snapshot" {
+    const allocator = std.testing.allocator;
+    var surfaces = try allocator.alloc(ToolSurface, 1);
+    surfaces[0] = .{
+        .id = try allocator.dupe(u8, "surface-1"),
+        .title = try allocator.dupe(u8, "PowerShell"),
+        .cwd = try allocator.dupe(u8, "C:\\Users"),
+        .snapshot = try allocator.dupe(u8, "PS C:\\Users>"),
+        .tab_index = 1,
+        .focused = true,
+        .is_ssh = false,
+        .ptr = @ptrFromInt(1),
+    };
+    const cached_snapshot = ToolSnapshot{
+        .surfaces = surfaces,
+        .active_tab = 1,
+    };
+    defer cached_snapshot.deinit(allocator);
+
+    var messages = [_]RequestMessage{.{
+        .role = .user,
+        .content = @constCast("list terminals"),
+    }};
+    const request = ChatRequest{
+        .allocator = allocator,
+        .session = undefined,
+        .base_url = @constCast(""),
+        .api_key = @constCast(""),
+        .model = @constCast(""),
+        .system_prompt = @constCast(""),
+        .messages = messages[0..],
+        .thinking_enabled = true,
+        .reasoning_effort = @constCast(""),
+        .stream = false,
+        .agent_enabled = true,
+        .tool_host = null,
+        .tool_snapshot = cached_snapshot,
+    };
+
+    const snapshot = try collectToolSnapshot(&request);
+    defer snapshot.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.active_tab);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.surfaces.len);
+    try std.testing.expectEqualStrings("surface-1", snapshot.surfaces[0].id);
+    try std.testing.expect(snapshot.surfaces[0].id.ptr != cached_snapshot.surfaces[0].id.ptr);
+}
+
+test "ai chat ctrl a selects input and replacement clears selection" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    session.appendInputText("hello");
+    session.handleKey(.{ .vk = 0x41, .ctrl = true, .shift = false, .alt = false });
+    try std.testing.expect(session.input_select_all);
+
+    const copied = try session.allocClipboardText(allocator);
+    defer allocator.free(copied);
+    try std.testing.expectEqualStrings("hello", copied);
+
+    session.handleChar('x');
+    try std.testing.expect(!session.input_select_all);
+    try std.testing.expectEqualStrings("x", session.input());
+}
+
+test "ai chat clipboard text exports transcript when input is empty" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    defer {
+        for (session.messages.items) |msg| {
+            allocator.free(msg.content);
+            if (msg.reasoning) |reasoning| allocator.free(reasoning);
+        }
+        session.messages.deinit(allocator);
+    }
+
+    try session.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "status?"),
+        .reasoning = null,
+    });
+    try session.messages.append(allocator, .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "ready"),
+        .reasoning = try allocator.dupe(u8, "checked state"),
+    });
+
+    session.handleKey(.{ .vk = 0x41, .ctrl = true, .shift = false, .alt = false });
+    try std.testing.expect(session.transcript_select_all);
+
+    const copied = try session.allocClipboardText(allocator);
+    defer allocator.free(copied);
+    try std.testing.expect(std.mem.indexOf(u8, copied, "You:\r\nstatus?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, copied, "AI:\r\nready") != null);
+    try std.testing.expect(std.mem.indexOf(u8, copied, "Reasoning:\r\nchecked state") != null);
+}
+
+test "ai chat message clipboard exports one bubble" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    defer {
+        for (session.messages.items) |msg| {
+            allocator.free(msg.content);
+            if (msg.reasoning) |reasoning| allocator.free(reasoning);
+        }
+        session.messages.deinit(allocator);
+    }
+
+    try session.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "first"),
+        .reasoning = null,
+    });
+    try session.messages.append(allocator, .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "second"),
+        .reasoning = try allocator.dupe(u8, "not part of the bubble"),
+    });
+
+    const copied = try session.allocMessageClipboardText(allocator, 1);
+    defer allocator.free(copied);
+    try std.testing.expectEqualStrings("second", copied);
+}
+
+test "ai chat stop request suppresses late assistant result" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    defer {
+        for (session.messages.items) |msg| {
+            allocator.free(msg.content);
+            if (msg.reasoning) |reasoning| allocator.free(reasoning);
+        }
+        session.messages.deinit(allocator);
+    }
+
+    session.request_inflight = true;
+    session.stopRequest();
+    try std.testing.expect(session.request_stopping);
+    try std.testing.expectEqualStrings("Stopping...", session.status());
+
+    appendAssistantResult(&session, .{ .content = @constCast("late result") });
+    try std.testing.expect(!session.request_inflight);
+    try std.testing.expect(!session.request_stopping);
+    try std.testing.expect(!session.stop_requested.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), session.messages.items.len);
+    try std.testing.expectEqualStrings("Stopped", session.status());
 }
 
 test "ai chat detects dangerous shell commands" {

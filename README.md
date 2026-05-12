@@ -129,7 +129,9 @@ Default chords are implemented in `[src/input.zig](src/input.zig)`. Some keys ar
 | **Ctrl+Shift+W**                                                               | Close focused panel, tab, or window; press again to confirm closing the last panel |
 | **Alt+Enter**                                                                  | Maximize or restore window                                                         |
 | **Ctrl++** / **Ctrl+-**                                                        | Increase / decrease font size                                                      |
-| **Ctrl+Shift+C**                                                               | Copy selection                                                                     |
+| **Ctrl+Shift+C**                                                               | Copy terminal selection, or copy AI Chat selection/transcript                     |
+| **Ctrl+A** in AI Chat                                                          | Select the input text; when the input is empty, select the transcript             |
+| **Ctrl+C** in AI Chat                                                          | Copy the selected AI Chat text, or copy the transcript when nothing is selected   |
 | Right-click a selection                                                        | Copy selection                                                                     |
 | **Ctrl+V**                                                                     | Paste text                                                                         |
 | **Ctrl+Shift+V**                                                               | Paste clipboard image                                                              |

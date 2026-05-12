@@ -970,6 +970,18 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         handleBrowserUrlBarKey(ev);
         return;
     }
+    if (AppWindow.activeAiChat()) |chat| {
+        if (ev.ctrl and !ev.alt and ev.vk == 0x41) { // Ctrl+A
+            chat.selectAll();
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+            return;
+        }
+        if (ev.ctrl and !ev.alt and ev.vk == 0x43) { // Ctrl+C / Ctrl+Shift+C
+            copyAiChatToClipboard(chat);
+            return;
+        }
+    }
     // Ctrl+Shift+C = copy
     if (ev.ctrl and ev.shift and ev.vk == 0x43) { // 'C'
         copySelectionToClipboard();
@@ -1129,7 +1141,7 @@ fn isModifierKey(vk: win32_backend.WPARAM) bool {
 
 fn isAiChatKey(ev: win32_backend.KeyEvent) bool {
     if (ev.vk == win32_backend.VK_RETURN or ev.vk == win32_backend.VK_BACK or ev.vk == win32_backend.VK_ESCAPE) return true;
-    if (ev.ctrl and !ev.alt and (ev.vk == 0x55 or ev.vk == 0x4C)) return true; // Ctrl+U / Ctrl+L
+    if (ev.ctrl and !ev.alt and (ev.vk == 0x41 or ev.vk == 0x55 or ev.vk == 0x4C)) return true; // Ctrl+A / Ctrl+U / Ctrl+L
     return false;
 }
 
@@ -2311,9 +2323,36 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             file_explorer.g_focused = false;
             if (file_explorer.g_op_mode != .none) file_explorer.cancelOp();
 
-            if (AppWindow.activeAiChat() != null) {
+            if (AppWindow.activeAiChat()) |chat| {
                 const win = AppWindow.g_window orelse return;
                 const fb = win.getFramebufferSize();
+                if (AppWindow.ai_chat_renderer.stopButtonHitTest(
+                    chat,
+                    xpos,
+                    ypos,
+                    @floatFromInt(fb.width),
+                    @floatCast(titlebarHeight()),
+                    AppWindow.leftPanelsWidth(),
+                    AppWindow.rightPanelsWidthForWindow(fb.width),
+                )) {
+                    chat.stopRequest();
+                    AppWindow.g_force_rebuild = true;
+                    AppWindow.g_cells_valid = false;
+                    return;
+                }
+                if (AppWindow.ai_chat_renderer.messageCopyHitTest(
+                    chat,
+                    xpos,
+                    ypos,
+                    @floatFromInt(fb.width),
+                    @floatFromInt(fb.height),
+                    @floatCast(titlebarHeight()),
+                    AppWindow.leftPanelsWidth(),
+                    AppWindow.rightPanelsWidthForWindow(fb.width),
+                )) |message_index| {
+                    copyAiChatMessageToClipboard(chat, message_index);
+                    return;
+                }
                 if (AppWindow.ai_chat_renderer.permissionChipHitTest(
                     xpos,
                     ypos,
@@ -2325,6 +2364,9 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                     toggleAiAgentPermission();
                     return;
                 }
+                chat.clearSelection();
+                AppWindow.g_force_rebuild = true;
+                AppWindow.g_cells_valid = false;
                 return;
             }
 
@@ -2993,6 +3035,32 @@ fn copyTextToClipboard(text: []const u8) bool {
     _ = win32_backend.GlobalUnlock(hmem);
 
     return win32_backend.SetClipboardData(CF_UNICODETEXT, hmem) != null;
+}
+
+fn copyAiChatToClipboard(chat: *AppWindow.ai_chat.Session) void {
+    const allocator = AppWindow.g_allocator orelse return;
+    const text = chat.allocClipboardText(allocator) catch return;
+    defer allocator.free(text);
+    if (text.len == 0) return;
+    if (copyTextToClipboard(text)) {
+        overlays.showCopyToast(text.len);
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
+        std.debug.print("Copied {} AI chat bytes to clipboard\n", .{text.len});
+    }
+}
+
+fn copyAiChatMessageToClipboard(chat: *AppWindow.ai_chat.Session, message_index: usize) void {
+    const allocator = AppWindow.g_allocator orelse return;
+    const text = chat.allocMessageClipboardText(allocator, message_index) catch return;
+    defer allocator.free(text);
+    if (text.len == 0) return;
+    if (copyTextToClipboard(text)) {
+        overlays.showCopyToast(text.len);
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
+        std.debug.print("Copied {} AI chat message bytes to clipboard\n", .{text.len});
+    }
 }
 
 pub fn copySelectionToClipboard() void {
