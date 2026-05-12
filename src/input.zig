@@ -395,14 +395,14 @@ fn syncGridFromWindowSize(width: i32, height: i32) void {
     if (width <= 0 or height <= 0) return;
     const render_padding: f32 = 10;
     const tb_offset: f32 = @floatCast(titlebarHeight());
-    const sidebar_w = titlebar.sidebarWidth();
-    const right_panels_w = AppWindow.rightPanelsWidth();
+    const left_panels_w = AppWindow.leftPanelsWidth();
+    const right_panels_w = AppWindow.rightPanelsWidthForWindow(width);
     const explicit_left: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
     const explicit_right: f32 = @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING)) + overlays.SCROLLBAR_WIDTH;
     const explicit_top: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
     const explicit_bottom: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
 
-    const total_width_padding = sidebar_w + right_panels_w + explicit_left + explicit_right;
+    const total_width_padding = left_panels_w + right_panels_w + explicit_left + explicit_right;
     const total_height_padding = render_padding * 2 + tb_offset + explicit_top + explicit_bottom;
 
     const avail_width = @as(f32, @floatFromInt(width)) - total_width_padding;
@@ -1189,18 +1189,17 @@ fn applySidebarWidthFromMouse(xpos: f64) void {
 fn hitTestFileExplorer(xpos: f64, ypos: f64) bool {
     if (!file_explorer.g_visible) return false;
     if (ypos < titlebarHeight()) return false;
-    const win = AppWindow.g_window orelse return false;
-    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - @as(f64, @floatCast(file_explorer.width()));
-    return xpos >= panel_x;
+    const panel_x: f64 = @floatCast(titlebar.sidebarWidth());
+    const panel_right = panel_x + @as(f64, @floatCast(file_explorer.width()));
+    return xpos >= panel_x and xpos < panel_right;
 }
 
 fn hitTestMarkdownPreviewPanel(xpos: f64, ypos: f64) bool {
     if (!markdown_preview_panel.g_visible) return false;
     if (ypos < titlebarHeight()) return false;
     const win = AppWindow.g_window orelse return false;
-    const explorer_w: f64 = @floatCast(file_explorer.width());
     const preview_w: f64 = @floatCast(markdown_preview_panel.width());
-    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - explorer_w - preview_w;
+    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - preview_w;
     return xpos >= panel_x and xpos < panel_x + preview_w;
 }
 
@@ -1211,6 +1210,7 @@ fn browserPanelBounds() ?browser_panel.Bounds {
         win.width,
         win.height,
         @floatCast(titlebarHeight()),
+        AppWindow.leftPanelsWidth(),
         AppWindow.browserPanelRightOffset(),
     );
 }
@@ -1235,10 +1235,8 @@ fn hitTestBrowserUrlBar(xpos: f64, ypos: f64) bool {
 fn hitTestBrowserResizeHandle(xpos: f64, ypos: f64) bool {
     if (!browser_panel.g_visible) return false;
     if (ypos < titlebarHeight()) return false;
-    const win = AppWindow.g_window orelse return false;
-    const right_offset: f64 = @floatCast(AppWindow.browserPanelRightOffset());
-    const browser_w: f64 = @floatCast(browser_panel.width());
-    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - right_offset - browser_w;
+    const bounds = browserPanelBounds() orelse return false;
+    const panel_x: f64 = @floatFromInt(bounds.left);
     const half_hit: f64 = @as(f64, @floatCast(browser_panel.RESIZE_HIT_WIDTH)) / 2;
     return xpos >= panel_x - half_hit and xpos <= panel_x + half_hit;
 }
@@ -1247,7 +1245,7 @@ fn applyBrowserWidthFromMouse(xpos: f64) void {
     const win = AppWindow.g_window orelse return;
     const right_edge = @as(f64, @floatFromInt(win.width)) - @as(f64, @floatCast(AppWindow.browserPanelRightOffset()));
     const new_width = right_edge - xpos;
-    const available_width: f32 = @as(f32, @floatFromInt(win.width)) - AppWindow.browserPanelRightOffset();
+    const available_width: f32 = @as(f32, @floatFromInt(win.width)) - AppWindow.leftPanelsWidth() - AppWindow.browserPanelRightOffset();
     if (!browser_panel.setWidth(@floatCast(new_width), available_width)) return;
     syncGridFromWindowSize(win.width, win.height);
     AppWindow.g_force_rebuild = true;
@@ -1258,16 +1256,15 @@ fn hitTestMarkdownPreviewResizeHandle(xpos: f64, ypos: f64) bool {
     if (!markdown_preview_panel.g_visible) return false;
     if (ypos < titlebarHeight()) return false;
     const win = AppWindow.g_window orelse return false;
-    const explorer_w: f64 = @floatCast(file_explorer.width());
     const preview_w: f64 = @floatCast(markdown_preview_panel.width());
-    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - explorer_w - preview_w;
+    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - preview_w;
     const half_hit: f64 = @as(f64, @floatCast(markdown_preview_panel.RESIZE_HIT_WIDTH)) / 2;
     return xpos >= panel_x - half_hit and xpos <= panel_x + half_hit;
 }
 
 fn applyMarkdownPreviewWidthFromMouse(xpos: f64) void {
     const win = AppWindow.g_window orelse return;
-    const right_edge = @as(f64, @floatFromInt(win.width)) - @as(f64, @floatCast(file_explorer.width()));
+    const right_edge = @as(f64, @floatFromInt(win.width));
     const new_width = right_edge - xpos;
     if (!markdown_preview_panel.setWidth(@floatCast(new_width), @floatFromInt(win.width))) return;
     syncGridFromWindowSize(win.width, win.height);
@@ -1278,15 +1275,16 @@ fn applyMarkdownPreviewWidthFromMouse(xpos: f64) void {
 fn hitTestFileExplorerResizeHandle(xpos: f64, ypos: f64) bool {
     if (!file_explorer.g_visible) return false;
     if (ypos < titlebarHeight()) return false;
-    const win = AppWindow.g_window orelse return false;
-    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - @as(f64, @floatCast(file_explorer.width()));
+    const panel_x: f64 = @floatCast(titlebar.sidebarWidth());
+    const panel_right = panel_x + @as(f64, @floatCast(file_explorer.width()));
     const half_hit: f64 = @as(f64, @floatCast(file_explorer.RESIZE_HIT_WIDTH)) / 2;
-    return xpos >= panel_x - half_hit and xpos <= panel_x + half_hit;
+    return xpos >= panel_right - half_hit and xpos <= panel_right + half_hit;
 }
 
 fn applyExplorerWidthFromMouse(xpos: f64) void {
     const win = AppWindow.g_window orelse return;
-    const new_width = @as(f64, @floatFromInt(win.width)) - xpos;
+    const panel_x: f64 = @floatCast(titlebar.sidebarWidth());
+    const new_width = xpos - panel_x;
     if (!file_explorer.setWidth(@floatCast(new_width), @floatFromInt(win.width))) return;
     syncGridFromWindowSize(win.width, win.height);
     AppWindow.g_force_rebuild = true;
@@ -1447,9 +1445,9 @@ fn handleFileExplorerPress(xpos: f64, ypos: f64, ctrl: bool, shift: bool, alt: b
     }
 
     // Click on a file entry
-    const win = AppWindow.g_window orelse return;
-    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - @as(f64, @floatCast(file_explorer.width()));
-    if (xpos < panel_x) return;
+    const panel_x: f64 = @floatCast(titlebar.sidebarWidth());
+    const panel_right = panel_x + @as(f64, @floatCast(file_explorer.width()));
+    if (xpos < panel_x or xpos >= panel_right) return;
 
     const titlebar_h = titlebarHeight();
     const header_h: f64 = @floatCast(file_explorer.headerHeight());
@@ -1650,7 +1648,6 @@ fn selectParagraphAtCell(surface: *Surface, cell_pos: CellPos) bool {
     return true;
 }
 
-
 fn utf8CodepointCount(text: []const u8) usize {
     const view = std.unicode.Utf8View.init(text) catch return text.len;
     var it = view.iterator();
@@ -1658,7 +1655,6 @@ fn utf8CodepointCount(text: []const u8) usize {
     while (it.nextCodepoint() != null) count += 1;
     return count;
 }
-
 
 fn endsWithIgnoreCase(text: []const u8, suffix: []const u8) bool {
     if (text.len < suffix.len) return false;
@@ -2217,6 +2213,12 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
                 return;
             }
+            if (hitTestFileExplorerResizeHandle(xpos, ypos)) {
+                g_explorer_resize_dragging = true;
+                g_explorer_resize_hover = true;
+                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+                return;
+            }
             if (hitTestMarkdownPreviewResizeHandle(xpos, ypos)) {
                 g_markdown_preview_resize_dragging = true;
                 g_markdown_preview_resize_hover = true;
@@ -2252,7 +2254,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 return;
             }
 
-            // File explorer right sidebar click
+            // File explorer left sidebar click
             if (hitTestFileExplorer(xpos, ypos)) {
                 handleFileExplorerPress(xpos, ypos, ev.ctrl, ev.shift, ev.alt);
                 return;
@@ -2601,11 +2603,11 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
             // Get content area dimensions
             const win = AppWindow.g_window orelse return;
             const fb = win.getFramebufferSize();
-            const sidebar_w = titlebar.sidebarWidth();
-            const right_panels_w = AppWindow.rightPanelsWidth();
-            const content_x: f32 = sidebar_w + @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING));
+            const left_panels_w = AppWindow.leftPanelsWidth();
+            const right_panels_w = AppWindow.rightPanelsWidthForWindow(fb.width);
+            const content_x: f32 = left_panels_w + @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING));
             const content_y: f32 = @floatCast(titlebarHeight());
-            const content_w: f32 = @as(f32, @floatFromInt(fb.width)) - sidebar_w - right_panels_w - @as(f32, @floatFromInt(2 * split_layout.DEFAULT_PADDING));
+            const content_w: f32 = @as(f32, @floatFromInt(fb.width)) - left_panels_w - right_panels_w - @as(f32, @floatFromInt(2 * split_layout.DEFAULT_PADDING));
             const content_h: f32 = @as(f32, @floatFromInt(fb.height)) - content_y - @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING));
 
             const slot = spatial.slots[handle.idx()];
@@ -2832,8 +2834,8 @@ fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
     if (hitTestBrowserPanel(@floatFromInt(ev.xpos), @floatFromInt(ev.ypos))) return;
     if (markdown_preview_panel.g_visible) {
         const win = AppWindow.g_window orelse return;
-        const panel_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(win.width)) - file_explorer.width() - markdown_preview_panel.width()));
-        const panel_right = @as(i32, @intFromFloat(@as(f32, @floatFromInt(win.width)) - file_explorer.width()));
+        const panel_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(win.width)) - markdown_preview_panel.width()));
+        const panel_right = win.width;
         if (ev.xpos >= panel_x and ev.xpos < panel_right) {
             const delta: f32 = -@as(f32, @floatFromInt(ev.delta)) * 72.0 / 120.0;
             markdown_preview_panel.scrollBy(delta);
@@ -2843,9 +2845,9 @@ fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
     }
     // Scroll in file explorer
     if (file_explorer.g_visible) {
-        const win = AppWindow.g_window orelse return;
-        const panel_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(win.width)) - file_explorer.width()));
-        if (ev.xpos >= panel_x) {
+        const panel_x = @as(i32, @intFromFloat(titlebar.sidebarWidth()));
+        const panel_right = @as(i32, @intFromFloat(titlebar.sidebarWidth() + file_explorer.width()));
+        if (ev.xpos >= panel_x and ev.xpos < panel_right) {
             const delta: f32 = -@as(f32, @floatFromInt(ev.delta)) * file_explorer.rowHeight() * 3 / 120.0;
             file_explorer.scrollBy(delta);
             return;

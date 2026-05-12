@@ -1895,8 +1895,9 @@ fn handleDropFiles(wParam: WPARAM, w: *Window) void {
     // Check if drop is in the file explorer panel
     var pt: POINT = undefined;
     _ = DragQueryPoint(hDrop, &pt);
-    const panel_x: i32 = w.width - @as(i32, @intFromFloat(file_explorer.width()));
-    if (!file_explorer.g_visible or pt.x < panel_x) return;
+    const panel_x: i32 = w.sidebar_width;
+    const panel_right: i32 = panel_x + @as(i32, @intFromFloat(file_explorer.width()));
+    if (!file_explorer.g_visible or pt.x < panel_x or pt.x >= panel_right) return;
     if (file_explorer.g_mode != .remote) return;
 
     const file_count = DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);

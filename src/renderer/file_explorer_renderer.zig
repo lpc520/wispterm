@@ -1,6 +1,6 @@
 //! File explorer sidebar renderer.
 //!
-//! Renders the right-side file explorer panel using the same OpenGL primitives
+//! Renders the left-side file explorer panel using the same OpenGL primitives
 //! as the left tab sidebar (titlebar.zig). Uses gl_init.renderQuad for backgrounds
 //! and titlebar.renderTextLimited / renderTitlebarChar for text.
 
@@ -51,22 +51,24 @@ pub fn render(window_width: f32, window_height: f32, titlebar_h: f32) void {
     const side_h = window_height - titlebar_h;
     if (side_h <= 0) return;
 
-    const panel_x = window_width - explorer_w;
+    _ = window_width;
+    const panel_x = titlebar.sidebarWidth();
+    const panel_right = panel_x + explorer_w;
 
     // Background
     gl_init.renderQuad(panel_x, 0, explorer_w, side_h, sidebar_bg);
 
-    // Left border (resize edge)
+    // Right border (resize edge between explorer and terminal content)
     const resize_hovered = blk: {
         const win = AppWindow.g_window orelse break :blk false;
         if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
         const mx: f32 = @floatFromInt(win.mouse_x);
         const my: f32 = @floatFromInt(win.mouse_y);
         const half_hit = file_explorer.RESIZE_HIT_WIDTH / 2;
-        break :blk mx >= panel_x - half_hit and mx <= panel_x + half_hit and my >= titlebar_h and my < window_height;
+        break :blk mx >= panel_right - half_hit and mx <= panel_right + half_hit and my >= titlebar_h and my < window_height;
     };
     const edge_color = if (resize_hovered) blend(bg, accent, 0.38) else border_color;
-    gl_init.renderQuad(panel_x, 0, if (resize_hovered) 2 else 1, side_h, edge_color);
+    gl_init.renderQuad(panel_right - 1, 0, if (resize_hovered) 2 else 1, side_h, edge_color);
 
     // Header with mode indicator
     const header_y = window_height - titlebar_h - header_h;

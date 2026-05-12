@@ -144,7 +144,7 @@ Default chords are implemented in [`src/input.zig`](src/input.zig). Some keys ar
 
 ## File Explorer and Markdown Preview
 
-Press `Ctrl+Shift+E` to open the right-side File Explorer. It follows the
+Press `Ctrl+Shift+E` to open the left-side File Explorer. It follows the
 active environment:
 
 - Windows shells browse local Windows paths.

@@ -157,6 +157,13 @@ pub fn setWidth(w: f32, window_width: f32) bool {
     return true;
 }
 
+pub fn panelWidthForWindow(window_width: i32, left_offset: f32, right_offset: f32) f32 {
+    if (!g_visible) return 0;
+    const win_w: f32 = @floatFromInt(window_width);
+    const max_width = @max(MIN_WIDTH, @min(MAX_WIDTH, win_w - left_offset - right_offset - MIN_CONTENT_WIDTH));
+    return @max(MIN_WIDTH, @min(g_width, max_width));
+}
+
 pub fn open(parent: ?win32.HWND, url: []const u8) void {
     setUrl(url);
     g_visible = true;
@@ -238,7 +245,7 @@ pub fn lastError() win32.HRESULT {
     return g_last_error;
 }
 
-pub fn sync(parent: win32.HWND, window_width: i32, window_height: i32, titlebar_height: f32, right_offset: f32) void {
+pub fn sync(parent: win32.HWND, window_width: i32, window_height: i32, titlebar_height: f32, left_offset: f32, right_offset: f32) void {
     if (window_width <= 0 or window_height <= 0) return;
 
     if (!g_visible) {
@@ -246,7 +253,7 @@ pub fn sync(parent: win32.HWND, window_width: i32, window_height: i32, titlebar_
         return;
     }
 
-    const bounds = boundsForWindow(window_width, window_height, titlebar_height, right_offset);
+    const bounds = boundsForWindow(window_width, window_height, titlebar_height, left_offset, right_offset);
     if (bounds.right <= bounds.left or bounds.bottom <= bounds.top) return;
 
     const webview_bounds = contentBounds(bounds) orelse return;
@@ -383,13 +390,12 @@ fn urlToWide(url: []const u8, out: *[MAX_URL_BYTES]u16) ?[*:0]const u16 {
     return out[0..len :0].ptr;
 }
 
-pub fn boundsForWindow(window_width: i32, window_height: i32, titlebar_height: f32, right_offset: f32) Bounds {
+pub fn boundsForWindow(window_width: i32, window_height: i32, titlebar_height: f32, left_offset: f32, right_offset: f32) Bounds {
     const win_w: f32 = @floatFromInt(window_width);
     const win_h: f32 = @floatFromInt(window_height);
-    const max_width = @max(MIN_WIDTH, @min(MAX_WIDTH, win_w - right_offset - MIN_CONTENT_WIDTH));
-    const panel_w = @max(MIN_WIDTH, @min(g_width, max_width));
+    const panel_w = panelWidthForWindow(window_width, left_offset, right_offset);
     const right = @max(0, win_w - right_offset);
-    const left = @max(0, right - panel_w);
+    const left = @max(left_offset, right - panel_w);
     const top = @max(0, titlebar_height);
     const bottom = @max(top, win_h);
 

@@ -1,6 +1,6 @@
 //! File Explorer state and directory tree model.
 //!
-//! Manages the right-side file explorer sidebar: visibility, width, directory
+//! Manages the left-side file explorer sidebar: visibility, width, directory
 //! scanning, tree expand/collapse, selection, scroll, and file operations.
 //! Supports local (std.fs), WSL (wsl.exe), and remote (ssh ls / scp) modes.
 

@@ -7,7 +7,7 @@ param(
     [int]$WindowY = 80,
     [int]$WindowWidth = 1200,
     [int]$WindowHeight = 760,
-    [int]$ExplorerCropWidth = 430,
+    [int]$ExplorerCropWidth = 540,
     [switch]$KeepOpen
 )
 
@@ -33,9 +33,12 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 
 public static class PhanttyUiAutomation {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
   [StructLayout(LayoutKind.Sequential)]
   public struct RECT {
     public int Left;
@@ -52,6 +55,10 @@ public static class PhanttyUiAutomation {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
 }
 "@
 
@@ -61,6 +68,34 @@ function Get-WindowRectValue([IntPtr]$Hwnd) {
     [PhanttyUiAutomation+RECT]$rect = New-Object PhanttyUiAutomation+RECT
     [PhanttyUiAutomation]::GetWindowRect($Hwnd, [ref]$rect) | Out-Null
     return $rect
+}
+
+function Get-PhanttyWindowHandle([System.Diagnostics.Process]$Process) {
+    $script:phanttyWindowHandle = [IntPtr]::Zero
+    $script:phanttyProcessId = $Process.Id
+    $callback = [PhanttyUiAutomation+EnumWindowsProc]{
+        param([IntPtr]$Hwnd, [IntPtr]$LParam)
+        if (![PhanttyUiAutomation]::IsWindowVisible($Hwnd)) {
+            return $true
+        }
+
+        [uint32]$windowProcessId = 0
+        [PhanttyUiAutomation]::GetWindowThreadProcessId($Hwnd, [ref]$windowProcessId) | Out-Null
+        if ($windowProcessId -ne [uint32]$script:phanttyProcessId) {
+            return $true
+        }
+
+        $className = [System.Text.StringBuilder]::new(256)
+        [PhanttyUiAutomation]::GetClassNameW($Hwnd, $className, $className.Capacity) | Out-Null
+        if ($className.ToString() -eq "PhanttyWindowClass") {
+            $script:phanttyWindowHandle = $Hwnd
+            return $false
+        }
+        return $true
+    }
+
+    [PhanttyUiAutomation]::EnumWindows($callback, [IntPtr]::Zero) | Out-Null
+    return $script:phanttyWindowHandle
 }
 
 function Capture-Window([IntPtr]$Hwnd, [string]$Path) {
@@ -84,11 +119,11 @@ function Capture-Window([IntPtr]$Hwnd, [string]$Path) {
     return @{ Width = $width; Height = $height; Left = $rect.Left; Top = $rect.Top }
 }
 
-function Crop-RightPanel([string]$SourcePath, [string]$DestPath, [int]$CropWidth) {
+function Crop-LeftExplorerArea([string]$SourcePath, [string]$DestPath, [int]$CropWidth) {
     $bitmap = [System.Drawing.Bitmap]::FromFile($SourcePath)
     try {
         $width = [Math]::Min($CropWidth, $bitmap.Width)
-        $rect = [System.Drawing.Rectangle]::new($bitmap.Width - $width, 0, $width, $bitmap.Height)
+        $rect = [System.Drawing.Rectangle]::new(0, 0, $width, $bitmap.Height)
         $crop = $bitmap.Clone($rect, $bitmap.PixelFormat)
         try {
             $crop.Save($DestPath, [System.Drawing.Imaging.ImageFormat]::Png)
@@ -196,30 +231,32 @@ $proc = Start-Process -FilePath $ExePath -ArgumentList @("--shell", $Shell) -Wor
 
 try {
     $deadline = (Get-Date).AddSeconds(12)
+    [IntPtr]$phanttyWindow = [IntPtr]::Zero
     do {
         Start-Sleep -Milliseconds 250
         $proc.Refresh()
-    } while ($proc.MainWindowHandle -eq 0 -and (Get-Date) -lt $deadline)
+        $phanttyWindow = Get-PhanttyWindowHandle $proc
+    } while ($phanttyWindow -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline)
 
-    if ($proc.MainWindowHandle -eq 0) {
+    if ($phanttyWindow -eq [IntPtr]::Zero) {
         throw "Phantty window did not appear"
     }
 
-    [PhanttyUiAutomation]::ShowWindow($proc.MainWindowHandle, 5) | Out-Null
-    [PhanttyUiAutomation]::SetWindowPos($proc.MainWindowHandle, [IntPtr]::Zero, $WindowX, $WindowY, $WindowWidth, $WindowHeight, 0x0040) | Out-Null
-    [PhanttyUiAutomation]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+    [PhanttyUiAutomation]::ShowWindow($phanttyWindow, 5) | Out-Null
+    [PhanttyUiAutomation]::SetWindowPos($phanttyWindow, [IntPtr]::Zero, $WindowX, $WindowY, $WindowWidth, $WindowHeight, 0x0040) | Out-Null
+    [PhanttyUiAutomation]::SetForegroundWindow($phanttyWindow) | Out-Null
     Start-Sleep -Milliseconds 900
-    Click-WindowCenter $proc.MainWindowHandle
+    Click-WindowCenter $phanttyWindow
     Start-Sleep -Milliseconds 500
 
-    $beforeSize = Capture-Window $proc.MainWindowHandle $beforeFull
-    Crop-RightPanel $beforeFull $beforeCrop $ExplorerCropWidth | Out-Null
+    $beforeSize = Capture-Window $phanttyWindow $beforeFull
+    Crop-LeftExplorerArea $beforeFull $beforeCrop $ExplorerCropWidth | Out-Null
 
     Send-CtrlShiftE
     Start-Sleep -Milliseconds 1800
 
-    $afterSize = Capture-Window $proc.MainWindowHandle $afterFull
-    Crop-RightPanel $afterFull $afterCrop $ExplorerCropWidth | Out-Null
+    $afterSize = Capture-Window $phanttyWindow $afterFull
+    Crop-LeftExplorerArea $afterFull $afterCrop $ExplorerCropWidth | Out-Null
     $metrics = Analyze-ExplorerCrop $beforeCrop $afterCrop
 
     $result = [ordered]@{
