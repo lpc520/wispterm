@@ -14,9 +14,15 @@ const c = @cImport({
 pub const LINE_PAD_X: f32 = 18;
 const HEADER_H: f32 = 54;
 pub const INPUT_H: f32 = 92;
+const PERMISSION_CHIP_W: f32 = 104;
+const PERMISSION_CHIP_H: f32 = 24;
+const STATUS_SLOT_W: f32 = 120;
+const MODE_SLOT_W: f32 = 112;
 const BUBBLE_PAD_X: f32 = 14;
 const BUBBLE_PAD_Y: f32 = 10;
 const BUBBLE_GAP: f32 = 12;
+const APPROVAL_H: f32 = 128;
+const APPROVAL_GAP: f32 = 12;
 const REASONING_PAD_Y: f32 = 6;
 const REASONING_LEFT: f32 = 22;
 const REASONING_RIGHT: f32 = 12;
@@ -59,12 +65,22 @@ pub fn render(
     const header_y = window_height - top - HEADER_H;
     gl_init.renderQuadAlpha(x, header_y, w, HEADER_H, panel, 0.95);
     gl_init.renderQuadAlpha(x, header_y, w, 1, line, 0.8);
-    _ = titlebar.renderTextLimited(session.title(), x + LINE_PAD_X, header_y + 10, mixColor(fg, accent, 0.12), w * 0.45);
+    _ = titlebar.renderTextLimited(session.model(), x + LINE_PAD_X, header_y + 10, mixColor(fg, accent, 0.12), w * 0.48);
 
-    var meta_buf: [256]u8 = undefined;
-    const meta = std.fmt.bufPrint(&meta_buf, "{s}  {s}", .{ session.model(), session.status() }) catch session.status();
-    const meta_w = measureText(meta);
-    _ = titlebar.renderTextLimited(meta, x + w - LINE_PAD_X - @min(meta_w, w * 0.42), header_y + 10, muted, w * 0.42);
+    const permission = ai_chat.agentPermission();
+    const chip_x = permissionChipX(x, w);
+    const mode_text = if (session.agent_enabled) "Agent" else "Chat";
+    const mode_x = chip_x - MODE_SLOT_W - 8;
+    _ = titlebar.renderTextLimited(mode_text, mode_x, header_y + 10, mixColor(fg, accent, 0.18), MODE_SLOT_W);
+
+    const perm_text = permissionDisplayName(permission);
+    const perm_color = if (permission == .full) mixColor(fg, accent, 0.25) else mixColor(bg, fg, 0.66);
+    _ = titlebar.renderTextLimited(perm_text, chip_x, header_y + 10, perm_color, PERMISSION_CHIP_W);
+    gl_init.renderQuadAlpha(chip_x, header_y + 8, PERMISSION_CHIP_W - 8, 1, accent, if (permission == .full) 0.38 else 0.16);
+
+    const status_w = measureText(session.status());
+    const status_limit = STATUS_SLOT_W;
+    _ = titlebar.renderTextLimited(session.status(), x + w - LINE_PAD_X - @min(status_w, status_limit), header_y + 10, muted, status_limit);
 
     const input_y: f32 = 0;
     gl_init.renderQuadAlpha(x, input_y, w, INPUT_H, panel, 0.98);
@@ -80,7 +96,8 @@ pub fn render(
 
     const input_text = session.input();
     if (input_text.len == 0) {
-        _ = titlebar.renderTextLimited("Ask AI Chat", field_x + 12, field_y + (field_h - font.g_titlebar_cell_height) / 2, mixColor(bg, fg, 0.42), field_w - 24);
+        const placeholder = if (session.agent_enabled) "Ask Agent" else "Ask AI Chat";
+        _ = titlebar.renderTextLimited(placeholder, field_x + 12, field_y + (field_h - font.g_titlebar_cell_height) / 2, mixColor(bg, fg, 0.42), field_w - 24);
     } else {
         _ = renderWrappedText(input_text, field_x + 12, window_height - field_y - field_h + 10, field_w - 24, lineHeight(), fg, window_height, window_height);
     }
@@ -89,8 +106,11 @@ pub fn render(
         gl_init.renderQuad(cursor_x, field_y + 14, 1, field_h - 28, accent);
     }
 
+    const approval = session.approvalView();
+    const approval_h: f32 = if (approval != null) APPROVAL_H + APPROVAL_GAP else 0;
+
     const transcript_top = top + HEADER_H + 18;
-    const transcript_bottom = INPUT_H + 18;
+    const transcript_bottom = INPUT_H + approval_h + 18;
     const transcript_h = @max(1.0, window_height - transcript_top - transcript_bottom);
     const content_w = w - LINE_PAD_X * 2;
     const content_x = x + LINE_PAD_X;
@@ -104,7 +124,7 @@ pub fn render(
     const max_scroll = @max(0.0, content_h - transcript_h);
     session.scroll_px = @min(session.scroll_px, max_scroll);
 
-    const scissor_y: c.GLint = @intFromFloat(@round(INPUT_H + 18));
+    const scissor_y: c.GLint = @intFromFloat(@round(transcript_bottom));
     const scissor_h: c.GLsizei = @intFromFloat(@round(transcript_h));
     gl.Enable.?(c.GL_SCISSOR_TEST);
     gl.Scissor.?(
@@ -143,6 +163,61 @@ pub fn render(
     }
 
     gl.Disable.?(c.GL_SCISSOR_TEST);
+
+    if (approval) |view| {
+        renderApprovalCard(view, x + LINE_PAD_X, INPUT_H + APPROVAL_GAP, w - LINE_PAD_X * 2, APPROVAL_H);
+    }
+}
+
+pub fn permissionChipHitTest(
+    xpos: f64,
+    ypos: f64,
+    window_width: f32,
+    titlebar_offset: f32,
+    left_panels_w: f32,
+    right_panels_w: f32,
+) bool {
+    const x = @round(left_panels_w);
+    const w = @round(@max(1.0, window_width - left_panels_w - right_panels_w));
+    const chip_x = permissionChipX(x, w);
+    const chip_top = titlebar_offset + 12;
+    const px: f32 = @floatCast(xpos);
+    const py: f32 = @floatCast(ypos);
+    return px >= chip_x and px <= chip_x + PERMISSION_CHIP_W and
+        py >= chip_top and py <= chip_top + PERMISSION_CHIP_H;
+}
+
+fn permissionChipX(x: f32, w: f32) f32 {
+    return x + w - LINE_PAD_X - STATUS_SLOT_W - 12 - PERMISSION_CHIP_W;
+}
+
+fn permissionDisplayName(permission: ai_chat.AgentPermission) []const u8 {
+    return switch (permission) {
+        .confirm => "Ask",
+        .full => "Full",
+    };
+}
+
+fn renderApprovalCard(view: ai_chat.ApprovalView, x: f32, y: f32, w: f32, h: f32) void {
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const card_bg = mixColor(bg, accent, 0.08);
+    gl_init.renderQuadAlpha(x, y, w, h, card_bg, 0.98);
+    gl_init.renderQuadAlpha(x, y + h - 1, w, 1, accent, 0.65);
+    gl_init.renderQuadAlpha(x, y, w, 1, mixColor(bg, fg, 0.18), 0.8);
+    gl_init.renderQuadAlpha(x, y, 4, h, accent, 0.85);
+
+    var title_buf: [256]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "Approve {s}?", .{view.tool}) catch "Approve tool?";
+    _ = titlebar.renderTextLimited(title, x + 16, y + h - 26, mixColor(fg, accent, 0.20), w - 32);
+    _ = titlebar.renderTextLimited("Enter/Y to run, Esc/N to deny", x + 16, y + h - 50, mixColor(bg, fg, 0.62), w - 32);
+    if (view.reason.len > 0) {
+        _ = titlebar.renderTextLimited(view.reason, x + 16, y + h - 74, mixColor(bg, fg, 0.70), w - 32);
+    }
+    const command_bg = mixColor(bg, fg, 0.065);
+    gl_init.renderQuadAlpha(x + 12, y + 10, w - 24, 34, command_bg, 0.95);
+    _ = titlebar.renderTextLimited(view.command, x + 20, y + 18, fg, w - 40);
 }
 
 fn renderMessageBubble(role: ai_chat.Role, text: []const u8, x: f32, top_px: f32, w: f32, h: f32, window_height: f32) void {
