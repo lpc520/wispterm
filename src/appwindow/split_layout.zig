@@ -150,6 +150,8 @@ pub fn computeSplitLayout(
 ) usize {
     g_split_rect_count = 0;
     if (active_tab.tree.isEmpty()) return 0;
+    const safe_content_w = @max(content_w, 1);
+    const safe_content_h = @max(content_h, 1);
 
     // Get spatial representation (normalized 0-1 coordinates)
     const allocator = AppWindow.g_allocator orelse return 0;
@@ -172,10 +174,10 @@ pub fn computeSplitLayout(
         const slot = spatial.slots[entry.handle.idx()];
 
         // Convert normalized coords to pixels
-        const x_f: f32 = @as(f32, @floatCast(slot.x)) * @as(f32, @floatFromInt(content_w));
-        const y_f: f32 = @as(f32, @floatCast(slot.y)) * @as(f32, @floatFromInt(content_h));
-        const w_f: f32 = @as(f32, @floatCast(slot.width)) * @as(f32, @floatFromInt(content_w));
-        const h_f: f32 = @as(f32, @floatCast(slot.height)) * @as(f32, @floatFromInt(content_h));
+        const x_f: f32 = @as(f32, @floatCast(slot.x)) * @as(f32, @floatFromInt(safe_content_w));
+        const y_f: f32 = @as(f32, @floatCast(slot.y)) * @as(f32, @floatFromInt(safe_content_h));
+        const w_f: f32 = @as(f32, @floatCast(slot.width)) * @as(f32, @floatFromInt(safe_content_w));
+        const h_f: f32 = @as(f32, @floatCast(slot.height)) * @as(f32, @floatFromInt(safe_content_h));
 
         // Apply divider insets (half-divider on each side adjacent to other splits)
         var px: i32 = content_x + @as(i32, @intFromFloat(x_f));
@@ -212,6 +214,8 @@ pub fn computeSplitLayout(
         if (at_right_edge) {
             pw += @intCast(DEFAULT_PADDING);
         }
+        pw = @max(pw, 1);
+        ph = @max(ph, 1);
 
         // Set the surface screen size with padding.
         // The surface computes grid size and balanced padding internally.

@@ -69,11 +69,60 @@ fn blend(a: [3]f32, b: [3]f32, t: f32) [3]f32 {
     };
 }
 
+fn fallbackCodepoint(byte: u8) u32 {
+    return if (byte >= 0x20 and byte <= 0x7e) byte else '?';
+}
+
+fn renderFallbackBytesLimited(text: []const u8, x: f32, y: f32, color: [3]f32, max_w: f32) f32 {
+    var cursor_x = x;
+    for (text) |byte| {
+        const cp = fallbackCodepoint(byte);
+        const adv = titlebarGlyphAdvance(cp);
+        if (cursor_x + adv > x + max_w) {
+            const ellipsis: u32 = 0x2026;
+            const ellipsis_w = titlebarGlyphAdvance(ellipsis);
+            if (cursor_x + ellipsis_w <= x + max_w) {
+                renderTitlebarChar(ellipsis, cursor_x, y, color);
+                cursor_x += ellipsis_w;
+            }
+            break;
+        }
+        renderTitlebarChar(cp, cursor_x, y, color);
+        cursor_x += adv;
+    }
+    return cursor_x;
+}
+
+fn collectTextCodepoints(text: []const u8, codepoints: []u32, text_width: *f32) usize {
+    var count: usize = 0;
+    text_width.* = 0;
+
+    const view = std.unicode.Utf8View.init(text) catch {
+        for (text) |byte| {
+            if (count >= codepoints.len) break;
+            const cp = fallbackCodepoint(byte);
+            codepoints[count] = cp;
+            text_width.* += titlebarGlyphAdvance(cp);
+            count += 1;
+        }
+        return count;
+    };
+
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (count >= codepoints.len) break;
+        codepoints[count] = cp;
+        text_width.* += titlebarGlyphAdvance(cp);
+        count += 1;
+    }
+    return count;
+}
+
 pub fn renderTextLimited(text: []const u8, x: f32, y: f32, color: [3]f32, max_w: f32) f32 {
     if (max_w <= 0) return x;
 
     var cursor_x = x;
-    var view = std.unicode.Utf8View.initUnchecked(text);
+    var view = std.unicode.Utf8View.init(text) catch return renderFallbackBytesLimited(text, x, y, color, max_w);
     var it = view.iterator();
     while (it.nextCodepoint()) |cp| {
         const adv = titlebarGlyphAdvance(cp);
@@ -633,16 +682,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
                 break :blk titlebarGlyphAdvance(0x1F514);
             } else 0;
 
-            {
-                const view = std.unicode.Utf8View.initUnchecked(title);
-                var it = view.iterator();
-                while (it.nextCodepoint()) |cp| {
-                    if (cp_count >= 256) break;
-                    codepoints[cp_count] = cp;
-                    text_width += titlebarGlyphAdvance(cp);
-                    cp_count += 1;
-                }
-            }
+            cp_count = collectTextCodepoints(title, &codepoints, &text_width);
 
             const text_y = tb_top + (titlebar_h - font.g_titlebar_cell_height) / 2;
 

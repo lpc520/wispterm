@@ -1649,6 +1649,10 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         const fb = win.getFramebufferSize();
         const fb_width: c_int = fb.width;
         const fb_height: c_int = fb.height;
+        if (win.is_minimized or fb_width <= 0 or fb_height <= 0) {
+            std.Thread.sleep(16 * std.time.ns_per_ms);
+            continue;
+        }
 
         gl_init.g_draw_call_count = 0;
         overlays.updateFps();

@@ -389,6 +389,7 @@ fn titlebarHeight() f64 {
 }
 
 fn syncGridFromWindowSize(width: i32, height: i32) void {
+    if (width <= 0 or height <= 0) return;
     const render_padding: f32 = 10;
     const tb_offset: f32 = @floatCast(titlebarHeight());
     const sidebar_w = titlebar.sidebarWidth();
@@ -429,6 +430,26 @@ fn blurBrowserUrlBarIfFocused() void {
     if (!browser_panel.urlBarFocused()) return;
     browser_panel.blurUrlBar();
     markBrowserUrlBarDirty();
+}
+
+pub fn cancelTransientMouseState(win: ?*win32_backend.Window) void {
+    g_divider_hover = false;
+    g_divider_dragging = false;
+    g_divider_drag_handle = null;
+    g_divider_drag_layout = null;
+    g_sidebar_resize_hover = false;
+    g_sidebar_resize_dragging = false;
+    g_explorer_resize_hover = false;
+    g_explorer_resize_dragging = false;
+    g_markdown_preview_resize_hover = false;
+    g_markdown_preview_resize_dragging = false;
+    g_browser_resize_hover = false;
+    g_browser_resize_dragging = false;
+    g_selecting = false;
+    plus_btn_pressed = false;
+    tab.g_tab_close_pressed = null;
+    overlays.g_scrollbar_dragging = false;
+    if (win) |w| w.clearTransientInputQueues();
 }
 
 pub fn toggleSidebar() void {
@@ -668,6 +689,11 @@ pub fn updateFocusFromMouse(mouse_x: i32, mouse_y: i32) void {
 
 /// Process all queued Win32 input events. Called once per frame from the main loop.
 pub fn processEvents(win: *win32_backend.Window) void {
+    if (win.is_minimized) {
+        cancelTransientMouseState(win);
+        win.size_changed = false;
+        return;
+    }
     processKeyAndCharEvents(win);
     processMouseButtonEvents(win);
     processMouseMoveEvents(win);
@@ -724,6 +750,7 @@ fn processMouseWheelEvents(win: *win32_backend.Window) void {
 fn processSizeChange(win: *win32_backend.Window) void {
     if (!win.size_changed) return;
     win.size_changed = false;
+    if (win.is_minimized or win.width <= 0 or win.height <= 0) return;
     if (titlebar.setSidebarWidth(titlebar.g_sidebar_width, @floatFromInt(win.width))) {
         win.sidebar_width = @intFromFloat(titlebar.sidebarWidth());
         AppWindow.g_force_rebuild = true;

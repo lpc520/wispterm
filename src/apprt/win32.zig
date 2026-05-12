@@ -213,6 +213,10 @@ pub const WM_ACTIVATE: UINT = 0x0006;
 pub const WM_GETMINMAXINFO: UINT = 0x0024;
 pub const WM_DROPFILES: UINT = 0x0233;
 
+pub const SIZE_RESTORED: UINT = 0;
+pub const SIZE_MINIMIZED: UINT = 1;
+pub const SIZE_MAXIMIZED: UINT = 2;
+
 pub const CFS_POINT: DWORD = 0x0002;
 pub const CFS_CANDIDATEPOS: DWORD = 0x0040;
 const GCS_COMPSTR: DWORD = 0x0008;
@@ -768,6 +772,11 @@ fn RingBuffer(comptime T: type, comptime N: usize) type {
             self.count -= 1;
             return item;
         }
+
+        pub fn clear(self: *@This()) void {
+            self.head = 0;
+            self.count = 0;
+        }
     };
 }
 
@@ -784,6 +793,7 @@ pub const Window = struct {
     dpi: u32 = 96,
     dpi_changed: bool = false,
     focused: bool = true,
+    is_minimized: bool = false,
     is_fullscreen: bool = false,
 
     // Custom title bar
@@ -845,6 +855,16 @@ pub const Window = struct {
     pub fn clearImePreedit(self: *Window) void {
         self.ime_preedit_len = 0;
         self.ime_composing = false;
+    }
+
+    pub fn clearTransientInputQueues(self: *Window) void {
+        self.mouse_button_events.clear();
+        self.mouse_move_events.clear();
+        self.mouse_wheel_events.clear();
+        self.hovered_button = .none;
+        self.pressed_button = .none;
+        self.mouse_x = -1;
+        self.mouse_y = -1;
     }
 
     /// Initialize a Win32 window with an OpenGL 3.3 core profile context.
@@ -1439,6 +1459,15 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         WM_SIZE => {
             const width: i32 = @as(i16, @bitCast(@as(u16, @intCast(lParam & 0xFFFF))));
             const height: i32 = @as(i16, @bitCast(@as(u16, @intCast((lParam >> 16) & 0xFFFF))));
+            const size_type: UINT = @intCast(wParam & 0xFFFF);
+            if (size_type == SIZE_MINIMIZED or width <= 0 or height <= 0) {
+                w.is_minimized = true;
+                w.size_changed = false;
+                w.clearTransientInputQueues();
+                return 0;
+            }
+
+            w.is_minimized = false;
             w.width = width;
             w.height = height;
             w.size_changed = true;
