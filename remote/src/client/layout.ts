@@ -33,6 +33,8 @@ function normalizeSurface(raw: unknown): LayoutSurface | null {
   if (typeof surface.id !== "string") return null;
   return {
     id: surface.id,
+    kind: surface.kind === "ai_chat" ? "ai_chat" : "terminal",
+    readOnly: surface.readOnly === true,
     title: typeof surface.title === "string" ? surface.title : shortSurfaceId(surface.id),
     focused: surface.focused === true,
     snapshot: typeof surface.snapshot === "string" ? surface.snapshot : "",

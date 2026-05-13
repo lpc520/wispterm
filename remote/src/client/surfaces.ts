@@ -112,7 +112,13 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     term,
     fit,
     decoder: new TextDecoder(),
-    disposeInput: term.onData((data) => inputHandler(surfaceId, data)),
+    disposeInput: term.onData((data) => {
+      const current = state.layoutState?.tabs
+        .flatMap((tab) => tab.surfaces)
+        .find((surface) => surface.id === surfaceId);
+      if (current?.readOnly) return;
+      inputHandler(surfaceId, data);
+    }),
     disposeMiddleClickGesture: null,
     disposeCanvasPan: null,
     resizeObserver: null,
@@ -122,6 +128,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     needsDefaultCanvasPan: false,
     hasLiveOutput: false,
     snapshotApplied: false,
+    snapshotText: null,
     opened: false,
     pendingOutput: "",
     remoteCols: null,
@@ -169,6 +176,7 @@ export function renderRemotePanels(): void {
     view.panel.style.height = `${Math.max(0.05, surface.h ?? 1) * 100}%`;
     view.panel.dataset.surfaceId = surface.id;
     view.title.textContent = surface.title || shortSurfaceId(surface.id);
+    view.term.options.disableStdin = surface.readOnly === true;
     const nextRemoteCols = validPositiveInteger(surface.cols);
     const nextRemoteRows = validPositiveInteger(surface.rows);
     const gridChanged = view.remoteCols !== nextRemoteCols || view.remoteRows !== nextRemoteRows;
@@ -176,8 +184,9 @@ export function renderRemotePanels(): void {
     view.remoteRows = nextRemoteRows;
     if (gridChanged) view.needsDefaultCanvasPan = true;
     const grid = view.remoteCols && view.remoteRows ? `${view.remoteCols}×${view.remoteRows}` : null;
-    const stateLabel = surface.focused ? "focused" : shortSurfaceId(surface.id);
-    view.meta.textContent = grid ? `${grid} · ${stateLabel}` : stateLabel;
+    const stateLabel = surface.readOnly ? "read-only" : surface.focused ? "focused" : shortSurfaceId(surface.id);
+    const kindLabel = surface.kind === "ai_chat" ? "AI chat" : null;
+    view.meta.textContent = [grid, kindLabel, stateLabel].filter(Boolean).join(" · ");
 
     if (view.panel.parentElement !== panelsRoot) {
       panelsRoot.appendChild(view.panel);
@@ -306,10 +315,19 @@ function scheduleFit(view: SurfaceView): void {
 }
 
 function applyInitialSnapshot(view: SurfaceView, surface: LayoutSurface): void {
-  if (view.snapshotApplied || view.hasLiveOutput || !surface.snapshot) return;
-  view.snapshotApplied = true;
+  if (!surface.snapshot) return;
+  if (surface.kind === "ai_chat") {
+    if (view.snapshotText === surface.snapshot) return;
+    view.snapshotText = surface.snapshot;
+    view.snapshotApplied = true;
+    view.hasLiveOutput = false;
+  } else {
+    if (view.snapshotApplied || view.hasLiveOutput) return;
+    view.snapshotApplied = true;
+    view.snapshotText = surface.snapshot;
+  }
   requestAnimationFrame(() => {
-    if (!view.host.isConnected || view.hasLiveOutput) return;
+    if (!view.host.isConnected || (surface.kind !== "ai_chat" && view.hasLiveOutput)) return;
     try {
       fitOrResize(view);
       updateCanvasPan(view);

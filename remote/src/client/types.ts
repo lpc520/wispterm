@@ -6,6 +6,8 @@ export type MeResponse = { authenticated: boolean; username?: string };
 
 export type LayoutSurface = {
   id: string;
+  kind?: "terminal" | "ai_chat";
+  readOnly?: boolean;
   title?: string;
   focused?: boolean;
   snapshot?: string;
@@ -59,6 +61,7 @@ export type SurfaceView = {
   needsDefaultCanvasPan: boolean;
   hasLiveOutput: boolean;
   snapshotApplied: boolean;
+  snapshotText: string | null;
   opened: boolean;
   pendingOutput: string;
   remoteCols: number | null;

@@ -19,6 +19,7 @@ pub const DEFAULT_AGENT = "true";
 
 const DEFAULT_AGENT_TIMEOUT_MS: u32 = 60_000;
 const DEFAULT_AGENT_OUTPUT_LIMIT: u32 = 16 * 1024;
+const REMOTE_SNAPSHOT_MAX_BYTES: usize = 24 * 1024;
 
 pub const Role = enum {
     user,
@@ -446,6 +447,36 @@ pub const Session = struct {
         self.input_len += len;
     }
 
+    pub fn applyRemoteInput(self: *Session, data: []const u8) void {
+        var text_start: usize = 0;
+        var i: usize = 0;
+        while (i < data.len) {
+            const ch = data[i];
+            const is_control = ch == '\r' or ch == '\n' or ch == 0x1b or ch == 0x7f or ch == 0x08;
+            if (!is_control) {
+                i += 1;
+                continue;
+            }
+
+            if (i > text_start) self.appendInputText(data[text_start..i]);
+            switch (ch) {
+                '\r', '\n' => self.submit(),
+                0x1b => {
+                    self.stopRequest();
+                    if (i + 1 < data.len and data[i + 1] == '[') {
+                        i += 2;
+                        while (i < data.len and !std.ascii.isAlphabetic(data[i])) : (i += 1) {}
+                    }
+                },
+                0x7f, 0x08 => self.backspaceInput(),
+                else => {},
+            }
+            i += 1;
+            text_start = i;
+        }
+        if (text_start < data.len) self.appendInputText(data[text_start..]);
+    }
+
     pub fn handleKey(self: *Session, ev: win32_backend.KeyEvent) void {
         if (self.handleApprovalKey(ev)) return;
 
@@ -535,6 +566,28 @@ pub const Session = struct {
             return allocator.dupe(u8, self.input());
         }
         return allocator.dupe(u8, "");
+    }
+
+    pub fn allocRemoteSnapshot(self: *Session, allocator: std.mem.Allocator) ![]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(allocator);
+
+        try appendLimitedSection(allocator, &out, "Model", self.model(), REMOTE_SNAPSHOT_MAX_BYTES);
+        try appendLimitedSection(allocator, &out, "Status", self.status(), REMOTE_SNAPSHOT_MAX_BYTES);
+        for (self.messages.items) |msg| {
+            try appendLimitedSection(allocator, &out, msg.role.label(), msg.content, REMOTE_SNAPSHOT_MAX_BYTES);
+            if (msg.reasoning) |reasoning| {
+                if (reasoning.len > 0) try appendLimitedSection(allocator, &out, "Reasoning", reasoning, REMOTE_SNAPSHOT_MAX_BYTES);
+            }
+        }
+        if (self.input_len > 0) {
+            try appendLimitedSection(allocator, &out, "Draft", self.input(), REMOTE_SNAPSHOT_MAX_BYTES);
+        }
+        if (out.items.len == 0) try out.appendSlice(allocator, "No messages yet.");
+        return out.toOwnedSlice(allocator);
     }
 
     pub fn allocMessageClipboardText(self: *Session, allocator: std.mem.Allocator, message_index: usize) ![]u8 {
@@ -866,6 +919,27 @@ fn appendClipboardSection(
     try out.appendSlice(allocator, label);
     try out.appendSlice(allocator, ":\r\n");
     try out.appendSlice(allocator, text);
+}
+
+fn appendLimitedSection(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    label: []const u8,
+    text: []const u8,
+    max_bytes: usize,
+) !void {
+    if (out.items.len >= max_bytes) return;
+    if (out.items.len > 0) try out.appendSlice(allocator, "\r\n\r\n");
+    try out.appendSlice(allocator, label);
+    try out.appendSlice(allocator, ":\r\n");
+    if (out.items.len >= max_bytes) return;
+
+    const remaining = max_bytes - out.items.len;
+    const take = @min(text.len, remaining);
+    try out.appendSlice(allocator, text[0..take]);
+    if (take < text.len and out.items.len + 18 <= max_bytes) {
+        try out.appendSlice(allocator, "\r\n...[truncated]");
+    }
 }
 
 fn requestThreadMain(request: *ChatRequest) void {

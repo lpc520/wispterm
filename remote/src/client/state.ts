@@ -44,7 +44,11 @@ export function currentTab(): LayoutTab | null {
 }
 
 export function activeSurfaceIdForInput(): string | null {
-  return state.selectedSurfaceId ?? currentTab()?.surfaces[0]?.id ?? null;
+  const tab = currentTab();
+  const surfaceId = state.selectedSurfaceId ?? tab?.surfaces[0]?.id ?? null;
+  if (!surfaceId) return null;
+  const surface = tab?.surfaces.find((candidate) => candidate.id === surfaceId);
+  return surface?.readOnly ? null : surfaceId;
 }
 
 export function pushNotice(message: string): void {

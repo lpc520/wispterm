@@ -198,6 +198,7 @@ threadlocal var g_start_fullscreen: bool = false;
 threadlocal var g_debug_memory: bool = false;
 threadlocal var g_debug_memory_last_ms: i64 = 0;
 threadlocal var g_remote_layout_last_ms: i64 = 0;
+threadlocal var g_remote_ai_sinks: [tab.MAX_TABS]RemoteAiInputSink = undefined;
 
 // Global theme (set at startup via config)
 pub threadlocal var g_theme: Theme = Theme.default();
@@ -230,6 +231,7 @@ pub const MAX_TABS = tab.MAX_TABS;
 const WM_PHANTTY_AGENT_SSH_CONNECT = win32_backend.WM_APP + 0x51;
 const WM_PHANTTY_AGENT_TAB_NEW = win32_backend.WM_APP + 0x52;
 const WM_PHANTTY_AGENT_TAB_CLOSE = win32_backend.WM_APP + 0x53;
+const WM_PHANTTY_REMOTE_AI_INPUT = win32_backend.WM_APP + 0x54;
 
 const AgentSshConnectRequest = struct {
     allocator: std.mem.Allocator,
@@ -253,6 +255,16 @@ const AgentTabCloseRequest = struct {
     title: ?[]const u8,
     result: ?ai_chat.ToolClosedTab = null,
     err: ?anyerror = null,
+};
+
+const RemoteAiInputSink = struct {
+    hwnd: win32_backend.HWND,
+    tab_index: usize,
+};
+
+const RemoteAiInputRequest = struct {
+    tab_index: usize,
+    data: []u8,
 };
 
 // ============================================================================
@@ -1144,6 +1156,11 @@ fn buildRemoteLayoutJson(allocator: std.mem.Allocator, out: *std.ArrayListUnmana
         if (wrote_tab) try out.append(allocator, ',');
         wrote_tab = true;
 
+        if (tab_state.kind == .ai_chat) {
+            try appendRemoteAiChatTabJson(allocator, out, tab_state, tab_index);
+            continue;
+        }
+
         try out.appendSlice(allocator, "{\"index\":");
         try out.print(allocator, "{d}", .{tab_index});
         try out.appendSlice(allocator, ",\"title\":\"");
@@ -1217,6 +1234,94 @@ fn buildRemoteLayoutJson(allocator: std.mem.Allocator, out: *std.ArrayListUnmana
     }
 
     try out.appendSlice(allocator, "]}");
+}
+
+fn remoteAiSurfaceId(tab_index: usize) [16]u8 {
+    var id: [16]u8 = undefined;
+    _ = std.fmt.bufPrint(&id, "aichat{d:0>10}", .{tab_index}) catch unreachable;
+    return id;
+}
+
+fn registerRemoteAiInputSink(tab_index: usize) void {
+    const app = g_app orelse return;
+    const client = app.remote_client orelse return;
+    const window = g_window orelse return;
+    if (tab_index >= g_remote_ai_sinks.len) return;
+
+    g_remote_ai_sinks[tab_index] = .{
+        .hwnd = window.hwnd,
+        .tab_index = tab_index,
+    };
+    client.registerSurface(remoteAiSurfaceId(tab_index), &g_remote_ai_sinks[tab_index], remoteAiWrite);
+}
+
+fn remoteAiWrite(ctx: *anyopaque, data: []const u8) void {
+    const sink: *RemoteAiInputSink = @ptrCast(@alignCast(ctx));
+    const request = std.heap.page_allocator.create(RemoteAiInputRequest) catch return;
+    request.* = .{
+        .tab_index = sink.tab_index,
+        .data = std.heap.page_allocator.dupe(u8, data) catch {
+            std.heap.page_allocator.destroy(request);
+            return;
+        },
+    };
+
+    const ok = win32_backend.PostMessageW(
+        sink.hwnd,
+        WM_PHANTTY_REMOTE_AI_INPUT,
+        0,
+        @bitCast(@as(isize, @intCast(@intFromPtr(request)))),
+    ) != 0;
+    if (!ok) {
+        std.heap.page_allocator.free(request.data);
+        std.heap.page_allocator.destroy(request);
+    }
+}
+
+fn appendRemoteAiChatTabJson(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    tab_state: *tab.TabState,
+    tab_index: usize,
+) !void {
+    registerRemoteAiInputSink(tab_index);
+    const surface_id = remoteAiSurfaceId(tab_index);
+    const title_text = tab_state.getTitle();
+
+    try out.appendSlice(allocator, "{\"index\":");
+    try out.print(allocator, "{d}", .{tab_index});
+    try out.appendSlice(allocator, ",\"title\":\"");
+    try remote.appendJsonString(out, allocator, title_text);
+    try out.appendSlice(allocator, "\",\"focusedSurfaceId\":\"");
+    try remote.appendJsonString(out, allocator, surface_id[0..]);
+    try out.append(allocator, '"');
+    try appendAgentDetectionJson(allocator, out, null);
+    try out.appendSlice(allocator, ",\"surfaces\":[{\"id\":\"");
+    try remote.appendJsonString(out, allocator, surface_id[0..]);
+    try out.appendSlice(allocator, "\",\"title\":\"");
+    try remote.appendJsonString(out, allocator, title_text);
+    try out.appendSlice(allocator, "\",\"focused\":true");
+    try appendAgentDetectionJson(allocator, out, null);
+    try out.appendSlice(allocator, ",\"kind\":\"ai_chat\",\"readOnly\":false,\"cols\":120,\"rows\":30,\"cursorX\":0,\"cursorY\":0,\"snapshot\":\"");
+    if (tab_state.ai_chat_session) |session| {
+        const snapshot = session.allocRemoteSnapshot(allocator) catch null;
+        defer if (snapshot) |text| allocator.free(text);
+        if (snapshot) |text| try remote.appendJsonString(out, allocator, text);
+    }
+    try out.appendSlice(allocator, "\",\"x\":0,\"y\":0,\"w\":1,\"h\":1}]}");
+}
+
+fn handleRemoteAiInputRequest(request: *RemoteAiInputRequest) void {
+    defer {
+        std.heap.page_allocator.free(request.data);
+        std.heap.page_allocator.destroy(request);
+    }
+    if (request.tab_index >= tab.g_tab_count) return;
+    const tab_state = tab.g_tabs[request.tab_index] orelse return;
+    if (tab_state.kind != .ai_chat) return;
+    const session = tab_state.ai_chat_session orelse return;
+    session.applyRemoteInput(request.data);
+    g_force_rebuild = true;
 }
 
 fn buildRemoteSurfaceSnapshot(allocator: std.mem.Allocator, surface: *Surface) ![]u8 {
@@ -1646,6 +1751,11 @@ fn onWin32Message(msg: win32_backend.UINT, wParam: win32_backend.WPARAM, lParam:
         WM_PHANTTY_AGENT_TAB_CLOSE => {
             const request: *AgentTabCloseRequest = @ptrFromInt(@as(usize, @bitCast(lParam)));
             handleAgentTabCloseRequest(request);
+            return 1;
+        },
+        WM_PHANTTY_REMOTE_AI_INPUT => {
+            const request: *RemoteAiInputRequest = @ptrFromInt(@as(usize, @bitCast(lParam)));
+            handleRemoteAiInputRequest(request);
             return 1;
         },
         else => return null,

@@ -1,7 +1,7 @@
 import type { StatusKind } from "../types";
 import { iconClose, iconKeyboard, iconMenu, themeToggleMarkup } from "../icons";
 import { bindThemeToggleButtons } from "../theme";
-import { currentTab, state, pushNotice } from "../state";
+import { activeSurfaceIdForInput, currentTab, state, pushNotice } from "../state";
 import {
   clearSessionKey,
   maskSessionKey,
@@ -247,15 +247,16 @@ function renderSurfaceStrip(): void {
 
 export function updateInputUi(): void {
   const connected = state.socket?.readyState === WebSocket.OPEN;
+  const writable = connected && Boolean(activeSurfaceIdForInput());
   const label = document.querySelector<HTMLSpanElement>("#control-state");
   const hint = document.querySelector<HTMLSpanElement>(".toolbar-hint");
 
   if (label) {
-    label.dataset.state = connected ? "granted" : "idle";
-    label.textContent = connected ? "Input enabled" : "Input ready";
+    label.dataset.state = writable ? "granted" : "idle";
+    label.textContent = connected ? (writable ? "Input enabled" : "No input target") : "Input ready";
   }
   if (hint) {
-    hint.textContent = connected ? "Click a panel, then type" : "Connect a session to begin";
+    hint.textContent = connected ? (writable ? "Click a panel, then type" : "Select a writable panel") : "Connect a session to begin";
   }
 
   updateSurfaceCursors();
