@@ -8,7 +8,7 @@ A Windows terminal written in Zig, powered by [libghostty-vt](https://github.com
 > [!NOTE]
 > This repository is a fork of [arya-s/phantty](https://github.com/arya-s/phantty),
 > with additional features layered on top: an embedded WebView2 browser panel,
-> a file explorer with Markdown/text preview, AI Chat sessions,
+> a file explorer with Markdown/text preview, AI Agent sessions,
 > an opt-in remote-access client,
 > Kitty Graphics image protocol support, and a configurable background image.
 
@@ -23,7 +23,7 @@ A Windows terminal written in Zig, powered by [libghostty-vt](https://github.com
 - **Splits and tabs** — vertical/horizontal splits, tab strip, focus-follows-mouse, equalize sizes
 - **File Explorer and previews** — browse local, WSL, and SSH files; preview Markdown/text without leaving the terminal
 - **Embedded browser panel** — open `http://` / `https://` URLs in a side WebView2 panel; SSH sessions tunnel loopback URLs automatically
-- **AI Chat sessions** — launch an OpenAI-compatible chat tab from saved profiles; DeepSeek is the default provider/model
+- **AI Agent sessions** — launch the default OpenAI-compatible Agent tab directly; configure the profile in Settings
 - **Kitty Graphics protocol** — display inline images and PDFs from remote shells via `imgcat.py` / `pdfcat.py`
 - **Custom post-processing shaders** — Ghostty-compatible GLSL post-processing (CRT, glitch, etc.); the wallpaper is rendered inside the same FBO so effects apply uniformly
 - **Opt-in remote access** — share a session key over a Cloudflare-hosted relay (disabled by default)
@@ -183,10 +183,13 @@ preview yet.
 
 ## AI Chat Sessions
 
-Open the session launcher with `Ctrl+Shift+T`, choose `AI Chat`, then create or
-select a saved AI profile. AI profiles are managed in the launcher the same way
-SSH profiles are: profile data is stored under `%APPDATA%\phantty\ai_profiles`,
-with fields hex encoded on disk.
+Open the session launcher with `Ctrl+Shift+T` and choose `AI Agent`. Phantty
+opens the default AI profile directly in Agent mode. If no AI profile exists
+yet, it opens the AI settings form first so you can configure the provider,
+model, API key, and agent mode before the first launch.
+
+Manage the default AI profile from Settings. Profile data is stored under
+`%APPDATA%\phantty\ai_profiles`, with fields hex encoded on disk.
 
 The first AI Chat implementation targets OpenAI-compatible chat completions.
 The built-in defaults are:

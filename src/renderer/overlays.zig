@@ -221,7 +221,7 @@ const CommandEntry = struct {
 };
 
 const COMMAND_ENTRIES = [_]CommandEntry{
-    .{ .title = "New Session", .detail = "Choose PowerShell, SSH, WSL, or AI Chat", .shortcut = "Ctrl+Shift+T", .action = .new_tab },
+    .{ .title = "New Session", .detail = "Choose PowerShell, SSH, WSL, or AI Agent", .shortcut = "Ctrl+Shift+T", .action = .new_tab },
     .{ .title = "Split Right", .detail = "Create a panel to the right", .shortcut = "Ctrl+Shift+O", .action = .split_right },
     .{ .title = "Split Down", .detail = "Create a panel below", .shortcut = "", .action = .split_down },
     .{ .title = "Split Left", .detail = "Create a panel to the left", .shortcut = "", .action = .split_left },
@@ -921,6 +921,11 @@ const AiListMode = enum {
     delete_select,
 };
 
+const AiFormMode = enum {
+    session_setup,
+    settings,
+};
+
 const SshProfile = struct {
     fields: [SSH_FIELD_COUNT][SSH_FIELD_MAX]u8 = undefined,
     lens: [SSH_FIELD_COUNT]usize = .{0} ** SSH_FIELD_COUNT,
@@ -970,6 +975,7 @@ threadlocal var g_ai_profiles_loaded: bool = false;
 threadlocal var g_ai_list_selected: usize = 0;
 threadlocal var g_ai_list_mode: AiListMode = .manage;
 threadlocal var g_ai_edit_index: usize = AI_PROFILE_NONE;
+threadlocal var g_ai_form_mode: AiFormMode = .session_setup;
 threadlocal var g_pending_ssh_password: [SSH_FIELD_MAX + 1]u8 = undefined;
 threadlocal var g_pending_ssh_password_len: usize = 0;
 threadlocal var g_pending_ssh_password_due_ms: i64 = 0;
@@ -1006,6 +1012,7 @@ pub fn sessionLauncherClose() void {
     g_ai_form_visible = false;
     g_ssh_list_mode = .manage;
     g_ai_list_mode = .manage;
+    g_ai_form_mode = .session_setup;
 }
 
 pub fn sessionLauncherInsertChar(codepoint: u21) void {
@@ -1041,7 +1048,7 @@ pub fn sessionLauncherPasteText(text: []const u8) bool {
 
 pub fn sessionLauncherHandleKey(ev: win32_backend.KeyEvent) void {
     if (ev.vk == win32_backend.VK_ESCAPE) {
-        sessionLauncherClose();
+        cancelAiFormOrLauncher();
         return;
     }
 
@@ -1117,7 +1124,7 @@ pub fn sessionLauncherExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_
         .powershell => openPowerShellSession(),
         .ssh => openSshList(),
         .wsl => openWslSession(),
-        .ai_chat => openAiList(),
+        .ai_chat => openDefaultAiSession(),
         .connect_selected => runSshListRow(g_ssh_list_selected),
         .new_ssh => openSshFormNew(),
         .edit_selected => openSshEditPicker(),
@@ -1150,7 +1157,7 @@ fn runSessionLauncherRow(row: usize) void {
         0 => openPowerShellSession(),
         1 => openSshList(),
         2 => openWslSession(),
-        3 => openAiList(),
+        3 => openDefaultAiSession(),
         else => {},
     }
 }
@@ -1546,6 +1553,24 @@ fn openAiList() void {
     g_ai_list_selected = @min(g_ai_list_selected, aiListRowCount() - 1);
 }
 
+fn openDefaultAiSession() void {
+    loadAiProfiles();
+    if (g_ai_profile_count == 0) {
+        openAiFormNewWithMode(.session_setup);
+        return;
+    }
+    connectAiProfile(0);
+}
+
+fn openAiSettings() void {
+    loadAiProfiles();
+    if (g_ai_profile_count == 0) {
+        openAiFormNewWithMode(.settings);
+        return;
+    }
+    openAiFormEditWithMode(0, .settings);
+}
+
 fn openAiEditPicker() void {
     openAiProfilePicker(.edit_select);
 }
@@ -1566,12 +1591,20 @@ fn openAiProfilePicker(mode: AiListMode) void {
 }
 
 fn openAiFormNew() void {
+    openAiFormNewWithMode(.session_setup);
+}
+
+fn openAiFormNewWithMode(mode: AiFormMode) void {
     clearAiForm();
     g_ai_edit_index = AI_PROFILE_NONE;
-    openAiForm();
+    openAiFormWithMode(mode);
 }
 
 fn openAiFormEdit(index: usize) void {
+    openAiFormEditWithMode(index, .session_setup);
+}
+
+fn openAiFormEditWithMode(index: usize, mode: AiFormMode) void {
     if (index >= g_ai_profile_count) return;
     clearAiForm();
     for (0..AI_FIELD_COUNT) |i| {
@@ -1579,15 +1612,17 @@ fn openAiFormEdit(index: usize) void {
         @memcpy(g_ai_bufs[i][0..g_ai_lens[i]], g_ai_profiles[index].fields[i][0..g_ai_lens[i]]);
     }
     g_ai_edit_index = index;
-    openAiForm();
+    openAiFormWithMode(mode);
 }
 
-fn openAiForm() void {
+fn openAiFormWithMode(mode: AiFormMode) void {
     g_ssh_list_visible = false;
     g_ssh_form_visible = false;
     g_ai_list_visible = false;
     g_session_launcher_visible = false;
+    g_settings_visible = false;
     g_ai_form_visible = true;
+    g_ai_form_mode = mode;
     g_ai_focus = @intFromEnum(AiField.name);
 }
 
@@ -1743,7 +1778,18 @@ fn connectAiFromForm() void {
 
 fn saveAiFormOnly() void {
     _ = saveAiFormProfile() orelse return;
-    openAiList();
+    switch (g_ai_form_mode) {
+        .settings => settingsPageOpen(),
+        .session_setup => sessionLauncherClose(),
+    }
+}
+
+fn cancelAiFormOrLauncher() void {
+    if (g_ai_form_visible and g_ai_form_mode == .settings) {
+        settingsPageOpen();
+        return;
+    }
+    sessionLauncherClose();
 }
 
 fn runAiFormFocusAction() void {
@@ -1752,9 +1798,9 @@ fn runAiFormFocusAction() void {
         return;
     }
     switch (g_ai_focus - AI_FIELD_COUNT) {
-        0 => connectAiFromForm(),
-        1 => saveAiFormOnly(),
-        else => openAiList(),
+        0 => if (g_ai_form_mode == .settings) saveAiFormOnly() else connectAiFromForm(),
+        1 => if (g_ai_form_mode == .settings) connectAiFromForm() else saveAiFormOnly(),
+        else => cancelAiFormOrLauncher(),
     }
 }
 
@@ -1984,7 +2030,12 @@ fn sessionTwoColumnWidth(left: []const u8, right: []const u8) f32 {
 }
 
 fn sessionLauncherTitle() []const u8 {
-    if (g_ai_form_visible) return "AI Chat";
+    if (g_ai_form_visible) {
+        return switch (g_ai_form_mode) {
+            .settings => "AI Settings",
+            .session_setup => "AI Agent",
+        };
+    }
     if (g_ai_list_visible) {
         return switch (g_ai_list_mode) {
             .manage => "AI Chats",
@@ -2004,7 +2055,12 @@ fn sessionLauncherTitle() []const u8 {
 }
 
 fn sessionLauncherHint() []const u8 {
-    if (g_ai_form_visible) return "Tab changes field, Enter connects";
+    if (g_ai_form_visible) {
+        return switch (g_ai_form_mode) {
+            .settings => "Tab changes field, Enter saves",
+            .session_setup => "Configure once, then Enter opens",
+        };
+    }
     if (g_ai_list_visible) {
         return switch (g_ai_list_mode) {
             .manage => "Enter opens, New/Edit/Delete manage",
@@ -2037,9 +2093,9 @@ fn sessionDesiredBoxWidth() f32 {
         desired = @max(desired, sessionTwoColumnWidth("Thinking", aiField(.thinking)));
         desired = @max(desired, sessionTwoColumnWidth("Effort", aiField(.reasoning_effort)));
         desired = @max(desired, sessionTwoColumnWidth("Stream", aiField(.stream)));
-        desired = @max(desired, sessionTwoColumnWidth("Save & Open", "chat"));
+        desired = @max(desired, sessionTwoColumnWidth("Save & Open", "agent"));
         desired = @max(desired, sessionTwoColumnWidth("Save", "profile"));
-        desired = @max(desired, sessionTwoColumnWidth("Cancel", "Esc"));
+        desired = @max(desired, sessionTwoColumnWidth("Back", "Settings"));
         return desired;
     }
 
@@ -2113,7 +2169,7 @@ fn sessionDesiredBoxWidth() f32 {
     desired = @max(desired, sessionTwoColumnWidth("PowerShell", "new terminal"));
     desired = @max(desired, sessionTwoColumnWidth("SSH", "connect server"));
     desired = @max(desired, sessionTwoColumnWidth("WSL", "wsl.exe ~"));
-    desired = @max(desired, sessionTwoColumnWidth("AI", defaultAiModeLabel()));
+    desired = @max(desired, sessionTwoColumnWidth("AI Agent", defaultAiModeLabel()));
     return desired;
 }
 
@@ -2378,7 +2434,7 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
         renderSessionRow(layout, window_height, 0, "PowerShell", "new terminal", g_session_launcher_selected == 0);
         renderSessionRow(layout, window_height, 1, "SSH", "connect server", g_session_launcher_selected == 1);
         renderSessionRow(layout, window_height, 2, "WSL", "wsl.exe ~", g_session_launcher_selected == 2);
-        renderSessionRow(layout, window_height, 3, "AI", defaultAiModeLabel(), g_session_launcher_selected == 3);
+        renderSessionRow(layout, window_height, 3, "AI Agent", defaultAiModeLabel(), g_session_launcher_selected == 3);
         return;
     }
 
@@ -2392,9 +2448,15 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
         renderAiSessionField(layout, window_height, @intFromEnum(AiField.reasoning_effort), "Effort", aiField(.reasoning_effort), false);
         renderAiSessionField(layout, window_height, @intFromEnum(AiField.stream), "Stream", aiField(.stream), false);
         renderAiSessionField(layout, window_height, @intFromEnum(AiField.agent), "Agent", aiField(.agent), false);
-        renderSessionRow(layout, window_height, AI_FIELD_COUNT, "Save & Open", "chat", g_ai_focus == AI_FIELD_COUNT);
-        renderSessionRow(layout, window_height, AI_FIELD_COUNT + 1, "Save", "profile", g_ai_focus == AI_FIELD_COUNT + 1);
-        renderSessionRow(layout, window_height, AI_FIELD_COUNT + 2, "Cancel", "Esc", g_ai_focus == AI_FIELD_COUNT + 2);
+        if (g_ai_form_mode == .settings) {
+            renderSessionRow(layout, window_height, AI_FIELD_COUNT, "Save", "settings", g_ai_focus == AI_FIELD_COUNT);
+            renderSessionRow(layout, window_height, AI_FIELD_COUNT + 1, "Save & Open", "agent", g_ai_focus == AI_FIELD_COUNT + 1);
+            renderSessionRow(layout, window_height, AI_FIELD_COUNT + 2, "Back", "Settings", g_ai_focus == AI_FIELD_COUNT + 2);
+        } else {
+            renderSessionRow(layout, window_height, AI_FIELD_COUNT, "Save & Open", "agent", g_ai_focus == AI_FIELD_COUNT);
+            renderSessionRow(layout, window_height, AI_FIELD_COUNT + 1, "Save", "profile", g_ai_focus == AI_FIELD_COUNT + 1);
+            renderSessionRow(layout, window_height, AI_FIELD_COUNT + 2, "Cancel", "Esc", g_ai_focus == AI_FIELD_COUNT + 2);
+        }
         return;
     }
 
@@ -2428,7 +2490,7 @@ const SETTINGS_THEME_PRESETS = [_]ThemePreset{
 
 const SETTINGS_THEME_ROW = 1;
 const SETTINGS_CONTROL_ROW_START = SETTINGS_THEME_ROW + 1;
-const SETTINGS_ROW_COUNT = SETTINGS_CONTROL_ROW_START + 6;
+const SETTINGS_ROW_COUNT = SETTINGS_CONTROL_ROW_START + 7;
 
 const SettingsAction = enum {
     font_size_minus,
@@ -2438,6 +2500,7 @@ const SettingsAction = enum {
     toggle_cursor_blink,
     toggle_focus_follows_mouse,
     cycle_shell,
+    open_ai_settings,
     open_raw_config,
     close,
 };
@@ -2465,6 +2528,13 @@ pub fn settingsPageVisible() bool {
 pub fn settingsPageOpen() void {
     g_settings_visible = true;
     g_settings_focus = SETTINGS_THEME_ROW;
+    g_session_launcher_visible = false;
+    g_ssh_list_visible = false;
+    g_ssh_form_visible = false;
+    g_ai_list_visible = false;
+    g_ai_form_visible = false;
+    g_ai_list_mode = .manage;
+    g_ai_form_mode = .session_setup;
     g_command_palette_visible = false;
     g_startup_shortcuts_visible = false;
     g_settings_cfg_dirty = true;
@@ -2574,8 +2644,9 @@ fn settingsHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, 
         1 => .toggle_cursor_blink,
         2 => .toggle_focus_follows_mouse,
         3 => .cycle_shell,
-        4 => .open_raw_config,
-        5 => .close,
+        4 => .open_ai_settings,
+        5 => .open_raw_config,
+        6 => .close,
         else => null,
     };
 }
@@ -2599,6 +2670,7 @@ fn executeSettingsAction(action: SettingsAction) void {
         .toggle_cursor_blink => Config.setConfigValue(allocator, "cursor-style-blink", if (cfg.@"cursor-style-blink") "false" else "true") catch {},
         .toggle_focus_follows_mouse => Config.setConfigValue(allocator, "focus-follows-mouse", if (cfg.@"focus-follows-mouse") "false" else "true") catch {},
         .cycle_shell => Config.setConfigValue(allocator, "shell", nextShell(cfg.shell)) catch {},
+        .open_ai_settings => openAiSettings(),
         .open_raw_config => Config.openConfigInEditor(allocator),
         .close => settingsPageClose(),
     }
@@ -2620,8 +2692,9 @@ fn runSettingsFocusPrimary() void {
         SETTINGS_CONTROL_ROW_START + 1 => executeSettingsAction(.toggle_cursor_blink),
         SETTINGS_CONTROL_ROW_START + 2 => executeSettingsAction(.toggle_focus_follows_mouse),
         SETTINGS_CONTROL_ROW_START + 3 => executeSettingsAction(.cycle_shell),
-        SETTINGS_CONTROL_ROW_START + 4 => executeSettingsAction(.open_raw_config),
-        SETTINGS_CONTROL_ROW_START + 5 => executeSettingsAction(.close),
+        SETTINGS_CONTROL_ROW_START + 4 => executeSettingsAction(.open_ai_settings),
+        SETTINGS_CONTROL_ROW_START + 5 => executeSettingsAction(.open_raw_config),
+        SETTINGS_CONTROL_ROW_START + 6 => executeSettingsAction(.close),
         else => {},
     }
 }
@@ -2824,8 +2897,12 @@ pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32
     renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 1, "Cursor blink", boolText(cfg.@"cursor-style-blink"), "Enter / Right", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 1);
     renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 2, "Focus follows mouse", boolText(cfg.@"focus-follows-mouse"), "Enter / Right", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 2);
     renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 3, "Shell for new tabs", cfg.shell, "cmd / powershell / pwsh / wsl", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 3);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 4, "Raw config file", "open", "Advanced editor", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 4);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 5, "Close settings", "Esc", "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 5);
+    loadAiProfiles();
+    const ai_profile_value = if (g_ai_profile_count > 0) aiProfileField(&g_ai_profiles[0], .name) else "configure";
+    const ai_profile_hint = if (g_ai_profile_count > 0) aiProfileModeLabel(&g_ai_profiles[0]) else "Required before first AI session";
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 4, "AI agent profile", ai_profile_value, ai_profile_hint, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 4);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 5, "Raw config file", "open", "Advanced editor", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 5);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 6, "Close settings", "Esc", "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 6);
 }
 
 // ============================================================================
