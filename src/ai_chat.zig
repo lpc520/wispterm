@@ -46,6 +46,10 @@ pub const Message = struct {
     role: Role,
     content: []u8,
     reasoning: ?[]u8 = null,
+    content_collapsed: bool = false,
+    content_auto_expand: bool = false,
+    reasoning_collapsed: bool = true,
+    reasoning_auto_expand: bool = false,
 };
 
 const RequestMessage = struct {
@@ -517,6 +521,27 @@ pub const Session = struct {
         return allocator.dupe(u8, self.messages.items[message_index].content);
     }
 
+    pub fn toggleToolMessageCollapsed(self: *Session, message_index: usize) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (message_index >= self.messages.items.len) return;
+        var msg = &self.messages.items[message_index];
+        if (msg.role != .tool) return;
+        msg.content_collapsed = !msg.content_collapsed;
+        msg.content_auto_expand = false;
+    }
+
+    pub fn toggleReasoningCollapsed(self: *Session, message_index: usize) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (message_index >= self.messages.items.len) return;
+        var msg = &self.messages.items[message_index];
+        const reasoning = msg.reasoning orelse return;
+        if (reasoning.len == 0) return;
+        msg.reasoning_collapsed = !msg.reasoning_collapsed;
+        msg.reasoning_auto_expand = false;
+    }
+
     pub fn approvalView(self: *Session) ?ApprovalView {
         self.approval_mutex.lock();
         defer self.approval_mutex.unlock();
@@ -682,6 +707,19 @@ pub const Session = struct {
     fn clearSelectionLocked(self: *Session) void {
         self.input_select_all = false;
         self.transcript_select_all = false;
+    }
+
+    fn collapseAutoExpandedDetailsLocked(self: *Session) void {
+        for (self.messages.items) |*msg| {
+            if (msg.role == .tool and msg.content_auto_expand) {
+                msg.content_collapsed = true;
+                msg.content_auto_expand = false;
+            }
+            if (msg.reasoning_auto_expand) {
+                msg.reasoning_collapsed = true;
+                msg.reasoning_auto_expand = false;
+            }
+        }
     }
 
     fn allocTranscriptClipboardTextLocked(self: *Session, allocator: std.mem.Allocator) ![]u8 {
@@ -879,6 +917,7 @@ fn finishStoppedRequest(session: *Session) void {
     session.request_inflight = false;
     session.request_stopping = false;
     session.stop_requested.store(false, .release);
+    session.collapseAutoExpandedDetailsLocked();
     session.setStatusLocked("Stopped");
 }
 
@@ -987,6 +1026,7 @@ fn appendAssistantResult(session: *Session, result: ApiResult) void {
 
     const content = allocator.dupe(u8, result.content) catch {
         session.request_inflight = false;
+        session.collapseAutoExpandedDetailsLocked();
         session.setStatusLocked("Out of memory");
         return;
     };
@@ -994,18 +1034,23 @@ fn appendAssistantResult(session: *Session, result: ApiResult) void {
     if (result.reasoning) |reasoning| {
         reasoning_copy = allocator.dupe(u8, reasoning) catch null;
     }
+    const reasoning_visible = if (reasoning_copy) |r| r.len > 0 else false;
     session.messages.append(allocator, .{
         .role = .assistant,
         .content = content,
         .reasoning = reasoning_copy,
+        .reasoning_collapsed = reasoning_visible,
+        .reasoning_auto_expand = false,
     }) catch {
         allocator.free(content);
         if (reasoning_copy) |r| allocator.free(r);
         session.request_inflight = false;
+        session.collapseAutoExpandedDetailsLocked();
         session.setStatusLocked("Out of memory");
         return;
     };
     session.request_inflight = false;
+    session.collapseAutoExpandedDetailsLocked();
     session.scroll_px = 1_000_000;
     session.setStatusLocked("Ready");
 }
@@ -1023,6 +1068,8 @@ fn appendProgressMessage(session: *Session, text: []const u8) !void {
         .role = .tool,
         .content = content,
         .reasoning = null,
+        .content_collapsed = false,
+        .content_auto_expand = true,
     });
     session.scroll_px = 1_000_000;
     session.setStatusLocked("Running tools...");
@@ -1042,6 +1089,8 @@ fn beginAssistantStream(session: *Session) !usize {
         .role = .assistant,
         .content = content,
         .reasoning = null,
+        .reasoning_collapsed = false,
+        .reasoning_auto_expand = true,
     });
     session.scroll_px = 1_000_000;
     session.setStatusLocked("Streaming...");
@@ -1103,6 +1152,7 @@ fn finishAssistantStream(session: *Session, message_idx: usize) void {
         }
     }
     session.request_inflight = false;
+    session.collapseAutoExpandedDetailsLocked();
     session.scroll_px = 1_000_000;
     session.setStatusLocked("Ready");
 }
@@ -2225,4 +2275,46 @@ test "ai chat stream response aggregates content and reasoning chunks" {
     try std.testing.expectEqualStrings("Hello!", result.content);
     try std.testing.expect(result.reasoning != null);
     try std.testing.expectEqualStrings("Thinking", result.reasoning.?);
+}
+
+test "ai chat collapse helper only closes auto-expanded details" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    defer {
+        for (session.messages.items) |msg| {
+            allocator.free(msg.content);
+            if (msg.reasoning) |reasoning| allocator.free(reasoning);
+        }
+        session.messages.deinit(allocator);
+    }
+
+    try session.messages.append(allocator, .{
+        .role = .tool,
+        .content = try allocator.dupe(u8, "running powershell_exec {\"command\":\"Get-ChildItem\"}"),
+        .content_collapsed = false,
+        .content_auto_expand = true,
+    });
+    try session.messages.append(allocator, .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "done"),
+        .reasoning = try allocator.dupe(u8, "inspect the filesystem first"),
+        .reasoning_collapsed = false,
+        .reasoning_auto_expand = true,
+    });
+    try session.messages.append(allocator, .{
+        .role = .tool,
+        .content = try allocator.dupe(u8, "manual"),
+        .content_collapsed = false,
+        .content_auto_expand = false,
+    });
+
+    session.mutex.lock();
+    session.collapseAutoExpandedDetailsLocked();
+    session.mutex.unlock();
+
+    try std.testing.expect(session.messages.items[0].content_collapsed);
+    try std.testing.expect(!session.messages.items[0].content_auto_expand);
+    try std.testing.expect(session.messages.items[1].reasoning_collapsed);
+    try std.testing.expect(!session.messages.items[1].reasoning_auto_expand);
+    try std.testing.expect(!session.messages.items[2].content_collapsed);
 }

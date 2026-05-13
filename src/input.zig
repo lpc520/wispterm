@@ -2377,7 +2377,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                     AppWindow.g_cells_valid = false;
                     return;
                 }
-                if (AppWindow.ai_chat_renderer.messageCopyHitTest(
+                if (AppWindow.ai_chat_renderer.interactionHitTest(
                     chat,
                     xpos,
                     ypos,
@@ -2386,8 +2386,20 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                     @floatCast(titlebarHeight()),
                     AppWindow.leftPanelsWidth(),
                     AppWindow.rightPanelsWidthForWindow(fb.width),
-                )) |message_index| {
-                    copyAiChatMessageToClipboard(chat, message_index);
+                )) |target| {
+                    switch (target) {
+                        .copy_message => |message_index| copyAiChatMessageToClipboard(chat, message_index),
+                        .toggle_tool => |message_index| {
+                            chat.toggleToolMessageCollapsed(message_index);
+                            AppWindow.g_force_rebuild = true;
+                            AppWindow.g_cells_valid = false;
+                        },
+                        .toggle_reasoning => |message_index| {
+                            chat.toggleReasoningCollapsed(message_index);
+                            AppWindow.g_force_rebuild = true;
+                            AppWindow.g_cells_valid = false;
+                        },
+                    }
                     return;
                 }
                 if (AppWindow.ai_chat_renderer.permissionChipHitTest(
