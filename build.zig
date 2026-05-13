@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     const optimize = b.standardOptimizeOption(.{});
+    const webview = b.option(bool, "webview", "Enable the WebView2 browser panel") orelse true;
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -17,6 +18,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const app_options = b.addOptions();
+    app_options.addOption(bool, "webview", webview);
+    exe_mod.addOptions("build_options", app_options);
 
     // Add ghostty-vt dependency with SIMD disabled for cross-compilation
     if (b.lazyDependency("ghostty", .{
@@ -114,10 +118,12 @@ pub fn build(b: *std.Build) void {
         .file = b.path("vendor/glad/src/gl.c"),
         .flags = &.{},
     });
-    exe_mod.addCSourceFile(.{
-        .file = b.path("src/webview2_bridge.c"),
-        .flags = &.{},
-    });
+    if (webview) {
+        exe_mod.addCSourceFile(.{
+            .file = b.path("src/webview2_bridge.c"),
+            .flags = &.{},
+        });
+    }
 
     // Link OpenGL on Windows
     exe_mod.linkSystemLibrary("opengl32", .{});
@@ -145,6 +151,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const test_options = b.addOptions();
+    test_options.addOption(bool, "webview", webview);
+    test_mod.addOptions("build_options", test_options);
 
     if (b.lazyDependency("ghostty", .{
         .target = target,

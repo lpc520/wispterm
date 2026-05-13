@@ -19,6 +19,7 @@ const Config = @import("config.zig");
 const Renderer = @import("renderer/Renderer.zig");
 const RendererThread = @import("RendererThread.zig");
 const remote = @import("remote_client.zig");
+const threading = @import("threading.zig");
 
 const windows = std.os.windows;
 
@@ -427,7 +428,7 @@ pub fn init(
     surface.io_thread_state = thread_state;
 
     // Spawn IO writer thread (xev event loop — handles resize, future messages)
-    surface.io_writer_thread = std.Thread.spawn(.{}, termio.Thread.threadMain, .{ thread_state, surface }) catch |err| {
+    surface.io_writer_thread = std.Thread.spawn(threading.surface_thread_spawn_config, termio.Thread.threadMain, .{ thread_state, surface }) catch |err| {
         std.debug.print("Failed to spawn IO writer thread: {}\n", .{err});
         thread_state.deinit();
         allocator.destroy(thread_state);
@@ -439,7 +440,7 @@ pub fn init(
     };
 
     // Spawn IO reader thread (blocking ReadFile loop)
-    surface.io_reader_thread = std.Thread.spawn(.{}, termio.ReadThread.threadMain, .{surface}) catch |err| {
+    surface.io_reader_thread = std.Thread.spawn(threading.surface_thread_spawn_config, termio.ReadThread.threadMain, .{surface}) catch |err| {
         std.debug.print("Failed to spawn IO reader thread: {}\n", .{err});
         // Stop writer thread since we can't proceed without reader
         thread_state.stop.notify() catch {};

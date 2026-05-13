@@ -11,6 +11,7 @@
 const std = @import("std");
 const Surface = @import("Surface.zig");
 const Renderer = @import("renderer/Renderer.zig");
+const threading = @import("threading.zig");
 
 const RendererThread = @This();
 
@@ -68,7 +69,7 @@ pub fn start(self: *RendererThread) !void {
     if (self.thread != null) return; // Already running
 
     self.should_stop.store(false, .release);
-    self.thread = try std.Thread.spawn(.{}, threadMain, .{self});
+    self.thread = try std.Thread.spawn(threading.surface_thread_spawn_config, threadMain, .{self});
 }
 
 /// Signal the thread to stop and wait for it to finish

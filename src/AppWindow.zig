@@ -9,6 +9,7 @@ const ghostty_vt = @import("ghostty-vt");
 const freetype = @import("freetype");
 const directwrite = @import("directwrite.zig");
 const Config = @import("config.zig");
+const build_options = @import("build_options");
 const Surface = @import("Surface.zig");
 const SplitTree = @import("split_tree.zig");
 const renderer = @import("renderer.zig");
@@ -35,7 +36,10 @@ pub const file_explorer = @import("file_explorer.zig");
 pub const file_explorer_renderer = @import("renderer/file_explorer_renderer.zig");
 pub const markdown_preview_panel = @import("markdown_preview_panel.zig");
 pub const markdown_preview_renderer = @import("renderer/markdown_preview_renderer.zig");
-pub const browser_panel = @import("browser_panel.zig");
+pub const browser_panel = if (build_options.webview)
+    @import("browser_panel.zig")
+else
+    @import("browser_panel_stub.zig");
 pub const ai_chat_renderer = @import("renderer/ai_chat_renderer.zig");
 
 const c = @cImport({
