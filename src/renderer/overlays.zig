@@ -105,8 +105,8 @@ threadlocal var g_remote_key_copy_rect: ?DebugLineRect = null;
 threadlocal var g_remote_key_copied_until_ms: i64 = 0;
 // Once the user has copied the active session key (via overlay click or the
 // command palette), the floating key overlay is dismissed for that key.
-// Stored as the raw key bytes so a new session (different key) re-shows it.
-threadlocal var g_remote_key_dismissed_for: ?[32]u8 = null;
+// Stored as a digest so fixed keys can be shorter or longer than 32 bytes.
+threadlocal var g_remote_key_dismissed_digest: ?[32]u8 = null;
 
 // Selection copy toast — flashes "Copied" briefly after right-click /
 // Ctrl+Shift+C so the user can see that the clipboard write succeeded.
@@ -3563,7 +3563,7 @@ pub fn renderDebugOverlay(window_width: f32) void {
             // session. The command palette is the only re-copy path afterwards.
             if (!dismissed or flash_active) {
                 g_remote_key_copy_rect = renderDebugLine(window_width, &overlay_y, margin, pad_h, pad_v, line_h, blk: {
-                    var buf: [128]u8 = undefined;
+                    var buf: [256]u8 = undefined;
                     if (flash_active) {
                         break :blk "Remote key copied";
                     }
@@ -3725,16 +3725,16 @@ pub fn renderCopyToast(window_width: f32, window_height: f32) void {
 }
 
 pub fn remoteKeyOverlayDismiss(key: []const u8) void {
-    if (key.len != 32) return;
-    var stored: [32]u8 = undefined;
-    @memcpy(stored[0..], key[0..32]);
-    g_remote_key_dismissed_for = stored;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(key, &digest, .{});
+    g_remote_key_dismissed_digest = digest;
 }
 
 fn isRemoteKeyDismissed(key: []const u8) bool {
-    const dismissed = g_remote_key_dismissed_for orelse return false;
-    if (key.len != 32) return false;
-    return std.mem.eql(u8, dismissed[0..], key[0..32]);
+    const dismissed = g_remote_key_dismissed_digest orelse return false;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(key, &digest, .{});
+    return std.mem.eql(u8, dismissed[0..], digest[0..]);
 }
 
 pub fn remoteKeyCopyHitTest(xpos: f64, ypos: f64, window_height: f32) bool {

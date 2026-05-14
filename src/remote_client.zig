@@ -84,6 +84,12 @@ extern "winhttp" fn WinHttpWebSocketClose(
 
 extern "winhttp" fn WinHttpCloseHandle(hInternet: HINTERNET) callconv(.winapi) windows.BOOL;
 
+extern "kernel32" fn CreateMutexW(
+    lpMutexAttributes: ?*anyopaque,
+    bInitialOwner: windows.BOOL,
+    lpName: windows.LPCWSTR,
+) callconv(.winapi) ?windows.HANDLE;
+
 const WINHTTP_ACCESS_TYPE_DEFAULT_PROXY: windows.DWORD = 0;
 const WINHTTP_FLAG_SECURE: windows.DWORD = 0x00800000;
 const WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET: windows.DWORD = 114;
@@ -98,6 +104,7 @@ const INPUT_BUF_SIZE = 16 * 1024;
 const HEARTBEAT_INTERVAL_MS: i64 = 25 * 1000;
 const PING_MESSAGE = "{\"type\":\"ping\"}";
 const PONG_MESSAGE = "{\"type\":\"pong\"}";
+const MAX_FIXED_SESSION_KEY_ATTEMPTS = 256;
 
 var next_surface_counter = std.atomic.Value(u64).init(1);
 
@@ -112,6 +119,7 @@ pub const State = enum(u8) {
 pub const Options = struct {
     server_url: []const u8,
     device_name: ?[]const u8 = null,
+    session_key: ?[]const u8 = null,
 };
 
 pub const SurfaceWriteFn = *const fn (ctx: *anyopaque, data: []const u8) void;
@@ -161,11 +169,23 @@ const Handles = struct {
     }
 };
 
+const SessionKeyReservation = struct {
+    handle: ?windows.HANDLE = null,
+
+    fn deinit(self: *SessionKeyReservation) void {
+        if (self.handle) |handle| {
+            windows.CloseHandle(handle);
+            self.handle = null;
+        }
+    }
+};
+
 pub const Client = struct {
     allocator: std.mem.Allocator,
     endpoint: Endpoint,
     device_name: ?[]u8,
-    session_key: [32]u8,
+    session_key: []u8,
+    session_key_reservation: SessionKeyReservation = .{},
 
     mutex: std.Thread.Mutex = .{},
     condition: std.Thread.Condition = .{},
@@ -180,10 +200,13 @@ pub const Client = struct {
         const client = try allocator.create(Client);
         errdefer allocator.destroy(client);
 
-        var key: [32]u8 = undefined;
-        fillSessionKey(&key);
+        var session_key_reservation: SessionKeyReservation = .{};
+        errdefer session_key_reservation.deinit();
 
-        var endpoint = try buildEndpoint(allocator, options.server_url, &key, options.device_name);
+        const key = try sessionKeyAlloc(allocator, options.session_key, &session_key_reservation);
+        errdefer allocator.free(key);
+
+        var endpoint = try buildEndpoint(allocator, options.server_url, key, options.device_name);
         errdefer endpoint.deinit(allocator);
 
         const device_name = if (options.device_name) |name| try allocator.dupe(u8, name) else null;
@@ -194,6 +217,7 @@ pub const Client = struct {
             .endpoint = endpoint,
             .device_name = device_name,
             .session_key = key,
+            .session_key_reservation = session_key_reservation,
         };
 
         client.thread = try std.Thread.spawn(.{}, threadMain, .{client});
@@ -219,6 +243,8 @@ pub const Client = struct {
         if (self.last_layout) |layout| self.allocator.free(layout);
         self.endpoint.deinit(self.allocator);
         if (self.device_name) |name| self.allocator.free(name);
+        self.session_key_reservation.deinit();
+        self.allocator.free(self.session_key);
     }
 
     pub fn destroy(self: *Client) void {
@@ -228,7 +254,7 @@ pub const Client = struct {
     }
 
     pub fn sessionKey(self: *const Client) []const u8 {
-        return self.session_key[0..];
+        return self.session_key;
     }
 
     pub fn loadState(self: *const Client) State {
@@ -517,6 +543,70 @@ fn fillSessionKey(out: *[32]u8) void {
     }
 }
 
+fn sessionKeyAlloc(allocator: std.mem.Allocator, configured_key: ?[]const u8, reservation: *SessionKeyReservation) ![]u8 {
+    if (configured_key) |raw| {
+        const base = std.mem.trim(u8, raw, " \t\r\n");
+        if (base.len > 0) {
+            return try reserveFixedSessionKey(allocator, base, reservation);
+        }
+    }
+
+    var generated: [32]u8 = undefined;
+    fillSessionKey(&generated);
+    return allocator.dupe(u8, generated[0..]);
+}
+
+fn reserveFixedSessionKey(allocator: std.mem.Allocator, base: []const u8, reservation: *SessionKeyReservation) ![]u8 {
+    for (0..MAX_FIXED_SESSION_KEY_ATTEMPTS) |idx| {
+        const candidate = try fixedSessionKeyCandidate(allocator, base, idx);
+        errdefer allocator.free(candidate);
+
+        if (try reserveSessionKeyMutex(allocator, candidate)) |handle| {
+            reservation.handle = handle;
+            return candidate;
+        }
+
+        allocator.free(candidate);
+    }
+
+    return error.NoAvailableFixedSessionKey;
+}
+
+fn fixedSessionKeyCandidate(allocator: std.mem.Allocator, base: []const u8, index: usize) ![]u8 {
+    if (index == 0) return allocator.dupe(u8, base);
+    return std.fmt.allocPrint(allocator, "{s}_{d}", .{ base, index });
+}
+
+fn reserveSessionKeyMutex(allocator: std.mem.Allocator, session_key: []const u8) !?windows.HANDLE {
+    const name_w = try sessionKeyMutexName(allocator, session_key);
+    defer allocator.free(name_w);
+
+    const handle = CreateMutexW(null, 0, name_w.ptr) orelse return error.CreateMutexFailed;
+    if (windows.kernel32.GetLastError() == .ALREADY_EXISTS) {
+        windows.CloseHandle(handle);
+        return null;
+    }
+
+    return handle;
+}
+
+fn sessionKeyMutexName(allocator: std.mem.Allocator, session_key: []const u8) ![:0]u16 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(session_key, &digest, .{});
+
+    const prefix = "Local\\PhanttyRemoteSessionKey-";
+    var ascii: [prefix.len + digest.len * 2]u8 = undefined;
+    @memcpy(ascii[0..prefix.len], prefix);
+
+    const hex = "0123456789abcdef";
+    for (digest, 0..) |byte, i| {
+        ascii[prefix.len + i * 2] = hex[byte >> 4];
+        ascii[prefix.len + i * 2 + 1] = hex[byte & 0x0f];
+    }
+
+    return std.unicode.utf8ToUtf16LeAllocZ(allocator, ascii[0..]);
+}
+
 pub fn nextSurfaceId(out: *[16]u8) void {
     const value = next_surface_counter.fetchAdd(1, .monotonic);
     const hex = "0123456789abcdef";
@@ -699,6 +789,22 @@ test "buildEndpoint maps relay URL to Phantty websocket route" {
     try std.testing.expectEqualStrings("remote.example.com", endpoint.host);
     try std.testing.expectEqual(@as(u16, 443), endpoint.port);
     try std.testing.expectEqualStrings("/ws/phantty?session=0123456789abcdef0123456789abcdef&device=workstation", endpoint.object_name);
+}
+
+test "fixed session key candidates append numeric suffixes after first instance" {
+    const allocator = std.testing.allocator;
+
+    const first = try fixedSessionKeyCandidate(allocator, "fixed-password", 0);
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings("fixed-password", first);
+
+    const second = try fixedSessionKeyCandidate(allocator, "fixed-password", 1);
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings("fixed-password_1", second);
+
+    const fourth = try fixedSessionKeyCandidate(allocator, "fixed-password", 3);
+    defer allocator.free(fourth);
+    try std.testing.expectEqualStrings("fixed-password_3", fourth);
 }
 
 test "buildOutputMessage preserves PTY bytes as hex" {

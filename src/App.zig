@@ -67,6 +67,7 @@ remote_enabled: bool,
 remote_server_url: ?[]const u8,
 remote_server_fingerprint: ?[]const u8,
 remote_device_name: ?[]const u8,
+remote_session_key: ?[]const u8,
 remote_client: ?*remote.Client,
 
 // AI agent config
@@ -125,7 +126,9 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
     errdefer freeOptStr(allocator, remote_server_fingerprint);
     const remote_device_name = try dupeOptStr(allocator, cfg.@"remote-device-name");
     errdefer freeOptStr(allocator, remote_device_name);
-    const remote_client_ptr = startRemoteClient(allocator, cfg.@"remote-enabled", remote_server_url, remote_device_name);
+    const remote_session_key = try dupeOptStr(allocator, cfg.@"remote-session-key");
+    errdefer freeOptStr(allocator, remote_session_key);
+    const remote_client_ptr = startRemoteClient(allocator, cfg.@"remote-enabled", remote_server_url, remote_device_name, remote_session_key);
     errdefer if (remote_client_ptr) |client| client.destroy();
     const background_image = try dupeOptStr(allocator, cfg.@"background-image");
     errdefer freeOptStr(allocator, background_image);
@@ -162,6 +165,7 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
         .remote_server_url = remote_server_url,
         .remote_server_fingerprint = remote_server_fingerprint,
         .remote_device_name = remote_device_name,
+        .remote_session_key = remote_session_key,
         .remote_client = remote_client_ptr,
         .ai_agent_enabled = cfg.@"ai-agent-enabled",
         .ai_agent_permission = cfg.@"ai-agent-permission",
@@ -213,6 +217,7 @@ fn startRemoteClient(
     enabled: bool,
     server_url: ?[]const u8,
     device_name: ?[]const u8,
+    session_key: ?[]const u8,
 ) ?*remote.Client {
     if (!enabled) return null;
     const raw_url = server_url orelse return null;
@@ -222,6 +227,7 @@ fn startRemoteClient(
     return remote.Client.create(allocator, .{
         .server_url = url,
         .device_name = device_name,
+        .session_key = session_key,
     }) catch |err| {
         std.debug.print("Remote client disabled: {}\n", .{err});
         return null;
@@ -292,6 +298,7 @@ pub fn updateConfig(self: *App, cfg: *const Config) void {
     self.replaceOptStr(&self.remote_server_url, cfg.@"remote-server-url");
     self.replaceOptStr(&self.remote_server_fingerprint, cfg.@"remote-server-fingerprint");
     self.replaceOptStr(&self.remote_device_name, cfg.@"remote-device-name");
+    self.replaceOptStr(&self.remote_session_key, cfg.@"remote-session-key");
     self.replaceOptStr(&self.title, cfg.title);
     self.ai_agent_enabled = cfg.@"ai-agent-enabled";
     self.ai_agent_permission = cfg.@"ai-agent-permission";
@@ -504,6 +511,7 @@ pub fn deinit(self: *App) void {
     freeOptStr(self.allocator, self.remote_server_url);
     freeOptStr(self.allocator, self.remote_server_fingerprint);
     freeOptStr(self.allocator, self.remote_device_name);
+    freeOptStr(self.allocator, self.remote_session_key);
     freeOptStr(self.allocator, self.background_image);
 
     self.windows.deinit(self.allocator);

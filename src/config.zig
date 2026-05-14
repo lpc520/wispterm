@@ -273,6 +273,10 @@ shell: []const u8 = "cmd",
 /// Optional friendly name shown on the remote access page.
 @"remote-device-name": ?[]const u8 = null,
 
+/// Optional fixed remote session key base. When set, the first local Phantty
+/// instance uses it directly and later local instances append _1, _2, ...
+@"remote-session-key": ?[]const u8 = null,
+
 /// Show a debug FPS overlay in the bottom-right corner.
 @"phantty-debug-fps": bool = false,
 @"phantty-debug-draw-calls": bool = false,
@@ -616,6 +620,8 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
         self.@"remote-server-fingerprint" = self.dupeString(allocator, value) orelse return;
     } else if (std.mem.eql(u8, key, "remote-device-name")) {
         self.@"remote-device-name" = self.dupeString(allocator, value) orelse return;
+    } else if (std.mem.eql(u8, key, "remote-session-key")) {
+        self.@"remote-session-key" = self.dupeString(allocator, value) orelse return;
     } else if (std.mem.eql(u8, key, "phantty-debug-fps")) {
         if (std.mem.eql(u8, value, "true")) {
             self.@"phantty-debug-fps" = true;
@@ -976,6 +982,7 @@ pub fn printHelp() void {
         \\  --remote-server-url <url>    Cloudflare relay URL
         \\  --remote-server-fingerprint <fp> Expected relay fingerprint
         \\  --remote-device-name <name>  Friendly device name for remote access
+        \\  --remote-session-key <key>   Fixed remote key base; later instances append _1, _2
         \\
         \\Color Options (override theme):
         \\  --background <color>         Background color (#RRGGBB or RRGGBB)
@@ -1259,11 +1266,12 @@ const default_config_template =
     \\# shell = cmd
     \\
     \\# Remote access foundation (disabled by default)
-    \\# The web admin password and device private key must not be stored here.
+    \\# remote-session-key is the browser pairing key, not the web admin login password.
     \\# remote-enabled = false
     \\# remote-server-url =
     \\# remote-server-fingerprint =
     \\# remote-device-name =
+    \\# remote-session-key =
     \\
     \\# Scrollback buffer size in bytes (default: 10MB)
     \\# scrollback-limit = 10000000
@@ -1358,4 +1366,15 @@ test "config: ai agent options parse" {
     try std.testing.expectEqual(ai_chat.AgentPermission.full, cfg.@"ai-agent-permission");
     try std.testing.expectEqual(@as(u32, 120000), cfg.@"ai-agent-command-timeout-ms");
     try std.testing.expectEqual(@as(u32, 4096), cfg.@"ai-agent-output-limit");
+}
+
+test "config: remote session key parses" {
+    const allocator = std.testing.allocator;
+    var cfg: Config = .{};
+    defer cfg.deinit(allocator);
+
+    try std.testing.expect(cfg.@"remote-session-key" == null);
+
+    cfg.applyKeyValue(allocator, "remote-session-key", "fixed-password", ".");
+    try std.testing.expectEqualStrings("fixed-password", cfg.@"remote-session-key".?);
 }

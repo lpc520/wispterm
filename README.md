@@ -303,6 +303,7 @@ remote-enabled = false
 remote-server-url = https://remote.example.com
 remote-server-fingerprint = sha256:...
 remote-device-name = Workstation
+remote-session-key = Workstation
 ```
 
 ### Available keys
@@ -329,6 +330,7 @@ remote-device-name = Workstation
 | `remote-server-url`         | *(none)*   | Cloudflare relay URL, for example `https://remote.example.com`                                                                                                                                                          |
 | `remote-server-fingerprint` | *(none)*   | Expected relay fingerprint for server identity pinning                                                                                                                                                                  |
 | `remote-device-name`        | *(none)*   | Friendly device name sent with the Phantty WebSocket pairing                                                                                                                                                            |
+| `remote-session-key`        | *(none)*   | Fixed remote session key base. The first local Phantty instance uses it directly; later concurrently running instances use `_1`, `_2`, `_3`, and so on.                                                                  |
 
 
 When `remote-enabled = true`, Phantty creates one RemoteClient for the running
@@ -336,6 +338,13 @@ instance. All tabs and splits publish PTY output through that shared client, and
 the generated session key is printed in the debug console and shown in the
 in-window remote status pill. Click the remote status pill to copy the active
 session key, or use `Copy Remote Key` from the command center.
+
+By default the session key is random for every process. Set
+`remote-session-key = mypass` to use predictable keys for multiple concurrent
+local Phantty instances: the first process gets `mypass`, the next gets
+`mypass_1`, then `mypass_2`, `mypass_3`, and so on. This only chooses the relay
+session key that the remote browser enters; it is separate from the web admin
+login password configured on the relay server.
 
 ## FAQ
 
