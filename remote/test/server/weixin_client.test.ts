@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
-import { WeixinClient } from "../../src/server/bridge/weixin/client";
+import { WeixinClient } from "../../src/server/bridge/weixin/client.js";
 
-async function withServer(handler: Parameters<typeof createServer>[0]) {
+type ServerHandler = (req: IncomingMessage, res: ServerResponse) => void;
+
+async function withServer(handler: ServerHandler) {
   const server = createServer(handler);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -58,11 +60,13 @@ test("WeixinClient posts getupdates with auth headers", async () => {
 });
 
 test("WeixinClient sends text messages through sendmessage", async () => {
+  let bodyText = "";
   let body: unknown = null;
   const server = await withServer((req, res) => {
     assert.equal(req.url, "/ilink/bot/sendmessage");
-    req.on("data", (chunk) => { body = JSON.parse(String(chunk)); });
+    req.on("data", (chunk) => { bodyText += chunk; });
     req.on("end", () => {
+      body = JSON.parse(bodyText);
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ ret: 0 }));
     });
@@ -71,6 +75,70 @@ test("WeixinClient sends text messages through sendmessage", async () => {
     const client = new WeixinClient({ baseUrl: server.baseUrl, token: "secret" });
     await client.sendTextMessage("user@im.wechat", "hello", "ctx");
     assert.equal((body as { msg: { to_user_id: string } }).msg.to_user_id, "user@im.wechat");
+  } finally {
+    await server.close();
+  }
+});
+
+test("WeixinClient treats missing sendmessage ret as success", async () => {
+  let body: unknown = null;
+  let bodyText = "";
+  const server = await withServer((req, res) => {
+    assert.equal(req.url, "/ilink/bot/sendmessage");
+    req.on("data", (chunk) => { bodyText += chunk; });
+    req.on("end", () => {
+      body = JSON.parse(bodyText);
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({}));
+    });
+  });
+  try {
+    const client = new WeixinClient({ baseUrl: server.baseUrl, token: "secret" });
+    await client.sendTextMessage("user@im.wechat", "hello", "ctx");
+    assert.equal((body as { msg: { to_user_id: string } }).msg.to_user_id, "user@im.wechat");
+  } finally {
+    await server.close();
+  }
+});
+
+test("WeixinClient throws for explicit nonzero sendmessage ret", async () => {
+  const server = await withServer((req, res) => {
+    assert.equal(req.url, "/ilink/bot/sendmessage");
+    req.on("data", () => {});
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ret: 42, errcode: 7, message: "denied" }));
+    });
+  });
+  try {
+    const client = new WeixinClient({ baseUrl: server.baseUrl, token: "secret" });
+    await assert.rejects(
+      () => client.sendTextMessage("user@im.wechat", "hello", "ctx"),
+      /sendmessage ret=42 errcode=7: denied/,
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("WeixinClient polls QR status with encoded qrcode and app client version header", async () => {
+  let seenUrl = "";
+  let appClientVersion = "";
+  let authType = "";
+  const server = await withServer((req, res) => {
+    seenUrl = req.url ?? "";
+    appClientVersion = String(req.headers["ilink-app-clientversion"] ?? "");
+    authType = String(req.headers.authorizationtype ?? "");
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ ret: 0, status: "wait" }));
+  });
+  try {
+    const client = new WeixinClient({ baseUrl: server.baseUrl, token: "secret" });
+    const status = await client.getQRCodeStatus("qr session");
+    assert.deepEqual(status, { ret: 0, status: "wait" });
+    assert.equal(seenUrl, "/ilink/bot/get_qrcode_status?qrcode=qr%20session");
+    assert.equal(appClientVersion, "1");
+    assert.equal(authType, "ilink_bot_token");
   } finally {
     await server.close();
   }

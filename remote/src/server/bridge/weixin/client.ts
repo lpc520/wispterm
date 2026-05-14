@@ -38,7 +38,7 @@ export class WeixinClient {
 
   async getQRCodeStatus(qrcode: string): Promise<WeixinQRCodeStatusResponse> {
     const url = `${this.baseUrl}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`;
-    const res = await this.fetchImpl(url, { headers: this.headers() });
+    const res = await this.fetchImpl(url, { headers: this.headers({ "iLink-App-ClientVersion": "1" }) });
     return this.decodeJson<WeixinQRCodeStatusResponse>(res, "get_qrcode_status");
   }
 
@@ -61,7 +61,9 @@ export class WeixinClient {
       },
       base_info: { channel_version: WEIXIN_CHANNEL_VERSION },
     });
-    if (result.ret !== 0) throw new Error(`sendmessage ret=${result.ret} errcode=${result.errcode ?? 0}: ${result.message ?? ""}`);
+    if (result.ret !== undefined && result.ret !== 0) {
+      throw new Error(`sendmessage ret=${result.ret} errcode=${result.errcode ?? 0}: ${result.message ?? ""}`);
+    }
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
@@ -73,11 +75,12 @@ export class WeixinClient {
     return this.decodeJson<T>(res, path);
   }
 
-  private headers(): Record<string, string> {
+  private headers(extraHeaders: Record<string, string> = {}): Record<string, string> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       AuthorizationType: "ilink_bot_token",
       "X-WECHAT-UIN": Buffer.from(String(Math.floor(Math.random() * 2 ** 32))).toString("base64"),
+      ...extraHeaders,
     };
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
     return headers;

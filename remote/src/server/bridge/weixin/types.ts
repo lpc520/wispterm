@@ -48,7 +48,7 @@ export type WeixinGetUpdatesResponse = {
 };
 
 export type WeixinSendMessageResponse = {
-  ret: number;
+  ret?: number;
   errcode?: number;
   message?: string;
 };
