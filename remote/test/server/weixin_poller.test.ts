@@ -425,13 +425,122 @@ test("WeixinPoller ignores stale session-expired scheduling after restart", asyn
   assert.deepEqual(scheduler.delays(), [0, 0]);
 });
 
+test("WeixinPoller starts new generation poll while old generation is still running", async () => {
+  let getUpdatesCalls = 0;
+  let releaseOldUpdates!: () => void;
+  let oldUpdatesStartedResolve!: () => void;
+  const oldUpdatesStarted = new Promise<void>((resolve) => {
+    oldUpdatesStartedResolve = resolve;
+  });
+  const scheduler = fakeManualScheduler();
+  const poller = new WeixinPoller(
+    fakeStore(),
+    () => [],
+    { warn: () => {} },
+    {
+      createClient: () => ({
+        getUpdates: async () => {
+          getUpdatesCalls += 1;
+          if (getUpdatesCalls === 1) {
+            oldUpdatesStartedResolve();
+            await new Promise<void>((resolve) => {
+              releaseOldUpdates = resolve;
+            });
+          }
+          return { ret: 0, msgs: [] };
+        },
+        sendTextMessage: async () => {},
+      }),
+      scheduler,
+    },
+  );
+
+  try {
+    poller.start();
+    scheduler.fire(0);
+    await oldUpdatesStarted;
+    poller.stop();
+    poller.start();
+    scheduler.fire(1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(getUpdatesCalls, 2);
+    assert.deepEqual(scheduler.delays(), [0, 0, 1000]);
+  } finally {
+    releaseOldUpdates?.();
+  }
+});
+
+test("WeixinPoller does not save stale route target session after restart", async () => {
+  const savedTargets: string[] = [];
+  let loadSettingsCalls = 0;
+  let releaseStaleLoad!: () => void;
+  let staleLoadStartedResolve!: () => void;
+  const staleLoadStarted = new Promise<void>((resolve) => {
+    staleLoadStartedResolve = resolve;
+  });
+  const scheduler = fakeManualScheduler();
+  const poller = new WeixinPoller(
+    fakeStore({
+      loadSettings: async () => {
+        loadSettingsCalls += 1;
+        if (loadSettingsCalls === 2) {
+          staleLoadStartedResolve();
+          await new Promise<void>((resolve) => {
+            releaseStaleLoad = resolve;
+          });
+        }
+        return { enabled: true, target_session: "alpha", reply_timeout_ms: 10000 };
+      },
+      saveSettings: async (settings) => {
+        savedTargets.push(settings.target_session);
+      },
+    }),
+    () => [{
+      key: "beta",
+      session: {
+        isPhanttyConnected: () => true,
+        findAiChatSurface: () => ({ id: "ai", title: "AI", kind: "ai_chat" }),
+        sendInput: () => true,
+      },
+    }] as never,
+    { warn: () => {} },
+    {
+      createClient: () => ({
+        getUpdates: async () => ({
+          ret: 0,
+          msgs: [{
+            from_user_id: "user@im.wechat",
+            to_user_id: "bot@im.bot",
+            context_token: "ctx",
+            item_list: [{ type: 1, text_item: { text: "/use beta" } }],
+          }],
+        }),
+        sendTextMessage: async () => {},
+      }),
+      scheduler,
+    },
+  );
+
+  poller.start();
+  scheduler.fire(0);
+  await staleLoadStarted;
+  poller.stop();
+  poller.start();
+  releaseStaleLoad();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(savedTargets, []);
+});
+
 function fakeStore(overrides: {
+  loadSettings?: () => Promise<WeixinSettings>;
   saveSettings?: (settings: WeixinSettings) => Promise<void>;
   saveSyncBuf?: (value: string) => Promise<void>;
 } = {}) {
   const settings: WeixinSettings = { enabled: true, target_session: "alpha", reply_timeout_ms: 10000 };
   return {
-    loadSettings: async () => settings,
+    loadSettings: overrides.loadSettings ?? (async () => settings),
     loadBinding: async () => binding,
     loadSyncBuf: async () => "current-cursor",
     saveSettings: overrides.saveSettings ?? (async () => {}),

@@ -79,7 +79,7 @@ export async function processWeixinUpdates(input: ProcessUpdatesInput): Promise<
 
 export class WeixinPoller {
   private timer: unknown = null;
-  private running = false;
+  private runningGeneration: number | null = null;
   private active = false;
   private generation = 0;
   private readonly createClient: (binding: WeixinBindingRecord) => WeixinPollerClient;
@@ -133,9 +133,9 @@ export class WeixinPoller {
 
   private async tick(): Promise<void> {
     if (!this.active) return;
-    if (this.running) return this.schedule(1000);
     const generation = this.generation;
-    this.running = true;
+    if (this.runningGeneration === generation) return this.schedule(1000);
+    this.runningGeneration = generation;
     try {
       const settings = await this.store.loadSettings();
       if (this.isStale(generation)) return;
@@ -165,7 +165,10 @@ export class WeixinPoller {
           settings,
           sessions: this.sessions(),
           saveTargetSession: async (key) => {
-            await this.store.saveSettings({ ...(await this.store.loadSettings()), target_session: key });
+            if (!shouldContinue()) return;
+            const currentSettings = await this.store.loadSettings();
+            if (!shouldContinue()) return;
+            await this.store.saveSettings({ ...currentSettings, target_session: key });
           },
         }),
         sendText: (to, text, contextToken) => client.sendTextMessage(to, text, contextToken),
@@ -179,7 +182,7 @@ export class WeixinPoller {
       this.logger.warn("weixin poll failed", err);
       return this.schedule(5000);
     } finally {
-      this.running = false;
+      if (this.runningGeneration === generation) this.runningGeneration = null;
     }
   }
 
