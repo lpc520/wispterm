@@ -103,7 +103,7 @@ function helpText(): string {
   return [
     "Phantty Weixin Bridge 命令：",
     "/status 查看状态",
-    "/sessions 查看在线 Remote session",
+    "/sessions 查看 Remote session",
     "/use <session> 选择目标 session",
     "/ai <内容> 发送给 AI Agent",
     "/term <命令> 显式发送到终端并回车",

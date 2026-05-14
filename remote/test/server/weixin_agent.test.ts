@@ -110,6 +110,16 @@ test("/sessions lists all remote sessions without claiming only online sessions"
   assert.match(reply.text, /beta\*\*\*\* offline/);
 });
 
+test("/help describes sessions with neutral wording", async () => {
+  const reply = await routeWeixinText({
+    text: "/help",
+    settings: { enabled: true, target_session: "", reply_timeout_ms: 10000 },
+    sessions: [],
+  });
+  assert.match(reply.text, /\/sessions 查看 Remote session/);
+  assert.doesNotMatch(reply.text, /\/sessions 查看在线 Remote session/);
+});
+
 test("unknown slash command returns help before resolving a target session", async () => {
   const reply = await routeWeixinText({
     text: "/bogus",
