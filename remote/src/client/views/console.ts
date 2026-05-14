@@ -198,7 +198,7 @@ export function renderRemoteTabs(): void {
     .map((tab) => {
       const active = tab.index === state.selectedTabIndex ? " active" : "";
       const title = escapeText(tab.title || `Tab ${tab.index + 1}`);
-      return `<button type="button" class="tab-chip${active}" data-tab-index="${tab.index}">${title}<span>${tab.surfaces.length}</span></button>`;
+      return `<button type="button" class="tab-chip${active}" data-tab-index="${tab.index}"><span class="tab-chip-label">${title}</span><span class="tab-chip-count">${tab.surfaces.length}</span></button>`;
     })
     .join("");
 
