@@ -19,7 +19,10 @@ export async function routeWeixinText(input: WeixinRouteInput): Promise<WeixinRo
   if (cmd === "/help") return { text: helpText() };
   if (cmd === "/sessions") return { text: sessionsText(input.sessions) };
   if (cmd === "/status") return { text: statusText(input.settings, input.sessions) };
-  if (cmd === "/use") return useSession(arg, input);
+  if (cmd === "/use") return useSession(arg, input, activeSessions);
+  if (cmd && cmd !== "/term" && cmd !== "/keys" && cmd !== "/ai") {
+    return { text: `未知命令：${cmd}\n\n${helpText()}` };
+  }
 
   const target = resolveTargetSession(input.settings, activeSessions);
   if (!target.session) return { text: target.error };
@@ -27,7 +30,6 @@ export async function routeWeixinText(input: WeixinRouteInput): Promise<WeixinRo
   if (cmd === "/term") return sendTerminal(target.session, arg, true);
   if (cmd === "/keys") return sendTerminal(target.session, arg, false);
   if (cmd === "/ai") return sendAi(target.session, arg);
-  if (cmd.startsWith("/")) return { text: `未知命令：${cmd}\n\n${helpText()}` };
   return sendAi(target.session, text);
 }
 
@@ -56,10 +58,10 @@ function resolveTargetSession(settings: WeixinSettings, sessions: RoutedSession[
   return { session: null, error: `当前有多个在线 session：\n${sessionsText(sessions)}\n\n请先发送 \`/use <session>\` 选择目标。` };
 }
 
-async function useSession(arg: string, input: WeixinRouteInput): Promise<WeixinRouteReply> {
+async function useSession(arg: string, input: WeixinRouteInput, activeSessions: RoutedSession[]): Promise<WeixinRouteReply> {
   const key = arg.trim();
   if (!key) return { text: sessionsText(input.sessions) + "\n\n发送 `/use <完整 session>` 选择目标。" };
-  const matched = input.sessions.find((candidate) => candidate.key === key);
+  const matched = activeSessions.find((candidate) => candidate.key === key);
   if (!matched) return { text: `未找到在线 session：${maskSessionKey(key)}。` };
   await input.saveTargetSession?.(key);
   return { text: `已选择 Remote session：${maskSessionKey(key)}` };

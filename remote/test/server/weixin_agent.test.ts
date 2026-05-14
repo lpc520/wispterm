@@ -22,6 +22,12 @@ function sessionWithLayout(): RemoteSession {
   return session;
 }
 
+function offlineSessionWithLayout(): RemoteSession {
+  const session = sessionWithLayout();
+  session.phantty = null;
+  return session;
+}
+
 let sent: unknown[] = [];
 
 test("maskSessionKey keeps only a short prefix", () => {
@@ -62,4 +68,31 @@ test("router asks user to choose session when multiple sessions exist and no tar
     ],
   });
   assert.match(reply.text, /请先发送 `\/use/);
+});
+
+test("unknown slash command returns help before resolving a target session", async () => {
+  const reply = await routeWeixinText({
+    text: "/bogus",
+    settings: { enabled: true, target_session: "", reply_timeout_ms: 10000 },
+    sessions: [
+      { key: "alpha-secret", session: sessionWithLayout() },
+      { key: "beta-secret", session: sessionWithLayout() },
+    ],
+  });
+  assert.match(reply.text, /未知命令：\/bogus/);
+  assert.match(reply.text, /Phantty Weixin Bridge 命令/);
+});
+
+test("/use refuses offline sessions and does not save them", async () => {
+  let saved = "";
+  const reply = await routeWeixinText({
+    text: "/use alpha-secret",
+    settings: { enabled: true, target_session: "", reply_timeout_ms: 10000 },
+    sessions: [{ key: "alpha-secret", session: offlineSessionWithLayout() }],
+    saveTargetSession: async (key) => {
+      saved = key;
+    },
+  });
+  assert.match(reply.text, /未找到在线 session：alph\*\*\*\*/);
+  assert.equal(saved, "");
 });
