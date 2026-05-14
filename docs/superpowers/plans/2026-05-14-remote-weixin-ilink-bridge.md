@@ -43,7 +43,7 @@ Keep Cloudflare Worker parity out of this implementation. Do not touch `remote/s
 - Modify: `remote/src/server/index.ts`
 - Test: `remote/test/server/session.test.ts`
 
-- [ ] **Step 1: Write the failing session helper tests**
+- [x] **Step 1: Write the failing session helper tests**
 
 Create `remote/test/server/session.test.ts`:
 
@@ -113,7 +113,7 @@ test("RemoteSession refuses input when Phantty socket is disconnected", () => {
 });
 ```
 
-- [ ] **Step 2: Add server test script and run the failing tests**
+- [x] **Step 2: Add server test script and run the failing tests**
 
 Modify `remote/package.json` scripts:
 
@@ -131,7 +131,7 @@ npm run test:server
 
 Expected: FAIL because `remote/src/server/session.ts` does not exist.
 
-- [ ] **Step 3: Create `RemoteSession` module**
+- [x] **Step 3: Create `RemoteSession` module**
 
 Create `remote/src/server/session.ts` by moving the existing `RemoteSession`, `RelayMessage`, `safeSend`, `safeJson`, `trackHeartbeat`, `getSession`, and `sessions` map out of `index.ts`. Add these public helpers:
 
@@ -271,7 +271,7 @@ if (message.type === "layout") {
 this.broadcast(message);
 ```
 
-- [ ] **Step 4: Wire `index.ts` to the extracted module**
+- [x] **Step 4: Wire `index.ts` to the extracted module**
 
 Modify `remote/src/server/index.ts`:
 
@@ -281,7 +281,7 @@ import { getSession } from "./session";
 
 Remove the local `RelayMessage`, `RemoteSession`, `sessions`, `getSession`, `safeSend`, and `safeJson` definitions after moving them. Keep `WebSocketServer`, `handleUpgrade`, login, static serving, and cookie code in `index.ts`.
 
-- [ ] **Step 5: Run session tests**
+- [x] **Step 5: Run session tests**
 
 Run:
 
@@ -293,7 +293,7 @@ npm run typecheck
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add remote/package.json remote/src/server/index.ts remote/src/server/session.ts remote/test/server/session.test.ts
