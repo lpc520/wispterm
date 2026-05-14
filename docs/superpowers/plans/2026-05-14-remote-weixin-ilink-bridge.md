@@ -1058,7 +1058,7 @@ git commit -m "Add Weixin remote agent router"
 - Create: `remote/src/server/bridge/weixin/poller.ts`
 - Test: `remote/test/server/weixin_poller.test.ts`
 
-- [ ] **Step 1: Write failing poller tests**
+- [x] **Step 1: Write failing poller tests**
 
 Create `remote/test/server/weixin_poller.test.ts`:
 
@@ -1106,7 +1106,7 @@ test("processWeixinUpdates extracts text and sends replies", async () => {
 });
 ```
 
-- [ ] **Step 2: Run failing tests**
+- [x] **Step 2: Run failing tests**
 
 Run:
 
@@ -1117,7 +1117,7 @@ npm run test:server
 
 Expected: FAIL because `poller.ts` does not exist.
 
-- [ ] **Step 3: Implement poller primitives**
+- [x] **Step 3: Implement poller primitives**
 
 Create `remote/src/server/bridge/weixin/poller.ts`:
 
@@ -1235,7 +1235,7 @@ export class WeixinPoller {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run:
 
@@ -1247,7 +1247,7 @@ npm run typecheck
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add remote/src/server/bridge/weixin/poller.ts remote/test/server/weixin_poller.test.ts
