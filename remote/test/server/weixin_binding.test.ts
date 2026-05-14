@@ -68,3 +68,37 @@ test("WeixinBindingStore unbind removes binding and sync buffer", async () => {
   assert.equal(await store.loadSyncBuf(), "");
   await assert.rejects(stat(join(dir, "weixin", "binding.json")));
 });
+
+test("WeixinBindingStore handles concurrent same-path sync buffer writes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "phantty-weixin-"));
+  const store = new WeixinBindingStore(dir);
+  const originalDateNow = Date.now;
+  Date.now = () => 1234567890;
+  try {
+    await Promise.all(["cursor-1", "cursor-2", "cursor-3", "cursor-4"].map((value) => store.saveSyncBuf(value)));
+  } finally {
+    Date.now = originalDateNow;
+  }
+
+  assert.match(await store.loadSyncBuf(), /^cursor-[1-4]$/);
+});
+
+test("WeixinBindingStore writes sensitive files with owner-only mode on POSIX", async () => {
+  if (process.platform === "win32") return;
+
+  const dir = await mkdtemp(join(tmpdir(), "phantty-weixin-"));
+  const store = new WeixinBindingStore(dir);
+  await store.saveBinding({
+    token: "secret-token",
+    base_url: "https://ilink.example",
+    user_id: "user@im.wechat",
+    account_id: "bot@im.bot",
+    bound_at: "2026-05-14T00:00:00Z",
+  });
+  await store.saveSettings({ enabled: true, target_session: "alpha", reply_timeout_ms: 45000 });
+  await store.saveSyncBuf("cursor");
+
+  assert.equal((await stat(join(dir, "weixin", "binding.json"))).mode & 0o777, 0o600);
+  assert.equal((await stat(join(dir, "weixin", "settings.json"))).mode & 0o777, 0o600);
+  assert.equal((await stat(join(dir, "weixin", "sync_buf"))).mode & 0o777, 0o600);
+});

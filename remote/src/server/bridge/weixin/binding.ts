@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -84,7 +85,9 @@ export function normalizeSettings(input: Partial<WeixinSettings>): WeixinSetting
   return {
     enabled: input.enabled === true,
     target_session: String(input.target_session ?? "").trim(),
-    reply_timeout_ms: Number.isFinite(timeout) && timeout >= 5000 && timeout <= 180000 ? timeout : 60000,
+    reply_timeout_ms: Number.isFinite(timeout) && timeout >= 5000 && timeout <= 180000
+      ? timeout
+      : DEFAULT_WEIXIN_SETTINGS.reply_timeout_ms,
   };
 }
 
@@ -103,7 +106,7 @@ async function writeAtomicJson(path: string, value: unknown, mode: number): Prom
 
 async function writeAtomicText(path: string, value: string, mode: number): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(tmp, value, { mode });
   await rename(tmp, path);
 }
