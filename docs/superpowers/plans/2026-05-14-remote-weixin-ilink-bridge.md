@@ -1264,7 +1264,7 @@ git commit -m "Add Weixin polling flow"
 - Modify: `remote/src/server/index.ts`
 - Test: `remote/test/server/weixin_routes.test.ts`
 
-- [ ] **Step 1: Install QR dependency**
+- [x] **Step 1: Install QR dependency**
 
 Run:
 
@@ -1276,7 +1276,7 @@ npm install --save-dev @types/qrcode
 
 Expected: `remote/package.json` and `remote/package-lock.json` update with `qrcode` and `@types/qrcode`.
 
-- [ ] **Step 2: Write failing route tests**
+- [x] **Step 2: Write failing route tests**
 
 Create `remote/test/server/weixin_routes.test.ts`:
 
@@ -1330,7 +1330,7 @@ test("GET /api/weixin/settings returns settings and binding summary", async () =
 });
 ```
 
-- [ ] **Step 3: Run failing tests**
+- [x] **Step 3: Run failing tests**
 
 Run:
 
@@ -1341,7 +1341,7 @@ npm run test:server
 
 Expected: FAIL because `routes.ts` does not exist.
 
-- [ ] **Step 4: Implement route handler**
+- [x] **Step 4: Implement route handler**
 
 Create `remote/src/server/bridge/weixin/routes.ts`:
 
@@ -1441,7 +1441,7 @@ function sendJson(res: ServerResponse, body: unknown, status = 200): true {
 }
 ```
 
-- [ ] **Step 5: Wire routes and poller in `index.ts`**
+- [x] **Step 5: Wire routes and poller in `index.ts`**
 
 Modify `remote/src/server/index.ts`:
 
@@ -1479,7 +1479,7 @@ if (url.pathname.startsWith("/api/weixin/")) {
 }
 ```
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run:
 
@@ -1491,7 +1491,7 @@ npm run typecheck
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add remote/package.json remote/package-lock.json remote/src/server/index.ts remote/src/server/bridge/weixin/routes.ts remote/test/server/weixin_routes.test.ts
