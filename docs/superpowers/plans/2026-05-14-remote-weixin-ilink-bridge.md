@@ -1509,7 +1509,7 @@ git commit -m "Wire Weixin bridge routes"
 - Modify: `remote/src/client/styles/responsive.css`
 - Test: `remote/test/client/weixin.test.ts`
 
-- [ ] **Step 1: Write failing client helper tests**
+- [x] **Step 1: Write failing client helper tests**
 
 Create `remote/test/client/weixin.test.ts`:
 
@@ -1538,7 +1538,7 @@ test("bridgeStatusText describes binding and target state", () => {
 });
 ```
 
-- [ ] **Step 2: Run failing client tests**
+- [x] **Step 2: Run failing client tests**
 
 Run:
 
@@ -1549,7 +1549,7 @@ npm run test:client
 
 Expected: FAIL because `remote/src/client/weixin.ts` does not exist.
 
-- [ ] **Step 3: Add client Weixin API helpers**
+- [x] **Step 3: Add client Weixin API helpers**
 
 Create `remote/src/client/weixin.ts`:
 
@@ -1629,7 +1629,7 @@ export async function unbindWeixin(): Promise<void> {
 }
 ```
 
-- [ ] **Step 4: Add console panel markup and bindings**
+- [x] **Step 4: Add console panel markup and bindings**
 
 Modify `remote/src/client/views/console.ts`:
 
@@ -1751,7 +1751,7 @@ async function unbindWeixinPanel(): Promise<void> {
 
 Call `bindWeixinPanel()` near the other bind calls at the end of `renderConsole`.
 
-- [ ] **Step 5: Add minimal styles**
+- [x] **Step 5: Add minimal styles**
 
 Modify `remote/src/client/styles/console.css`:
 
@@ -1797,7 +1797,7 @@ Modify `remote/src/client/styles/responsive.css`:
 }
 ```
 
-- [ ] **Step 6: Run client checks**
+- [x] **Step 6: Run client checks**
 
 Run:
 
@@ -1810,7 +1810,7 @@ npm run build
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add remote/src/client/weixin.ts remote/src/client/views/console.ts remote/src/client/styles/console.css remote/src/client/styles/responsive.css remote/test/client/weixin.test.ts
