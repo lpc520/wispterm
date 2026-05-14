@@ -6,7 +6,11 @@ import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve } from "node:path";
 import { WebSocketServer } from "ws";
 
-import { getSession } from "./session.js";
+import { WeixinBindingStore } from "./bridge/weixin/binding.js";
+import { WeixinClient } from "./bridge/weixin/client.js";
+import { WeixinPoller } from "./bridge/weixin/poller.js";
+import { handleWeixinRoute } from "./bridge/weixin/routes.js";
+import { getSession, listSessions } from "./session.js";
 
 type SessionPayload = {
   username: string;
@@ -24,6 +28,7 @@ const SESSION_TTL_SECONDS = 24 * 60 * 60;
 const PORT = Number(process.env.PORT ?? 8787);
 const HOST = process.env.HOST ?? "0.0.0.0";
 const DIST_DIR = resolve(process.env.DIST_DIR ?? "./dist");
+const DATA_DIR = resolve(process.env.REMOTE_DATA_DIR ?? "./data");
 const ADMIN_USERNAME = requireEnv("ADMIN_USERNAME").trim();
 const ADMIN_PASSWORD_HASH = requireEnv("ADMIN_PASSWORD_HASH");
 const SESSION_SIGNING_SECRET = requireEnv("SESSION_SIGNING_SECRET");
@@ -39,6 +44,13 @@ function requireEnv(name: string): string {
 }
 
 const wss = new WebSocketServer({ noServer: true });
+const weixinStore = new WeixinBindingStore(DATA_DIR);
+const weixinPoller = new WeixinPoller(
+  weixinStore,
+  () => listSessions().filter(({ connected }) => connected).map(({ key }) => ({ key, session: getSession(key) })),
+);
+
+weixinPoller.start();
 
 const server = createServer((req, res) => {
   void routeHttp(req, res).catch((err) => {
@@ -106,6 +118,21 @@ async function routeHttp(req: IncomingMessage, res: ServerResponse): Promise<voi
       res,
       session ? { authenticated: true, username: session.username } : { authenticated: false },
     );
+  }
+
+  if (url.pathname.startsWith("/api/weixin/")) {
+    const session = await readSession(req);
+    if (!session) return sendJson(res, { error: "login required" }, 401);
+    const handled = await handleWeixinRoute(req, res, {
+      store: weixinStore,
+      createClient: (token, baseUrl) => new WeixinClient({ token, baseUrl }),
+      listSessions,
+      restartPoller: () => {
+        weixinPoller.stop();
+        weixinPoller.start();
+      },
+    });
+    if (handled) return;
   }
 
   await serveStatic(res, url.pathname);
