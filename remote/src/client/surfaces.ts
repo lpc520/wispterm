@@ -18,8 +18,8 @@ import {
   type CanvasPoint,
   type CanvasSize,
 } from "./mobile_canvas";
+import { shouldFocusTerminalElement } from "./focus_policy";
 import { isMobileRemoteShell, shouldUseCanvasPan, shouldUseViewportFit } from "./mobile_layout";
-import { focusMobileTextInput } from "./mobile_text_input";
 import { cursorMoveSequence, emptyState, shortSurfaceId, validPositiveInteger } from "./utils";
 import { activeSurfaceIdForInput, currentTab, resetSurfaceViews, state } from "./state";
 import { getTerminalPalette, subscribeToTheme } from "./theme";
@@ -232,10 +232,10 @@ export function focusAndFitSelectedSurface(): void {
   const view = state.surfaceViews.get(id);
   if (!view) return;
   if (view.aiInput) {
-    view.aiInput.focus();
+    if (!isMobileRemoteShell()) view.aiInput.focus();
     return;
   }
-  if (!focusMobileTextInput()) view.term.focus();
+  if (shouldFocusTerminalElement()) view.term.focus();
   scheduleFit(view);
 }
 
@@ -300,10 +300,10 @@ export function updateSurfaceCursors(): void {
 function focusSurfaceView(surfaceId: string): void {
   const view = ensureSurfaceView(surfaceId);
   if (view.aiInput) {
-    view.aiInput.focus();
+    if (!isMobileRemoteShell()) view.aiInput.focus();
     return;
   }
-  if (!focusMobileTextInput()) view.term.focus();
+  if (shouldFocusTerminalElement()) view.term.focus();
 }
 
 function ensureTerminalMount(view: SurfaceView): void {
