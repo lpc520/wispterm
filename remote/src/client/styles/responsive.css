@@ -144,6 +144,10 @@
     overflow-x: hidden;
   }
 
+  .weixin-qr img {
+    width: min(220px, 100%);
+  }
+
   .workspace {
     grid-column: 1;
     grid-row: 1;

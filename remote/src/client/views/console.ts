@@ -24,8 +24,20 @@ import { applyVisualViewportSizing, isMobileRemoteShell } from "../mobile_layout
 import { bindMobileTextInput, renderMobileTextInputMarkup } from "../mobile_text_input";
 import { bindVirtualKeyboard, renderVirtualKeyboardMarkup } from "../vkbd";
 import { selectedMobileSurfaceKind, shouldShowMobileVirtualKeyboard } from "../mobile_surface_mode";
+import {
+  bridgeStatusText,
+  fetchWeixinSettings,
+  normalizeWeixinSettings,
+  pollWeixinBindStatus,
+  saveWeixinSettings,
+  startWeixinBind,
+  unbindWeixin,
+  type WeixinSettingsResponse,
+} from "../weixin";
 
 let viewportRefitBound = false;
+let weixinBindTimer: ReturnType<typeof setTimeout> | null = null;
+let weixinState: WeixinSettingsResponse | null = null;
 
 export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   const savedSessionKey = readSavedSessionKey();
@@ -61,6 +73,24 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
         <div class="panel status-panel">
           <span class="status-dot" id="status-dot"></span>
           <span id="status-text">Not connected</span>
+        </div>
+        <div class="panel weixin-panel">
+          <div class="panel-label">Weixin</div>
+          <div id="weixin-status" class="weixin-status">Loading Weixin bridge...</div>
+          <label class="weixin-toggle">
+            <input id="weixin-enabled" type="checkbox" />
+            Enable bridge
+          </label>
+          <label>
+            Target session
+            <select id="weixin-target-session"></select>
+          </label>
+          <div class="form-actions">
+            <button type="button" class="secondary-button" id="weixin-save">Save</button>
+            <button type="button" class="secondary-button" id="weixin-bind">Bind</button>
+            <button type="button" class="secondary-button" id="weixin-unbind">Unbind</button>
+          </div>
+          <div id="weixin-qr" class="weixin-qr" hidden></div>
         </div>
         <div class="panel remote-tabs-panel">
           <div class="panel-label">Tabs</div>
@@ -155,6 +185,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   bindVirtualKeyboard(() => setKbdVisible(false));
   bindMobileTextInput();
   bindThemeToggleButtons();
+  bindWeixinPanel();
   updateMobileSurfaceMode();
   updateInputUi();
   if (savedSessionKey) queueMicrotask(() => connect(savedSessionKey));
@@ -323,6 +354,159 @@ function bindViewportRefit(): void {
   window.addEventListener("resize", refit, { passive: true });
   window.visualViewport?.addEventListener("resize", refit);
   window.visualViewport?.addEventListener("scroll", refit);
+}
+
+function bindWeixinPanel(): void {
+  document.querySelector<HTMLButtonElement>("#weixin-save")?.addEventListener("click", () => {
+    void saveWeixinPanel();
+  });
+  document.querySelector<HTMLButtonElement>("#weixin-bind")?.addEventListener("click", () => {
+    void startWeixinPanelBind();
+  });
+  document.querySelector<HTMLButtonElement>("#weixin-unbind")?.addEventListener("click", () => {
+    void unbindWeixinPanel();
+  });
+  void refreshWeixinPanel();
+}
+
+async function refreshWeixinPanel(): Promise<void> {
+  const status = document.querySelector<HTMLDivElement>("#weixin-status");
+  try {
+    const next = await fetchWeixinSettings();
+    weixinState = {
+      ...next,
+      settings: normalizeWeixinSettings(next.settings),
+    };
+    renderWeixinPanel();
+  } catch (error) {
+    if (status) status.textContent = error instanceof Error ? error.message : "Failed to load Weixin settings";
+  }
+}
+
+function renderWeixinPanel(): void {
+  if (!weixinState) return;
+
+  const status = document.querySelector<HTMLDivElement>("#weixin-status");
+  const enabled = document.querySelector<HTMLInputElement>("#weixin-enabled");
+  const target = document.querySelector("#weixin-target-session") as HTMLSelectElement | null;
+
+  if (status) status.textContent = bridgeStatusText(weixinState.settings, weixinState.binding);
+  if (enabled) enabled.checked = weixinState.settings.enabled;
+  if (target) {
+    const selected = weixinState.settings.target_session;
+    const sessions = [...weixinState.sessions];
+    if (selected && !sessions.some((session) => session.key === selected)) {
+      sessions.unshift({ key: selected, connected: false });
+    }
+
+    target.innerHTML = [
+      `<option value="">No target</option>`,
+      ...sessions.map((session) => {
+        const connected = session.connected ? "connected" : "offline";
+        return `<option value="${escapeText(session.key)}"${session.key === selected ? " selected" : ""}>${escapeText(maskSessionKey(session.key))} (${connected})</option>`;
+      }),
+    ].join("");
+  }
+}
+
+async function saveWeixinPanel(): Promise<void> {
+  const status = document.querySelector<HTMLDivElement>("#weixin-status");
+  const enabled = document.querySelector<HTMLInputElement>("#weixin-enabled");
+  const target = document.querySelector("#weixin-target-session") as HTMLSelectElement | null;
+  if (!enabled || !target) return;
+
+  if (status) status.textContent = "Saving Weixin bridge...";
+  try {
+    const settings = normalizeWeixinSettings({
+      enabled: enabled.checked,
+      target_session: target.value,
+      reply_timeout_ms: weixinState?.settings.reply_timeout_ms ?? 60000,
+    });
+    const next = await saveWeixinSettings(settings);
+    weixinState = {
+      ...next,
+      settings: normalizeWeixinSettings(next.settings),
+    };
+    renderWeixinPanel();
+  } catch (error) {
+    if (status) status.textContent = error instanceof Error ? error.message : "Failed to save Weixin settings";
+  }
+}
+
+async function startWeixinPanelBind(): Promise<void> {
+  const status = document.querySelector<HTMLDivElement>("#weixin-status");
+  const qr = document.querySelector<HTMLDivElement>("#weixin-qr");
+  if (weixinBindTimer) {
+    clearTimeout(weixinBindTimer);
+    weixinBindTimer = null;
+  }
+
+  if (status) status.textContent = "Starting Weixin binding...";
+  try {
+    const binding = await startWeixinBind();
+    if (qr) {
+      qr.hidden = false;
+      qr.innerHTML = `<img src="${escapeText(binding.qrcode_data_url)}" alt="Weixin bind QR code" /><div>${escapeText(binding.status)}</div>`;
+    }
+    if (status) status.textContent = "Waiting for Weixin binding...";
+    scheduleWeixinBindPoll(binding.qrcode);
+  } catch (error) {
+    if (status) status.textContent = error instanceof Error ? error.message : "Failed to start Weixin binding";
+  }
+}
+
+function scheduleWeixinBindPoll(qrcode: string): void {
+  const status = document.querySelector<HTMLDivElement>("#weixin-status");
+  if (weixinBindTimer) clearTimeout(weixinBindTimer);
+
+  weixinBindTimer = setTimeout(() => {
+    weixinBindTimer = null;
+    void (async () => {
+      try {
+        const next = await pollWeixinBindStatus(qrcode);
+        if (next.binding.bound || next.status === "bound") {
+          const qr = document.querySelector<HTMLDivElement>("#weixin-qr");
+          if (qr) {
+            qr.hidden = true;
+            qr.replaceChildren();
+          }
+          await refreshWeixinPanel();
+          return;
+        }
+
+        if (next.status === "expired" || next.status === "failed") {
+          if (status) status.textContent = next.message ?? "Weixin binding stopped";
+          return;
+        }
+
+        if (status) status.textContent = next.message ?? "Waiting for Weixin binding...";
+        scheduleWeixinBindPoll(qrcode);
+      } catch (error) {
+        if (status) status.textContent = error instanceof Error ? error.message : "Failed to poll Weixin binding";
+      }
+    })();
+  }, 2000);
+}
+
+async function unbindWeixinPanel(): Promise<void> {
+  const status = document.querySelector<HTMLDivElement>("#weixin-status");
+  const qr = document.querySelector<HTMLDivElement>("#weixin-qr");
+  if (weixinBindTimer) {
+    clearTimeout(weixinBindTimer);
+    weixinBindTimer = null;
+  }
+  if (qr) {
+    qr.hidden = true;
+    qr.replaceChildren();
+  }
+
+  if (status) status.textContent = "Unbinding Weixin...";
+  try {
+    await unbindWeixin();
+    await refreshWeixinPanel();
+  } catch (error) {
+    if (status) status.textContent = error instanceof Error ? error.message : "Failed to unbind Weixin";
+  }
 }
 
 function setDrawerOpen(open: boolean): void {
