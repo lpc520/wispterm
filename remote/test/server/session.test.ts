@@ -85,6 +85,20 @@ test("RemoteSession prefers writable terminal surfaces in the active tab", () =>
   });
 });
 
+test("RemoteSession notifies layout listeners and supports unsubscribe", () => {
+  const session = new RemoteSession("alpha");
+  let calls = 0;
+  const unsubscribe = session.onLayout(() => {
+    calls += 1;
+  });
+
+  session.applyLayout({ type: "layout", activeTab: 0, tabs: [] });
+  unsubscribe();
+  session.applyLayout({ type: "layout", activeTab: 0, tabs: [] });
+
+  assert.equal(calls, 1);
+});
+
 test("RemoteSession sends utf8 input bytes to connected Phantty socket", () => {
   const session = new RemoteSession("alpha");
   const phantty = new FakeSocket();

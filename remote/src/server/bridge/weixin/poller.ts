@@ -85,6 +85,7 @@ export async function processWeixinUpdates(input: ProcessUpdatesInput): Promise<
 export class WeixinPoller {
   private timer: unknown = null;
   private readonly aiReplyTimers = new Set<unknown>();
+  private readonly aiReplyCleanups = new Set<() => void>();
   private runningGeneration: number | null = null;
   private active = false;
   private generation = 0;
@@ -124,6 +125,8 @@ export class WeixinPoller {
     this.timer = null;
     for (const timer of this.aiReplyTimers) this.scheduler.clearTimeout(timer);
     this.aiReplyTimers.clear();
+    for (const cleanup of [...this.aiReplyCleanups]) cleanup();
+    this.aiReplyCleanups.clear();
   }
 
   async runOnceForTest(): Promise<void> {
@@ -227,15 +230,47 @@ export class WeixinPoller {
     if (checkpoints.length === 0) return;
 
     const timers = new Set<unknown>();
+    const observableSession = ai.session as WeixinAiFollowup["session"] & {
+      onLayout?: (listener: () => void) => () => void;
+    };
+    let unsubscribeLayout: (() => void) | null = null;
+    let cleanup: (() => void) | null = null;
     let finished = false;
     const finish = () => {
+      if (finished) return;
       finished = true;
       for (const timer of timers) {
         this.scheduler.clearTimeout(timer);
         this.aiReplyTimers.delete(timer);
       }
       timers.clear();
+      unsubscribeLayout?.();
+      unsubscribeLayout = null;
+      if (cleanup) this.aiReplyCleanups.delete(cleanup);
     };
+    const checkProgress = (sendPendingProgress: boolean) => {
+      if (finished || this.isStale(options.generation)) return;
+      void (async () => {
+        const progress = aiReplyProgress(ai.baselineTranscript, ai.session.latestAiChatTranscript());
+        if (!progress.text) return;
+        if (!progress.done && !sendPendingProgress) return;
+        if (progress.done) finish();
+        try {
+          if (this.isStale(options.generation)) return;
+          await options.client.sendTextMessage(options.toUserId, progress.text, options.contextToken);
+        } catch (err) {
+          if (!this.isStale(options.generation)) this.logger.warn("weixin ai followup send failed", err);
+        } finally {
+          if (!unsubscribeLayout && timers.size === 0 && !finished) finish();
+        }
+      })();
+    };
+
+    cleanup = finish;
+    this.aiReplyCleanups.add(cleanup);
+    if (typeof observableSession.onLayout === "function") {
+      unsubscribeLayout = observableSession.onLayout(() => checkProgress(false));
+    }
 
     for (const delay of checkpoints) {
       let timer: unknown = null;
@@ -245,17 +280,7 @@ export class WeixinPoller {
           this.aiReplyTimers.delete(timer);
         }
         if (finished || this.isStale(options.generation)) return;
-        void (async () => {
-          const progress = aiReplyProgress(ai.baselineTranscript, ai.session.latestAiChatTranscript());
-          if (!progress.text) return;
-          if (progress.done) finish();
-          try {
-            if (this.isStale(options.generation)) return;
-            await options.client.sendTextMessage(options.toUserId, progress.text, options.contextToken);
-          } catch (err) {
-            if (!this.isStale(options.generation)) this.logger.warn("weixin ai followup send failed", err);
-          }
-        })();
+        checkProgress(true);
       }, delay);
       timers.add(timer);
       this.aiReplyTimers.add(timer);

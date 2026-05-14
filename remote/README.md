@@ -204,9 +204,10 @@ Authenticated routes:
 Send `/ping` from Weixin to confirm that the binding and server reply path are
 working; the server replies `pong` without touching AI Chat. Plain Weixin text
 is routed to the selected Remote session's AI Chat surface. The server confirms
-receipt immediately, then checks the AI Chat snapshot at 5, 10, 30, and 60
-seconds. Tool activity returns a still-processing reply; a completed AI answer
-returns the latest assistant message. Direct terminal input requires
+receipt immediately, checks the AI Chat snapshot at 5, 10, 30, and 60 seconds
+for progress, and also listens for later AI Chat snapshot updates. Tool activity
+returns a still-processing reply; a completed AI answer returns the latest
+assistant message. Direct terminal input requires
 `/term <command>` or `/keys <text>`.
 
 ## Relay Messages

@@ -53,6 +53,7 @@ export class RemoteSession {
   phantty: WebSocket | null = null;
   browsers = new Set<WebSocket>();
   lastLayout: RelayMessage | null = null;
+  private layoutListeners = new Set<() => void>();
 
   constructor(key: string) {
     this.key = key;
@@ -64,6 +65,20 @@ export class RemoteSession {
 
   applyLayout(message: RelayMessage): void {
     this.lastLayout = message;
+    for (const listener of [...this.layoutListeners]) {
+      try {
+        listener();
+      } catch {
+        // Layout listeners are auxiliary observers; a failure must not break relay updates.
+      }
+    }
+  }
+
+  onLayout(listener: () => void): () => void {
+    this.layoutListeners.add(listener);
+    return () => {
+      this.layoutListeners.delete(listener);
+    };
   }
 
   findAiChatSurface(): RemoteSurfaceRef | null {
