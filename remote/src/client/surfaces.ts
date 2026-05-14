@@ -83,7 +83,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
   panel.addEventListener("pointerdown", selectThis);
   panel.addEventListener("click", () => {
     selectThis();
-    if (!focusMobileTextInput()) ensureSurfaceView(surfaceId).term.focus();
+    focusSurfaceView(surfaceId);
   });
 
   const fit = new FitAddon();
@@ -109,6 +109,10 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     host,
     scrollbar,
     scrollbarThumb,
+    aiContainer: null,
+    aiTranscript: null,
+    aiInput: null,
+    aiSend: null,
     term,
     fit,
     decoder: new TextDecoder(),
@@ -116,6 +120,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
       const current = state.layoutState?.tabs
         .flatMap((tab) => tab.surfaces)
         .find((surface) => surface.id === surfaceId);
+      if (current?.kind === "ai_chat") return;
       if (current?.readOnly) return;
       inputHandler(surfaceId, data);
     }),
@@ -169,14 +174,14 @@ export function renderRemotePanels(): void {
   for (const surface of tab.surfaces) {
     const view = ensureSurfaceView(surface.id);
     const selected = surface.id === state.selectedSurfaceId;
-    view.panel.className = `remote-panel${selected ? " selected" : ""}`;
+    view.panel.className = `remote-panel${selected ? " selected" : ""}${surface.kind === "ai_chat" ? " ai-chat-panel" : ""}`;
     view.panel.style.left = `${(surface.x ?? 0) * 100}%`;
     view.panel.style.top = `${(surface.y ?? 0) * 100}%`;
     view.panel.style.width = `${Math.max(0.05, surface.w ?? 1) * 100}%`;
     view.panel.style.height = `${Math.max(0.05, surface.h ?? 1) * 100}%`;
     view.panel.dataset.surfaceId = surface.id;
     view.title.textContent = surface.title || shortSurfaceId(surface.id);
-    view.term.options.disableStdin = surface.readOnly === true;
+    view.term.options.disableStdin = surface.kind === "ai_chat" || surface.readOnly === true;
     const nextRemoteCols = validPositiveInteger(surface.cols);
     const nextRemoteRows = validPositiveInteger(surface.rows);
     const gridChanged = view.remoteCols !== nextRemoteCols || view.remoteRows !== nextRemoteRows;
@@ -192,6 +197,12 @@ export function renderRemotePanels(): void {
       panelsRoot.appendChild(view.panel);
     }
 
+    if (surface.kind === "ai_chat") {
+      renderAiChatPanel(view, surface);
+      continue;
+    }
+
+    ensureTerminalMount(view);
     if (!view.opened) {
       view.term.open(view.host);
       view.opened = true;
@@ -220,6 +231,10 @@ export function focusAndFitSelectedSurface(): void {
   if (!id) return;
   const view = state.surfaceViews.get(id);
   if (!view) return;
+  if (view.aiInput) {
+    view.aiInput.focus();
+    return;
+  }
   if (!focusMobileTextInput()) view.term.focus();
   scheduleFit(view);
 }
@@ -265,7 +280,7 @@ export function writeLegacyOutput(data: string): void {
 
 export function focusActiveSurface(): void {
   const id = activeSurfaceIdForInput();
-  if (id) state.surfaceViews.get(id)?.term.focus();
+  if (id) focusSurfaceView(id);
 }
 
 export function refitAllSurfaces(): void {
@@ -274,9 +289,102 @@ export function refitAllSurfaces(): void {
 
 export function updateSurfaceCursors(): void {
   for (const [surfaceId, view] of state.surfaceViews) {
-    view.term.options.disableStdin = false;
+    const surface = state.layoutState?.tabs
+      .flatMap((tab) => tab.surfaces)
+      .find((candidate) => candidate.id === surfaceId);
+    view.term.options.disableStdin = surface?.kind === "ai_chat" || surface?.readOnly === true;
     updateSurfaceCursor(view, surfaceId);
   }
+}
+
+function focusSurfaceView(surfaceId: string): void {
+  const view = ensureSurfaceView(surfaceId);
+  if (view.aiInput) {
+    view.aiInput.focus();
+    return;
+  }
+  if (!focusMobileTextInput()) view.term.focus();
+}
+
+function ensureTerminalMount(view: SurfaceView): void {
+  if (view.host.parentElement === view.mount && view.scrollbar.parentElement === view.mount) return;
+  view.mount.className = "terminal-mount";
+  view.mount.replaceChildren(view.host, view.scrollbar);
+}
+
+function renderAiChatPanel(view: SurfaceView, surface: LayoutSurface): void {
+  const container = ensureAiChatElements(view, surface.id);
+  if (container.parentElement !== view.mount) {
+    view.mount.className = "terminal-mount ai-chat-mount";
+    view.mount.replaceChildren(container);
+  }
+  const snapshot = surface.snapshot || "No messages yet.";
+  if (view.snapshotText !== snapshot && view.aiTranscript) {
+    view.snapshotText = snapshot;
+    view.aiTranscript.textContent = snapshot;
+    requestAnimationFrame(() => {
+      if (view.aiTranscript) view.aiTranscript.scrollTop = view.aiTranscript.scrollHeight;
+    });
+  }
+}
+
+function ensureAiChatElements(view: SurfaceView, surfaceId: string): HTMLDivElement {
+  if (view.aiContainer && view.aiTranscript && view.aiInput && view.aiSend) return view.aiContainer;
+
+  const container = document.createElement("div");
+  container.className = "ai-chat-remote";
+
+  const transcript = document.createElement("pre");
+  transcript.className = "ai-chat-transcript";
+
+  const form = document.createElement("form");
+  form.className = "ai-chat-composer";
+
+  const input = document.createElement("textarea");
+  input.className = "ai-chat-input";
+  input.rows = 3;
+  input.placeholder = "Ask Agent";
+  input.spellcheck = false;
+
+  const send = document.createElement("button");
+  send.className = "ai-chat-send";
+  send.type = "submit";
+  send.textContent = "Send";
+
+  const submit = (): void => {
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    inputHandler(surfaceId, `${text}\r`);
+  };
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submit();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      inputHandler(surfaceId, "\x1b");
+    }
+  });
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submit();
+  });
+
+  form.appendChild(input);
+  form.appendChild(send);
+  container.appendChild(transcript);
+  container.appendChild(form);
+
+  view.aiContainer = container;
+  view.aiTranscript = transcript;
+  view.aiInput = input;
+  view.aiSend = send;
+  return container;
 }
 
 function updateSurfaceCursor(view: SurfaceView, surfaceId: string): void {

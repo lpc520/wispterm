@@ -247,7 +247,10 @@ function renderSurfaceStrip(): void {
 
 export function updateInputUi(): void {
   const connected = state.socket?.readyState === WebSocket.OPEN;
-  const writable = connected && Boolean(activeSurfaceIdForInput());
+  const tab = currentTab();
+  const selectedSurfaceId = state.selectedSurfaceId ?? tab?.surfaces[0]?.id ?? null;
+  const selectedSurface = tab?.surfaces.find((surface) => surface.id === selectedSurfaceId);
+  const writable = connected && (Boolean(activeSurfaceIdForInput()) || selectedSurface?.kind === "ai_chat");
   const label = document.querySelector<HTMLSpanElement>("#control-state");
   const hint = document.querySelector<HTMLSpanElement>(".toolbar-hint");
 

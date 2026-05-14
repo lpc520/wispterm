@@ -48,6 +48,10 @@ export type SurfaceView = {
   host: HTMLDivElement;
   scrollbar: HTMLDivElement;
   scrollbarThumb: HTMLDivElement;
+  aiContainer: HTMLDivElement | null;
+  aiTranscript: HTMLPreElement | null;
+  aiInput: HTMLTextAreaElement | null;
+  aiSend: HTMLButtonElement | null;
   term: Terminal;
   fit: FitAddon;
   decoder: TextDecoder;

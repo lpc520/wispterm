@@ -48,6 +48,7 @@ export function activeSurfaceIdForInput(): string | null {
   const surfaceId = state.selectedSurfaceId ?? tab?.surfaces[0]?.id ?? null;
   if (!surfaceId) return null;
   const surface = tab?.surfaces.find((candidate) => candidate.id === surfaceId);
+  if (surface?.kind === "ai_chat") return null;
   return surface?.readOnly ? null : surfaceId;
 }
 

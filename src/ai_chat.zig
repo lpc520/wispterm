@@ -583,9 +583,6 @@ pub const Session = struct {
                 if (reasoning.len > 0) try appendLimitedSection(allocator, &out, "Reasoning", reasoning, REMOTE_SNAPSHOT_MAX_BYTES);
             }
         }
-        if (self.input_len > 0) {
-            try appendLimitedSection(allocator, &out, "Draft", self.input(), REMOTE_SNAPSHOT_MAX_BYTES);
-        }
         if (out.items.len == 0) try out.appendSlice(allocator, "No messages yet.");
         return out.toOwnedSlice(allocator);
     }
@@ -2760,6 +2757,30 @@ test "ai chat ctrl a selects input and replacement clears selection" {
     session.handleChar('x');
     try std.testing.expect(!session.input_select_all);
     try std.testing.expectEqualStrings("x", session.input());
+}
+
+test "ai chat remote snapshot omits local draft input" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "DeepSeek",
+        DEFAULT_BASE_URL,
+        "key",
+        DEFAULT_MODEL,
+        DEFAULT_SYSTEM_PROMPT,
+        DEFAULT_THINKING,
+        DEFAULT_REASONING_EFFORT,
+        DEFAULT_STREAM,
+        DEFAULT_AGENT,
+    );
+    defer session.deinit();
+
+    session.appendInputText("local draft only");
+    const snapshot = try session.allocRemoteSnapshot(allocator);
+    defer allocator.free(snapshot);
+
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "local draft only") == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "Draft") == null);
 }
 
 test "ai chat clipboard text exports transcript when input is empty" {
