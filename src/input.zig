@@ -1101,7 +1101,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     if (AppWindow.activeAiChat()) |chat| {
         if (isAiChatKey(ev)) {
             AppWindow.resetCursorBlink();
-            chat.handleKey(ev);
+            chat.handleKeyWithWrapCols(ev, aiChatInputWrapCols());
             AppWindow.g_force_rebuild = true;
             AppWindow.g_cells_valid = false;
             return;
@@ -1197,11 +1197,20 @@ fn isAiChatKey(ev: win32_backend.KeyEvent) bool {
         ev.vk == win32_backend.VK_DELETE or
         ev.vk == win32_backend.VK_LEFT or
         ev.vk == win32_backend.VK_RIGHT or
+        ev.vk == win32_backend.VK_UP or
+        ev.vk == win32_backend.VK_DOWN or
         ev.vk == win32_backend.VK_HOME or
         ev.vk == win32_backend.VK_END or
         ev.vk == win32_backend.VK_ESCAPE) return true;
     if (ev.ctrl and !ev.alt and (ev.vk == 0x41 or ev.vk == 0x55 or ev.vk == 0x4C)) return true; // Ctrl+A / Ctrl+U / Ctrl+L
     return false;
+}
+
+fn aiChatInputWrapCols() usize {
+    const win = AppWindow.g_window orelse return std.math.maxInt(usize);
+    const ww: f32 = @floatFromInt(win.width);
+    const panel_w = @max(1.0, ww - AppWindow.leftPanelsWidth() - AppWindow.rightPanelsWidth());
+    return AppWindow.ai_chat_renderer.inputWrapColumns(panel_w);
 }
 
 fn handleBrowserUrlBarKey(ev: win32_backend.KeyEvent) void {

@@ -1,26 +1,27 @@
 const std = @import("std");
 
 pub const Panel = struct {
-    pub const pad_x: f32 = 24;
-    pub const pad_y: f32 = 14;
+    pub const pad_x: f32 = 18;
+    pub const pad_y: f32 = 16;
 };
 
 pub const Field = struct {
-    pub const max_w: f32 = 1480;
-    pub const pad_x: f32 = 24;
-    pub const pad_top: f32 = 18;
-    pub const pad_bottom: f32 = 20;
+    pub const max_w: f32 = 4096;
+    pub const pad_x: f32 = 12;
+    pub const pad_top: f32 = 10;
+    pub const pad_bottom: f32 = 10;
 };
 
-pub const input_min_h: f32 = 152;
-pub const input_max_h: f32 = 360;
+pub const input_min_h: f32 = 92;
+pub const input_max_h: f32 = 260;
 
 pub fn fieldWidth(panel_w: f32) f32 {
     return @min(Field.max_w, @max(1.0, panel_w - Panel.pad_x * 2));
 }
 
 pub fn fieldX(panel_x: f32, panel_w: f32) f32 {
-    return panel_x + @round(@max(0.0, panel_w - fieldWidth(panel_w)) / 2);
+    _ = panel_w;
+    return panel_x + Panel.pad_x;
 }
 
 pub fn textWidth(field_w: f32) f32 {
@@ -39,18 +40,18 @@ pub fn visibleRows(field_h: f32, line_h: f32) usize {
     return @max(@as(usize, 1), @as(usize, @intFromFloat(rows_f)));
 }
 
-test "ai chat composer layout is centered and capped on wide panels" {
+test "ai chat composer layout keeps original full-width field style" {
     const panel_w: f32 = 1580;
-    try std.testing.expectApproxEqAbs(@as(f32, 1480), fieldWidth(panel_w), 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 50), fieldX(0, panel_w), 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 1544), fieldWidth(panel_w), 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 18), fieldX(0, panel_w), 0.01);
 }
 
-test "ai chat composer layout keeps a larger minimum and grows for multiline input" {
+test "ai chat composer layout stays compact and grows for multiline input" {
     const line_h: f32 = 31;
     const single = inputHeightForRows(1, line_h);
     const eight = inputHeightForRows(8, line_h);
     const capped = inputHeightForRows(60, line_h);
-    try std.testing.expectApproxEqAbs(@as(f32, 152), single, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 92), single, 0.01);
     try std.testing.expect(eight > single);
-    try std.testing.expectApproxEqAbs(@as(f32, 360), capped, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 260), capped, 0.01);
 }

@@ -496,6 +496,10 @@ pub const Session = struct {
     }
 
     pub fn handleKey(self: *Session, ev: win32_backend.KeyEvent) void {
+        self.handleKeyWithWrapCols(ev, std.math.maxInt(usize));
+    }
+
+    pub fn handleKeyWithWrapCols(self: *Session, ev: win32_backend.KeyEvent, max_cols: usize) void {
         if (self.handleApprovalKey(ev)) return;
 
         if (ev.ctrl and !ev.alt and ev.vk == 0x41) {
@@ -520,6 +524,8 @@ pub const Session = struct {
             win32_backend.VK_DELETE => self.deleteInput(),
             win32_backend.VK_LEFT => self.moveInputCursorLeft(),
             win32_backend.VK_RIGHT => self.moveInputCursorRight(),
+            win32_backend.VK_UP => self.moveInputCursorVertical(max_cols, -1),
+            win32_backend.VK_DOWN => self.moveInputCursorVertical(max_cols, 1),
             win32_backend.VK_HOME => self.moveInputCursorHome(),
             win32_backend.VK_END => self.moveInputCursorEnd(),
             win32_backend.VK_ESCAPE => {
@@ -847,6 +853,20 @@ pub const Session = struct {
         self.input_cursor = self.input_len;
     }
 
+    fn moveInputCursorVertical(self: *Session, max_cols_raw: usize, delta: i32) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.clearSelectionLocked();
+        self.clampInputCursorLocked();
+
+        const text = self.input();
+        const max_cols = @max(@as(usize, 1), max_cols_raw);
+        const current = visualCursorPosition(text, self.input_cursor, max_cols);
+        if (delta < 0 and current.row == 0) return;
+        const target_row = if (delta < 0) current.row - 1 else current.row + 1;
+        self.input_cursor = byteOffsetForVisualPosition(text, target_row, current.col, max_cols) orelse return;
+    }
+
     fn insertInputBytesLocked(self: *Session, text: []const u8) void {
         self.clampInputCursorLocked();
         var len = @min(text.len, self.input_buf.len - self.input_len);
@@ -1017,7 +1037,7 @@ pub const Session = struct {
             return;
         }
 
-        var buf: [160]u8 = undefined;
+        var buf: [96]u8 = undefined;
         const elapsed_ms: i64 = if (started_ms > 0) @max(@as(i64, 0), std.time.milliTimestamp() - started_ms) else 0;
         const secs: i64 = @divTrunc(elapsed_ms, 1000);
         const tenths: i64 = @divTrunc(@mod(elapsed_ms, 1000), 100);
@@ -1025,13 +1045,13 @@ pub const Session = struct {
             if (started_ms > 0) {
                 break :blk std.fmt.bufPrint(
                     &buf,
-                    "Done in {d}.{d}s | tokens {d} (in {d} / out {d})",
+                    "Done {d}.{d}s | {d} tok ({d}/{d})",
                     .{ secs, tenths, u.total_tokens, u.prompt_tokens, u.completion_tokens },
                 ) catch "Ready";
             }
             break :blk std.fmt.bufPrint(
                 &buf,
-                "Done | tokens {d} (in {d} / out {d})",
+                "Done | {d} tok ({d}/{d})",
                 .{ u.total_tokens, u.prompt_tokens, u.completion_tokens },
             ) catch "Ready";
         } else std.fmt.bufPrint(&buf, "Done in {d}.{d}s", .{ secs, tenths }) catch "Ready";
@@ -1056,6 +1076,83 @@ fn nextUtf8Boundary(text: []const u8, cursor: usize) usize {
     if (cursor >= text.len) return text.len;
     var i = cursor + 1;
     while (i < text.len and (text[i] & 0xC0) == 0x80) : (i += 1) {}
+    return i;
+}
+
+const VisualCursor = struct {
+    row: usize,
+    col: usize,
+};
+
+const VisualRow = struct {
+    start: usize,
+    end: usize,
+};
+
+fn nextUtf8Step(text: []const u8, index: usize) usize {
+    const len = std.unicode.utf8ByteSequenceLength(text[index]) catch 1;
+    return if (index + len <= text.len) len else 1;
+}
+
+fn visualCursorPosition(text: []const u8, cursor_raw: usize, max_cols_raw: usize) VisualCursor {
+    const cursor = @min(cursor_raw, text.len);
+    const max_cols = @max(@as(usize, 1), max_cols_raw);
+    var row: usize = 0;
+    var col: usize = 0;
+    var i: usize = 0;
+    while (i < cursor) {
+        if (text[i] == '\n') {
+            row += 1;
+            col = 0;
+            i += 1;
+            continue;
+        }
+        if (col >= max_cols) {
+            row += 1;
+            col = 0;
+        }
+        col += 1;
+        i += nextUtf8Step(text, i);
+    }
+    return .{ .row = row, .col = col };
+}
+
+fn visualRowAt(text: []const u8, target_row: usize, max_cols_raw: usize) ?VisualRow {
+    const max_cols = @max(@as(usize, 1), max_cols_raw);
+    var row: usize = 0;
+    var row_start: usize = 0;
+    var col: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '\n') {
+            if (row == target_row) return .{ .start = row_start, .end = i };
+            row += 1;
+            row_start = i + 1;
+            col = 0;
+            i += 1;
+            continue;
+        }
+        if (col >= max_cols) {
+            if (row == target_row) return .{ .start = row_start, .end = i };
+            row += 1;
+            row_start = i;
+            col = 0;
+        }
+        col += 1;
+        i += nextUtf8Step(text, i);
+    }
+    if (row == target_row) return .{ .start = row_start, .end = text.len };
+    return null;
+}
+
+fn byteOffsetForVisualPosition(text: []const u8, target_row: usize, target_col: usize, max_cols: usize) ?usize {
+    const row = visualRowAt(text, target_row, max_cols) orelse return null;
+    var col: usize = 0;
+    var i = row.start;
+    while (i < row.end and col < target_col) {
+        i += nextUtf8Step(text, i);
+        col += 1;
+    }
     return i;
 }
 
@@ -1406,7 +1503,7 @@ fn appendAssistantStreamDelta(session: *Session, message_idx: usize, content_del
     session.setStatusLocked("Streaming...");
 }
 
-fn finishAssistantStream(session: *Session, message_idx: usize, started_ms: i64) void {
+fn finishAssistantStream(session: *Session, message_idx: usize, started_ms: i64, usage: ?ApiUsage) void {
     if (session.closing.load(.acquire)) return;
     if (session.stop_requested.load(.acquire)) {
         finishStoppedRequest(session);
@@ -1433,7 +1530,7 @@ fn finishAssistantStream(session: *Session, message_idx: usize, started_ms: i64)
     session.request_inflight = false;
     session.collapseAutoExpandedDetailsLocked();
     session.scroll_px = 1_000_000;
-    session.setCompletionStatusLocked(started_ms, null);
+    session.setCompletionStatusLocked(started_ms, usage);
 }
 
 fn failAssistantStream(session: *Session, message_idx: ?usize, text: []const u8) void {
@@ -1443,7 +1540,7 @@ fn failAssistantStream(session: *Session, message_idx: ?usize, text: []const u8)
     }
     if (message_idx) |idx| {
         appendAssistantStreamDelta(session, idx, text, "") catch {};
-        finishAssistantStream(session, idx, 0);
+        finishAssistantStream(session, idx, 0, null);
         return;
     }
 
@@ -1556,6 +1653,7 @@ fn runChatRequestStreaming(request: *const ChatRequest) !void {
     }
 
     const message_idx = try beginAssistantStream(request.session);
+    var usage: ?ApiUsage = null;
     while (true) {
         if (requestCancelled(request)) return error.Canceled;
         const line = reader.takeDelimiter('\n') catch |err| {
@@ -1567,9 +1665,9 @@ fn runChatRequestStreaming(request: *const ChatRequest) !void {
         } orelse break;
 
         if (requestCancelled(request)) return error.Canceled;
-        if (try applyApiStreamLineToSession(allocator, request.session, message_idx, line)) break;
+        if (try applyApiStreamLineToSession(allocator, request.session, message_idx, line, &usage)) break;
     }
-    finishAssistantStream(request.session, message_idx, request.started_ms);
+    finishAssistantStream(request.session, message_idx, request.started_ms, usage);
 }
 
 fn chatEndpoint(allocator: std.mem.Allocator, base_url_raw: []const u8) ![]u8 {
@@ -1647,6 +1745,9 @@ fn buildRequestJsonForMessages(
     try appendJsonString(allocator, &out, if (request.reasoning_effort.len > 0) request.reasoning_effort else "high");
     try out.appendSlice(allocator, ",\"stream\":");
     try out.appendSlice(allocator, if (request.stream) "true" else "false");
+    if (request.stream) {
+        try out.appendSlice(allocator, ",\"stream_options\":{\"include_usage\":true}");
+    }
     if (include_tools) {
         try appendToolSchemas(allocator, &out);
     }
@@ -2666,6 +2767,7 @@ fn applyApiStreamLineToSession(
     session: *Session,
     message_idx: usize,
     line_raw: []const u8,
+    usage_out: *?ApiUsage,
 ) !bool {
     const line = std.mem.trim(u8, line_raw, " \t\r");
     if (!std.mem.startsWith(u8, line, "data:")) return false;
@@ -2680,6 +2782,7 @@ fn applyApiStreamLineToSession(
     const root = parsed.value;
     if (root != .object) return false;
     const obj = root.object;
+    if (parseApiUsage(root)) |usage| usage_out.* = usage;
 
     if (obj.get("error")) |err_value| {
         if (err_value == .object) {
@@ -2896,6 +2999,44 @@ test "ai chat parses token usage from OpenAI responses" {
     try std.testing.expectEqual(@as(u64, 46), result.usage.?.total_tokens);
 }
 
+test "ai chat completion status keeps token count visible" {
+    var session = Session{ .allocator = std.testing.allocator };
+    session.setCompletionStatusLocked(std.time.milliTimestamp() - 2300, .{
+        .prompt_tokens = 12,
+        .completion_tokens = 34,
+        .total_tokens = 46,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, session.status(), "46 tok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session.status(), "tokens 46") == null);
+}
+
+test "ai chat streaming request asks provider to include usage" {
+    const allocator = std.testing.allocator;
+    var content = [_]u8{ 'h', 'i' };
+    var model = [_]u8{ 'd', 'e', 'e', 'p', 's', 'e', 'e', 'k', '-', 'v', '4', '-', 'p', 'r', 'o' };
+    var reasoning = [_]u8{ 'h', 'i', 'g', 'h' };
+    var msg = [_]RequestMessage{.{ .role = .user, .content = content[0..] }};
+    var request = ChatRequest{
+        .allocator = allocator,
+        .session = undefined,
+        .base_url = &.{},
+        .api_key = &.{},
+        .model = model[0..],
+        .system_prompt = &.{},
+        .messages = msg[0..],
+        .stream = true,
+        .agent_enabled = false,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .thinking_enabled = true,
+        .reasoning_effort = reasoning[0..],
+        .started_ms = 0,
+    };
+    const body = try buildRequestJsonForMessages(allocator, &request, msg[0..], false);
+    defer allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"stream_options\":{\"include_usage\":true}") != null);
+}
+
 test "ai chat tools prefer request-local terminal snapshot" {
     const allocator = std.testing.allocator;
     var surfaces = try allocator.alloc(ToolSurface, 1);
@@ -3020,6 +3161,43 @@ test "ai chat input cursor moves by utf8 codepoint boundaries" {
     session.handleKey(.{ .vk = win32_backend.VK_BACK, .ctrl = false, .shift = false, .alt = false });
     try std.testing.expectEqualStrings("a", session.input());
     try std.testing.expectEqual(@as(usize, 0), session.inputCursor());
+}
+
+test "ai chat input cursor moves vertically across explicit lines" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    session.appendInputText("abc\ndefg\nhi");
+
+    session.handleKey(.{ .vk = win32_backend.VK_HOME, .ctrl = false, .shift = false, .alt = false });
+    session.handleKey(.{ .vk = win32_backend.VK_DOWN, .ctrl = false, .shift = false, .alt = false });
+    try std.testing.expectEqual(@as(usize, 4), session.inputCursor());
+
+    session.handleKey(.{ .vk = win32_backend.VK_RIGHT, .ctrl = false, .shift = false, .alt = false });
+    session.handleKey(.{ .vk = win32_backend.VK_RIGHT, .ctrl = false, .shift = false, .alt = false });
+    try std.testing.expectEqual(@as(usize, 6), session.inputCursor());
+
+    session.handleKey(.{ .vk = win32_backend.VK_DOWN, .ctrl = false, .shift = false, .alt = false });
+    try std.testing.expectEqual(@as(usize, 11), session.inputCursor());
+
+    session.handleKey(.{ .vk = win32_backend.VK_UP, .ctrl = false, .shift = false, .alt = false });
+    try std.testing.expectEqual(@as(usize, 6), session.inputCursor());
+}
+
+test "ai chat input cursor moves vertically across wrapped rows" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    session.appendInputText("abcdefghijkl");
+    session.handleKey(.{ .vk = win32_backend.VK_HOME, .ctrl = false, .shift = false, .alt = false });
+    session.handleKeyWithWrapCols(.{ .vk = win32_backend.VK_DOWN, .ctrl = false, .shift = false, .alt = false }, 5);
+    try std.testing.expectEqual(@as(usize, 5), session.inputCursor());
+
+    session.handleKeyWithWrapCols(.{ .vk = win32_backend.VK_RIGHT, .ctrl = false, .shift = false, .alt = false }, 5);
+    session.handleKeyWithWrapCols(.{ .vk = win32_backend.VK_RIGHT, .ctrl = false, .shift = false, .alt = false }, 5);
+    session.handleKeyWithWrapCols(.{ .vk = win32_backend.VK_DOWN, .ctrl = false, .shift = false, .alt = false }, 5);
+    try std.testing.expectEqual(@as(usize, 12), session.inputCursor());
+
+    session.handleKeyWithWrapCols(.{ .vk = win32_backend.VK_UP, .ctrl = false, .shift = false, .alt = false }, 5);
+    try std.testing.expectEqual(@as(usize, 7), session.inputCursor());
 }
 
 test "ai chat composer wrapped row count grows with explicit lines and wrapping" {
@@ -3159,6 +3337,7 @@ test "ai chat stream response aggregates content and reasoning chunks" {
         "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ing\",\"content\":null}}]}\n\n" ++
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n" ++
         "data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}\n\n" ++
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":34,\"total_tokens\":46}}\n\n" ++
         "data: [DONE]\n\n";
 
     const result = try parseApiStreamResponse(allocator, body);
@@ -3166,6 +3345,8 @@ test "ai chat stream response aggregates content and reasoning chunks" {
     try std.testing.expectEqualStrings("Hello!", result.content);
     try std.testing.expect(result.reasoning != null);
     try std.testing.expectEqualStrings("Thinking", result.reasoning.?);
+    try std.testing.expect(result.usage != null);
+    try std.testing.expectEqual(@as(u64, 46), result.usage.?.total_tokens);
 }
 
 test "ai chat collapse helper only closes auto-expanded details" {

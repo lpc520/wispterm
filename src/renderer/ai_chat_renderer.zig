@@ -122,28 +122,26 @@ pub fn render(
     gl_init.renderQuadAlpha(x, input_y, w, input_h, panel, 0.98);
     gl_init.renderQuadAlpha(x, input_y + input_h - 1, w, 1, line, 0.72);
 
-    const field_bg = mixColor(bg, fg, 0.105);
-    const field_border = mixColor(bg, fg, 0.28);
-    gl_init.renderQuadAlpha(layout.field_x, layout.field_y, layout.field_w, layout.field_h, field_border, 0.82);
-    gl_init.renderQuadAlpha(layout.field_x + 1, layout.field_y + 1, @max(1.0, layout.field_w - 2), @max(1.0, layout.field_h - 2), field_bg, 0.98);
-    gl_init.renderQuadAlpha(layout.field_x + 1, layout.field_y + layout.field_h - 2, @max(1.0, layout.field_w - 2), 1, mixColor(bg, accent, 0.42), 0.48);
+    const field_bg = mixColor(bg, fg, 0.075);
+    gl_init.renderQuadAlpha(layout.field_x, layout.field_y, layout.field_w, layout.field_h, field_bg, 0.95);
+    gl_init.renderQuadAlpha(layout.field_x, layout.field_y, layout.field_w, 1, mixColor(bg, accent, 0.38), 0.6);
 
     if (input_text.len == 0) {
         const placeholder = if (session.agent_enabled) "Ask Agent" else "Ask AI Chat";
         _ = titlebar.renderTextLimited(
             placeholder,
             layout.text_x,
-            layout.field_y + layout.field_h - composer_layout.Field.pad_top - font.g_titlebar_cell_height,
-            mixColor(bg, fg, 0.46),
+            layout.field_y + (layout.field_h - font.g_titlebar_cell_height) / 2,
+            mixColor(bg, fg, 0.42),
             layout.text_w,
         );
     } else {
         if (session.input_select_all) {
             gl_init.renderQuadAlpha(
-                layout.field_x + composer_layout.Field.pad_x - 6,
-                layout.field_y + composer_layout.Field.pad_bottom - 6,
-                @max(1.0, layout.field_w - composer_layout.Field.pad_x * 2 + 12),
-                @max(1.0, layout.field_h - composer_layout.Field.pad_top - composer_layout.Field.pad_bottom + 12),
+                layout.field_x + 8,
+                layout.field_y + 8,
+                @max(1.0, layout.field_w - 16),
+                @max(1.0, layout.field_h - 16),
                 accent,
                 0.22,
             );
@@ -1281,6 +1279,13 @@ pub fn inputHeightForText(text: []const u8, max_w: f32) f32 {
 
 pub fn inputVisibleRowsForField(field_h: f32) usize {
     return composer_layout.visibleRows(field_h, lineHeight());
+}
+
+pub fn inputWrapColumns(panel_w: f32) usize {
+    const field_w = composer_layout.fieldWidth(panel_w);
+    const text_w = composer_layout.textWidth(field_w);
+    const cell_w = @max(@as(f32, 1.0), font.g_titlebar_cell_width);
+    return @max(@as(usize, 1), @as(usize, @intFromFloat(@max(1.0, @floor(text_w / cell_w)))));
 }
 
 pub fn inputCursorRect(text: []const u8, cursor_raw: usize, x: f32, max_w_raw: f32) InputCursorRect {
