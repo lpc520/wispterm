@@ -8,6 +8,7 @@ const std = @import("std");
 const win32_backend = @import("apprt/win32.zig");
 const agent_detector = @import("agent_detector.zig");
 const agent_history = @import("agent_history.zig");
+const skill_registry = @import("skill_registry.zig");
 
 pub const DEFAULT_NAME = "DeepSeek";
 pub const DEFAULT_BASE_URL = "https://api.deepseek.com";
@@ -50,10 +51,22 @@ pub const Message = struct {
     content: []u8,
     reasoning: ?[]u8 = null,
     usage_footer: ?[]u8 = null,
+    tool_call_id: ?[]u8 = null,
+    tool_name: ?[]u8 = null,
+    replay_to_model: bool = false,
+    persist_to_history: bool = true,
     content_collapsed: bool = false,
     content_auto_expand: bool = false,
     reasoning_collapsed: bool = true,
     reasoning_auto_expand: bool = false,
+
+    fn deinit(self: Message, allocator: std.mem.Allocator) void {
+        allocator.free(self.content);
+        if (self.reasoning) |reasoning| allocator.free(reasoning);
+        if (self.usage_footer) |footer| allocator.free(footer);
+        if (self.tool_call_id) |id| allocator.free(id);
+        if (self.tool_name) |name| allocator.free(name);
+    }
 };
 
 const RequestMessage = struct {
@@ -317,6 +330,88 @@ fn currentToolHost() ?ToolHost {
     return g_tool_host;
 }
 
+const SlashCommand = enum { skills, commands, reload_skills, unknown };
+
+const SkillInvocation = struct {
+    skill_name: []const u8,
+    prompt: []const u8,
+};
+
+fn parseSlashCommand(input: []const u8) ?SlashCommand {
+    const trimmed = std.mem.trim(u8, input, " \t\r\n");
+    if (!std.mem.startsWith(u8, trimmed, "/")) return null;
+    if (std.mem.eql(u8, trimmed, "/skills")) return .skills;
+    if (std.mem.eql(u8, trimmed, "/commands")) return .commands;
+    if (std.mem.eql(u8, trimmed, "/reload-skills")) return .reload_skills;
+    if (std.mem.indexOfAny(u8, trimmed[1..], "/ \t\r\n") != null) return null;
+    if (trimmed.len < "/help".len) return null;
+    return .unknown;
+}
+
+fn parseSkillInvocation(input: []const u8) ?SkillInvocation {
+    const trimmed = std.mem.trim(u8, input, " \t\r\n");
+    if (!std.mem.startsWith(u8, trimmed, "$") or trimmed.len < 2) return null;
+    if (!(std.ascii.isAlphabetic(trimmed[1]) or trimmed[1] == '_')) return null;
+
+    var end: usize = 1;
+    var has_lower = false;
+    while (end < trimmed.len) : (end += 1) {
+        const ch = trimmed[end];
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_')) break;
+        if (std.ascii.isLower(ch)) has_lower = true;
+    }
+
+    if (end == 1) return null;
+    if (!has_lower) return null;
+    if (end >= trimmed.len or !isAsciiWhitespace(trimmed[end])) return null;
+    const rest = std.mem.trim(u8, trimmed[end..], " \t\r\n");
+    if (rest.len == 0) return null;
+    return .{ .skill_name = trimmed[1..end], .prompt = rest };
+}
+
+fn isAsciiWhitespace(ch: u8) bool {
+    return ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n';
+}
+
+fn slashCommandOutput(allocator: std.mem.Allocator, command: SlashCommand) ![]u8 {
+    return switch (command) {
+        .commands => allocator.dupe(u8, "Available commands:\n/skills - list available skills\n/commands - list slash commands\n/reload-skills - rescan skills for future calls"),
+        .reload_skills => allocator.dupe(u8, "Skills will be re-read from disk on the next skill call."),
+        .unknown => allocator.dupe(u8, "Unknown command. Use /commands to list commands."),
+        .skills => listSkillsForDisplay(allocator),
+    };
+}
+
+fn listSkillsForDisplay(allocator: std.mem.Allocator) ![]u8 {
+    const list = try skill_registry.listSkills(allocator, std.fs.cwd(), "skills");
+    defer skill_registry.freeSkillList(allocator, list);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (list.len == 0) {
+        try out.appendSlice(allocator, "No skills found under ./skills.");
+    } else {
+        try out.appendSlice(allocator, "Available skills:\n");
+        for (list) |meta| {
+            try out.print(allocator, "- ${s}: {s}\n", .{ meta.name, meta.description });
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn loadSkillPreloadContent(allocator: std.mem.Allocator, skill_name: []const u8) !?[]u8 {
+    var snapshot = skill_registry.loadSkillSnapshot(allocator, std.fs.cwd(), "skills", skill_name) catch |err| switch (err) {
+        skill_registry.LookupError.SkillNotFound,
+        skill_registry.LookupError.DuplicateSkillName,
+        skill_registry.LookupError.InvalidSkillMarkdown,
+        skill_registry.LookupError.SkillTooLarge,
+        => return null,
+        else => |e| return e,
+    };
+    defer snapshot.deinit(allocator);
+    return try allocator.dupe(u8, snapshot.content);
+}
+
 pub fn agentPermission() AgentPermission {
     return currentAgentSettings().permission;
 }
@@ -445,16 +540,23 @@ pub const Session = struct {
         session.created_at_ms = record.created_at;
         session.updated_at_ms = record.updated_at;
         for (record.messages) |msg| {
-            try session.messages.append(allocator, .{
+            var cloned_msg = Message{
                 .role = switch (msg.role) {
                     .user => .user,
                     .assistant => .assistant,
                     .tool => .tool,
                 },
                 .content = try allocator.dupe(u8, msg.content),
-                .reasoning = if (msg.reasoning) |reasoning| try allocator.dupe(u8, reasoning) else null,
-                .usage_footer = if (msg.usage_footer) |footer| try allocator.dupe(u8, footer) else null,
-            });
+            };
+            errdefer cloned_msg.deinit(allocator);
+
+            cloned_msg.reasoning = if (msg.reasoning) |reasoning| try allocator.dupe(u8, reasoning) else null;
+            cloned_msg.usage_footer = if (msg.usage_footer) |footer| try allocator.dupe(u8, footer) else null;
+            cloned_msg.tool_call_id = if (msg.tool_call_id) |id| try allocator.dupe(u8, id) else null;
+            cloned_msg.tool_name = if (msg.tool_name) |name| try allocator.dupe(u8, name) else null;
+            cloned_msg.replay_to_model = msg.replay_to_model;
+
+            try session.messages.append(allocator, cloned_msg);
         }
         return session;
     }
@@ -467,9 +569,7 @@ pub const Session = struct {
             self.request_thread = null;
         }
         for (self.messages.items) |msg| {
-            self.allocator.free(msg.content);
-            if (msg.reasoning) |reasoning| self.allocator.free(reasoning);
-            if (msg.usage_footer) |footer| self.allocator.free(footer);
+            msg.deinit(self.allocator);
         }
         self.messages.deinit(self.allocator);
         self.allocator.destroy(self);
@@ -827,32 +927,122 @@ pub const Session = struct {
             self.mutex.unlock();
             return;
         }
+
+        if (parseSlashCommand(prompt_raw)) |command| {
+            const output = slashCommandOutput(self.allocator, command) catch {
+                self.setStatusLocked("Could not run command");
+                self.mutex.unlock();
+                return;
+            };
+            self.messages.append(self.allocator, .{
+                .role = .tool,
+                .content = output,
+                .replay_to_model = false,
+                .persist_to_history = false,
+                .content_collapsed = false,
+                .content_auto_expand = false,
+            }) catch {
+                self.allocator.free(output);
+                self.setStatusLocked("Out of memory");
+                self.mutex.unlock();
+                return;
+            };
+            self.clearSubmittedInputLocked();
+            self.setStatusLocked("Ready");
+            history_change = null;
+            self.mutex.unlock();
+            return;
+        }
+
         if (self.api_key_len == 0) {
             self.setStatusLocked("Missing API key. Edit the AI Chat profile or set DEEPSEEK_API_KEY.");
             self.mutex.unlock();
             return;
         }
 
-        const prompt = self.allocator.dupe(u8, prompt_raw) catch {
+        const message_start = self.messages.items.len;
+        const invocation = parseSkillInvocation(prompt_raw);
+        var skill_preload_content: ?[]u8 = null;
+        if (invocation) |parsed| {
+            skill_preload_content = loadSkillPreloadContent(self.allocator, parsed.skill_name) catch {
+                self.setStatusLocked("Could not load skill");
+                self.mutex.unlock();
+                return;
+            };
+        }
+
+        const prompt_for_history = if (invocation) |parsed|
+            if (skill_preload_content != null) parsed.prompt else prompt_raw
+        else
+            prompt_raw;
+        const prompt = self.allocator.dupe(u8, prompt_for_history) catch {
+            if (skill_preload_content) |content| self.allocator.free(content);
             self.setStatusLocked("Out of memory");
             self.mutex.unlock();
             return;
         };
         self.messages.append(self.allocator, .{ .role = .user, .content = prompt }) catch {
+            if (skill_preload_content) |content| self.allocator.free(content);
             self.allocator.free(prompt);
             self.setStatusLocked("Out of memory");
             self.mutex.unlock();
             return;
         };
-        history_change = self.captureHistoryChangeLocked();
-        self.input_len = 0;
-        self.input_cursor = 0;
-        self.input_scroll_row = 0;
-        self.input_scroll_follow_cursor = true;
-        self.clearSelectionLocked();
-        self.scroll_px = 1_000_000;
+
+        var skill_preload_appended = false;
+        if (invocation) |parsed| if (skill_preload_content) |skill_content| {
+            const tool_call_id = std.fmt.allocPrint(self.allocator, "skill-preload-{s}", .{parsed.skill_name}) catch {
+                self.allocator.free(skill_content);
+                var user_msg = self.messages.pop().?;
+                user_msg.deinit(self.allocator);
+                self.setStatusLocked("Out of memory");
+                self.mutex.unlock();
+                return;
+            };
+            const tool_name = self.allocator.dupe(u8, "skill_info") catch {
+                self.allocator.free(tool_call_id);
+                self.allocator.free(skill_content);
+                var user_msg = self.messages.pop().?;
+                user_msg.deinit(self.allocator);
+                self.setStatusLocked("Out of memory");
+                self.mutex.unlock();
+                return;
+            };
+            skill_preload_content = null;
+            self.messages.append(self.allocator, .{
+                .role = .tool,
+                .content = skill_content,
+                .tool_call_id = tool_call_id,
+                .tool_name = tool_name,
+                .replay_to_model = true,
+                .content_collapsed = true,
+                .content_auto_expand = false,
+            }) catch {
+                self.allocator.free(tool_name);
+                self.allocator.free(tool_call_id);
+                self.allocator.free(skill_content);
+                var user_msg = self.messages.pop().?;
+                user_msg.deinit(self.allocator);
+                self.setStatusLocked("Out of memory");
+                self.mutex.unlock();
+                return;
+            };
+            skill_preload_appended = true;
+        };
+
+        if (!skill_preload_appended) {
+            history_change = self.captureHistoryChangeLocked();
+            self.clearSubmittedInputLocked();
+            self.scroll_px = 1_000_000;
+        }
 
         const request = self.buildRequestLocked() catch {
+            if (skill_preload_appended) {
+                self.rollbackMessagesFromLocked(message_start);
+                self.setStatusLocked("Could not prepare request");
+                self.mutex.unlock();
+                return;
+            }
             self.setStatusLocked("Could not prepare request");
             self.mutex.unlock();
             self.notifyHistoryChange(history_change);
@@ -864,12 +1054,15 @@ pub const Session = struct {
         self.request_inflight = true;
         self.setStatusLocked("Thinking...");
         self.mutex.unlock();
-        self.notifyHistoryChange(history_change);
+        if (!skill_preload_appended) self.notifyHistoryChange(history_change);
 
         const thread = std.Thread.spawn(.{}, requestThreadMain, .{request}) catch {
             request.deinit();
             self.mutex.lock();
             self.request_inflight = false;
+            if (skill_preload_appended) {
+                self.rollbackMessagesFromLocked(message_start);
+            }
             self.setStatusLocked("Failed to start request thread");
             self.mutex.unlock();
             return;
@@ -877,7 +1070,13 @@ pub const Session = struct {
 
         self.mutex.lock();
         self.request_thread = thread;
+        if (skill_preload_appended) {
+            self.clearSubmittedInputLocked();
+            self.scroll_px = 1_000_000;
+            history_change = self.captureHistoryChangeLocked();
+        }
         self.mutex.unlock();
+        if (skill_preload_appended) self.notifyHistoryChange(history_change);
     }
 
     fn clearMessages(self: *Session) void {
@@ -887,11 +1086,7 @@ pub const Session = struct {
             self.mutex.unlock();
             return;
         }
-        for (self.messages.items) |msg| {
-            self.allocator.free(msg.content);
-            if (msg.reasoning) |reasoning| self.allocator.free(reasoning);
-            if (msg.usage_footer) |footer| self.allocator.free(footer);
-        }
+        for (self.messages.items) |msg| msg.deinit(self.allocator);
         self.messages.clearRetainingCapacity();
         self.scroll_px = 0;
         self.clearSelectionLocked();
@@ -1081,6 +1276,21 @@ pub const Session = struct {
         self.transcript_select_all = false;
     }
 
+    fn clearSubmittedInputLocked(self: *Session) void {
+        self.input_len = 0;
+        self.input_cursor = 0;
+        self.input_scroll_row = 0;
+        self.input_scroll_follow_cursor = true;
+        self.clearSelectionLocked();
+    }
+
+    fn rollbackMessagesFromLocked(self: *Session, start: usize) void {
+        while (self.messages.items.len > start) {
+            var msg = self.messages.pop().?;
+            msg.deinit(self.allocator);
+        }
+    }
+
     fn collapseAutoExpandedDetailsLocked(self: *Session) void {
         for (self.messages.items) |*msg| {
             if (msg.role == .tool and msg.content_auto_expand) {
@@ -1115,7 +1325,14 @@ pub const Session = struct {
 
         var visible_count: usize = 0;
         for (self.messages.items) |msg| {
-            if (msg.role != .tool) visible_count += 1;
+            if (msg.role != .tool) {
+                visible_count += 1;
+            } else if (msg.replay_to_model) {
+                const id = msg.tool_call_id orelse continue;
+                const name = msg.tool_name orelse continue;
+                if (id.len == 0 or name.len == 0) continue;
+                visible_count += 2;
+            }
         }
 
         const messages = try self.allocator.alloc(RequestMessage, visible_count);
@@ -1127,12 +1344,20 @@ pub const Session = struct {
         }
 
         for (self.messages.items) |msg| {
-            if (msg.role == .tool) continue;
-            messages[written] = .{
-                .role = msg.role,
-                .content = try self.allocator.dupe(u8, msg.content),
-                .reasoning = if (msg.reasoning) |reasoning| try self.allocator.dupe(u8, reasoning) else null,
-            };
+            if (msg.role == .tool) {
+                if (!msg.replay_to_model) continue;
+                const id = msg.tool_call_id orelse continue;
+                const name = msg.tool_name orelse continue;
+                if (id.len == 0 or name.len == 0) continue;
+
+                messages[written] = try durableToolAssistantRequestMessage(self.allocator, id, name);
+                written += 1;
+                messages[written] = try requestMessageWithClonedFields(self.allocator, .tool, msg.content, null, id, null);
+                written += 1;
+                continue;
+            }
+
+            messages[written] = try requestMessageWithClonedFields(self.allocator, msg.role, msg.content, msg.reasoning, null, null);
             written += 1;
         }
 
@@ -1148,27 +1373,53 @@ pub const Session = struct {
             tool_snapshot = host.collectSnapshot(host.ctx, self.allocator) catch null;
         }
 
+        const base_url = try self.allocator.dupe(u8, self.baseUrl());
+        var base_url_owned = true;
+        errdefer if (base_url_owned) self.allocator.free(base_url);
+        const api_key = try self.allocator.dupe(u8, self.apiKey());
+        var api_key_owned = true;
+        errdefer if (api_key_owned) self.allocator.free(api_key);
+        const model_name = try self.allocator.dupe(u8, self.model());
+        var model_owned = true;
+        errdefer if (model_owned) self.allocator.free(model_name);
+        const system_prompt = try self.allocator.dupe(u8, self.systemPrompt());
+        var system_prompt_owned = true;
+        errdefer if (system_prompt_owned) self.allocator.free(system_prompt);
+        const reasoning_effort = try self.allocator.dupe(u8, self.reasoningEffort());
+        var reasoning_effort_owned = true;
+        errdefer if (reasoning_effort_owned) self.allocator.free(reasoning_effort);
+
         req.* = .{
             .allocator = self.allocator,
             .session = self,
-            .base_url = try self.allocator.dupe(u8, self.baseUrl()),
-            .api_key = try self.allocator.dupe(u8, self.apiKey()),
-            .model = try self.allocator.dupe(u8, self.model()),
-            .system_prompt = try self.allocator.dupe(u8, self.systemPrompt()),
+            .base_url = base_url,
+            .api_key = api_key,
+            .model = model_name,
+            .system_prompt = system_prompt,
             .messages = messages,
             .thinking_enabled = self.thinking_enabled,
-            .reasoning_effort = try self.allocator.dupe(u8, self.reasoningEffort()),
+            .reasoning_effort = reasoning_effort,
             .stream = self.stream and !agent_enabled,
             .agent_enabled = agent_enabled,
             .tool_host = tool_host,
             .tool_snapshot = tool_snapshot,
             .started_ms = std.time.milliTimestamp(),
         };
+        base_url_owned = false;
+        api_key_owned = false;
+        model_owned = false;
+        system_prompt_owned = false;
+        reasoning_effort_owned = false;
         return req;
     }
 
     fn toHistoryRecordLocked(self: *Session, allocator: std.mem.Allocator) !agent_history.SessionRecord {
-        const messages = try allocator.alloc(agent_history.MessageRecord, self.messages.items.len);
+        var persist_count: usize = 0;
+        for (self.messages.items) |msg| {
+            if (msg.persist_to_history) persist_count += 1;
+        }
+
+        const messages = try allocator.alloc(agent_history.MessageRecord, persist_count);
         var initialized: usize = 0;
         errdefer {
             while (initialized > 0) {
@@ -1178,17 +1429,26 @@ pub const Session = struct {
             allocator.free(messages);
         }
 
-        for (self.messages.items, 0..) |msg, i| {
-            messages[i] = .{
+        for (self.messages.items) |msg| {
+            if (!msg.persist_to_history) continue;
+
+            var record_msg = agent_history.MessageRecord{
                 .role = switch (msg.role) {
                     .user => .user,
                     .assistant => .assistant,
                     .tool => .tool,
                 },
                 .content = try allocator.dupe(u8, msg.content),
-                .reasoning = if (msg.reasoning) |reasoning| try allocator.dupe(u8, reasoning) else null,
-                .usage_footer = if (msg.usage_footer) |footer| try allocator.dupe(u8, footer) else null,
             };
+            errdefer agent_history.freeOwnedMessage(allocator, &record_msg);
+
+            record_msg.reasoning = if (msg.reasoning) |reasoning| try allocator.dupe(u8, reasoning) else null;
+            record_msg.usage_footer = if (msg.usage_footer) |footer| try allocator.dupe(u8, footer) else null;
+            record_msg.tool_call_id = if (msg.tool_call_id) |id| try allocator.dupe(u8, id) else null;
+            record_msg.tool_name = if (msg.tool_name) |name| try allocator.dupe(u8, name) else null;
+            record_msg.replay_to_model = msg.replay_to_model;
+
+            messages[initialized] = record_msg;
             initialized += 1;
         }
 
@@ -1567,7 +1827,11 @@ fn runAgentRequest(request: *ChatRequest) !ApiResult {
     }
 
     for (request.messages) |msg| {
-        try transcript.append(request.allocator, try cloneRequestMessage(request.allocator, msg));
+        var cloned = try cloneRequestMessage(request.allocator, msg);
+        var cloned_owned = true;
+        errdefer if (cloned_owned) cloned.deinit(request.allocator);
+        try transcript.append(request.allocator, cloned);
+        cloned_owned = false;
     }
 
     var total_usage: ApiUsage = .{};
@@ -1594,7 +1858,12 @@ fn runAgentRequest(request: *ChatRequest) !ApiResult {
             appendProgressMessage(request.session, result.content) catch {};
         }
 
-        try transcript.append(request.allocator, try assistantToolCallMessage(request.allocator, result.content, result.reasoning, result.tool_calls.?));
+        var assistant_msg = try assistantToolCallMessage(request.allocator, result.content, result.reasoning, result.tool_calls.?);
+        var assistant_msg_owned = true;
+        errdefer if (assistant_msg_owned) assistant_msg.deinit(request.allocator);
+        try transcript.append(request.allocator, assistant_msg);
+        assistant_msg_owned = false;
+
         for (result.tool_calls.?) |call| {
             if (requestCancelled(request)) return error.Canceled;
             const progress = try std.fmt.allocPrint(request.allocator, "running {s} {s}", .{ call.name, call.arguments });
@@ -1604,24 +1873,22 @@ fn runAgentRequest(request: *ChatRequest) !ApiResult {
             const tool_result = try executeToolCall(request, call);
             defer request.allocator.free(tool_result);
             if (requestCancelled(request)) return error.Canceled;
-            try transcript.append(request.allocator, .{
-                .role = .tool,
-                .content = try request.allocator.dupe(u8, tool_result),
-                .tool_call_id = try request.allocator.dupe(u8, call.id),
-            });
+            if (std.mem.eql(u8, call.name, "skill_info")) {
+                appendReplayableToolMessage(request.session, call.id, call.name, tool_result) catch {};
+            }
+
+            var tool_msg = try requestMessageWithClonedFields(request.allocator, .tool, tool_result, null, call.id, null);
+            var tool_msg_owned = true;
+            errdefer if (tool_msg_owned) tool_msg.deinit(request.allocator);
+            try transcript.append(request.allocator, tool_msg);
+            tool_msg_owned = false;
         }
         result.deinit(request.allocator);
     }
 }
 
 fn cloneRequestMessage(allocator: std.mem.Allocator, msg: RequestMessage) !RequestMessage {
-    return .{
-        .role = msg.role,
-        .content = try allocator.dupe(u8, msg.content),
-        .reasoning = if (msg.reasoning) |reasoning| try allocator.dupe(u8, reasoning) else null,
-        .tool_call_id = if (msg.tool_call_id) |id| try allocator.dupe(u8, id) else null,
-        .tool_calls = if (msg.tool_calls) |calls| try cloneToolCalls(allocator, calls) else null,
-    };
+    return requestMessageWithClonedFields(allocator, msg.role, msg.content, msg.reasoning, msg.tool_call_id, msg.tool_calls);
 }
 
 fn cloneToolCalls(allocator: std.mem.Allocator, calls: []const ToolCall) ![]ToolCall {
@@ -1632,22 +1899,89 @@ fn cloneToolCalls(allocator: std.mem.Allocator, calls: []const ToolCall) ![]Tool
         for (out[0..written]) |call| call.deinit(allocator);
     }
     for (calls, 0..) |call, i| {
-        out[i] = .{
-            .id = try allocator.dupe(u8, call.id),
-            .name = try allocator.dupe(u8, call.name),
-            .arguments = try allocator.dupe(u8, call.arguments),
-        };
+        {
+            const id = try allocator.dupe(u8, call.id);
+            errdefer allocator.free(id);
+            const name = try allocator.dupe(u8, call.name);
+            errdefer allocator.free(name);
+            const arguments = try allocator.dupe(u8, call.arguments);
+            errdefer allocator.free(arguments);
+            out[i] = .{
+                .id = id,
+                .name = name,
+                .arguments = arguments,
+            };
+        }
         written += 1;
     }
     return out;
 }
 
 fn assistantToolCallMessage(allocator: std.mem.Allocator, content: []const u8, reasoning: ?[]const u8, calls: []const ToolCall) !RequestMessage {
+    return requestMessageWithClonedFields(allocator, .assistant, content, reasoning, null, calls);
+}
+
+fn requestMessageWithClonedFields(
+    allocator: std.mem.Allocator,
+    role: Role,
+    content: []const u8,
+    reasoning: ?[]const u8,
+    tool_call_id: ?[]const u8,
+    tool_calls: ?[]const ToolCall,
+) !RequestMessage {
+    const content_copy = try allocator.dupe(u8, content);
+    errdefer allocator.free(content_copy);
+
+    var reasoning_copy: ?[]u8 = null;
+    errdefer if (reasoning_copy) |text| allocator.free(text);
+    if (reasoning) |text| reasoning_copy = try allocator.dupe(u8, text);
+
+    var tool_call_id_copy: ?[]u8 = null;
+    errdefer if (tool_call_id_copy) |id| allocator.free(id);
+    if (tool_call_id) |id| tool_call_id_copy = try allocator.dupe(u8, id);
+
+    var tool_calls_copy: ?[]ToolCall = null;
+    errdefer if (tool_calls_copy) |calls| {
+        for (calls) |call| call.deinit(allocator);
+        allocator.free(calls);
+    };
+    if (tool_calls) |calls| tool_calls_copy = try cloneToolCalls(allocator, calls);
+
+    return .{
+        .role = role,
+        .content = content_copy,
+        .reasoning = reasoning_copy,
+        .tool_call_id = tool_call_id_copy,
+        .tool_calls = tool_calls_copy,
+    };
+}
+
+fn durableToolAssistantRequestMessage(allocator: std.mem.Allocator, id: []const u8, name: []const u8) !RequestMessage {
+    const content = try allocator.dupe(u8, "");
+    errdefer allocator.free(content);
+
+    const calls = try allocator.alloc(ToolCall, 1);
+    errdefer allocator.free(calls);
+
+    {
+        const id_copy = try allocator.dupe(u8, id);
+        errdefer allocator.free(id_copy);
+        const name_copy = try allocator.dupe(u8, name);
+        errdefer allocator.free(name_copy);
+        const arguments = try allocator.dupe(u8, "{}");
+        errdefer allocator.free(arguments);
+
+        calls[0] = .{
+            .id = id_copy,
+            .name = name_copy,
+            .arguments = arguments,
+        };
+    }
+
     return .{
         .role = .assistant,
-        .content = try allocator.dupe(u8, content),
-        .reasoning = if (reasoning) |text| try allocator.dupe(u8, text) else null,
-        .tool_calls = try cloneToolCalls(allocator, calls),
+        .content = content,
+        .tool_calls = calls,
     };
 }
 
@@ -1716,6 +2050,54 @@ fn appendProgressMessage(session: *Session, text: []const u8) !void {
     const content = try allocator.dupe(u8, text);
     errdefer allocator.free(content);
 
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    if (sessionCancelled(session)) return error.Canceled;
+    try session.messages.append(allocator, .{
+        .role = .tool,
+        .content = content,
+        .reasoning = null,
+        .persist_to_history = false,
+        .content_collapsed = false,
+        .content_auto_expand = true,
+    });
+    session.scroll_px = 1_000_000;
+    session.setStatusLocked("Running tools...");
+}
+
+fn appendReplayableToolMessage(
+    session: *Session,
+    tool_call_id: []const u8,
+    tool_name: []const u8,
+    text: []const u8,
+) !void {
+    if (sessionCancelled(session)) return error.Canceled;
+    const allocator = session.allocator;
+    const content = try allocator.dupe(u8, text);
+    var content_owned = true;
+    errdefer if (content_owned) allocator.free(content);
+    const id = try allocator.dupe(u8, tool_call_id);
+    var id_owned = true;
+    errdefer if (id_owned) allocator.free(id);
+    const name = try allocator.dupe(u8, tool_name);
+    var name_owned = true;
+    errdefer if (name_owned) allocator.free(name);
+
+    var msg = Message{
+        .role = .tool,
+        .content = content,
+        .tool_call_id = id,
+        .tool_name = name,
+        .replay_to_model = true,
+        .content_collapsed = true,
+        .content_auto_expand = false,
+    };
+    content_owned = false;
+    id_owned = false;
+    name_owned = false;
+    var msg_owned = true;
+    errdefer if (msg_owned) msg.deinit(allocator);
+
     var history_change: ?PendingHistoryChange = null;
     session.mutex.lock();
     defer {
@@ -1723,15 +2105,8 @@ fn appendProgressMessage(session: *Session, text: []const u8) !void {
         session.notifyHistoryChange(history_change);
     }
     if (sessionCancelled(session)) return error.Canceled;
-    try session.messages.append(allocator, .{
-        .role = .tool,
-        .content = content,
-        .reasoning = null,
-        .content_collapsed = false,
-        .content_auto_expand = true,
-    });
-    session.scroll_px = 1_000_000;
-    session.setStatusLocked("Running tools...");
+    try session.messages.append(allocator, msg);
+    msg_owned = false;
     history_change = session.captureHistoryChangeLocked();
 }
 
@@ -2078,6 +2453,8 @@ fn appendToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(
     try out.appendSlice(allocator, toolSchema("tab_new", "Create a new local terminal tab. Use kind=default, powershell, pwsh, cmd, wsl, or command with an explicit command line.", "{\"kind\":{\"type\":\"string\",\"description\":\"default, powershell, pwsh, cmd, wsl, or command.\"},\"command\":{\"type\":\"string\",\"description\":\"Optional explicit Windows command line; used when kind is command or to override kind.\"}}"));
     try out.append(allocator, ',');
     try out.appendSlice(allocator, toolSchema("tab_close", "Close a terminal tab by zero-based tab_index, surface_id, title, or the active terminal tab when no selector is provided. Cannot close the AI chat tab running the agent.", "{\"tab_index\":{\"type\":\"integer\",\"description\":\"Zero-based tab index from terminal_list.\"},\"tab_number\":{\"type\":\"integer\",\"description\":\"One-based UI tab number, accepted as a convenience.\"},\"surface_id\":{\"type\":\"string\",\"description\":\"Surface id from terminal_list.\"},\"title\":{\"type\":\"string\",\"description\":\"Terminal tab title to close, such as CPU2.\"}}"));
+    try out.append(allocator, ',');
+    try out.appendSlice(allocator, toolSchema("skill_info", "Load a Phantty skill by stable name. Use when the user explicitly names a skill or asks for specialized skill instructions.", "{\"skill_name\":{\"type\":\"string\",\"description\":\"Skill name or skill directory name.\"}}"));
     try out.append(allocator, ']');
     try out.appendSlice(allocator, ",\"tool_choice\":\"auto\"");
 }
@@ -2156,6 +2533,12 @@ fn executeToolCall(request: *ChatRequest, call: ToolCall) ![]u8 {
         const title = jsonStringArg(args.value, "title");
         return tabCloseTool(request, tab_index, surface_id, title);
     }
+    if (std.mem.eql(u8, call.name, "skill_info")) {
+        const args = parseArgs(request.allocator, call.arguments) orelse return request.allocator.dupe(u8, "Invalid tool arguments");
+        defer args.deinit();
+        const skill_name = jsonStringArg(args.value, "skill_name") orelse return request.allocator.dupe(u8, "Missing skill_name");
+        return skillInfoTool(request.allocator, skill_name);
+    }
     return std.fmt.allocPrint(request.allocator, "Unknown tool: {s}", .{call.name});
 }
 
@@ -2190,6 +2573,18 @@ fn jsonIndexArg(root: std.json.Value, name: []const u8) ?usize {
         .float => |v| if (v >= 0 and v <= @as(f64, @floatFromInt(std.math.maxInt(usize)))) @intFromFloat(v) else null,
         else => null,
     };
+}
+
+fn skillInfoTool(allocator: std.mem.Allocator, skill_name: []const u8) ![]u8 {
+    var snapshot = skill_registry.loadSkillSnapshot(allocator, std.fs.cwd(), "skills", skill_name) catch |err| switch (err) {
+        skill_registry.LookupError.SkillNotFound => return std.fmt.allocPrint(allocator, "Skill not found: {s}", .{skill_name}),
+        skill_registry.LookupError.DuplicateSkillName => return std.fmt.allocPrint(allocator, "Duplicate skill name: {s}", .{skill_name}),
+        skill_registry.LookupError.InvalidSkillMarkdown => return std.fmt.allocPrint(allocator, "Invalid SKILL.md for skill: {s}", .{skill_name}),
+        skill_registry.LookupError.SkillTooLarge => return std.fmt.allocPrint(allocator, "SKILL.md too large for skill: {s}", .{skill_name}),
+        else => |e| return std.fmt.allocPrint(allocator, "Failed to load skill {s}: {}", .{ skill_name, e }),
+    };
+    defer snapshot.deinit(allocator);
+    return allocator.dupe(u8, snapshot.content);
 }
 
 fn toolSurfaceKind(surface: ToolSurface) []const u8 {
@@ -3197,6 +3592,35 @@ fn testHistoryHookCaptureCallback(event: HistoryChangeEvent) void {
     capture.calls += 1;
 }
 
+test "ai chat parses explicit dollar skill invocation" {
+    const parsed = parseSkillInvocation("$pdf summarize this file").?;
+    try std.testing.expectEqualStrings("pdf", parsed.skill_name);
+    try std.testing.expectEqualStrings("summarize this file", parsed.prompt);
+
+    try std.testing.expect(parseSkillInvocation("normal prompt") == null);
+    try std.testing.expect(parseSkillInvocation("$ missing") == null);
+}
+
+test "ai chat avoids obvious dollar skill false positives" {
+    try std.testing.expect(parseSkillInvocation("$100 budget") == null);
+    try std.testing.expect(parseSkillInvocation("$PATH is broken") == null);
+    try std.testing.expect(parseSkillInvocation("$env:PATH is broken") == null);
+}
+
+test "ai chat recognizes local slash commands" {
+    try std.testing.expect(parseSlashCommand("/skills").? == .skills);
+    try std.testing.expect(parseSlashCommand("/commands").? == .commands);
+    try std.testing.expect(parseSlashCommand("/reload-skills").? == .reload_skills);
+    try std.testing.expect(parseSlashCommand("/unknown").? == .unknown);
+    try std.testing.expect(parseSlashCommand("hello") == null);
+}
+
+test "ai chat avoids slash command false positives" {
+    try std.testing.expect(parseSlashCommand("/api") == null);
+    try std.testing.expect(parseSlashCommand("/usr/bin") == null);
+    try std.testing.expect(parseSlashCommand("/help me") == null);
+}
+
 test "ai_chat: session serializes to history record" {
     const allocator = std.testing.allocator;
     const session = try Session.init(
@@ -3253,11 +3677,109 @@ test "ai_chat: session loads from history record" {
     try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
 }
 
-test "ai_chat: history hook receives self-owning snapshot event" {
+test "ai_chat: loading history record cleans up partial message clone on allocation failure" {
+    const allocator = std.testing.allocator;
+    var record = try agent_history.cloneRecord(allocator, .{
+        .session_id = "session-tool",
+        .title = "Saved",
+        .base_url = "https://api.example.com",
+        .api_key = "secret",
+        .model = "model-a",
+        .system_prompt = "system",
+        .thinking_enabled = true,
+        .reasoning_effort = "high",
+        .stream = false,
+        .agent_enabled = true,
+        .created_at = 1,
+        .updated_at = 2,
+        .messages = &.{
+            .{
+                .role = .tool,
+                .content = "# Skill: pdf",
+                .reasoning = "reason",
+                .usage_footer = "usage",
+                .tool_call_id = "skill-preload-pdf",
+                .tool_name = "skill_info",
+                .replay_to_model = true,
+            },
+        },
+    });
+    defer agent_history.freeOwnedRecord(allocator, &record);
+
+    var saw_oom = false;
+    var fail_index: usize = 0;
+    while (fail_index < 128) : (fail_index += 1) {
+        var failing_allocator = std.testing.FailingAllocator.init(allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = Session.initFromHistoryRecord(failing_allocator.allocator(), record);
+        if (result) |session| {
+            session.deinit();
+            if (!failing_allocator.has_induced_failure) break;
+        } else |err| switch (err) {
+            error.OutOfMemory => saw_oom = true,
+            else => return err,
+        }
+    }
+
+    try std.testing.expect(saw_oom);
+}
+
+test "ai_chat: serializing history record cleans up partial message clone on allocation failure" {
     const allocator = std.testing.allocator;
     const session = try Session.init(
         allocator,
-        "History Hook",
+        "History Test",
+        "https://api.example.com",
+        "secret",
+        "model-a",
+        "system",
+        "enabled",
+        "high",
+        "false",
+        "true",
+    );
+    defer session.deinit();
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    try session.messages.append(allocator, .{
+        .role = .tool,
+        .content = try allocator.dupe(u8, "# Skill: pdf"),
+        .reasoning = try allocator.dupe(u8, "reason"),
+        .usage_footer = try allocator.dupe(u8, "usage"),
+        .tool_call_id = try allocator.dupe(u8, "skill-preload-pdf"),
+        .tool_name = try allocator.dupe(u8, "skill_info"),
+        .replay_to_model = true,
+    });
+
+    var saw_oom = false;
+    var fail_index: usize = 0;
+    while (fail_index < 128) : (fail_index += 1) {
+        var failing_allocator = std.testing.FailingAllocator.init(allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = session.toHistoryRecordLocked(failing_allocator.allocator());
+        if (result) |record| {
+            var owned_record = record;
+            agent_history.freeOwnedRecord(failing_allocator.allocator(), &owned_record);
+            if (!failing_allocator.has_induced_failure) break;
+        } else |err| switch (err) {
+            error.OutOfMemory => saw_oom = true,
+            else => return err,
+        }
+    }
+
+    try std.testing.expect(saw_oom);
+}
+
+test "ai_chat: progress tool messages are ui-only history" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "Progress",
         "https://api.example.com",
         "secret",
         "model-a",
@@ -3277,11 +3799,52 @@ test "ai_chat: history hook receives self-owning snapshot event" {
     session.setHistoryChangeHook(testHistoryHookCaptureCallback);
     try appendProgressMessage(session, "running tool");
 
+    try std.testing.expectEqual(@as(usize, 0), capture.calls);
+    try std.testing.expect(capture.event == null);
+    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
+    try std.testing.expect(!session.messages.items[0].persist_to_history);
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    var record = try session.toHistoryRecordLocked(allocator);
+    defer agent_history.freeOwnedRecord(allocator, &record);
+
+    try std.testing.expectEqual(@as(usize, 0), record.messages.len);
+}
+
+test "ai_chat: replayable skill tool messages emit history snapshots" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "Skill Tool",
+        "https://api.example.com",
+        "secret",
+        "model-a",
+        "system",
+        "enabled",
+        "high",
+        "false",
+        "true",
+    );
+    defer session.deinit();
+
+    var capture = TestHistoryHookCapture{};
+    defer capture.deinit();
+    g_test_history_hook_capture = &capture;
+    defer g_test_history_hook_capture = null;
+
+    session.setHistoryChangeHook(testHistoryHookCaptureCallback);
+    try appendReplayableToolMessage(session, "call-1", "skill_info", "# Skill: pdf");
+
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
     try std.testing.expect(capture.event != null);
     try std.testing.expectEqual(@as(usize, 1), capture.event.?.record.messages.len);
-    try std.testing.expectEqualStrings("running tool", capture.event.?.record.messages[0].content);
-    try std.testing.expect(capture.event.?.record.messages[0].content.ptr != session.messages.items[0].content.ptr);
+    const message = capture.event.?.record.messages[0];
+    try std.testing.expectEqual(.tool, message.role);
+    try std.testing.expectEqualStrings("# Skill: pdf", message.content);
+    try std.testing.expectEqualStrings("call-1", message.tool_call_id.?);
+    try std.testing.expectEqualStrings("skill_info", message.tool_name.?);
+    try std.testing.expect(message.replay_to_model);
 
     capture.deinit();
     try std.testing.expect(capture.event == null);
@@ -3387,6 +3950,160 @@ test "ai chat agent request json includes tool schemas" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"tab_close\"") != null);
 }
 
+test "ai chat agent request json includes stable skill_info tool schema" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "Test",
+        DEFAULT_BASE_URL,
+        "test-key",
+        DEFAULT_MODEL,
+        DEFAULT_SYSTEM_PROMPT,
+        "enabled",
+        "high",
+        "false",
+        "true",
+    );
+    defer session.deinit();
+
+    session.mutex.lock();
+    try session.messages.append(allocator, .{ .role = .user, .content = try allocator.dupe(u8, "hello") });
+    const request = try session.buildRequestLocked();
+    session.mutex.unlock();
+    defer request.deinit();
+
+    const json = try buildRequestJson(allocator, request);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"skill_info\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "skill_name") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "pdf") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\\u0070df") == null);
+}
+
+test "ai chat request json replays durable tool messages and skips progress tools" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "Test",
+        DEFAULT_BASE_URL,
+        "test-key",
+        DEFAULT_MODEL,
+        DEFAULT_SYSTEM_PROMPT,
+        "enabled",
+        "high",
+        "false",
+        "true",
+    );
+    defer session.deinit();
+
+    session.mutex.lock();
+    try session.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "Use the skill."),
+    });
+    try session.messages.append(allocator, .{
+        .role = .tool,
+        .content = try allocator.dupe(u8, "# Skill: pdf"),
+        .tool_call_id = try allocator.dupe(u8, "skill-preload-pdf"),
+        .tool_name = try allocator.dupe(u8, "skill_info"),
+        .replay_to_model = true,
+    });
+    try session.messages.append(allocator, .{
+        .role = .tool,
+        .content = try allocator.dupe(u8, "running terminal_list {}"),
+        .replay_to_model = false,
+    });
+    const request = try session.buildRequestLocked();
+    session.mutex.unlock();
+    defer request.deinit();
+
+    const json = try buildRequestJsonForMessages(allocator, request, request.messages, true);
+    defer allocator.free(json);
+
+    const assistant_tool_call =
+        \\{"role":"assistant","content":"","tool_calls":[{"id":"skill-preload-pdf","type":"function","function":{"name":"skill_info","arguments":"{}"}}]}
+    ;
+    const tool_result =
+        \\{"role":"tool","content":"# Skill: pdf","tool_call_id":"skill-preload-pdf"}
+    ;
+    const assistant_index = std.mem.indexOf(u8, json, assistant_tool_call) orelse return error.MissingAssistantToolCall;
+    const tool_index = std.mem.indexOf(u8, json, tool_result) orelse return error.MissingToolResult;
+    try std.testing.expect(assistant_index < tool_index);
+    try std.testing.expect(std.mem.indexOf(u8, json, "running terminal_list") == null);
+}
+
+test "ai chat request skips replayable tool messages missing identity" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "Test",
+        DEFAULT_BASE_URL,
+        "test-key",
+        DEFAULT_MODEL,
+        DEFAULT_SYSTEM_PROMPT,
+        "enabled",
+        "high",
+        "false",
+        "true",
+    );
+    defer session.deinit();
+
+    session.mutex.lock();
+    try session.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "Use the skill."),
+    });
+    try session.messages.append(allocator, .{
+        .role = .tool,
+        .content = try allocator.dupe(u8, "# Skill without metadata"),
+        .replay_to_model = true,
+    });
+    const request = try session.buildRequestLocked();
+    session.mutex.unlock();
+    defer request.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), request.messages.len);
+
+    const json = try buildRequestJsonForMessages(allocator, request, request.messages, true);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "# Skill without metadata") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"role\":\"tool\"") == null);
+}
+
+test "ai chat request setup cleans scalar fields on allocation failure" {
+    const allocator = std.testing.allocator;
+
+    var saw_oom = false;
+    var fail_index: usize = 0;
+    while (fail_index < 32) : (fail_index += 1) {
+        var failing_allocator = std.testing.FailingAllocator.init(allocator, .{
+            .fail_index = fail_index,
+        });
+
+        var session = Session{ .allocator = failing_allocator.allocator() };
+        session.assignSessionId();
+        session.copyTitle("Test");
+        session.copyBaseUrl(DEFAULT_BASE_URL);
+        session.copyApiKey("test-key");
+        session.copyModel(DEFAULT_MODEL);
+        session.copySystemPrompt(DEFAULT_SYSTEM_PROMPT);
+        session.copyReasoningEffort(DEFAULT_REASONING_EFFORT);
+
+        const result = session.buildRequestLocked();
+        if (result) |request| {
+            request.deinit();
+            if (!failing_allocator.has_induced_failure) break;
+        } else |err| switch (err) {
+            error.OutOfMemory => saw_oom = true,
+            else => return err,
+        }
+    }
+
+    try std.testing.expect(saw_oom);
+}
+
 test "ai chat request json replays assistant reasoning content" {
     const allocator = std.testing.allocator;
     var messages = [_]RequestMessage{.{
@@ -3486,11 +4203,7 @@ test "ai chat appends usage footer to completed assistant message" {
     const allocator = std.testing.allocator;
     var session = Session{ .allocator = allocator };
     defer {
-        for (session.messages.items) |msg| {
-            allocator.free(msg.content);
-            if (msg.reasoning) |reasoning| allocator.free(reasoning);
-            if (msg.usage_footer) |footer| allocator.free(footer);
-        }
+        for (session.messages.items) |msg| msg.deinit(allocator);
         session.messages.deinit(allocator);
     }
 
@@ -3806,11 +4519,7 @@ test "ai chat clipboard text exports transcript when input is empty" {
     const allocator = std.testing.allocator;
     var session = Session{ .allocator = allocator };
     defer {
-        for (session.messages.items) |msg| {
-            allocator.free(msg.content);
-            if (msg.reasoning) |reasoning| allocator.free(reasoning);
-            if (msg.usage_footer) |footer| allocator.free(footer);
-        }
+        for (session.messages.items) |msg| msg.deinit(allocator);
         session.messages.deinit(allocator);
     }
 
@@ -3839,11 +4548,7 @@ test "ai chat message clipboard exports one bubble" {
     const allocator = std.testing.allocator;
     var session = Session{ .allocator = allocator };
     defer {
-        for (session.messages.items) |msg| {
-            allocator.free(msg.content);
-            if (msg.reasoning) |reasoning| allocator.free(reasoning);
-            if (msg.usage_footer) |footer| allocator.free(footer);
-        }
+        for (session.messages.items) |msg| msg.deinit(allocator);
         session.messages.deinit(allocator);
     }
 
@@ -3867,11 +4572,7 @@ test "ai chat stop request suppresses late assistant result" {
     const allocator = std.testing.allocator;
     var session = Session{ .allocator = allocator };
     defer {
-        for (session.messages.items) |msg| {
-            allocator.free(msg.content);
-            if (msg.reasoning) |reasoning| allocator.free(reasoning);
-            if (msg.usage_footer) |footer| allocator.free(footer);
-        }
+        for (session.messages.items) |msg| msg.deinit(allocator);
         session.messages.deinit(allocator);
     }
 
@@ -3930,11 +4631,7 @@ test "ai chat collapse helper only closes auto-expanded details" {
     const allocator = std.testing.allocator;
     var session = Session{ .allocator = allocator };
     defer {
-        for (session.messages.items) |msg| {
-            allocator.free(msg.content);
-            if (msg.reasoning) |reasoning| allocator.free(reasoning);
-            if (msg.usage_footer) |footer| allocator.free(footer);
-        }
+        for (session.messages.items) |msg| msg.deinit(allocator);
         session.messages.deinit(allocator);
     }
 

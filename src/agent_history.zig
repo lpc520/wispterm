@@ -15,6 +15,9 @@ pub const MessageRecord = struct {
     content: []const u8,
     reasoning: ?[]const u8 = null,
     usage_footer: ?[]const u8 = null,
+    tool_call_id: ?[]const u8 = null,
+    tool_name: ?[]const u8 = null,
+    replay_to_model: bool = false,
 };
 
 pub const SessionRecord = struct {
@@ -64,8 +67,10 @@ pub const Store = struct {
 
     pub fn upsertRecord(self: *Store, input: anytype) !void {
         var cloned = try cloneRecord(self.allocator, input);
-        errdefer freeOwnedRecord(self.allocator, &cloned);
+        var cloned_owned = true;
+        errdefer if (cloned_owned) freeOwnedRecord(self.allocator, &cloned);
 
+        cloned_owned = false;
         try self.upsertOwnedRecord(cloned);
     }
 
@@ -262,16 +267,35 @@ pub fn freeOwnedRecord(allocator: std.mem.Allocator, record: *SessionRecord) voi
 pub fn cloneMessage(allocator: std.mem.Allocator, input: anytype) !MessageRecord {
     const content = try allocator.dupe(u8, input.content);
     errdefer allocator.free(content);
-    const reasoning = try dupeOptionalString(allocator, input.reasoning);
+    const reasoning = if (@hasField(@TypeOf(input), "reasoning"))
+        try dupeOptionalString(allocator, input.reasoning)
+    else
+        null;
     errdefer if (reasoning) |value| allocator.free(value);
-    const usage_footer = try dupeOptionalString(allocator, input.usage_footer);
+    const usage_footer = if (@hasField(@TypeOf(input), "usage_footer"))
+        try dupeOptionalString(allocator, input.usage_footer)
+    else
+        null;
     errdefer if (usage_footer) |value| allocator.free(value);
+    const tool_call_id = if (@hasField(@TypeOf(input), "tool_call_id"))
+        try dupeOptionalString(allocator, input.tool_call_id)
+    else
+        null;
+    errdefer if (tool_call_id) |value| allocator.free(value);
+    const tool_name = if (@hasField(@TypeOf(input), "tool_name"))
+        try dupeOptionalString(allocator, input.tool_name)
+    else
+        null;
+    errdefer if (tool_name) |value| allocator.free(value);
 
     return .{
         .role = input.role,
         .content = content,
         .reasoning = reasoning,
         .usage_footer = usage_footer,
+        .tool_call_id = tool_call_id,
+        .tool_name = tool_name,
+        .replay_to_model = if (@hasField(@TypeOf(input), "replay_to_model")) input.replay_to_model else false,
     };
 }
 
@@ -283,6 +307,8 @@ pub fn freeOwnedMessage(allocator: std.mem.Allocator, message: *MessageRecord) v
     allocator.free(message.content);
     if (message.reasoning) |reasoning| allocator.free(reasoning);
     if (message.usage_footer) |usage_footer| allocator.free(usage_footer);
+    if (message.tool_call_id) |tool_call_id| allocator.free(tool_call_id);
+    if (message.tool_name) |tool_name| allocator.free(tool_name);
     message.* = undefined;
 }
 
@@ -506,6 +532,49 @@ test "agent_history: json round trip preserves messages" {
     try std.testing.expectEqualStrings("world", parsed.records.items[0].messages[1].content);
 }
 
+test "agent_history: json round trip preserves replayable tool metadata" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator);
+    defer store.deinit();
+
+    try store.upsertRecord(.{
+        .session_id = "session-tool",
+        .title = "Tool Session",
+        .base_url = "https://api.deepseek.com",
+        .api_key = "",
+        .model = "deepseek-v4-pro",
+        .system_prompt = "You are a helpful assistant.",
+        .thinking_enabled = true,
+        .reasoning_effort = "high",
+        .stream = false,
+        .agent_enabled = true,
+        .created_at = 1,
+        .updated_at = 2,
+        .messages = &.{
+            .{
+                .role = .tool,
+                .content = "# Skill: pdf",
+                .tool_call_id = "skill-preload-pdf",
+                .tool_name = "skill_info",
+                .replay_to_model = true,
+            },
+        },
+    });
+
+    const json = try store.toJsonString(allocator);
+    defer allocator.free(json);
+
+    var parsed = try Store.fromJsonString(allocator, json);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.records.items.len);
+    const message = parsed.records.items[0].messages[0];
+    try std.testing.expectEqual(.tool, message.role);
+    try std.testing.expectEqualStrings("skill-preload-pdf", message.tool_call_id.?);
+    try std.testing.expectEqualStrings("skill_info", message.tool_name.?);
+    try std.testing.expect(message.replay_to_model);
+}
+
 test "agent_history: malformed json falls back to empty store" {
     const allocator = std.testing.allocator;
     var parsed = try Store.fromJsonStringLenient(allocator, "{not json");
@@ -566,6 +635,43 @@ test "agent_history: upsertOwnedRecord takes ownership and replaces existing rec
     try std.testing.expectEqual(@as(usize, 1), store.records.items.len);
     try std.testing.expectEqualStrings("New", store.records.items[0].title);
     try std.testing.expectEqualStrings("updated", store.records.items[0].messages[0].content);
+}
+
+test "agent_history: upsertRecord cleans owned clone when append fails" {
+    const allocator = std.testing.allocator;
+    var fail_index: usize = 0;
+    var saw_oom = false;
+    while (fail_index < 128) : (fail_index += 1) {
+        var failing_allocator = std.testing.FailingAllocator.init(allocator, .{
+            .fail_index = fail_index,
+        });
+        var store = Store.init(failing_allocator.allocator());
+        defer store.deinit();
+
+        const result = store.upsertRecord(.{
+            .session_id = "s1",
+            .title = "OOM",
+            .base_url = "https://api.example.com",
+            .api_key = "secret",
+            .model = "m1",
+            .system_prompt = "system",
+            .thinking_enabled = true,
+            .reasoning_effort = "high",
+            .stream = false,
+            .agent_enabled = true,
+            .created_at = 10,
+            .updated_at = 20,
+            .messages = &.{},
+        });
+        if (result) |_| {
+            if (!failing_allocator.has_induced_failure) break;
+        } else |err| switch (err) {
+            error.OutOfMemory => saw_oom = true,
+            else => return err,
+        }
+    }
+
+    try std.testing.expect(saw_oom);
 }
 
 test "agent_history: upsert replaces existing session id instead of duplicating" {
