@@ -84,6 +84,10 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
     // Split config
     overlays.g_unfocused_split_opacity = app.unfocused_split_opacity;
     g_focus_follows_mouse = app.focus_follows_mouse;
+    g_copy_on_select = app.copy_on_select;
+    g_right_click_action = app.right_click_action;
+    g_ssh_legacy_algorithms = app.ssh_legacy_algorithms;
+    tab.g_ssh_legacy_algorithms = app.ssh_legacy_algorithms;
     overlays.g_split_divider_color = app.split_divider_color;
 
     // Apply window size from config
@@ -600,6 +604,9 @@ const ConfigWatcher = @import("config_watcher.zig");
 
 /// Focus follows mouse - when true, moving mouse into a split pane focuses it
 pub threadlocal var g_focus_follows_mouse: bool = false;
+pub threadlocal var g_copy_on_select: bool = false;
+pub threadlocal var g_right_click_action: Config.RightClickAction = .copy;
+pub threadlocal var g_ssh_legacy_algorithms: bool = false;
 
 /// Update cursor blink state based on time (call once per frame)
 fn updateCursorBlink() void {
@@ -843,6 +850,10 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     // --- Split config ---
     overlays.g_unfocused_split_opacity = cfg.@"unfocused-split-opacity";
     g_focus_follows_mouse = cfg.@"focus-follows-mouse";
+    g_copy_on_select = cfg.@"copy-on-select";
+    g_right_click_action = cfg.@"right-click-action";
+    g_ssh_legacy_algorithms = cfg.@"ssh-legacy-algorithms";
+    tab.g_ssh_legacy_algorithms = cfg.@"ssh-legacy-algorithms";
     overlays.g_split_divider_color = cfg.@"split-divider-color";
 
     // --- Background image ---
@@ -1975,12 +1986,21 @@ fn syncAiChatImeCaret(win: *win32_backend.Window, session: *ai_chat.Session) voi
     const field_w = panel_w - ai_chat_renderer.LINE_PAD_X * 2 - 24;
     session.mutex.lock();
     const input_text = session.input();
-    const cursor_x = ai_chat_renderer.inputCursorX(input_text, field_x, field_w);
+    const input_h = ai_chat_renderer.inputHeightForText(input_text, field_w);
+    const field_h = input_h - 32;
+    const cursor = ai_chat_renderer.inputCursorRect(input_text, session.input_cursor, field_x, field_w);
     session.mutex.unlock();
-    const cursor_y = wh - ai_chat_renderer.INPUT_H + 16 + 14;
-    const h = ai_chat_renderer.INPUT_H - 32 - 28;
+    const input_line_h = @round(@max(23.0, font.g_titlebar_cell_height + 8.0));
+    const visible_rows = @max(@as(usize, 1), @as(usize, @intFromFloat(@max(1.0, @floor((field_h - 20) / input_line_h)))));
+    const first_row = if (cursor.row >= visible_rows) cursor.row - visible_rows + 1 else 0;
+    const row = cursor.row - first_row;
+    const field_y: f32 = 16;
+    const field_top_px = wh - field_y - field_h;
+    const cursor_top_px = field_top_px + 10 + @as(f32, @floatFromInt(row)) * input_line_h;
+    const cursor_y = cursor_top_px;
+    const h = font.g_titlebar_cell_height;
     win.setImeCaret(
-        @intFromFloat(@round(cursor_x)),
+        @intFromFloat(@round(cursor.x)),
         @intFromFloat(@round(cursor_y)),
         @intFromFloat(@max(1.0, @round(h))),
     );

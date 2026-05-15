@@ -142,8 +142,9 @@ To confirm the running desktop version, open the command center with `Ctrl+Shift
 | Shift-click terminal text                                                      | Select from the last terminal click anchor                                        |
 | **Ctrl+A** in AI Chat                                                          | Select the input text; when the input is empty, select the transcript             |
 | **Ctrl+C** in AI Chat                                                          | Copy the selected AI Chat text, or copy the transcript when nothing is selected   |
+| Left / Right / Home / End / Delete / Backspace in AI Chat                      | Edit the AI Chat input cursor without clearing the whole draft                    |
 | **Esc** in AI Chat while working                                               | Stop the in-flight AI Chat or Agent request                                      |
-| Right-click a selection                                                        | Copy selection                                                                     |
+| Right-click a selection                                                        | Copy selection by default; configurable with `right-click-action`                 |
 | **Ctrl+V**                                                                     | Paste text                                                                         |
 | **Ctrl+Shift+V**                                                               | Paste clipboard image                                                              |
 | **Alt** + arrow keys                                                           | Move focus to adjacent panel (spatial)                                             |
@@ -190,6 +191,11 @@ the built-in SSH launcher are supported. Manually typing `ssh user@host` inside
 a local shell is still treated as that local shell and cannot use remote file
 preview yet.
 
+For old bastions or servers that still require disabled OpenSSH algorithms, set
+`ssh-legacy-algorithms = true`. This appends compatibility options for
+`ssh-rsa`, `ssh-dss`, older Diffie-Hellman KEX, and CBC ciphers to Phantty's SSH
+profile launches and helper `ssh.exe` / `scp.exe` commands.
+
 ## AI Chat Sessions
 
 Open the session launcher with `Ctrl+Shift+T` and choose `AI Agent`. Phantty
@@ -213,6 +219,21 @@ DeepSeek, Phantty also checks `DEEPSEEK_API_KEY` in the process environment.
 Responses with `reasoning_content` are shown as a muted reasoning block above
 the assistant reply. This follows DeepSeek's
 [thinking mode guide](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode).
+Completed requests show elapsed time in the AI Chat status area, and token usage
+when the provider returns OpenAI-compatible `usage` fields.
+
+Agent tool commands run as hidden background child processes where possible, so
+local PowerShell/cmd tool calls do not flash a separate console window.
+
+For Xshell-like terminal clipboard behavior, use:
+
+```text
+copy-on-select = true
+right-click-action = paste
+```
+
+`right-click-action = copy-or-paste` copies when a terminal selection is active
+and pastes when there is no selection.
 
 ## Background Image
 

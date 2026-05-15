@@ -1397,18 +1397,22 @@ fn connectSshProfileReturningSurface(idx: usize) ?*Surface {
     // ServerAlive* sends an encrypted keepalive every 60s and gives up after 3
     // misses (~3 min). Defeats NAT/firewall idle drops that hang interactive
     // sessions (e.g. Codex over SSH) after ~10 min of silence.
+    const legacy_flags = if (AppWindow.g_ssh_legacy_algorithms)
+        "-o HostkeyAlgorithms=+ssh-rsa,ssh-dss -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-dss -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1 -o Ciphers=+aes128-cbc,3des-cbc "
+    else
+        "";
     const auth_flags = if (password.len > 0)
         "-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no "
     else
         "-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 -o ServerAliveCountMax=3 ";
     const command = if (port.len > 0)
-        std.fmt.bufPrint(&command_buf, "cmd.exe /k ssh.exe -tt {s}-p {s} {s}@{s}", .{ auth_flags, port, user, ip }) catch return null
+        std.fmt.bufPrint(&command_buf, "cmd.exe /k ssh.exe -tt {s}{s}-p {s} {s}@{s}", .{ auth_flags, legacy_flags, port, user, ip }) catch return null
     else
-        std.fmt.bufPrint(&command_buf, "cmd.exe /k ssh.exe -tt {s}{s}@{s}", .{ auth_flags, user, ip }) catch return null;
+        std.fmt.bufPrint(&command_buf, "cmd.exe /k ssh.exe -tt {s}{s}{s}@{s}", .{ auth_flags, legacy_flags, user, ip }) catch return null;
 
     sessionLauncherClose();
     if (AppWindow.spawnTabWithCommandUtf8ReturningSurface(command)) |surface| {
-        surface.setSshConnection(user, ip, port, password, password.len > 0);
+        surface.setSshConnection(user, ip, port, password, password.len > 0, AppWindow.g_ssh_legacy_algorithms);
         if (server_name.len > 0) {
             surface.setTitleOverride(server_name);
         }

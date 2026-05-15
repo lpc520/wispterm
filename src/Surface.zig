@@ -64,6 +64,7 @@ pub const SshConnection = struct {
     password_buf: [128]u8 = undefined,
     password_len: usize = 0,
     password_auth: bool = false,
+    legacy_algorithms: bool = false,
 
     pub fn user(self: *const SshConnection) []const u8 {
         return self.user_buf[0..self.user_len];
@@ -546,6 +547,7 @@ pub fn setSshConnection(
     port: []const u8,
     password: []const u8,
     password_auth: bool,
+    legacy_algorithms: bool,
 ) void {
     var conn: SshConnection = .{};
     conn.user_len = @min(user.len, conn.user_buf.len);
@@ -557,6 +559,7 @@ pub fn setSshConnection(
     @memcpy(conn.port_buf[0..conn.port_len], port[0..conn.port_len]);
     @memcpy(conn.password_buf[0..conn.password_len], password[0..conn.password_len]);
     conn.password_auth = password_auth;
+    conn.legacy_algorithms = legacy_algorithms;
 
     self.launch_kind = .ssh;
     self.ssh_connection = conn;

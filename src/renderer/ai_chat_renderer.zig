@@ -14,9 +14,10 @@ const c = @cImport({
 pub const LINE_PAD_X: f32 = 18;
 const HEADER_H: f32 = 54;
 pub const INPUT_H: f32 = 92;
+pub const INPUT_MAX_H: f32 = 220;
 const PERMISSION_CHIP_W: f32 = 104;
 const PERMISSION_CHIP_H: f32 = 24;
-const STATUS_SLOT_W: f32 = 120;
+const STATUS_SLOT_W: f32 = 280;
 const STOP_BUTTON_W: f32 = 104;
 const STOP_BUTTON_H: f32 = 28;
 const MODE_SLOT_W: f32 = 112;
@@ -39,6 +40,11 @@ pub const HitTarget = union(enum) {
     copy_message: usize,
     toggle_tool: usize,
     toggle_reasoning: usize,
+};
+
+pub const InputCursorRect = struct {
+    x: f32,
+    row: usize,
 };
 
 pub fn render(
@@ -97,19 +103,20 @@ pub fn render(
         _ = titlebar.renderTextLimited(session.status(), x + w - LINE_PAD_X - @min(status_w, STATUS_SLOT_W), header_y + 10, muted, STATUS_SLOT_W);
     }
 
-    const input_y: f32 = 0;
-    gl_init.renderQuadAlpha(x, input_y, w, INPUT_H, panel, 0.98);
-    gl_init.renderQuadAlpha(x, input_y + INPUT_H - 1, w, 1, line, 0.8);
-
     const field_x = x + LINE_PAD_X;
-    const field_y = input_y + 16;
     const field_w = w - LINE_PAD_X * 2;
-    const field_h = INPUT_H - 32;
+    const input_text = session.input();
+    const input_h = inputHeightForText(input_text, field_w - 24);
+    const input_y: f32 = 0;
+    gl_init.renderQuadAlpha(x, input_y, w, input_h, panel, 0.98);
+    gl_init.renderQuadAlpha(x, input_y + input_h - 1, w, 1, line, 0.8);
+
+    const field_y = input_y + 16;
+    const field_h = input_h - 32;
     const field_bg = mixColor(bg, fg, 0.075);
     gl_init.renderQuadAlpha(field_x, field_y, field_w, field_h, field_bg, 0.95);
     gl_init.renderQuadAlpha(field_x, field_y, field_w, 1, mixColor(bg, accent, 0.38), 0.6);
 
-    const input_text = session.input();
     if (input_text.len == 0) {
         const placeholder = if (session.agent_enabled) "Ask Agent" else "Ask AI Chat";
         _ = titlebar.renderTextLimited(placeholder, field_x + 12, field_y + (field_h - font.g_titlebar_cell_height) / 2, mixColor(bg, fg, 0.42), field_w - 24);
@@ -117,18 +124,30 @@ pub fn render(
         if (session.input_select_all) {
             gl_init.renderQuadAlpha(field_x + 8, field_y + 8, field_w - 16, field_h - 16, accent, 0.22);
         }
-        _ = renderWrappedText(input_text, field_x + 12, window_height - field_y - field_h + 10, field_w - 24, lineHeight(), fg, window_height, window_height);
+        const max_text_w = field_w - 24;
+        const cursor = inputCursorRect(input_text, session.input_cursor, field_x + 12, max_text_w);
+        const visible_rows = inputVisibleRows(field_h);
+        const first_row = if (cursor.row >= visible_rows) cursor.row - visible_rows + 1 else 0;
+        const text_start = wrappedByteOffsetForLine(input_text, max_text_w, first_row);
+        _ = renderWrappedText(input_text[text_start..], field_x + 12, window_height - field_y - field_h + 10, max_text_w, lineHeight(), fg, window_height, window_height);
     }
     if (!session.request_inflight and AppWindow.g_cursor_blink_visible) {
-        const cursor_x = inputCursorX(input_text, field_x + 12, field_w - 24);
-        gl_init.renderQuad(cursor_x, field_y + 14, 1, field_h - 28, accent);
+        const max_text_w = field_w - 24;
+        const cursor = inputCursorRect(input_text, session.input_cursor, field_x + 12, max_text_w);
+        const visible_rows = inputVisibleRows(field_h);
+        const first_row = if (cursor.row >= visible_rows) cursor.row - visible_rows + 1 else 0;
+        const row = cursor.row - first_row;
+        const field_top_px = window_height - field_y - field_h;
+        const cursor_top_px = field_top_px + 10 + @as(f32, @floatFromInt(row)) * lineHeight();
+        const cursor_y = window_height - cursor_top_px - font.g_titlebar_cell_height;
+        gl_init.renderQuad(cursor.x, cursor_y, 1, font.g_titlebar_cell_height, accent);
     }
 
     const approval = session.approvalView();
     const approval_h: f32 = if (approval != null) APPROVAL_H + APPROVAL_GAP else 0;
 
     const transcript_top = top + HEADER_H + 18;
-    const transcript_bottom = INPUT_H + approval_h + 18;
+    const transcript_bottom = input_h + approval_h + 18;
     const transcript_h = @max(1.0, window_height - transcript_top - transcript_bottom);
     const content_w = w - LINE_PAD_X * 2;
     const content_x = x + LINE_PAD_X;
@@ -186,7 +205,7 @@ pub fn render(
     gl.Disable.?(c.GL_SCISSOR_TEST);
 
     if (approval) |view| {
-        renderApprovalCard(view, x + LINE_PAD_X, INPUT_H + APPROVAL_GAP, w - LINE_PAD_X * 2, APPROVAL_H);
+        renderApprovalCard(view, x + LINE_PAD_X, input_h + APPROVAL_GAP, w - LINE_PAD_X * 2, APPROVAL_H);
     }
 }
 
@@ -209,8 +228,9 @@ pub fn interactionHitTest(
 
     const approval = session.approvalView();
     const approval_h: f32 = if (approval != null) APPROVAL_H + APPROVAL_GAP else 0;
+    const input_h = inputHeightForText(session.input(), w - LINE_PAD_X * 2 - 24);
     const transcript_top = titlebar_offset + HEADER_H + 18;
-    const transcript_bottom = INPUT_H + approval_h + 18;
+    const transcript_bottom = input_h + approval_h + 18;
     const transcript_h = @max(1.0, window_height - transcript_top - transcript_bottom);
     const viewport_bottom_top_px = window_height - transcript_bottom;
     const content_w = w - LINE_PAD_X * 2;
@@ -1208,16 +1228,72 @@ fn countWrappedLines(text: []const u8, max_w: f32) usize {
     return lines;
 }
 
-pub fn inputCursorX(text: []const u8, x: f32, max_w: f32) f32 {
+pub fn inputHeightForText(text: []const u8, max_w: f32) f32 {
+    const rows = countWrappedLines(text, @max(1.0, max_w));
+    const max_field_h = INPUT_MAX_H - 32;
+    const min_field_h = INPUT_H - 32;
+    const wanted_field_h = @as(f32, @floatFromInt(rows)) * lineHeight() + 20;
+    const field_h = @min(max_field_h, @max(min_field_h, wanted_field_h));
+    return field_h + 32;
+}
+
+fn inputVisibleRows(field_h: f32) usize {
+    const rows_f = @max(1.0, @floor((field_h - 20) / lineHeight()));
+    return @max(@as(usize, 1), @as(usize, @intFromFloat(rows_f)));
+}
+
+pub fn inputCursorRect(text: []const u8, cursor_raw: usize, x: f32, max_w_raw: f32) InputCursorRect {
+    const max_w = @max(1.0, max_w_raw);
+    const cursor = @min(cursor_raw, text.len);
     var width: f32 = 0;
+    var row: usize = 0;
     var i: usize = 0;
-    while (i < text.len) {
+    while (i < cursor) {
+        if (text[i] == '\n') {
+            row += 1;
+            width = 0;
+            i += 1;
+            continue;
+        }
         const item = nextCodepoint(text, i);
-        if (width + item.advance > max_w) break;
+        if (width > 0 and width + item.advance > max_w) {
+            row += 1;
+            width = 0;
+        }
         width += item.advance;
         i += item.len;
     }
-    return x + width + 2;
+    return .{ .x = x + width + 2, .row = row };
+}
+
+pub fn inputCursorX(text: []const u8, x: f32, max_w: f32) f32 {
+    return inputCursorRect(text, text.len, x, max_w).x;
+}
+
+fn wrappedByteOffsetForLine(text: []const u8, max_w_raw: f32, target_row: usize) usize {
+    if (target_row == 0) return 0;
+    const max_w = @max(1.0, max_w_raw);
+    var width: f32 = 0;
+    var row: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '\n') {
+            row += 1;
+            i += 1;
+            width = 0;
+            if (row == target_row) return i;
+            continue;
+        }
+        const item = nextCodepoint(text, i);
+        if (width > 0 and width + item.advance > max_w) {
+            row += 1;
+            width = 0;
+            if (row == target_row) return i;
+        }
+        width += item.advance;
+        i += item.len;
+    }
+    return text.len;
 }
 
 fn measureText(text: []const u8) f32 {

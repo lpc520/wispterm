@@ -29,6 +29,8 @@ pub const DEFAULT_PADDING: u32 = 10;
 pub const TAB_CLOSE_BTN_W: f32 = 36;
 pub const TAB_CLOSE_FADE_SPEED: f32 = 6.0;
 
+pub threadlocal var g_ssh_legacy_algorithms: bool = false;
+
 // ============================================================================
 // Tab model — each tab owns a SplitTree of Surfaces
 // ============================================================================
@@ -523,7 +525,7 @@ fn splitFocusedSurfaceWithCommand(
 
     if (inherit_ssh_connection) {
         if (focused_surface.ssh_connection) |conn| {
-            new_surface.setSshConnection(conn.user(), conn.host(), conn.port(), conn.password(), conn.password_auth);
+            new_surface.setSshConnection(conn.user(), conn.host(), conn.port(), conn.password(), conn.password_auth, conn.legacy_algorithms);
         }
     }
 
@@ -1043,7 +1045,7 @@ fn surfaceFromSnapImpl(
             // ssh.exe -tt prompts interactively in cmd.exe if key auth fails;
             // the in-app password-autofill flow (which requires password_auth=true)
             // does not engage here.
-            surface.setSshConnection(s.user, s.host, port_slice, "", false);
+            surface.setSshConnection(s.user, s.host, port_slice, "", false, g_ssh_legacy_algorithms);
             return surface;
         },
     }

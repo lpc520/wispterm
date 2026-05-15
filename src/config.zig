@@ -133,6 +133,30 @@ pub const CursorStyle = enum {
     block_hollow,
 };
 
+pub const RightClickAction = enum {
+    ignore,
+    copy,
+    paste,
+    copy_or_paste,
+
+    pub fn parse(s: []const u8) ?RightClickAction {
+        if (std.mem.eql(u8, s, "ignore")) return .ignore;
+        if (std.mem.eql(u8, s, "copy")) return .copy;
+        if (std.mem.eql(u8, s, "paste")) return .paste;
+        if (std.mem.eql(u8, s, "copy-or-paste")) return .copy_or_paste;
+        return null;
+    }
+
+    pub fn name(self: RightClickAction) []const u8 {
+        return switch (self) {
+            .ignore => "ignore",
+            .copy => "copy",
+            .paste => "paste",
+            .copy_or_paste => "copy-or-paste",
+        };
+    }
+};
+
 // ============================================================================
 // Background Image
 // ============================================================================
@@ -235,6 +259,15 @@ theme: ?[]const u8 = null,
 
 /// Scrollback buffer limit in bytes.
 @"scrollback-limit": u32 = 10_000_000,
+
+/// Copy terminal selections to the clipboard when selection completes.
+@"copy-on-select": bool = false,
+
+/// Right-click action for terminal surfaces.
+@"right-click-action": RightClickAction = .copy,
+
+/// Add legacy OpenSSH algorithms for older bastion/servers.
+@"ssh-legacy-algorithms": bool = false,
 
 /// Enable agent tools for AI Chat profiles by default.
 @"ai-agent-enabled": bool = false,
@@ -580,6 +613,28 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
             log.warn("invalid scrollback-limit: {s}", .{value});
             return;
         };
+    } else if (std.mem.eql(u8, key, "copy-on-select")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"copy-on-select" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"copy-on-select" = false;
+        } else {
+            log.warn("invalid copy-on-select: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "right-click-action")) {
+        if (RightClickAction.parse(value)) |action| {
+            self.@"right-click-action" = action;
+        } else {
+            log.warn("invalid right-click-action: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "ssh-legacy-algorithms")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"ssh-legacy-algorithms" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"ssh-legacy-algorithms" = false;
+        } else {
+            log.warn("invalid ssh-legacy-algorithms: {s}", .{value});
+        }
     } else if (std.mem.eql(u8, key, "ai-agent-enabled")) {
         if (std.mem.eql(u8, value, "true")) {
             self.@"ai-agent-enabled" = true;
@@ -976,6 +1031,9 @@ pub fn printHelp() void {
         \\  --window-height <rows>       Initial height in cells (default: 0=auto, min: 4)
         \\  --window-width <cols>        Initial width in cells (default: 0=auto, min: 10)
         \\  --scrollback-limit <bytes>   Scrollback buffer size (default: 10000000)
+        \\  --copy-on-select <bool>      Copy terminal selection when mouse selection completes
+        \\  --right-click-action <mode>  ignore | copy | paste | copy-or-paste
+        \\  --ssh-legacy-algorithms <bool> Enable legacy ssh-rsa/ssh-dss OpenSSH options
         \\  --ai-agent-enabled <bool>    Enable AI Chat agent tools by default
         \\  --ai-agent-permission <mode> Agent tool permission: confirm | full
         \\  --ai-agent-command-timeout-ms <ms> Agent command timeout budget
@@ -1280,6 +1338,14 @@ const default_config_template =
     \\# Scrollback buffer size in bytes (default: 10MB)
     \\# scrollback-limit = 10000000
     \\
+    \\# Terminal mouse/clipboard behavior
+    \\# copy-on-select = false
+    \\# right-click-action = copy   # ignore | copy | paste | copy-or-paste
+    \\
+    \\# SSH compatibility for older bastions/servers.
+    \\# Adds ssh-rsa/ssh-dss and legacy KEX/cipher options to profile/helper SSH.
+    \\# ssh-legacy-algorithms = false
+    \\
     \\# AI Chat agent tools (disabled by default)
     \\# ai-agent-enabled = false
     \\# ai-agent-permission = confirm   # confirm | full
@@ -1370,6 +1436,29 @@ test "config: ai agent options parse" {
     try std.testing.expectEqual(ai_chat.AgentPermission.full, cfg.@"ai-agent-permission");
     try std.testing.expectEqual(@as(u32, 120000), cfg.@"ai-agent-command-timeout-ms");
     try std.testing.expectEqual(@as(u32, 4096), cfg.@"ai-agent-output-limit");
+}
+
+test "config: copy and right click options parse" {
+    const allocator = std.testing.allocator;
+    var cfg: Config = .{};
+
+    try std.testing.expectEqual(false, cfg.@"copy-on-select");
+    try std.testing.expectEqual(RightClickAction.copy, cfg.@"right-click-action");
+
+    cfg.applyKeyValue(allocator, "copy-on-select", "true", ".");
+    cfg.applyKeyValue(allocator, "right-click-action", "copy-or-paste", ".");
+
+    try std.testing.expectEqual(true, cfg.@"copy-on-select");
+    try std.testing.expectEqual(RightClickAction.copy_or_paste, cfg.@"right-click-action");
+}
+
+test "config: ssh legacy algorithm option parses" {
+    const allocator = std.testing.allocator;
+    var cfg: Config = .{};
+
+    try std.testing.expectEqual(false, cfg.@"ssh-legacy-algorithms");
+    cfg.applyKeyValue(allocator, "ssh-legacy-algorithms", "true", ".");
+    try std.testing.expectEqual(true, cfg.@"ssh-legacy-algorithms");
 }
 
 test "config: remote session key parses" {

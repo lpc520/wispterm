@@ -106,6 +106,7 @@ fn runScpTransfer(
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Pipe;
     if (env_map) |map| child.env_map = map;
+    child.create_no_window = true;
     child.spawn() catch |err| {
         std.debug.print("SCP spawn failed: {}\n", .{err});
         return .spawn_error;
@@ -197,6 +198,7 @@ pub fn sshExec(allocator: std.mem.Allocator, conn: *const SshConnection, command
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Ignore;
     if (env_map) |*map| child.env_map = map;
+    child.create_no_window = true;
     child.spawn() catch return null;
 
     // Read stdout
@@ -365,6 +367,7 @@ fn sshStreamUpload(
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Pipe;
     if (env_map) |map| child.env_map = map;
+    child.create_no_window = true;
     child.spawn() catch return .spawn_error;
 
     var write_ok = true;
@@ -432,6 +435,7 @@ fn sshStreamDownload(
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
     if (env_map) |map| child.env_map = map;
+    child.create_no_window = true;
     child.spawn() catch return .spawn_error;
 
     if (child.stdout) |stdout| {
@@ -498,6 +502,24 @@ fn appendSshOptions(
         argv_buf[argc] = "-o";
         argc += 1;
         argv_buf[argc] = "BatchMode=yes";
+        argc += 1;
+    }
+    if (conn.legacy_algorithms) {
+        argv_buf[argc] = "-o";
+        argc += 1;
+        argv_buf[argc] = "HostkeyAlgorithms=+ssh-rsa,ssh-dss";
+        argc += 1;
+        argv_buf[argc] = "-o";
+        argc += 1;
+        argv_buf[argc] = "PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-dss";
+        argc += 1;
+        argv_buf[argc] = "-o";
+        argc += 1;
+        argv_buf[argc] = "KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1";
+        argc += 1;
+        argv_buf[argc] = "-o";
+        argc += 1;
+        argv_buf[argc] = "Ciphers=+aes128-cbc,3des-cbc";
         argc += 1;
     }
     if (conn.port().len > 0) {
@@ -680,4 +702,18 @@ test "appendSshOptions with control path" {
     try std.testing.expectEqualStrings("ControlMaster=auto", argv_buf[7]);
     try std.testing.expectEqualStrings("ControlPersist=10m", argv_buf[9]);
     try std.testing.expectEqualStrings("ControlPath=C:/Temp/phantty-ssh-%C", argv_buf[11]);
+}
+
+test "appendSshOptions includes legacy algorithms when enabled" {
+    var conn: SshConnection = .{};
+    conn.password_auth = false;
+    conn.legacy_algorithms = true;
+
+    var argv_buf: [32][]const u8 = undefined;
+    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh, null);
+    try std.testing.expectEqual(@as(usize, 14), argc);
+    try std.testing.expectEqualStrings("HostkeyAlgorithms=+ssh-rsa,ssh-dss", argv_buf[7]);
+    try std.testing.expectEqualStrings("PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-dss", argv_buf[9]);
+    try std.testing.expectEqualStrings("KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1", argv_buf[11]);
+    try std.testing.expectEqualStrings("Ciphers=+aes128-cbc,3des-cbc", argv_buf[13]);
 }

@@ -56,6 +56,9 @@ debug_memory: bool,
 unfocused_split_opacity: f32,
 split_divider_color: ?Config.Color,
 focus_follows_mouse: bool,
+copy_on_select: bool,
+right_click_action: Config.RightClickAction,
+ssh_legacy_algorithms: bool,
 
 // Background image
 background_image: ?[]const u8,
@@ -158,6 +161,9 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
         .unfocused_split_opacity = cfg.@"unfocused-split-opacity",
         .split_divider_color = cfg.@"split-divider-color",
         .focus_follows_mouse = cfg.@"focus-follows-mouse",
+        .copy_on_select = cfg.@"copy-on-select",
+        .right_click_action = cfg.@"right-click-action",
+        .ssh_legacy_algorithms = cfg.@"ssh-legacy-algorithms",
         .background_image = background_image,
         .background_opacity = cfg.@"background-opacity",
         .background_image_mode = cfg.@"background-image-mode",
@@ -291,6 +297,9 @@ pub fn updateConfig(self: *App, cfg: *const Config) void {
     self.unfocused_split_opacity = cfg.@"unfocused-split-opacity";
     self.split_divider_color = cfg.@"split-divider-color";
     self.focus_follows_mouse = cfg.@"focus-follows-mouse";
+    self.copy_on_select = cfg.@"copy-on-select";
+    self.right_click_action = cfg.@"right-click-action";
+    self.ssh_legacy_algorithms = cfg.@"ssh-legacy-algorithms";
     self.replaceOptStr(&self.background_image, cfg.@"background-image");
     self.background_opacity = cfg.@"background-opacity";
     self.background_image_mode = cfg.@"background-image-mode";

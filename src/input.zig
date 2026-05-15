@@ -333,6 +333,7 @@ fn pasteSavedClipboardImage(surface: *Surface, allocator: std.mem.Allocator, ima
 pub threadlocal var g_selecting: bool = false; // True while mouse button is held
 pub threadlocal var g_click_x: f64 = 0; // X position of initial click (for threshold calculation)
 pub threadlocal var g_click_y: f64 = 0; // Y position of initial click
+var g_selection_changed_for_copy: bool = false;
 threadlocal var g_left_click_count: u8 = 0;
 threadlocal var g_left_click_time_ms: i64 = 0;
 threadlocal var g_left_click_x: f64 = 0;
@@ -1191,7 +1192,14 @@ fn isModifierKey(vk: win32_backend.WPARAM) bool {
 }
 
 fn isAiChatKey(ev: win32_backend.KeyEvent) bool {
-    if (ev.vk == win32_backend.VK_RETURN or ev.vk == win32_backend.VK_BACK or ev.vk == win32_backend.VK_ESCAPE) return true;
+    if (ev.vk == win32_backend.VK_RETURN or
+        ev.vk == win32_backend.VK_BACK or
+        ev.vk == win32_backend.VK_DELETE or
+        ev.vk == win32_backend.VK_LEFT or
+        ev.vk == win32_backend.VK_RIGHT or
+        ev.vk == win32_backend.VK_HOME or
+        ev.vk == win32_backend.VK_END or
+        ev.vk == win32_backend.VK_ESCAPE) return true;
     if (ev.ctrl and !ev.alt and (ev.vk == 0x41 or ev.vk == 0x55 or ev.vk == 0x4C)) return true; // Ctrl+A / Ctrl+U / Ctrl+L
     return false;
 }
@@ -1640,6 +1648,7 @@ fn viewportCellCodepoint(surface: *Surface, col: usize, row: usize) u21 {
 }
 
 fn markSelectionChanged() void {
+    g_selection_changed_for_copy = true;
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
 }
@@ -2325,9 +2334,9 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
         return;
     }
 
-    // Right-click copies the current terminal selection, if any.
+    // Right-click follows Ghostty-compatible right-click-action config.
     if (ev.button == .right and ev.action == .release) {
-        copySelectionToClipboard();
+        handleConfiguredRightClick();
         return;
     }
 
@@ -2337,6 +2346,8 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
         const titlebar_h: f64 = titlebarHeight();
 
         if (ev.action == .press) {
+            g_selection_changed_for_copy = false;
+
             // Commit rename on any click
             if (tab.g_tab_rename_active) tab.commitTabRename();
 
@@ -2641,6 +2652,10 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 }
                 return;
             }
+            if (AppWindow.g_copy_on_select and g_selection_changed_for_copy and activeTerminalSelectionExists()) {
+                copySelectionToClipboard();
+            }
+            g_selection_changed_for_copy = false;
             g_selecting = false;
         }
     }
@@ -3131,6 +3146,26 @@ fn selectionSurfaceForClipboard() ?*Surface {
         if (selected_surface) |surface| return surface;
     }
     return AppWindow.activeSurface();
+}
+
+fn activeTerminalSelectionExists() bool {
+    const surface = selectionSurfaceForClipboard() orelse return false;
+    return surface.selection.active;
+}
+
+fn handleConfiguredRightClick() void {
+    switch (AppWindow.g_right_click_action) {
+        .ignore => {},
+        .copy => copySelectionToClipboard(),
+        .paste => pasteFromClipboard(),
+        .copy_or_paste => {
+            if (activeTerminalSelectionExists()) {
+                copySelectionToClipboard();
+            } else {
+                pasteFromClipboard();
+            }
+        },
+    }
 }
 
 fn copyTextToClipboard(text: []const u8) bool {

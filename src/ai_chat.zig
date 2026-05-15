@@ -216,6 +216,7 @@ const ChatRequest = struct {
     agent_enabled: bool,
     tool_host: ?ToolHost,
     tool_snapshot: ?ToolSnapshot,
+    started_ms: i64,
 
     fn deinit(self: *ChatRequest) void {
         self.allocator.free(self.base_url);
@@ -234,6 +235,7 @@ const ApiResult = struct {
     content: []u8,
     reasoning: ?[]u8 = null,
     tool_calls: ?[]ToolCall = null,
+    usage: ?ApiUsage = null,
 
     fn deinit(self: ApiResult, allocator: std.mem.Allocator) void {
         allocator.free(self.content);
@@ -242,6 +244,18 @@ const ApiResult = struct {
             for (calls) |call| call.deinit(allocator);
             allocator.free(calls);
         }
+    }
+};
+
+pub const ApiUsage = struct {
+    prompt_tokens: u64 = 0,
+    completion_tokens: u64 = 0,
+    total_tokens: u64 = 0,
+
+    fn add(self: *ApiUsage, other: ApiUsage) void {
+        self.prompt_tokens += other.prompt_tokens;
+        self.completion_tokens += other.completion_tokens;
+        self.total_tokens += other.total_tokens;
     }
 };
 
@@ -285,6 +299,7 @@ pub const Session = struct {
     messages: std.ArrayListUnmanaged(Message) = .empty,
     input_buf: [8192]u8 = undefined,
     input_len: usize = 0,
+    input_cursor: usize = 0,
     input_select_all: bool = false,
     transcript_select_all: bool = false,
     status_buf: [512]u8 = undefined,
@@ -400,6 +415,12 @@ pub const Session = struct {
         return self.input_buf[0..self.input_len];
     }
 
+    pub fn inputCursor(self: *Session) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.input_cursor;
+    }
+
     pub fn status(self: *const Session) []const u8 {
         return self.status_buf[0..self.status_len];
     }
@@ -425,12 +446,11 @@ pub const Session = struct {
         defer self.mutex.unlock();
         if (self.input_select_all) {
             self.input_len = 0;
+            self.input_cursor = 0;
             self.input_select_all = false;
         }
         self.transcript_select_all = false;
-        if (self.input_len + len > self.input_buf.len) return;
-        @memcpy(self.input_buf[self.input_len..][0..len], buf[0..len]);
-        self.input_len += len;
+        self.insertInputBytesLocked(buf[0..len]);
     }
 
     pub fn appendInputText(self: *Session, text: []const u8) void {
@@ -438,13 +458,11 @@ pub const Session = struct {
         defer self.mutex.unlock();
         if (self.input_select_all) {
             self.input_len = 0;
+            self.input_cursor = 0;
             self.input_select_all = false;
         }
         self.transcript_select_all = false;
-        const len = @min(text.len, self.input_buf.len - self.input_len);
-        if (len == 0) return;
-        @memcpy(self.input_buf[self.input_len..][0..len], text[0..len]);
-        self.input_len += len;
+        self.insertInputBytesLocked(text);
     }
 
     pub fn applyRemoteInput(self: *Session, data: []const u8) void {
@@ -487,6 +505,7 @@ pub const Session = struct {
         if (ev.ctrl and !ev.alt and ev.vk == 0x55) {
             self.mutex.lock();
             self.input_len = 0;
+            self.input_cursor = 0;
             self.clearSelectionLocked();
             self.mutex.unlock();
             return;
@@ -498,6 +517,11 @@ pub const Session = struct {
 
         switch (ev.vk) {
             win32_backend.VK_BACK => self.backspaceInput(),
+            win32_backend.VK_DELETE => self.deleteInput(),
+            win32_backend.VK_LEFT => self.moveInputCursorLeft(),
+            win32_backend.VK_RIGHT => self.moveInputCursorRight(),
+            win32_backend.VK_HOME => self.moveInputCursorHome(),
+            win32_backend.VK_END => self.moveInputCursorEnd(),
             win32_backend.VK_ESCAPE => {
                 if (self.request_inflight) {
                     self.stopRequest();
@@ -712,6 +736,7 @@ pub const Session = struct {
             return;
         };
         self.input_len = 0;
+        self.input_cursor = 0;
         self.clearSelectionLocked();
         self.scroll_px = 1_000_000;
 
@@ -766,14 +791,99 @@ pub const Session = struct {
         defer self.mutex.unlock();
         if (self.input_select_all) {
             self.input_len = 0;
+            self.input_cursor = 0;
             self.clearSelectionLocked();
             return;
         }
         self.transcript_select_all = false;
-        if (self.input_len == 0) return;
-        self.input_len -= 1;
-        while (self.input_len > 0 and (self.input_buf[self.input_len] & 0xC0) == 0x80) {
-            self.input_len -= 1;
+        self.clampInputCursorLocked();
+        if (self.input_cursor == 0) return;
+        const start = previousUtf8Boundary(self.input(), self.input_cursor);
+        self.deleteInputRangeLocked(start, self.input_cursor);
+        self.input_cursor = start;
+    }
+
+    fn deleteInput(self: *Session) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.input_select_all) {
+            self.input_len = 0;
+            self.input_cursor = 0;
+            self.clearSelectionLocked();
+            return;
+        }
+        self.transcript_select_all = false;
+        self.clampInputCursorLocked();
+        if (self.input_cursor >= self.input_len) return;
+        const end = nextUtf8Boundary(self.input(), self.input_cursor);
+        self.deleteInputRangeLocked(self.input_cursor, end);
+    }
+
+    fn moveInputCursorLeft(self: *Session) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.clearSelectionLocked();
+        self.input_cursor = previousUtf8Boundary(self.input(), self.input_cursor);
+    }
+
+    fn moveInputCursorRight(self: *Session) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.clearSelectionLocked();
+        self.input_cursor = nextUtf8Boundary(self.input(), self.input_cursor);
+    }
+
+    fn moveInputCursorHome(self: *Session) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.clearSelectionLocked();
+        self.input_cursor = 0;
+    }
+
+    fn moveInputCursorEnd(self: *Session) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.clearSelectionLocked();
+        self.input_cursor = self.input_len;
+    }
+
+    fn insertInputBytesLocked(self: *Session, text: []const u8) void {
+        self.clampInputCursorLocked();
+        var len = @min(text.len, self.input_buf.len - self.input_len);
+        while (len > 0 and len < text.len and (text[len] & 0xC0) == 0x80) {
+            len -= 1;
+        }
+        if (len == 0) return;
+        if (self.input_cursor < self.input_len) {
+            std.mem.copyBackwards(
+                u8,
+                self.input_buf[self.input_cursor + len .. self.input_len + len],
+                self.input_buf[self.input_cursor..self.input_len],
+            );
+        }
+        @memcpy(self.input_buf[self.input_cursor..][0..len], text[0..len]);
+        self.input_len += len;
+        self.input_cursor += len;
+    }
+
+    fn deleteInputRangeLocked(self: *Session, start: usize, end: usize) void {
+        if (start >= end or end > self.input_len) return;
+        const removed = end - start;
+        if (end < self.input_len) {
+            std.mem.copyForwards(
+                u8,
+                self.input_buf[start .. self.input_len - removed],
+                self.input_buf[end..self.input_len],
+            );
+        }
+        self.input_len -= removed;
+        if (self.input_cursor > self.input_len) self.input_cursor = self.input_len;
+    }
+
+    fn clampInputCursorLocked(self: *Session) void {
+        if (self.input_cursor > self.input_len) self.input_cursor = self.input_len;
+        while (self.input_cursor > 0 and self.input_cursor < self.input_len and (self.input_buf[self.input_cursor] & 0xC0) == 0x80) {
+            self.input_cursor -= 1;
         }
     }
 
@@ -860,6 +970,7 @@ pub const Session = struct {
             .agent_enabled = agent_enabled,
             .tool_host = tool_host,
             .tool_snapshot = tool_snapshot,
+            .started_ms = std.time.milliTimestamp(),
         };
         return req;
     }
@@ -900,11 +1011,77 @@ pub const Session = struct {
         self.setStatusLocked(value);
     }
 
+    fn setCompletionStatusLocked(self: *Session, started_ms: i64, usage: ?ApiUsage) void {
+        if (started_ms <= 0 and usage == null) {
+            self.setStatusLocked("Ready");
+            return;
+        }
+
+        var buf: [160]u8 = undefined;
+        const elapsed_ms: i64 = if (started_ms > 0) @max(@as(i64, 0), std.time.milliTimestamp() - started_ms) else 0;
+        const secs: i64 = @divTrunc(elapsed_ms, 1000);
+        const tenths: i64 = @divTrunc(@mod(elapsed_ms, 1000), 100);
+        const text = if (usage) |u| blk: {
+            if (started_ms > 0) {
+                break :blk std.fmt.bufPrint(
+                    &buf,
+                    "Done in {d}.{d}s | tokens {d} (in {d} / out {d})",
+                    .{ secs, tenths, u.total_tokens, u.prompt_tokens, u.completion_tokens },
+                ) catch "Ready";
+            }
+            break :blk std.fmt.bufPrint(
+                &buf,
+                "Done | tokens {d} (in {d} / out {d})",
+                .{ u.total_tokens, u.prompt_tokens, u.completion_tokens },
+            ) catch "Ready";
+        } else std.fmt.bufPrint(&buf, "Done in {d}.{d}s", .{ secs, tenths }) catch "Ready";
+        self.setStatusLocked(text);
+    }
+
     fn setStatusLocked(self: *Session, value: []const u8) void {
         self.status_len = @min(value.len, self.status_buf.len);
         @memcpy(self.status_buf[0..self.status_len], value[0..self.status_len]);
     }
 };
+
+fn previousUtf8Boundary(text: []const u8, cursor: usize) usize {
+    if (cursor == 0) return 0;
+    var i = @min(cursor, text.len);
+    i -= 1;
+    while (i > 0 and (text[i] & 0xC0) == 0x80) : (i -= 1) {}
+    return i;
+}
+
+fn nextUtf8Boundary(text: []const u8, cursor: usize) usize {
+    if (cursor >= text.len) return text.len;
+    var i = cursor + 1;
+    while (i < text.len and (text[i] & 0xC0) == 0x80) : (i += 1) {}
+    return i;
+}
+
+pub fn inputWrappedLineCount(text: []const u8, max_cols_raw: usize) usize {
+    if (text.len == 0) return 1;
+    const max_cols = @max(@as(usize, 1), max_cols_raw);
+    var lines: usize = 1;
+    var cols: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '\n') {
+            lines += 1;
+            cols = 0;
+            i += 1;
+            continue;
+        }
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        if (cols >= max_cols) {
+            lines += 1;
+            cols = 0;
+        }
+        cols += 1;
+        i += if (i + len <= text.len) len else 1;
+    }
+    return lines;
+}
 
 fn appendClipboardSection(
     allocator: std.mem.Allocator,
@@ -957,7 +1134,7 @@ fn requestThreadMain(request: *ChatRequest) void {
             finishStoppedRequest(request.session);
             return;
         }
-        appendAssistantResult(request.session, result);
+        appendAssistantResult(request.session, result, request.started_ms);
         return;
     }
 
@@ -969,7 +1146,7 @@ fn requestThreadMain(request: *ChatRequest) void {
             }
             const text = std.fmt.allocPrint(allocator, "AI stream failed: {}", .{err}) catch return;
             defer allocator.free(text);
-            appendAssistantResult(request.session, .{ .content = text });
+            appendAssistantResult(request.session, .{ .content = text }, request.started_ms);
         };
         if (requestCancelled(request)) {
             finishStoppedRequest(request.session);
@@ -992,7 +1169,7 @@ fn requestThreadMain(request: *ChatRequest) void {
         finishStoppedRequest(request.session);
         return;
     }
-    appendAssistantResult(request.session, result);
+    appendAssistantResult(request.session, result, request.started_ms);
 }
 
 fn requestCancelled(request: *const ChatRequest) bool {
@@ -1026,6 +1203,8 @@ fn runAgentRequest(request: *ChatRequest) !ApiResult {
         try transcript.append(request.allocator, try cloneRequestMessage(request.allocator, msg));
     }
 
+    var total_usage: ApiUsage = .{};
+    var has_usage = false;
     while (true) {
         if (requestCancelled(request)) return error.Canceled;
         const result = try runChatRequestForMessages(request, transcript.items, true);
@@ -1033,7 +1212,15 @@ fn runAgentRequest(request: *ChatRequest) !ApiResult {
             result.deinit(request.allocator);
             return error.Canceled;
         }
-        if (result.tool_calls == null or result.tool_calls.?.len == 0) return result;
+        if (result.usage) |usage| {
+            total_usage.add(usage);
+            has_usage = true;
+        }
+        if (result.tool_calls == null or result.tool_calls.?.len == 0) {
+            var final = result;
+            if (has_usage) final.usage = total_usage;
+            return final;
+        }
         errdefer result.deinit(request.allocator);
 
         if (result.content.len > 0) {
@@ -1097,7 +1284,7 @@ fn assistantToolCallMessage(allocator: std.mem.Allocator, content: []const u8, r
     };
 }
 
-fn appendAssistantResult(session: *Session, result: ApiResult) void {
+fn appendAssistantResult(session: *Session, result: ApiResult, started_ms: i64) void {
     const allocator = session.allocator;
     if (session.closing.load(.acquire)) return;
     if (session.stop_requested.load(.acquire)) {
@@ -1144,7 +1331,7 @@ fn appendAssistantResult(session: *Session, result: ApiResult) void {
     session.request_inflight = false;
     session.collapseAutoExpandedDetailsLocked();
     session.scroll_px = 1_000_000;
-    session.setStatusLocked("Ready");
+    session.setCompletionStatusLocked(started_ms, result.usage);
 }
 
 fn appendProgressMessage(session: *Session, text: []const u8) !void {
@@ -1219,7 +1406,7 @@ fn appendAssistantStreamDelta(session: *Session, message_idx: usize, content_del
     session.setStatusLocked("Streaming...");
 }
 
-fn finishAssistantStream(session: *Session, message_idx: usize) void {
+fn finishAssistantStream(session: *Session, message_idx: usize, started_ms: i64) void {
     if (session.closing.load(.acquire)) return;
     if (session.stop_requested.load(.acquire)) {
         finishStoppedRequest(session);
@@ -1246,7 +1433,7 @@ fn finishAssistantStream(session: *Session, message_idx: usize) void {
     session.request_inflight = false;
     session.collapseAutoExpandedDetailsLocked();
     session.scroll_px = 1_000_000;
-    session.setStatusLocked("Ready");
+    session.setCompletionStatusLocked(started_ms, null);
 }
 
 fn failAssistantStream(session: *Session, message_idx: ?usize, text: []const u8) void {
@@ -1256,11 +1443,11 @@ fn failAssistantStream(session: *Session, message_idx: ?usize, text: []const u8)
     }
     if (message_idx) |idx| {
         appendAssistantStreamDelta(session, idx, text, "") catch {};
-        finishAssistantStream(session, idx);
+        finishAssistantStream(session, idx, 0);
         return;
     }
 
-    appendAssistantResult(session, .{ .content = @constCast(text) });
+    appendAssistantResult(session, .{ .content = @constCast(text) }, 0);
 }
 
 fn runChatRequest(request: *const ChatRequest) !ApiResult {
@@ -1382,7 +1569,7 @@ fn runChatRequestStreaming(request: *const ChatRequest) !void {
         if (requestCancelled(request)) return error.Canceled;
         if (try applyApiStreamLineToSession(allocator, request.session, message_idx, line)) break;
     }
-    finishAssistantStream(request.session, message_idx);
+    finishAssistantStream(request.session, message_idx, request.started_ms);
 }
 
 fn chatEndpoint(allocator: std.mem.Allocator, base_url_raw: []const u8) ![]u8 {
@@ -1788,6 +1975,7 @@ fn runArgv(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
     child.cwd = cwd;
+    child.create_no_window = true;
     try child.spawn();
 
     var stdout_capture = CaptureOutput{
@@ -2343,6 +2531,27 @@ fn parseApiResponse(allocator: std.mem.Allocator, body: []const u8) !ApiResult {
         .content = try allocator.dupe(u8, content),
         .reasoning = if (reasoning) |r| try allocator.dupe(u8, r) else null,
         .tool_calls = tool_calls,
+        .usage = parseApiUsage(root),
+    };
+}
+
+fn parseApiUsage(root: std.json.Value) ?ApiUsage {
+    if (root != .object) return null;
+    const usage_value = root.object.get("usage") orelse return null;
+    if (usage_value != .object) return null;
+    return .{
+        .prompt_tokens = jsonU64Value(usage_value.object.get("prompt_tokens")),
+        .completion_tokens = jsonU64Value(usage_value.object.get("completion_tokens")),
+        .total_tokens = jsonU64Value(usage_value.object.get("total_tokens")),
+    };
+}
+
+fn jsonU64Value(value_opt: ?std.json.Value) u64 {
+    const value = value_opt orelse return 0;
+    return switch (value) {
+        .integer => |v| if (v > 0) @intCast(v) else 0,
+        .float => |v| if (v > 0 and v <= @as(f64, @floatFromInt(std.math.maxInt(u64)))) @intFromFloat(v) else 0,
+        else => 0,
     };
 }
 
@@ -2390,6 +2599,7 @@ fn parseApiStreamResponse(allocator: std.mem.Allocator, body: []const u8) !ApiRe
     errdefer content.deinit(allocator);
     var reasoning: std.ArrayListUnmanaged(u8) = .empty;
     errdefer reasoning.deinit(allocator);
+    var usage: ?ApiUsage = null;
 
     var lines = std.mem.splitScalar(u8, body, '\n');
     while (lines.next()) |line_raw| {
@@ -2406,6 +2616,7 @@ fn parseApiStreamResponse(allocator: std.mem.Allocator, body: []const u8) !ApiRe
         const root = parsed.value;
         if (root != .object) continue;
         const obj = root.object;
+        if (parseApiUsage(root)) |u| usage = u;
 
         if (obj.get("error")) |err_value| {
             if (err_value == .object) {
@@ -2446,6 +2657,7 @@ fn parseApiStreamResponse(allocator: std.mem.Allocator, body: []const u8) !ApiRe
     return .{
         .content = try content.toOwnedSlice(allocator),
         .reasoning = if (reasoning.items.len > 0) try reasoning.toOwnedSlice(allocator) else null,
+        .usage = usage,
     };
 }
 
@@ -2576,6 +2788,7 @@ test "ai chat request json includes deepseek thinking mode" {
         .agent_enabled = false,
         .tool_host = null,
         .tool_snapshot = null,
+        .started_ms = 0,
     };
     const json = try buildRequestJson(allocator, &request);
     defer allocator.free(json);
@@ -2603,6 +2816,7 @@ test "ai chat agent request json includes tool schemas" {
         .agent_enabled = true,
         .tool_host = null,
         .tool_snapshot = null,
+        .started_ms = 0,
     };
     const json = try buildRequestJson(allocator, &request);
     defer allocator.free(json);
@@ -2638,6 +2852,7 @@ test "ai chat request json replays assistant reasoning content" {
         .agent_enabled = true,
         .tool_host = null,
         .tool_snapshot = null,
+        .started_ms = 0,
     };
     const json = try buildRequestJson(allocator, &request);
     defer allocator.free(json);
@@ -2666,6 +2881,19 @@ test "ai chat parses OpenAI tool calls" {
     try std.testing.expectEqualStrings("call_1", result.tool_calls.?[0].id);
     try std.testing.expectEqualStrings("terminal_list", result.tool_calls.?[0].name);
     try std.testing.expectEqualStrings("{}", result.tool_calls.?[0].arguments);
+}
+
+test "ai chat parses token usage from OpenAI responses" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"usage":{"prompt_tokens":12,"completion_tokens":34,"total_tokens":46},"choices":[{"message":{"role":"assistant","content":"done"}}]}
+    ;
+    const result = try parseApiResponse(allocator, body);
+    defer result.deinit(allocator);
+    try std.testing.expect(result.usage != null);
+    try std.testing.expectEqual(@as(u64, 12), result.usage.?.prompt_tokens);
+    try std.testing.expectEqual(@as(u64, 34), result.usage.?.completion_tokens);
+    try std.testing.expectEqual(@as(u64, 46), result.usage.?.total_tokens);
 }
 
 test "ai chat tools prefer request-local terminal snapshot" {
@@ -2709,6 +2937,7 @@ test "ai chat tools prefer request-local terminal snapshot" {
         .agent_enabled = true,
         .tool_host = null,
         .tool_snapshot = cached_snapshot,
+        .started_ms = 0,
     };
 
     const snapshot = try collectToolSnapshot(&request);
@@ -2757,6 +2986,46 @@ test "ai chat ctrl a selects input and replacement clears selection" {
     session.handleChar('x');
     try std.testing.expect(!session.input_select_all);
     try std.testing.expectEqualStrings("x", session.input());
+}
+
+test "ai chat input cursor supports insertion and deletion in the middle" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    session.appendInputText("hello");
+    try std.testing.expectEqual(@as(usize, 5), session.inputCursor());
+
+    session.handleKey(.{ .vk = win32_backend.VK_LEFT, .ctrl = false, .shift = false, .alt = false });
+    session.handleKey(.{ .vk = win32_backend.VK_LEFT, .ctrl = false, .shift = false, .alt = false });
+    try std.testing.expectEqual(@as(usize, 3), session.inputCursor());
+
+    session.handleChar('X');
+    try std.testing.expectEqualStrings("helXlo", session.input());
+    try std.testing.expectEqual(@as(usize, 4), session.inputCursor());
+
+    session.handleKey(.{ .vk = win32_backend.VK_BACK, .ctrl = false, .shift = false, .alt = false });
+    try std.testing.expectEqualStrings("hello", session.input());
+    try std.testing.expectEqual(@as(usize, 3), session.inputCursor());
+
+    session.handleKey(.{ .vk = win32_backend.VK_DELETE, .ctrl = false, .shift = false, .alt = false });
+    try std.testing.expectEqualStrings("helo", session.input());
+    try std.testing.expectEqual(@as(usize, 3), session.inputCursor());
+}
+
+test "ai chat input cursor moves by utf8 codepoint boundaries" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    session.appendInputText("你a");
+    session.handleKey(.{ .vk = win32_backend.VK_LEFT, .ctrl = false, .shift = false, .alt = false });
+    try std.testing.expectEqual(@as(usize, 3), session.inputCursor());
+    session.handleKey(.{ .vk = win32_backend.VK_BACK, .ctrl = false, .shift = false, .alt = false });
+    try std.testing.expectEqualStrings("a", session.input());
+    try std.testing.expectEqual(@as(usize, 0), session.inputCursor());
+}
+
+test "ai chat composer wrapped row count grows with explicit lines and wrapping" {
+    try std.testing.expectEqual(@as(usize, 1), inputWrappedLineCount("", 12));
+    try std.testing.expectEqual(@as(usize, 2), inputWrappedLineCount("hello\nworld", 12));
+    try std.testing.expectEqual(@as(usize, 3), inputWrappedLineCount("abcdefghijkl", 5));
 }
 
 test "ai chat remote snapshot omits local draft input" {
@@ -2858,7 +3127,7 @@ test "ai chat stop request suppresses late assistant result" {
     try std.testing.expect(session.request_stopping);
     try std.testing.expectEqualStrings("Stopping...", session.status());
 
-    appendAssistantResult(&session, .{ .content = @constCast("late result") });
+    appendAssistantResult(&session, .{ .content = @constCast("late result") }, 0);
     try std.testing.expect(!session.request_inflight);
     try std.testing.expect(!session.request_stopping);
     try std.testing.expect(!session.stop_requested.load(.acquire));
