@@ -2339,6 +2339,23 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             } else {
                 AppWindow.closeTab(tab_idx);
             }
+            return;
+        }
+        if (AppWindow.activeAiChat()) |chat| {
+            const win = AppWindow.g_window orelse return;
+            const fb = win.getFramebufferSize();
+            if (AppWindow.ai_chat_renderer.inputFieldMetricsAt(
+                chat,
+                xpos,
+                ypos,
+                @floatFromInt(fb.width),
+                @floatFromInt(fb.height),
+                AppWindow.leftPanelsWidth(),
+                AppWindow.rightPanelsWidthForWindow(fb.width),
+            ) != null) {
+                pasteFromClipboardIntoAiChat(chat);
+                return;
+            }
         }
         return;
     }
@@ -3067,6 +3084,22 @@ fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
         const left = @as(i32, @intFromFloat(AppWindow.leftPanelsWidth()));
         const right = win.width - @as(i32, @intFromFloat(AppWindow.rightPanelsWidthForWindow(win.width)));
         if (ev.xpos >= left and ev.xpos < right) {
+            if (AppWindow.ai_chat_renderer.inputFieldMetricsAt(
+                chat,
+                @floatFromInt(ev.xpos),
+                @floatFromInt(ev.ypos),
+                @floatFromInt(win.width),
+                @floatFromInt(win.height),
+                AppWindow.leftPanelsWidth(),
+                AppWindow.rightPanelsWidthForWindow(win.width),
+            )) |metrics| {
+                const units: i32 = @intCast(mouseWheelUnits(ev.delta));
+                const rows = if (ev.delta > 0) -units else units;
+                _ = chat.scrollInputRows(rows, metrics.max_cols, metrics.visible_rows);
+                AppWindow.g_force_rebuild = true;
+                AppWindow.g_cells_valid = false;
+                return;
+            }
             const delta: f32 = -@as(f32, @floatFromInt(ev.delta)) * 72.0 / 120.0;
             chat.scrollBy(delta);
             AppWindow.g_force_rebuild = true;

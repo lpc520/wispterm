@@ -23,9 +23,13 @@ const STATUS_SLOT_W: f32 = 280;
 const STOP_BUTTON_W: f32 = 104;
 const STOP_BUTTON_H: f32 = 28;
 const MODE_SLOT_W: f32 = 112;
+const INPUT_SCROLLBAR_GUTTER: f32 = 10;
+const INPUT_SCROLLBAR_W: f32 = 4;
+const INPUT_SCROLLBAR_PAD: f32 = 7;
 const BUBBLE_PAD_X: f32 = 14;
 const BUBBLE_PAD_Y: f32 = 10;
 const BUBBLE_GAP: f32 = 12;
+const USAGE_FOOTER_PAD_TOP: f32 = 4;
 const APPROVAL_H: f32 = 128;
 const APPROVAL_GAP: f32 = 12;
 const COPY_BUTTON_SIZE: f32 = 24;
@@ -57,6 +61,11 @@ pub const InputLayout = struct {
     field_h: f32,
     text_x: f32,
     text_w: f32,
+};
+
+pub const InputFieldMetrics = struct {
+    max_cols: usize,
+    visible_rows: usize,
 };
 
 pub fn render(
@@ -126,7 +135,16 @@ pub fn render(
     gl_init.renderQuadAlpha(layout.field_x, layout.field_y, layout.field_w, layout.field_h, field_bg, 0.95);
     gl_init.renderQuadAlpha(layout.field_x, layout.field_y, layout.field_w, 1, mixColor(bg, accent, 0.38), 0.6);
 
+    gl.Enable.?(c.GL_SCISSOR_TEST);
+    gl.Scissor.?(
+        @intFromFloat(@round(layout.field_x)),
+        @intFromFloat(@round(layout.field_y)),
+        @intFromFloat(@round(layout.field_w)),
+        @intFromFloat(@round(layout.field_h)),
+    );
+
     if (input_text.len == 0) {
+        session.input_scroll_row = 0;
         const placeholder = if (session.agent_enabled) "Ask Agent" else "Ask AI Chat";
         _ = titlebar.renderTextLimited(
             placeholder,
@@ -148,7 +166,16 @@ pub fn render(
         }
         const cursor = inputCursorRect(input_text, session.input_cursor, layout.text_x, layout.text_w);
         const visible_rows = inputVisibleRowsForField(layout.field_h);
-        const first_row = if (cursor.row >= visible_rows) cursor.row - visible_rows + 1 else 0;
+        const total_rows = countWrappedLines(input_text, layout.text_w);
+        const max_first_row = if (total_rows > visible_rows) total_rows - visible_rows else 0;
+        var first_row = @min(session.input_scroll_row, max_first_row);
+        if (cursor.row < first_row) {
+            first_row = cursor.row;
+        } else if (cursor.row >= first_row + visible_rows) {
+            first_row = cursor.row - visible_rows + 1;
+        }
+        first_row = @min(first_row, max_first_row);
+        session.input_scroll_row = first_row;
         const text_start = wrappedByteOffsetForLine(input_text, layout.text_w, first_row);
         _ = renderWrappedText(
             input_text[text_start..],
@@ -158,19 +185,25 @@ pub fn render(
             lineHeight(),
             fg,
             window_height,
-            window_height,
+            window_height - layout.field_y,
         );
+        renderInputScrollbar(layout, total_rows, visible_rows, first_row);
     }
     if (!session.request_inflight and AppWindow.g_cursor_blink_visible) {
         const cursor = inputCursorRect(input_text, session.input_cursor, layout.text_x, layout.text_w);
         const visible_rows = inputVisibleRowsForField(layout.field_h);
-        const first_row = if (cursor.row >= visible_rows) cursor.row - visible_rows + 1 else 0;
+        const total_rows = countWrappedLines(input_text, layout.text_w);
+        const max_first_row = if (total_rows > visible_rows) total_rows - visible_rows else 0;
+        const first_row = @min(session.input_scroll_row, max_first_row);
         const row = cursor.row - first_row;
-        const field_top_px = window_height - layout.field_y - layout.field_h;
-        const cursor_top_px = field_top_px + composer_layout.Field.pad_top + @as(f32, @floatFromInt(row)) * lineHeight();
-        const cursor_y = window_height - cursor_top_px - font.g_titlebar_cell_height;
-        gl_init.renderQuad(cursor.x, cursor_y, 1, font.g_titlebar_cell_height, accent);
+        if (row < visible_rows) {
+            const field_top_px = window_height - layout.field_y - layout.field_h;
+            const cursor_top_px = field_top_px + composer_layout.Field.pad_top + @as(f32, @floatFromInt(row)) * lineHeight();
+            const cursor_y = window_height - cursor_top_px - font.g_titlebar_cell_height;
+            gl_init.renderQuad(cursor.x, cursor_y, 1, font.g_titlebar_cell_height, accent);
+        }
     }
+    gl.Disable.?(c.GL_SCISSOR_TEST);
 
     const approval = session.approvalView();
     const approval_h: f32 = if (approval != null) APPROVAL_H + APPROVAL_GAP else 0;
@@ -187,6 +220,9 @@ pub fn render(
         content_h += messageBlockHeight(msg, content_w);
         if (msg.reasoning) |reasoning| {
             if (reasoning.len > 0) content_h += reasoningCardHeight(msg, content_w);
+        }
+        if (msg.usage_footer) |footer| {
+            if (footer.len > 0) content_h += usageFooterHeight(footer, content_w);
         }
         content_h += BUBBLE_GAP;
     }
@@ -224,6 +260,16 @@ pub fn render(
                     renderReasoningCard(reasoning, msg.reasoning_collapsed, content_x, cursor_top, content_w, r_h, window_height, transcript_selected);
                 }
                 cursor_top += r_h;
+            }
+        }
+
+        if (msg.usage_footer) |footer| {
+            if (footer.len > 0) {
+                const footer_h = usageFooterHeight(footer, content_w);
+                if (sectionVisible(cursor_top, footer_h, transcript_top, viewport_bottom_top_px)) {
+                    renderUsageFooter(footer, content_x, cursor_top, content_w, footer_h, window_height);
+                }
+                cursor_top += footer_h;
             }
         }
 
@@ -271,6 +317,9 @@ pub fn interactionHitTest(
         if (msg.reasoning) |reasoning| {
             if (reasoning.len > 0) content_h += reasoningCardHeight(msg, content_w);
         }
+        if (msg.usage_footer) |footer| {
+            if (footer.len > 0) content_h += usageFooterHeight(footer, content_w);
+        }
         content_h += BUBBLE_GAP;
     }
 
@@ -304,6 +353,9 @@ pub fn interactionHitTest(
                 }
                 cursor_top += r_h;
             }
+        }
+        if (msg.usage_footer) |footer| {
+            if (footer.len > 0) cursor_top += usageFooterHeight(footer, content_w);
         }
         cursor_top += BUBBLE_GAP;
     }
@@ -350,6 +402,35 @@ pub fn permissionChipHitTest(
     });
 }
 
+pub fn inputFieldMetricsAt(
+    session: *ai_chat.Session,
+    xpos: f64,
+    ypos: f64,
+    window_width: f32,
+    window_height: f32,
+    left_panels_w: f32,
+    right_panels_w: f32,
+) ?InputFieldMetrics {
+    const x = @round(left_panels_w);
+    const w = @round(@max(1.0, window_width - left_panels_w - right_panels_w));
+    if (w <= 1) return null;
+
+    session.mutex.lock();
+    const layout = inputLayout(x, w, session.input());
+    session.mutex.unlock();
+
+    const px: f32 = @floatCast(xpos);
+    const py: f32 = @floatCast(ypos);
+    const field_top_px = window_height - layout.field_y - layout.field_h;
+    if (px < layout.field_x or px > layout.field_x + layout.field_w) return null;
+    if (py < field_top_px or py > field_top_px + layout.field_h) return null;
+
+    return .{
+        .max_cols = inputWrapColumns(w),
+        .visible_rows = inputVisibleRowsForField(layout.field_h),
+    };
+}
+
 fn messageBlockHeight(msg: ai_chat.Message, max_w: f32) f32 {
     return switch (msg.role) {
         .tool => toolCardHeight(msg, max_w),
@@ -382,6 +463,10 @@ fn reasoningCardHeight(msg: ai_chat.Message, max_w: f32) f32 {
     else
         plainContentHeight(reasoning, @max(1.0, max_w - DETAIL_PAD_X * 2), reasoningLineHeight()) + DETAIL_PAD_Y * 2;
     return detailHeaderHeight() + body_h;
+}
+
+fn usageFooterHeight(text: []const u8, max_w: f32) f32 {
+    return USAGE_FOOTER_PAD_TOP + plainContentHeight(text, @max(1.0, max_w - BUBBLE_PAD_X * 2), reasoningLineHeight());
 }
 
 fn plainContentHeight(text: []const u8, max_w: f32, line_h: f32) f32 {
@@ -552,6 +637,47 @@ fn renderReasoningCard(text: []const u8, collapsed: bool, x: f32, top_px: f32, w
             window_height,
         );
     }
+}
+
+fn renderUsageFooter(text: []const u8, x: f32, top_px: f32, w: f32, h: f32, window_height: f32) void {
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const body_x = x + BUBBLE_PAD_X;
+    const body_w = @max(1.0, w - BUBBLE_PAD_X * 2);
+    const top = top_px + USAGE_FOOTER_PAD_TOP;
+    _ = renderWrappedText(
+        text,
+        body_x,
+        top,
+        body_w,
+        reasoningLineHeight(),
+        mixColor(bg, fg, 0.58),
+        window_height,
+        window_height,
+    );
+    const y = window_height - top_px - h;
+    gl_init.renderQuadAlpha(body_x, y + h - 1, @max(1.0, @min(body_w, measureText(text))), 1, mixColor(bg, accent, 0.28), 0.34);
+}
+
+fn renderInputScrollbar(layout: InputLayout, total_rows: usize, visible_rows_raw: usize, first_row: usize) void {
+    const visible_rows = @max(@as(usize, 1), visible_rows_raw);
+    if (total_rows <= visible_rows) return;
+
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const track_x = @round(layout.field_x + layout.field_w - INPUT_SCROLLBAR_PAD - INPUT_SCROLLBAR_W);
+    const track_y = @round(layout.field_y + INPUT_SCROLLBAR_PAD);
+    const track_h = @round(@max(1.0, layout.field_h - INPUT_SCROLLBAR_PAD * 2));
+    const max_scroll = total_rows - visible_rows;
+    const ratio = @as(f32, @floatFromInt(first_row)) / @as(f32, @floatFromInt(max_scroll));
+    const visible_ratio = @as(f32, @floatFromInt(visible_rows)) / @as(f32, @floatFromInt(total_rows));
+    const thumb_h = @round(@min(track_h, @max(18.0, track_h * visible_ratio)));
+    const thumb_y = @round(track_y + (track_h - thumb_h) * (1.0 - ratio));
+
+    gl_init.renderQuadAlpha(track_x, track_y, INPUT_SCROLLBAR_W, track_h, mixColor(bg, fg, 0.24), 0.35);
+    gl_init.renderQuadAlpha(track_x, thumb_y, INPUT_SCROLLBAR_W, thumb_h, mixColor(fg, accent, 0.18), 0.72);
 }
 
 fn sectionVisible(top_px: f32, h: f32, viewport_top: f32, viewport_bottom_top_px: f32) bool {
@@ -1260,7 +1386,8 @@ fn countWrappedLines(text: []const u8, max_w: f32) usize {
 pub fn inputLayout(panel_x: f32, panel_w: f32, text: []const u8) InputLayout {
     const field_w = composer_layout.fieldWidth(panel_w);
     const field_x = composer_layout.fieldX(panel_x, panel_w);
-    const field_h = inputHeightForText(text, composer_layout.textWidth(field_w)) - composer_layout.Panel.pad_y * 2;
+    const text_w = @max(1.0, composer_layout.textWidth(field_w) - INPUT_SCROLLBAR_GUTTER);
+    const field_h = inputHeightForText(text, text_w) - composer_layout.Panel.pad_y * 2;
     return .{
         .input_h = field_h + composer_layout.Panel.pad_y * 2,
         .field_x = field_x,
@@ -1268,7 +1395,7 @@ pub fn inputLayout(panel_x: f32, panel_w: f32, text: []const u8) InputLayout {
         .field_w = field_w,
         .field_h = field_h,
         .text_x = field_x + composer_layout.Field.pad_x,
-        .text_w = composer_layout.textWidth(field_w),
+        .text_w = text_w,
     };
 }
 

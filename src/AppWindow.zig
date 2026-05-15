@@ -1980,16 +1980,23 @@ fn syncImeCaretPosition(win: *win32_backend.Window, split_count: usize) void {
 fn syncAiChatImeCaret(win: *win32_backend.Window, session: *ai_chat.Session) void {
     const wh: f32 = @floatFromInt(win.height);
     const ww: f32 = @floatFromInt(win.width);
-    const left_panels_w = titlebar.sidebarWidth();
-    const panel_w = @max(1.0, ww - left_panels_w);
+    const left_panels_w = leftPanelsWidth();
+    const right_panels_w = rightPanelsWidthForWindow(win.width);
+    const panel_w = @max(1.0, ww - left_panels_w - right_panels_w);
     session.mutex.lock();
     const input_text = session.input();
     const layout = ai_chat_renderer.inputLayout(left_panels_w, panel_w, input_text);
     const cursor = ai_chat_renderer.inputCursorRect(input_text, session.input_cursor, layout.text_x, layout.text_w);
+    const scrolled_row = session.input_scroll_row;
     session.mutex.unlock();
     const input_line_h = @round(@max(23.0, font.g_titlebar_cell_height + 8.0));
     const visible_rows = ai_chat_renderer.inputVisibleRowsForField(layout.field_h);
-    const first_row = if (cursor.row >= visible_rows) cursor.row - visible_rows + 1 else 0;
+    var first_row = scrolled_row;
+    if (cursor.row < first_row) {
+        first_row = cursor.row;
+    } else if (cursor.row >= first_row + visible_rows) {
+        first_row = cursor.row - visible_rows + 1;
+    }
     const row = cursor.row - first_row;
     const field_top_px = wh - layout.field_y - layout.field_h;
     const cursor_top_px = field_top_px + ai_chat_renderer.INPUT_FIELD_PAD_TOP + @as(f32, @floatFromInt(row)) * input_line_h;

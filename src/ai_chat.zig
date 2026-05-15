@@ -47,6 +47,7 @@ pub const Message = struct {
     role: Role,
     content: []u8,
     reasoning: ?[]u8 = null,
+    usage_footer: ?[]u8 = null,
     content_collapsed: bool = false,
     content_auto_expand: bool = false,
     reasoning_collapsed: bool = true,
@@ -250,11 +251,15 @@ const ApiResult = struct {
 pub const ApiUsage = struct {
     prompt_tokens: u64 = 0,
     completion_tokens: u64 = 0,
+    prompt_cache_hit_tokens: u64 = 0,
+    prompt_cache_miss_tokens: u64 = 0,
     total_tokens: u64 = 0,
 
     fn add(self: *ApiUsage, other: ApiUsage) void {
         self.prompt_tokens += other.prompt_tokens;
         self.completion_tokens += other.completion_tokens;
+        self.prompt_cache_hit_tokens += other.prompt_cache_hit_tokens;
+        self.prompt_cache_miss_tokens += other.prompt_cache_miss_tokens;
         self.total_tokens += other.total_tokens;
     }
 };
@@ -300,6 +305,7 @@ pub const Session = struct {
     input_buf: [8192]u8 = undefined,
     input_len: usize = 0,
     input_cursor: usize = 0,
+    input_scroll_row: usize = 0,
     input_select_all: bool = false,
     transcript_select_all: bool = false,
     status_buf: [512]u8 = undefined,
@@ -386,6 +392,7 @@ pub const Session = struct {
         for (self.messages.items) |msg| {
             self.allocator.free(msg.content);
             if (msg.reasoning) |reasoning| self.allocator.free(reasoning);
+            if (msg.usage_footer) |footer| self.allocator.free(footer);
         }
         self.messages.deinit(self.allocator);
         self.allocator.destroy(self);
@@ -447,6 +454,7 @@ pub const Session = struct {
         if (self.input_select_all) {
             self.input_len = 0;
             self.input_cursor = 0;
+            self.input_scroll_row = 0;
             self.input_select_all = false;
         }
         self.transcript_select_all = false;
@@ -459,6 +467,7 @@ pub const Session = struct {
         if (self.input_select_all) {
             self.input_len = 0;
             self.input_cursor = 0;
+            self.input_scroll_row = 0;
             self.input_select_all = false;
         }
         self.transcript_select_all = false;
@@ -510,6 +519,7 @@ pub const Session = struct {
             self.mutex.lock();
             self.input_len = 0;
             self.input_cursor = 0;
+            self.input_scroll_row = 0;
             self.clearSelectionLocked();
             self.mutex.unlock();
             return;
@@ -611,6 +621,9 @@ pub const Session = struct {
             try appendLimitedSection(allocator, &out, msg.role.label(), msg.content, REMOTE_SNAPSHOT_MAX_BYTES);
             if (msg.reasoning) |reasoning| {
                 if (reasoning.len > 0) try appendLimitedSection(allocator, &out, "Reasoning", reasoning, REMOTE_SNAPSHOT_MAX_BYTES);
+            }
+            if (msg.usage_footer) |footer| {
+                if (footer.len > 0) try appendLimitedSection(allocator, &out, "Usage", footer, REMOTE_SNAPSHOT_MAX_BYTES);
             }
         }
         if (out.items.len == 0) try out.appendSlice(allocator, "No messages yet.");
@@ -743,6 +756,7 @@ pub const Session = struct {
         };
         self.input_len = 0;
         self.input_cursor = 0;
+        self.input_scroll_row = 0;
         self.clearSelectionLocked();
         self.scroll_px = 1_000_000;
 
@@ -779,6 +793,7 @@ pub const Session = struct {
         for (self.messages.items) |msg| {
             self.allocator.free(msg.content);
             if (msg.reasoning) |reasoning| self.allocator.free(reasoning);
+            if (msg.usage_footer) |footer| self.allocator.free(footer);
         }
         self.messages.clearRetainingCapacity();
         self.scroll_px = 0;
@@ -792,12 +807,37 @@ pub const Session = struct {
         self.scroll_px = @max(0.0, self.scroll_px + delta_px);
     }
 
+    pub fn inputScrollRow(self: *Session) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.input_scroll_row;
+    }
+
+    pub fn scrollInputRows(self: *Session, delta_rows: i32, max_cols_raw: usize, visible_rows_raw: usize) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const before = self.input_scroll_row;
+        const max_row = self.maxInputScrollRowLocked(max_cols_raw, visible_rows_raw);
+        var next = @min(self.input_scroll_row, max_row);
+        if (delta_rows < 0) {
+            const amount: usize = @intCast(-delta_rows);
+            next -|= amount;
+        } else if (delta_rows > 0) {
+            const amount: usize = @intCast(delta_rows);
+            next = @min(max_row, next +| amount);
+        }
+        self.input_scroll_row = next;
+        return before != next;
+    }
+
     fn backspaceInput(self: *Session) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.input_select_all) {
             self.input_len = 0;
             self.input_cursor = 0;
+            self.input_scroll_row = 0;
             self.clearSelectionLocked();
             return;
         }
@@ -815,6 +855,7 @@ pub const Session = struct {
         if (self.input_select_all) {
             self.input_len = 0;
             self.input_cursor = 0;
+            self.input_scroll_row = 0;
             self.clearSelectionLocked();
             return;
         }
@@ -907,6 +948,12 @@ pub const Session = struct {
         }
     }
 
+    fn maxInputScrollRowLocked(self: *Session, max_cols_raw: usize, visible_rows_raw: usize) usize {
+        const rows = inputWrappedLineCount(self.input(), max_cols_raw);
+        const visible_rows = @max(@as(usize, 1), visible_rows_raw);
+        return if (rows > visible_rows) rows - visible_rows else 0;
+    }
+
     fn clearSelectionLocked(self: *Session) void {
         self.input_select_all = false;
         self.transcript_select_all = false;
@@ -932,6 +979,9 @@ pub const Session = struct {
             try appendClipboardSection(allocator, &out, msg.role.label(), msg.content);
             if (msg.reasoning) |reasoning| {
                 if (reasoning.len > 0) try appendClipboardSection(allocator, &out, "Reasoning", reasoning);
+            }
+            if (msg.usage_footer) |footer| {
+                if (footer.len > 0) try appendClipboardSection(allocator, &out, "Usage", footer);
             }
         }
         return out.toOwnedSlice(allocator);
@@ -1037,24 +1087,14 @@ pub const Session = struct {
             return;
         }
 
-        var buf: [96]u8 = undefined;
+        var buf: [32]u8 = undefined;
         const elapsed_ms: i64 = if (started_ms > 0) @max(@as(i64, 0), std.time.milliTimestamp() - started_ms) else 0;
         const secs: i64 = @divTrunc(elapsed_ms, 1000);
         const tenths: i64 = @divTrunc(@mod(elapsed_ms, 1000), 100);
-        const text = if (usage) |u| blk: {
-            if (started_ms > 0) {
-                break :blk std.fmt.bufPrint(
-                    &buf,
-                    "Done {d}.{d}s | {d} tok ({d}/{d})",
-                    .{ secs, tenths, u.total_tokens, u.prompt_tokens, u.completion_tokens },
-                ) catch "Ready";
-            }
-            break :blk std.fmt.bufPrint(
-                &buf,
-                "Done | {d} tok ({d}/{d})",
-                .{ u.total_tokens, u.prompt_tokens, u.completion_tokens },
-            ) catch "Ready";
-        } else std.fmt.bufPrint(&buf, "Done in {d}.{d}s", .{ secs, tenths }) catch "Ready";
+        const text = if (started_ms > 0)
+            std.fmt.bufPrint(&buf, "Done in {d}.{d}s", .{ secs, tenths }) catch "Ready"
+        else
+            "Done";
         self.setStatusLocked(text);
     }
 
@@ -1063,6 +1103,26 @@ pub const Session = struct {
         @memcpy(self.status_buf[0..self.status_len], value[0..self.status_len]);
     }
 };
+
+fn allocUsageFooter(allocator: std.mem.Allocator, started_ms: i64, usage: ?ApiUsage) !?[]u8 {
+    const u = usage orelse return null;
+    var buf: [160]u8 = undefined;
+    const text = if (started_ms > 0) blk: {
+        const elapsed_ms: i64 = @max(@as(i64, 0), std.time.milliTimestamp() - started_ms);
+        const secs: i64 = @divTrunc(elapsed_ms, 1000);
+        const tenths: i64 = @divTrunc(@mod(elapsed_ms, 1000), 100);
+        break :blk std.fmt.bufPrint(
+            &buf,
+            "time {d}.{d}s | total {d} | input {d} | output {d} | cache {d}/{d}",
+            .{ secs, tenths, u.total_tokens, u.prompt_tokens, u.completion_tokens, u.prompt_cache_hit_tokens, u.prompt_cache_miss_tokens },
+        ) catch "usage unavailable";
+    } else std.fmt.bufPrint(
+        &buf,
+        "total {d} | input {d} | output {d} | cache {d}/{d}",
+        .{ u.total_tokens, u.prompt_tokens, u.completion_tokens, u.prompt_cache_hit_tokens, u.prompt_cache_miss_tokens },
+    ) catch "usage unavailable";
+    return try allocator.dupe(u8, text);
+}
 
 fn previousUtf8Boundary(text: []const u8, cursor: usize) usize {
     if (cursor == 0) return 0;
@@ -1406,6 +1466,7 @@ fn appendAssistantResult(session: *Session, result: ApiResult, started_ms: i64) 
         session.setStatusLocked("Out of memory");
         return;
     };
+    var usage_footer = allocUsageFooter(allocator, started_ms, result.usage) catch null;
     var reasoning_copy: ?[]u8 = null;
     if (result.reasoning) |reasoning| {
         reasoning_copy = allocator.dupe(u8, reasoning) catch null;
@@ -1415,16 +1476,19 @@ fn appendAssistantResult(session: *Session, result: ApiResult, started_ms: i64) 
         .role = .assistant,
         .content = content,
         .reasoning = reasoning_copy,
+        .usage_footer = usage_footer,
         .reasoning_collapsed = reasoning_visible,
         .reasoning_auto_expand = false,
     }) catch {
         allocator.free(content);
         if (reasoning_copy) |r| allocator.free(r);
+        if (usage_footer) |footer| allocator.free(footer);
         session.request_inflight = false;
         session.collapseAutoExpandedDetailsLocked();
         session.setStatusLocked("Out of memory");
         return;
     };
+    usage_footer = null;
     session.request_inflight = false;
     session.collapseAutoExpandedDetailsLocked();
     session.scroll_px = 1_000_000;
@@ -1525,6 +1589,10 @@ fn finishAssistantStream(session: *Session, message_idx: usize, started_ms: i64,
         if (msg.content.len == 0 and msg.reasoning == null) {
             msg.content = session.allocator.realloc(msg.content, "No response".len) catch msg.content;
             if (msg.content.len == "No response".len) @memcpy(msg.content, "No response");
+        }
+        if (allocUsageFooter(session.allocator, started_ms, usage) catch null) |footer| {
+            if (msg.usage_footer) |old_footer| session.allocator.free(old_footer);
+            msg.usage_footer = footer;
         }
     }
     session.request_inflight = false;
@@ -2643,6 +2711,8 @@ fn parseApiUsage(root: std.json.Value) ?ApiUsage {
     return .{
         .prompt_tokens = jsonU64Value(usage_value.object.get("prompt_tokens")),
         .completion_tokens = jsonU64Value(usage_value.object.get("completion_tokens")),
+        .prompt_cache_hit_tokens = jsonU64Value(usage_value.object.get("prompt_cache_hit_tokens")),
+        .prompt_cache_miss_tokens = jsonU64Value(usage_value.object.get("prompt_cache_miss_tokens")),
         .total_tokens = jsonU64Value(usage_value.object.get("total_tokens")),
     };
 }
@@ -2989,25 +3059,74 @@ test "ai chat parses OpenAI tool calls" {
 test "ai chat parses token usage from OpenAI responses" {
     const allocator = std.testing.allocator;
     const body =
-        \\{"usage":{"prompt_tokens":12,"completion_tokens":34,"total_tokens":46},"choices":[{"message":{"role":"assistant","content":"done"}}]}
+        \\{"usage":{"prompt_tokens":12,"completion_tokens":34,"prompt_cache_hit_tokens":5,"prompt_cache_miss_tokens":7,"total_tokens":46},"choices":[{"message":{"role":"assistant","content":"done"}}]}
     ;
     const result = try parseApiResponse(allocator, body);
     defer result.deinit(allocator);
     try std.testing.expect(result.usage != null);
     try std.testing.expectEqual(@as(u64, 12), result.usage.?.prompt_tokens);
     try std.testing.expectEqual(@as(u64, 34), result.usage.?.completion_tokens);
+    try std.testing.expectEqual(@as(u64, 5), result.usage.?.prompt_cache_hit_tokens);
+    try std.testing.expectEqual(@as(u64, 7), result.usage.?.prompt_cache_miss_tokens);
     try std.testing.expectEqual(@as(u64, 46), result.usage.?.total_tokens);
 }
 
-test "ai chat completion status keeps token count visible" {
+test "ai chat usage footer includes time token and cache fields" {
+    const footer = try allocUsageFooter(std.testing.allocator, std.time.milliTimestamp() - 2300, .{
+        .prompt_tokens = 12,
+        .completion_tokens = 34,
+        .prompt_cache_hit_tokens = 5,
+        .prompt_cache_miss_tokens = 7,
+        .total_tokens = 46,
+    });
+    defer if (footer) |text| std.testing.allocator.free(text);
+    try std.testing.expect(footer != null);
+    try std.testing.expect(std.mem.indexOf(u8, footer.?, "time 2.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, footer.?, "total 46") != null);
+    try std.testing.expect(std.mem.indexOf(u8, footer.?, "input 12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, footer.?, "output 34") != null);
+    try std.testing.expect(std.mem.indexOf(u8, footer.?, "cache 5/7") != null);
+}
+
+test "ai chat completion status stays compact while usage is message footer" {
     var session = Session{ .allocator = std.testing.allocator };
     session.setCompletionStatusLocked(std.time.milliTimestamp() - 2300, .{
         .prompt_tokens = 12,
         .completion_tokens = 34,
         .total_tokens = 46,
     });
-    try std.testing.expect(std.mem.indexOf(u8, session.status(), "46 tok") != null);
-    try std.testing.expect(std.mem.indexOf(u8, session.status(), "tokens 46") == null);
+    try std.testing.expect(std.mem.indexOf(u8, session.status(), "Done in 2.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session.status(), "tok") == null);
+}
+
+test "ai chat appends usage footer to completed assistant message" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    defer {
+        for (session.messages.items) |msg| {
+            allocator.free(msg.content);
+            if (msg.reasoning) |reasoning| allocator.free(reasoning);
+            if (msg.usage_footer) |footer| allocator.free(footer);
+        }
+        session.messages.deinit(allocator);
+    }
+
+    appendAssistantResult(&session, .{
+        .content = @constCast("done"),
+        .usage = .{
+            .prompt_tokens = 12,
+            .completion_tokens = 34,
+            .prompt_cache_hit_tokens = 5,
+            .prompt_cache_miss_tokens = 7,
+            .total_tokens = 46,
+        },
+    }, std.time.milliTimestamp() - 2300);
+
+    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
+    try std.testing.expect(session.messages.items[0].usage_footer != null);
+    const footer = session.messages.items[0].usage_footer.?;
+    try std.testing.expect(std.mem.indexOf(u8, footer, "total 46") != null);
+    try std.testing.expect(std.mem.indexOf(u8, footer, "cache 5/7") != null);
 }
 
 test "ai chat streaming request asks provider to include usage" {
@@ -3206,6 +3325,35 @@ test "ai chat composer wrapped row count grows with explicit lines and wrapping"
     try std.testing.expectEqual(@as(usize, 3), inputWrappedLineCount("abcdefghijkl", 5));
 }
 
+test "ai chat input scroll clamps to wrapped rows" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "Test",
+        DEFAULT_BASE_URL,
+        "key",
+        DEFAULT_MODEL,
+        DEFAULT_SYSTEM_PROMPT,
+        DEFAULT_THINKING,
+        DEFAULT_REASONING_EFFORT,
+        DEFAULT_STREAM,
+        "false",
+    );
+    defer session.deinit();
+
+    session.appendInputText("abcdefghijkl");
+
+    try std.testing.expect(session.scrollInputRows(10, 5, 1));
+    try std.testing.expectEqual(@as(usize, 2), session.inputScrollRow());
+
+    try std.testing.expect(session.scrollInputRows(-1, 5, 1));
+    try std.testing.expectEqual(@as(usize, 1), session.inputScrollRow());
+
+    try std.testing.expect(session.scrollInputRows(10, 5, 3));
+    try std.testing.expectEqual(@as(usize, 0), session.inputScrollRow());
+    try std.testing.expect(!session.scrollInputRows(10, 5, 3));
+}
+
 test "ai chat remote snapshot omits local draft input" {
     const allocator = std.testing.allocator;
     const session = try Session.init(
@@ -3237,6 +3385,7 @@ test "ai chat clipboard text exports transcript when input is empty" {
         for (session.messages.items) |msg| {
             allocator.free(msg.content);
             if (msg.reasoning) |reasoning| allocator.free(reasoning);
+            if (msg.usage_footer) |footer| allocator.free(footer);
         }
         session.messages.deinit(allocator);
     }
@@ -3269,6 +3418,7 @@ test "ai chat message clipboard exports one bubble" {
         for (session.messages.items) |msg| {
             allocator.free(msg.content);
             if (msg.reasoning) |reasoning| allocator.free(reasoning);
+            if (msg.usage_footer) |footer| allocator.free(footer);
         }
         session.messages.deinit(allocator);
     }
@@ -3296,6 +3446,7 @@ test "ai chat stop request suppresses late assistant result" {
         for (session.messages.items) |msg| {
             allocator.free(msg.content);
             if (msg.reasoning) |reasoning| allocator.free(reasoning);
+            if (msg.usage_footer) |footer| allocator.free(footer);
         }
         session.messages.deinit(allocator);
     }
@@ -3337,7 +3488,7 @@ test "ai chat stream response aggregates content and reasoning chunks" {
         "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ing\",\"content\":null}}]}\n\n" ++
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n" ++
         "data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}\n\n" ++
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":34,\"total_tokens\":46}}\n\n" ++
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":34,\"prompt_cache_hit_tokens\":5,\"prompt_cache_miss_tokens\":7,\"total_tokens\":46}}\n\n" ++
         "data: [DONE]\n\n";
 
     const result = try parseApiStreamResponse(allocator, body);
@@ -3347,6 +3498,8 @@ test "ai chat stream response aggregates content and reasoning chunks" {
     try std.testing.expectEqualStrings("Thinking", result.reasoning.?);
     try std.testing.expect(result.usage != null);
     try std.testing.expectEqual(@as(u64, 46), result.usage.?.total_tokens);
+    try std.testing.expectEqual(@as(u64, 5), result.usage.?.prompt_cache_hit_tokens);
+    try std.testing.expectEqual(@as(u64, 7), result.usage.?.prompt_cache_miss_tokens);
 }
 
 test "ai chat collapse helper only closes auto-expanded details" {
@@ -3356,6 +3509,7 @@ test "ai chat collapse helper only closes auto-expanded details" {
         for (session.messages.items) |msg| {
             allocator.free(msg.content);
             if (msg.reasoning) |reasoning| allocator.free(reasoning);
+            if (msg.usage_footer) |footer| allocator.free(footer);
         }
         session.messages.deinit(allocator);
     }
