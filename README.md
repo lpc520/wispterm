@@ -31,6 +31,12 @@ A Windows terminal written in Zig, powered by [libghostty-vt](https://github.com
 > [!NOTE]
 > Phantty is **Windows-only**. On macOS and Linux, use [Ghostty](https://ghostty.org/) instead.
 
+## Why The UI Is Custom Drawn
+
+Phantty's main terminal UI is intentionally custom drawn instead of composed from raw Win32 controls. The terminal surface, tabs, splits, overlays, background image, shader effects, and theme colors all share one OpenGL rendering pipeline, so they can stay visually consistent and behave like one terminal canvas.
+
+Classic Win32 controls such as `SCROLLBAR` provide native behavior, but they do not blend well with Phantty's dark theme, transparency, background images, and terminal overlays. They also make layout, DPI, and focus behavior harder to keep consistent with split panes and custom panels. For the primary terminal experience, Phantty prefers platform-aware custom controls over embedding mismatched native widgets directly.
+
 ## Building
 
 ```powershell
