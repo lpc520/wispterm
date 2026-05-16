@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phantty Themes — Built-in Ghostty-compatible themes</title>
+  <meta name="description" content="Browse Phantty's built-in Ghostty-compatible terminal themes with live color previews and copyable config names.">
+  <meta property="og:title" content="Phantty Themes">
+  <meta property="og:description" content="Browse Phantty's built-in terminal themes with live color previews.">
+  <meta property="og:image" content="assets/phantty.png">
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#1b1e28">
+  <link rel="icon" href="assets/favicon.ico">
+  <link rel="apple-touch-icon" href="assets/phantty.png">
+  <link rel="stylesheet" href="style.css?v=5">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container nav">
+      <a class="brand" href="./">
+        <img src="assets/phantty.png" alt="" width="28" height="28">
+        <span>Phantty</span>
+      </a>
+      <nav class="nav-links">
+        <a href="./#features">Features</a>
+        <a href="./#install">Install</a>
+        <a href="./#config">Config</a>
+        <a href="./#shortcuts">Shortcuts</a>
+        <a class="active-link" href="./themes.html" aria-current="page">Themes</a>
+        <span class="lang-switch" role="group" aria-label="Language">
+          <a class="lang active" href="./themes.html" aria-current="page">EN</a>
+          <a class="lang" href="./zh.html">中文</a>
+        </span>
+        <a class="github" href="https://github.com/xuzhougeng/phantty" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="theme-hero">
+      <div class="container">
+        <p class="eyebrow">Built-in theme gallery</p>
+        <h1>Find a Phantty theme</h1>
+        <p class="tagline">Preview every embedded Ghostty-compatible theme, then copy the exact config line into <code>%APPDATA%\phantty\config</code>.</p>
+        <div class="theme-copy-line" aria-label="Theme config example">
+          <code>theme = <span id="featured-theme-name">Poimandres</span></code>
+          <button class="copy-config" type="button" data-copy-theme="Poimandres">Copy</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="theme-browser section">
+      <div class="container">
+        <div class="theme-toolbar">
+          <div>
+            <h2>Theme previews</h2>
+            <p id="theme-count" class="section-foot">Loading themes...</p>
+          </div>
+          <div class="theme-controls" aria-label="Theme filters">
+            <input id="theme-search" class="theme-search" type="search" placeholder="Search themes" autocomplete="off">
+            <div class="theme-filter" role="group" aria-label="Color mode">
+              <button type="button" class="active" data-filter="all">All</button>
+              <button type="button" data-filter="dark">Dark</button>
+              <button type="button" data-filter="light">Light</button>
+            </div>
+          </div>
+        </div>
+        <div id="theme-grid" class="theme-grid" aria-live="polite"></div>
+        <p id="theme-empty" class="theme-empty" hidden>No themes match your search.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div>
+        <img src="assets/phantty.png" alt="" width="20" height="20">
+        <span>Phantty · MIT License</span>
+      </div>
+      <div class="footer-links">
+        <a href="./">Home</a>
+        <a href="https://github.com/xuzhougeng/phantty/releases" target="_blank" rel="noopener">Releases</a>
+        <a href="https://github.com/xuzhougeng/phantty/issues" target="_blank" rel="noopener">Issues</a>
+        <a href="https://ghostty.org/" target="_blank" rel="noopener">Ghostty</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="themes-data.js"></script>
+  <script>
+    const themes = window.PHANTTY_THEMES || [];
+    const grid = document.getElementById("theme-grid");
+    const empty = document.getElementById("theme-empty");
+    const count = document.getElementById("theme-count");
+    const search = document.getElementById("theme-search");
+    const filterButtons = Array.from(document.querySelectorAll("[data-filter]"));
+    const featuredName = document.getElementById("featured-theme-name");
+    const featuredCopy = document.querySelector("[data-copy-theme]");
+    let activeFilter = "all";
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[char]);
+    }
+
+    function setFeatured(theme) {
+      if (!theme) return;
+      featuredName.textContent = theme.name;
+      featuredCopy.dataset.copyTheme = theme.name;
+    }
+
+    async function copyTheme(name, button) {
+      const line = `theme = ${name}`;
+      try {
+        await navigator.clipboard.writeText(line);
+        button.textContent = "Copied";
+      } catch {
+        button.textContent = line;
+      }
+      window.setTimeout(() => {
+        button.textContent = "Copy";
+      }, 1400);
+    }
+
+    function renderCard(theme) {
+      const palette = theme.palette.map((color) => `<span style="background:${color}" title="${color}"></span>`).join("");
+      return `
+        <article class="theme-card" style="--theme-bg:${theme.background}; --theme-fg:${theme.foreground}; --theme-cursor:${theme.cursor}; --theme-selection:${theme.selection};">
+          <div class="theme-preview">
+            <div class="theme-preview-bar">
+              <span></span><span></span><span></span>
+            </div>
+            <pre><span class="prompt">$</span> phantty --theme ${escapeHtml(theme.name)}
+<span class="muted">loading Ghostty colors</span>
+<span class="success">ready</span> <span class="cursor"> </span></pre>
+          </div>
+          <div class="theme-card-body">
+            <div>
+              <h3>${escapeHtml(theme.name)}</h3>
+              <p>${theme.kind}</p>
+            </div>
+            <button type="button" data-theme-name="${escapeHtml(theme.name)}">Copy</button>
+          </div>
+          <div class="theme-palette" aria-hidden="true">${palette}</div>
+        </article>`;
+    }
+
+    function applyFilters() {
+      const query = search.value.trim().toLowerCase();
+      const visible = themes.filter((theme) => {
+        const matchesFilter = activeFilter === "all" || theme.kind === activeFilter;
+        return matchesFilter && theme.name.toLowerCase().includes(query);
+      });
+
+      grid.innerHTML = visible.map(renderCard).join("");
+      empty.hidden = visible.length !== 0;
+      count.textContent = `${visible.length} of ${themes.length} themes`;
+      setFeatured(visible[0] || themes[0]);
+    }
+
+    grid.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-theme-name]");
+      if (!button) return;
+      copyTheme(button.dataset.themeName, button);
+    });
+
+    featuredCopy.addEventListener("click", () => copyTheme(featuredCopy.dataset.copyTheme, featuredCopy));
+    search.addEventListener("input", applyFilters);
+    filterButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        activeFilter = button.dataset.filter;
+        filterButtons.forEach((item) => item.classList.toggle("active", item === button));
+        applyFilters();
+      });
+    });
+
+    applyFilters();
+  </script>
+</body>
+</html>
