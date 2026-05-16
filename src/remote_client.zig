@@ -823,7 +823,10 @@ fn appendHex(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, dat
 }
 
 pub fn appendJsonString(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, data: []const u8) !void {
-    for (data) |ch| {
+    const hex = "0123456789abcdef";
+    var i: usize = 0;
+    while (i < data.len) {
+        const ch = data[i];
         switch (ch) {
             '"' => try out.appendSlice(allocator, "\\\""),
             '\\' => try out.appendSlice(allocator, "\\\\"),
@@ -832,15 +835,34 @@ pub fn appendJsonString(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.All
             '\t' => try out.appendSlice(allocator, "\\t"),
             else => {
                 if (ch < 0x20) {
-                    const hex = "0123456789abcdef";
                     try out.appendSlice(allocator, "\\u00");
                     try out.append(allocator, hex[ch >> 4]);
                     try out.append(allocator, hex[ch & 0x0f]);
-                } else {
+                } else if (ch < 0x80) {
                     try out.append(allocator, ch);
+                } else {
+                    const len = std.unicode.utf8ByteSequenceLength(ch) catch {
+                        try out.appendSlice(allocator, "\\ufffd");
+                        i += 1;
+                        continue;
+                    };
+                    if (i + len > data.len) {
+                        try out.appendSlice(allocator, "\\ufffd");
+                        i += 1;
+                        continue;
+                    }
+                    _ = std.unicode.utf8Decode(data[i .. i + len]) catch {
+                        try out.appendSlice(allocator, "\\ufffd");
+                        i += 1;
+                        continue;
+                    };
+                    try out.appendSlice(allocator, data[i .. i + len]);
+                    i += len;
+                    continue;
                 }
             },
         }
+        i += 1;
     }
 }
 
@@ -882,6 +904,27 @@ test "buildOutputMessage preserves PTY bytes as hex" {
         "{\"type\":\"output-bytes\",\"surfaceId\":\"0000000000000001\",\"encoding\":\"hex\",\"data\":\"1b5b33316d68690d0a\"}",
         message,
     );
+}
+
+test "remote json string replaces invalid utf8 bytes" {
+    const allocator = std.testing.allocator;
+    const bad = [_]u8{ 'o', 'k', ' ', 0xff, ' ', 0xc3 };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try appendJsonString(&out, allocator, bad[0..]);
+    try std.testing.expectEqualStrings("ok \\ufffd \\ufffd", out.items);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(out.items));
+}
+
+test "remote json string preserves valid multibyte utf8" {
+    const allocator = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try appendJsonString(&out, allocator, "标题 🚀");
+    try std.testing.expectEqualStrings("标题 🚀", out.items);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(out.items));
 }
 
 test "decode input message bytes" {
