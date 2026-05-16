@@ -1,4 +1,4 @@
-import type { LayoutState, LayoutSurface } from "./types";
+import type { LayoutState, LayoutSurface, MobileInputMode } from "./types";
 
 export type MobileSurfaceKind = "terminal" | "ai_chat" | "none";
 
@@ -27,8 +27,9 @@ export function selectedMobileSurfaceKind(
 export function shouldShowMobileVirtualKeyboard(
   surfaceKind: MobileSurfaceKind,
   keyboardVisible: boolean,
+  inputMode: MobileInputMode = "keys",
 ): boolean {
-  return keyboardVisible && surfaceKind === "terminal";
+  return keyboardVisible && surfaceKind === "terminal" && inputMode === "keys";
 }
 
 function findSurface(surfaces: LayoutSurface[], id: string | null): LayoutSurface | null {

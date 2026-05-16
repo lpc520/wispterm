@@ -47,4 +47,10 @@ describe("mobile surface mode", () => {
     assert.equal(shouldShowMobileVirtualKeyboard("none", true), false);
     assert.equal(shouldShowMobileVirtualKeyboard("terminal", false), false);
   });
+
+  it("only shows the shortcut keyboard in keys mode", () => {
+    assert.equal(shouldShowMobileVirtualKeyboard("terminal", true, "keys"), true);
+    assert.equal(shouldShowMobileVirtualKeyboard("terminal", true, "text"), false);
+    assert.equal(shouldShowMobileVirtualKeyboard("terminal", true, "view"), false);
+  });
 });

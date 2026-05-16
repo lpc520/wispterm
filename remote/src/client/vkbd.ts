@@ -17,7 +17,7 @@ export function renderVirtualKeyboardMarkup(): string {
   const key = (attrs: string, label: string, cls = ""): string =>
     `<button type="button" class="vkbd-key${cls ? ` ${cls}` : ""}" ${attrs}>${label}</button>`;
   return `
-    <section class="vkbd" id="vkbd" data-mod-ctrl="false" data-mod-alt="false">
+    <section class="vkbd" id="vkbd" data-mod-ctrl="false" data-mod-alt="false" data-mobile-input-mode="${state.mobileInputMode}">
       <div class="vkbd-rows">
         <div class="vkbd-row">
           ${key('data-vk-key="esc"', "Esc")}
@@ -80,6 +80,20 @@ export function bindVirtualKeyboard(onHide: () => void): void {
   });
 }
 
+export function syncVirtualKeyboardInputMode(): void {
+  const vkbd = document.querySelector<HTMLElement>("#vkbd");
+  if (!vkbd) return;
+  const inputMode = state.mobileInputMode;
+  vkbd.dataset.mobileInputMode = inputMode;
+  const ime = vkbd.querySelector<HTMLButtonElement>('[data-vk-key="ime"]');
+  if (!ime) return;
+  const disabled = inputMode === "view";
+  ime.disabled = disabled;
+  ime.setAttribute("aria-disabled", String(disabled));
+  ime.title = disabled ? "IME disabled in view mode" : "Toggle IME";
+  if (disabled) ime.dataset.active = "false";
+}
+
 function dispatchVirtualKey(button: HTMLButtonElement, onHide: () => void): void {
   const vkbd = document.querySelector<HTMLElement>("#vkbd");
   if (!vkbd) return;
@@ -101,6 +115,10 @@ function dispatchVirtualKey(button: HTMLButtonElement, onHide: () => void): void
   }
 
   if (button.dataset.vkKey === "ime") {
+    if (state.mobileInputMode === "view") {
+      button.dataset.active = "false";
+      return;
+    }
     button.dataset.active = String(toggleMobileTextInput());
     return;
   }

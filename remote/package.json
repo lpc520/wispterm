@@ -8,6 +8,7 @@
     "build:server": "tsc -p tsconfig.server.json",
     "build:docker": "npm run build && npm run build:server",
     "dev": "vite --host 127.0.0.1",
+    "dev:mock": "npm run build && npm run build:server && node dist-server/dev_mock_entry.js",
     "dev:server": "tsx watch src/server/index.ts",
     "start:server": "node dist-server/index.js",
     "preview": "vite preview --host 127.0.0.1",

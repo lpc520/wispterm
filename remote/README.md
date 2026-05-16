@@ -167,6 +167,20 @@ REMOTE_COOKIE_SECURE=false \
 npm run dev:server   # relay server, port 8787
 ```
 
+For a local all-in-one mock login, build and run the Node relay with built-in
+development credentials:
+
+```bash
+npm run dev:mock
+# Open http://127.0.0.1:8787
+# username: admin
+# password: password
+```
+
+`dev:mock` only fills missing local environment variables for this command.
+Production starts must still provide real `ADMIN_USERNAME`,
+`ADMIN_PASSWORD_HASH`, and `SESSION_SIGNING_SECRET` values.
+
 Set `REMOTE_COOKIE_SECURE=false` only for plain-HTTP local testing —
 production must keep cookies marked `Secure` and front the server with HTTPS.
 

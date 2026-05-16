@@ -92,6 +92,7 @@ test("sticky modifiers clear after special keys", () => {
 });
 
 test("virtual keyboard markup keeps the compact control key set", () => {
+  state.mobileInputMode = "keys";
   const markup = renderVirtualKeyboardMarkup();
 
   for (const label of ["Esc", "Tab", "↑", "←", "↓", "→", "^C", "^V", "⌫", "⏎", "IME"]) {
@@ -104,6 +105,13 @@ test("virtual keyboard markup keeps the compact control key set", () => {
 
   assert.doesNotMatch(markup, /data-vk-text=/);
   assert.doesNotMatch(markup, /data-vk-mod=/);
+});
+
+test("virtual keyboard exposes input mode state", () => {
+  state.mobileInputMode = "keys";
+  const markup = renderVirtualKeyboardMarkup();
+
+  assert.match(markup, /data-mobile-input-mode="keys"/);
 });
 
 test("virtual keyboard sends ctrl-v from the shortcut key", () => {
@@ -136,6 +144,7 @@ test("IME key toggles the mobile text input focus target", () => {
   setupDocument(keyboard, true);
 
   state.selectedSurfaceId = "surface-a";
+  state.mobileInputMode = "keys";
   bindVirtualKeyboard(() => {});
 
   ime.click();
@@ -145,6 +154,23 @@ test("IME key toggles the mobile text input focus target", () => {
 
   ime.click();
   assert.equal(fakeDocument.textarea.blurCalls, 1);
+  assert.equal(fakeDocument.activeElement, null);
+  assert.equal(ime.dataset.active, "false");
+});
+
+test("IME key is inert in view mode", () => {
+  const ime = new FakeButton({ vkKey: "ime", active: "false" });
+  const keyboard = new FakeKeyboard([ime]);
+
+  setupDocument(keyboard, true);
+
+  state.selectedSurfaceId = "surface-a";
+  state.mobileInputMode = "view";
+  bindVirtualKeyboard(() => {});
+
+  ime.click();
+
+  assert.equal(fakeDocument.textarea.focusCalls, 0);
   assert.equal(fakeDocument.activeElement, null);
   assert.equal(ime.dataset.active, "false");
 });

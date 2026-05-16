@@ -1,4 +1,4 @@
-import type { LayoutState, LayoutTab, SurfaceView } from "./types";
+import type { LayoutState, LayoutTab, MobileInputMode, SurfaceView } from "./types";
 import { readSavedDesktopPanelMode, readSavedKbdVisible, readSavedSidebarCollapsed } from "./storage";
 
 type Listener = () => void;
@@ -21,6 +21,7 @@ export const state = {
   drawerOpen: false,
   sidebarCollapsed: readSavedSidebarCollapsed() ?? false,
   desktopPanelMode: readSavedDesktopPanelMode(),
+  mobileInputMode: "keys" as MobileInputMode,
   activeSessionKey: null as string | null,
 };
 

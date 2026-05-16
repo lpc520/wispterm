@@ -165,7 +165,7 @@
 
   .mobile-bar {
     display: grid;
-    grid-template-columns: 42px minmax(0, 1fr) 16px 42px;
+    grid-template-columns: 42px minmax(0, 1fr) 16px 58px 42px;
     align-items: center;
     gap: 10px;
     min-height: 52px;
@@ -195,10 +195,32 @@
     justify-self: center;
   }
 
+  .mobile-input-mode-toggle {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 42px;
+    min-width: 58px;
+    padding: 0 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--ghost-bg-strong);
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 800;
+    text-align: center;
+  }
+
+  .mobile-input-mode-toggle[data-mode="view"] {
+    color: var(--accent-ink);
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
   .console-shell[data-mobile-surface-kind="ai_chat"] .mobile-bar {
     grid-template-columns: 42px minmax(0, 1fr) 16px;
   }
 
+  .console-shell[data-mobile-surface-kind="ai_chat"] #mobile-input-mode-toggle,
   .console-shell[data-mobile-surface-kind="ai_chat"] #kbd-toggle {
     display: none;
   }

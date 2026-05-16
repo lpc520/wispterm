@@ -1,5 +1,5 @@
 import { isMobileRemoteShell } from "./mobile_layout";
-import { activeSurfaceIdForInput } from "./state";
+import { activeSurfaceIdForInput, state } from "./state";
 
 type Sender = (surfaceId: string, data: string) => void;
 
@@ -102,7 +102,10 @@ export function bindMobileTextInput(): void {
 }
 
 export function focusMobileTextInput(): boolean {
-  if (!isMobileRemoteShell()) return false;
+  if (!canUseMobileTextInput()) {
+    blurMobileTextInput();
+    return false;
+  }
   const input = inputEl ?? document.querySelector<HTMLTextAreaElement>("#mobile-text-input");
   if (!input) return false;
   inputEl = input;
@@ -111,7 +114,10 @@ export function focusMobileTextInput(): boolean {
 }
 
 export function toggleMobileTextInput(): boolean {
-  if (!isMobileRemoteShell()) return false;
+  if (!canUseMobileTextInput()) {
+    blurMobileTextInput();
+    return false;
+  }
   const input = inputEl ?? document.querySelector<HTMLTextAreaElement>("#mobile-text-input");
   if (!input) return false;
   inputEl = input;
@@ -121,6 +127,16 @@ export function toggleMobileTextInput(): boolean {
   }
   input.focus({ preventScroll: true });
   return document.activeElement === input;
+}
+
+export function blurMobileTextInput(): void {
+  const input = inputEl ?? document.querySelector<HTMLTextAreaElement>("#mobile-text-input");
+  if (!input) return;
+  inputEl = input;
+  input.blur();
+  isComposing = false;
+  clearPendingCommittedComposition();
+  clearInputValue();
 }
 
 function dispatchText(text: string): void {
@@ -152,5 +168,9 @@ function clearPendingCommittedComposition(): void {
 }
 
 function shouldHandleMobileInput(): boolean {
-  return isMobileRemoteShell();
+  return canUseMobileTextInput();
+}
+
+function canUseMobileTextInput(): boolean {
+  return isMobileRemoteShell() && state.mobileInputMode !== "view";
 }

@@ -64,6 +64,17 @@
   background: linear-gradient(180deg, var(--vkbd-key-active-from), var(--vkbd-key-active-to));
 }
 
+.vkbd-key:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.vkbd-key:disabled:active {
+  transform: none;
+  background: linear-gradient(180deg, var(--vkbd-key-from), var(--vkbd-key-to));
+}
+
 .vkbd-key.vkbd-pill {
   color: var(--accent);
   border-color: var(--accent-soft);

@@ -1,4 +1,4 @@
-import type { DesktopPanelMode, StatusKind } from "../types";
+import type { DesktopPanelMode, MobileInputMode, StatusKind } from "../types";
 import { iconClose, iconKeyboard, iconMenu, iconPanelMode, themeToggleMarkup } from "../icons";
 import { bindThemeToggleButtons } from "../theme";
 import { activeSurfaceIdForInput, currentTab, state, pushNotice } from "../state";
@@ -23,8 +23,13 @@ import {
   updateSurfaceCursors,
 } from "../surfaces";
 import { applyVisualViewportSizing, isMobileRemoteShell } from "../mobile_layout";
-import { bindMobileTextInput, renderMobileTextInputMarkup } from "../mobile_text_input";
-import { bindVirtualKeyboard, renderVirtualKeyboardMarkup } from "../vkbd";
+import {
+  bindMobileTextInput,
+  blurMobileTextInput,
+  focusMobileTextInput,
+  renderMobileTextInputMarkup,
+} from "../mobile_text_input";
+import { bindVirtualKeyboard, renderVirtualKeyboardMarkup, syncVirtualKeyboardInputMode } from "../vkbd";
 import { selectedMobileSurfaceKind, shouldShowMobileVirtualKeyboard } from "../mobile_surface_mode";
 import {
   bindActionText,
@@ -54,7 +59,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   const initialSessionInputValue = hasSavedSessionKey ? maskSessionKey(savedSessionKey) : savedSessionKey;
 
   app.innerHTML = `
-    <section class="console-shell" data-kbd-visible="${state.kbdVisible}" data-mobile-surface-kind="none" data-mobile-vkbd-visible="false" data-drawer-open="${state.drawerOpen}" data-sidebar-collapsed="${state.sidebarCollapsed}" data-desktop-panel-mode="${state.desktopPanelMode}" data-sidebar-page="${sidebarPage}">
+    <section class="console-shell" data-kbd-visible="${state.kbdVisible}" data-mobile-surface-kind="none" data-mobile-vkbd-visible="false" data-mobile-input-mode="${state.mobileInputMode}" data-drawer-open="${state.drawerOpen}" data-sidebar-collapsed="${state.sidebarCollapsed}" data-desktop-panel-mode="${state.desktopPanelMode}" data-sidebar-page="${sidebarPage}">
       <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-main">
@@ -187,6 +192,9 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
           </button>
           <span class="mobile-bar-title" id="mobile-workspace-title">Phantty Remote</span>
           <span class="status-pip" id="mobile-status-pip" data-state="offline" title="Disconnected"></span>
+          <button type="button" class="mobile-input-mode-toggle" id="mobile-input-mode-toggle" data-mode="${state.mobileInputMode}" aria-label="${mobileInputModeToggleLabel(state.mobileInputMode)}" title="${mobileInputModeToggleLabel(state.mobileInputMode)}">
+            ${mobileInputModeLabel(state.mobileInputMode)}
+          </button>
           <button type="button" class="icon-button" id="kbd-toggle" aria-label="Toggle keyboard">
             ${iconKeyboard()}
           </button>
@@ -268,6 +276,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   bindDesktopPanelMode();
   bindWeixinPanel();
   updateMobileSurfaceMode();
+  syncMobileInputModeUi();
   updateInputUi();
   if (savedSessionKey) queueMicrotask(() => connect(savedSessionKey));
 }
@@ -390,7 +399,9 @@ function updateMobileSurfaceMode(): void {
   const shell = document.querySelector<HTMLElement>(".console-shell");
   if (shell) {
     shell.dataset.mobileSurfaceKind = surfaceKind;
-    shell.dataset.mobileVkbdVisible = String(shouldShowMobileVirtualKeyboard(surfaceKind, state.kbdVisible));
+    shell.dataset.mobileVkbdVisible = String(
+      shouldShowMobileVirtualKeyboard(surfaceKind, state.kbdVisible, state.mobileInputMode),
+    );
   }
 
   const keyboardToggle = document.querySelector<HTMLButtonElement>("#kbd-toggle");
@@ -399,6 +410,13 @@ function updateMobileSurfaceMode(): void {
     keyboardToggle.hidden = chatMode;
     keyboardToggle.setAttribute("aria-hidden", String(chatMode));
   }
+  const inputModeToggle = document.querySelector<HTMLButtonElement>("#mobile-input-mode-toggle");
+  if (inputModeToggle) {
+    const chatMode = surfaceKind === "ai_chat";
+    inputModeToggle.hidden = chatMode;
+    inputModeToggle.setAttribute("aria-hidden", String(chatMode));
+  }
+  syncMobileInputModeUi();
 }
 
 function bindMobileChrome(): void {
@@ -421,6 +439,54 @@ function bindMobileChrome(): void {
   document.querySelector<HTMLButtonElement>("#kbd-toggle")?.addEventListener("click", () => {
     setKbdVisible(!state.kbdVisible);
   });
+  document.querySelector<HTMLButtonElement>("#mobile-input-mode-toggle")?.addEventListener("click", () => {
+    setMobileInputMode(nextMobileInputMode(state.mobileInputMode));
+  });
+}
+
+function setMobileInputMode(mode: MobileInputMode): void {
+  if (state.mobileInputMode === mode) return;
+  state.mobileInputMode = mode;
+  if (mode === "text") {
+    focusMobileTextInput();
+  } else {
+    blurMobileTextInput();
+  }
+  syncMobileInputModeUi();
+  updateMobileSurfaceMode();
+}
+
+function syncMobileInputModeUi(): void {
+  const mode = state.mobileInputMode;
+  const shell = document.querySelector<HTMLElement>(".console-shell");
+  if (shell) shell.dataset.mobileInputMode = mode;
+
+  const toggle = document.querySelector<HTMLButtonElement>("#mobile-input-mode-toggle");
+  if (toggle) {
+    const label = mobileInputModeToggleLabel(mode);
+    toggle.dataset.mode = mode;
+    toggle.textContent = mobileInputModeLabel(mode);
+    toggle.setAttribute("aria-label", label);
+    toggle.title = label;
+  }
+
+  syncVirtualKeyboardInputMode();
+}
+
+function mobileInputModeLabel(mode: MobileInputMode): string {
+  if (mode === "keys") return "Keys";
+  if (mode === "text") return "Text";
+  return "View";
+}
+
+function mobileInputModeToggleLabel(mode: MobileInputMode): string {
+  return `Switch to ${mobileInputModeLabel(nextMobileInputMode(mode)).toLowerCase()} mode`;
+}
+
+function nextMobileInputMode(mode: MobileInputMode): MobileInputMode {
+  if (mode === "keys") return "text";
+  if (mode === "text") return "view";
+  return "keys";
 }
 
 function bindSidebarPages(): void {
