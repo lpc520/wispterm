@@ -94,7 +94,7 @@ test("sticky modifiers clear after special keys", () => {
 test("virtual keyboard markup keeps the compact control key set", () => {
   const markup = renderVirtualKeyboardMarkup();
 
-  for (const label of ["Esc", "Tab", "↑", "←", "↓", "→", "^C", "⌫", "⏎", "IME"]) {
+  for (const label of ["Esc", "Tab", "↑", "←", "↓", "→", "^C", "^V", "⌫", "⏎", "IME"]) {
     assert.match(markup, new RegExp(`>${escapeRegExp(label)}<`));
   }
 
@@ -104,6 +104,29 @@ test("virtual keyboard markup keeps the compact control key set", () => {
 
   assert.doesNotMatch(markup, /data-vk-text=/);
   assert.doesNotMatch(markup, /data-vk-mod=/);
+});
+
+test("virtual keyboard sends ctrl-v from the shortcut key", () => {
+  const ctrlV = new FakeButton({ vkCtrl: "v" });
+  const keyboard = new FakeKeyboard([ctrlV]);
+
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      querySelector(selector: string): FakeKeyboard | null {
+        return selector === "#vkbd" ? keyboard : null;
+      },
+    },
+  });
+
+  const sent: string[] = [];
+  state.selectedSurfaceId = "surface-a";
+  setVirtualKeyboardSender((_surfaceId, data) => sent.push(data));
+  bindVirtualKeyboard(() => {});
+
+  ctrlV.click();
+
+  assert.deepEqual(sent, ["\x16"]);
 });
 
 test("IME key toggles the mobile text input focus target", () => {

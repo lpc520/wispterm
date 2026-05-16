@@ -29,6 +29,7 @@ export function renderVirtualKeyboardMarkup(): string {
         </div>
         <div class="vkbd-row">
           ${key('data-vk-ctrl="c"', "^C", "vkbd-pill")}
+          ${key('data-vk-ctrl="v"', "^V", "vkbd-pill")}
           ${key('data-vk-key="bksp"', "⌫")}
           ${key('data-vk-key="enter"', "⏎")}
           ${key('data-vk-key="ime" data-active="false"', "IME", "vkbd-wide vkbd-mod")}
