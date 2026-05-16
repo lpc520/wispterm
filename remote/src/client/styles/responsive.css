@@ -78,7 +78,7 @@
     width: 100%;
     min-width: 0;
     padding: 15px;
-    border-radius: 18px;
+    border-radius: var(--radius);
     box-shadow: none;
   }
 
@@ -101,7 +101,7 @@
 
   .sidebar input {
     min-height: 48px;
-    border-radius: 18px;
+    border-radius: var(--radius-sm);
   }
 
   .sidebar .form-actions {
@@ -115,10 +115,6 @@
     padding: 12px 10px;
   }
 
-  .sidebar-nav-item {
-    min-height: 44px;
-  }
-
   .sidebar-footer {
     padding: 12px max(14px, var(--safe-right)) max(14px, var(--safe-bottom)) max(14px, var(--safe-left));
   }
@@ -130,15 +126,15 @@
 
   .remote-tabs {
     min-width: 0;
-    max-height: min(320px, 42dvh);
+    max-height: min(420px, 48dvh);
     overflow-x: hidden;
     overflow-y: auto;
   }
 
   .tab-chip {
-    min-height: 52px;
+    min-height: 56px;
     padding: 10px 12px;
-    border-radius: 16px;
+    border-radius: var(--radius-sm);
   }
 
   .tab-chip-label {
@@ -223,7 +219,7 @@
   .panels-stage {
     min-height: 0;
     height: 100%;
-    border-radius: 14px;
+    border-radius: var(--radius);
   }
 
   .surface-strip {
@@ -252,7 +248,7 @@
     min-height: 30px;
     padding: 7px 11px;
     border: 1px solid var(--line);
-    border-radius: 999px;
+    border-radius: var(--radius-sm);
     background: var(--surface-overlay);
     color: var(--muted);
     font-size: 12px;
@@ -288,13 +284,13 @@
 
   .panels-stage[data-mobile-mode="single"] .remote-panel::before {
     inset: 3px;
-    border-radius: 12px;
+    border-radius: var(--radius);
   }
 
   .panels-stage[data-mobile-mode="single"] .panel-header {
     min-height: 28px;
     padding: 6px 10px;
-    border-radius: 10px 10px 0 0;
+    border-radius: var(--radius) var(--radius) 0 0;
   }
 
   .panels-stage[data-mobile-mode="single"] .panel-header small {
@@ -309,7 +305,7 @@
 
   .panels-stage[data-mobile-mode="single"] .terminal-mount {
     padding: 4px;
-    border-radius: 0 0 10px 10px;
+    border-radius: 0 0 var(--radius) var(--radius);
     overflow: hidden;
     touch-action: none;
   }
@@ -345,7 +341,7 @@
   }
 
   .console-shell[data-mobile-vkbd-visible="true"] .panels-stage[data-mobile-mode="single"] .terminal-mount {
-    border-radius: 10px;
+    border-radius: var(--radius);
   }
 
   .console-shell[data-mobile-surface-kind="ai_chat"] .workspace {
@@ -400,7 +396,7 @@
   }
 
   .console-shell[data-mobile-surface-kind="ai_chat"] .ai-chat-bubble {
-    border-radius: 16px;
+    border-radius: var(--radius-sm);
     box-shadow: none;
   }
 
@@ -415,7 +411,7 @@
     min-height: 48px;
     max-height: 140px;
     resize: none;
-    border-radius: 14px;
+    border-radius: var(--radius-sm);
     font-family: Inter, ui-sans-serif, system-ui, sans-serif;
     font-weight: 700;
   }
@@ -424,7 +420,7 @@
   .console-shell[data-mobile-surface-kind="ai_chat"] .ai-chat-stop {
     width: 72px;
     height: 48px;
-    border-radius: 14px;
+    border-radius: var(--radius-sm);
     padding: 0;
   }
 }

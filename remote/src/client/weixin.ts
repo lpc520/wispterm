@@ -86,17 +86,17 @@ export function bindActionText(binding: WeixinBindingSummary): "Bind" | "Unbind"
 
 export async function fetchWeixinSettings(): Promise<WeixinSettingsResponse> {
   const res = await weixinApi("/api/weixin/settings");
-  return weixinApiJson<WeixinSettingsResponse>(res, "Failed to load Weixin settings");
+  return weixinApiJson<WeixinSettingsResponse>(res, "Load failed");
 }
 
 export async function saveWeixinSettings(settings: WeixinSettings): Promise<WeixinSaveSettingsResponse> {
   const res = await weixinApi("/api/weixin/settings", { method: "PUT", body: JSON.stringify(settings) });
-  return weixinApiJson<WeixinSaveSettingsResponse>(res, "Failed to save Weixin settings");
+  return weixinApiJson<WeixinSaveSettingsResponse>(res, "Save failed");
 }
 
 export async function startWeixinBind(): Promise<WeixinBindStartResponse> {
   const res = await weixinApi("/api/weixin/bind/start", { method: "POST" });
-  return weixinApiJson<WeixinBindStartResponse>(res, "Failed to start Weixin binding");
+  return weixinApiJson<WeixinBindStartResponse>(res, "Bind failed");
 }
 
 export async function pollWeixinBindStatus(
@@ -105,11 +105,11 @@ export async function pollWeixinBindStatus(
   const res = await weixinApi(`/api/weixin/bind/status?qrcode=${encodeURIComponent(qrcode)}`);
   return weixinApiJson<{ status: string; message?: string; binding: WeixinBindingSummary }>(
     res,
-    "Failed to poll Weixin binding",
+    "Check failed",
   );
 }
 
 export async function unbindWeixin(): Promise<void> {
   const res = await weixinApi("/api/weixin/bind", { method: "DELETE" });
-  if (!res.ok) await throwWeixinApiError(res, "Failed to unbind Weixin");
+  if (!res.ok) await throwWeixinApiError(res, "Unbind failed");
 }

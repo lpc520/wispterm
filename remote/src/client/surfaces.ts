@@ -70,7 +70,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
   copyButton.type = "button";
   copyButton.className = "panel-copy";
   copyButton.textContent = "Copy";
-  copyButton.title = "Copy selected text, or visible terminal text when nothing is selected";
+  copyButton.title = "Copy selection or visible text";
   copyButton.setAttribute("aria-label", "Copy terminal text");
   header.appendChild(title);
   header.appendChild(meta);
@@ -177,6 +177,7 @@ export function renderRemotePanels(): void {
   if (!tab || tab.surfaces.length === 0) {
     panelsRoot.className = "panels-stage empty";
     delete panelsRoot.dataset.mobileMode;
+    delete panelsRoot.dataset.desktopMode;
     panelsRoot.replaceChildren(emptyState("No panels for this tab yet."));
     const fallback = "Remote workspace";
     if (titleRoot) titleRoot.textContent = fallback;
@@ -191,6 +192,7 @@ export function renderRemotePanels(): void {
   if (mobileTitleRoot) mobileTitleRoot.textContent = tabTitle;
   panelsRoot.className = "panels-stage";
   panelsRoot.dataset.mobileMode = "single";
+  panelsRoot.dataset.desktopMode = state.desktopPanelMode;
   panelsRoot.querySelectorAll(".empty-state").forEach((node) => node.remove());
   const visible = new Set(tab.surfaces.map((surface) => surface.id));
 

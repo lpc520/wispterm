@@ -8,10 +8,8 @@ export function renderLogin(app: HTMLElement, onSuccess: () => void, message = "
   app.innerHTML = `
     <section class="shell auth-shell">
       ${themeToggleMarkup("theme-toggle-floating")}
-      <div class="brand">${remoteBrandMarkup()}</div>
       <form class="panel auth-panel" id="login-form">
-        <h1>Sign in to your relay</h1>
-        <p>Single-user access is required before any local session key can be used.</p>
+        <h1>Sign in</h1>
         <label>
           Username
           <input name="username" autocomplete="username" required />
@@ -23,6 +21,7 @@ export function renderLogin(app: HTMLElement, onSuccess: () => void, message = "
         <button type="submit">Sign in</button>
         <output class="form-message">${escapeText(message)}</output>
       </form>
+      <footer class="brand auth-brand-footer">${remoteBrandMarkup()}</footer>
     </section>
   `;
 

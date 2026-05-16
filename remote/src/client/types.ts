@@ -79,3 +79,5 @@ export type SurfaceView = {
 export type ThemeMode = "dark" | "light";
 
 export type StatusKind = "offline" | "connecting" | "online";
+
+export type DesktopPanelMode = "layout" | "single";

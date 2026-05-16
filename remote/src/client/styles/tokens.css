@@ -45,8 +45,9 @@
   --shadow-drawer: 24px 0 60px rgba(0, 0, 0, 0.5);
   --selected-ring: rgba(246, 199, 111, 0.86);
   --selected-glow: 0 0 0 1px rgba(246, 199, 111, 0.18), 0 0 30px rgba(246, 199, 111, 0.08);
-  --radius: 22px;
-  --radius-sm: 12px;
+  --radius: 6px;
+  --radius-sm: 3px;
+  --radius-xs: 2px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);

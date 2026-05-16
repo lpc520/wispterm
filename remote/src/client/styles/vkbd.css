@@ -19,7 +19,7 @@
   transform: translateX(-50%);
   width: 64px;
   height: 3px;
-  border-radius: 999px;
+  border-radius: var(--radius-xs);
   background: linear-gradient(90deg, transparent, var(--accent-soft), transparent);
 }
 
@@ -43,7 +43,7 @@
   height: 42px;
   min-width: 0;
   padding: 0 6px;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background:
     linear-gradient(180deg, var(--vkbd-key-from), var(--vkbd-key-to));
@@ -126,7 +126,7 @@
   .vkbd-key {
     height: 38px;
     min-width: 0;
-    border-radius: 9px;
+    border-radius: var(--radius-sm);
     padding: 0 4px;
     font-size: 13px;
   }

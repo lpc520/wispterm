@@ -1,9 +1,10 @@
-import type { ThemeMode } from "./types";
+import type { DesktopPanelMode, ThemeMode } from "./types";
 
 const SESSION_KEY_STORAGE_KEY = "phantty.remote.sessionKey";
 const KBD_VISIBLE_STORAGE_KEY = "phantty.remote.kbdVisible";
 const THEME_STORAGE_KEY = "phantty.remote.theme";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "phantty.remote.sidebarCollapsed";
+const DESKTOP_PANEL_MODE_STORAGE_KEY = "phantty.remote.desktopPanelMode";
 
 export function readSavedSessionKey(): string {
   try {
@@ -71,6 +72,24 @@ export function readSavedSidebarCollapsed(): boolean | null {
 export function saveSidebarCollapsed(collapsed: boolean): void {
   try {
     localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? "1" : "0");
+  } catch {
+    // Storage may be unavailable in restricted browser contexts.
+  }
+}
+
+export function readSavedDesktopPanelMode(): DesktopPanelMode {
+  try {
+    const raw = localStorage.getItem(DESKTOP_PANEL_MODE_STORAGE_KEY);
+    if (raw === "layout" || raw === "single") return raw;
+  } catch {
+    // Storage may be unavailable in restricted browser contexts.
+  }
+  return "layout";
+}
+
+export function saveDesktopPanelMode(mode: DesktopPanelMode): void {
+  try {
+    localStorage.setItem(DESKTOP_PANEL_MODE_STORAGE_KEY, mode);
   } catch {
     // Storage may be unavailable in restricted browser contexts.
   }

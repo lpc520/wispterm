@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  readSavedDesktopPanelMode,
   readSavedSidebarCollapsed,
+  saveDesktopPanelMode,
   saveSidebarCollapsed,
 } from "../../src/client/storage";
 
@@ -22,6 +24,26 @@ test("sidebar collapsed preference is nullable when unset", () => {
   installLocalStorage();
 
   assert.equal(readSavedSidebarCollapsed(), null);
+});
+
+test("desktop panel mode preference round-trips through storage", () => {
+  installLocalStorage();
+
+  assert.equal(readSavedDesktopPanelMode(), "layout");
+
+  saveDesktopPanelMode("single");
+  assert.equal(readSavedDesktopPanelMode(), "single");
+
+  saveDesktopPanelMode("layout");
+  assert.equal(readSavedDesktopPanelMode(), "layout");
+});
+
+test("desktop panel mode ignores invalid stored values", () => {
+  installLocalStorage();
+
+  store.set("phantty.remote.desktopPanelMode", "wide");
+
+  assert.equal(readSavedDesktopPanelMode(), "layout");
 });
 
 function installLocalStorage(): void {

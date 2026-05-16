@@ -54,7 +54,7 @@ input,
 select {
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: var(--radius-sm);
   background: var(--input-bg);
   color: var(--text);
   padding: 13px 14px;
@@ -69,7 +69,7 @@ select:focus {
 
 button {
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: var(--accent);
   color: var(--accent-ink);
   padding: 12px 18px;
@@ -154,14 +154,21 @@ button:disabled {
 }
 
 .auth-shell {
-  grid-template-rows: auto 1fr;
-  gap: 32px;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 20px;
   position: relative;
 }
 
 .auth-panel {
+  align-self: center;
   width: min(440px, 100%);
   padding: 32px;
+}
+
+.auth-brand-footer {
+  align-self: end;
+  justify-self: center;
+  text-align: center;
 }
 
 .auth-shell .theme-toggle-floating {
@@ -176,7 +183,7 @@ button:disabled {
   height: 40px;
   display: grid;
   place-items: center;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: var(--surface-overlay);
   color: var(--text);
