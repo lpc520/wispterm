@@ -17,6 +17,9 @@ class FakeSocket {
     this.listeners.set(event, list);
   }
   emit(event: string, raw?: unknown): void {
+    if (event === "error" && !this.listeners.has(event)) {
+      throw raw instanceof Error ? raw : new Error("Unhandled error event");
+    }
     for (const fn of this.listeners.get(event) ?? []) fn(raw);
   }
 }
@@ -131,4 +134,20 @@ test("RemoteSession refuses input when Phantty socket is not open or send fails"
   session.attachPhantty(throwingPhantty as never);
 
   assert.equal(session.sendInput("surface1", "pwd\r"), false);
+});
+
+test("RemoteSession handles Phantty socket errors without throwing", () => {
+  const session = new RemoteSession("alpha");
+  const phantty = new FakeSocket();
+  session.attachPhantty(phantty as never);
+
+  assert.doesNotThrow(() => phantty.emit("error", new Error("invalid websocket frame")));
+});
+
+test("RemoteSession handles browser socket errors without throwing", () => {
+  const session = new RemoteSession("alpha");
+  const browser = new FakeSocket();
+  session.attachBrowser(browser as never);
+
+  assert.doesNotThrow(() => browser.emit("error", new Error("invalid websocket frame")));
 });

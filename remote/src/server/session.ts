@@ -151,6 +151,14 @@ export class RemoteSession {
     trackHeartbeat(socket);
     this.broadcast({ type: "notice", message: "Phantty connected" });
 
+    socket.on("error", (err) => {
+      if (this.phantty !== socket) return;
+      console.warn(`[remote] Phantty websocket error: ${socketErrorMessage(err)}`);
+      this.phantty = null;
+      this.broadcast({ type: "notice", message: "Phantty disconnected" });
+      terminateSocket(socket);
+    });
+
     socket.on("message", (raw) => {
       const message = safeJson(raw.toString());
       if (!message) return;
@@ -187,6 +195,12 @@ export class RemoteSession {
     safeSend(socket, { type: "notice", message: "Browser paired; input enabled" });
     if (this.isPhanttyConnected()) safeSend(socket, { type: "notice", message: "Phantty connected" });
     if (this.lastLayout) safeSend(socket, this.lastLayout);
+
+    socket.on("error", (err) => {
+      console.warn(`[remote] browser websocket error: ${socketErrorMessage(err)}`);
+      this.browsers.delete(socket);
+      terminateSocket(socket);
+    });
 
     socket.on("message", (raw) => {
       const message = safeJson(raw.toString());
@@ -241,6 +255,22 @@ export function safeSend(socket: WebSocket, message: unknown): boolean {
 
 function isSocketOpen(socket: WebSocket | null): socket is WebSocket {
   return socket?.readyState === SOCKET_OPEN;
+}
+
+function terminateSocket(socket: WebSocket): void {
+  try {
+    socket.terminate();
+  } catch {
+    try {
+      socket.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function socketErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function isWritableTerminalSurface(surface: LayoutSurface): boolean {
