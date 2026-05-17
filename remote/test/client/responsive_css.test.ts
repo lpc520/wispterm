@@ -35,7 +35,7 @@ test("terminal panels do not reserve redundant per-panel headers", async () => {
   assert.match(mountRule, /border-radius:\s*var\(--radius\)\s*;/);
 });
 
-test("mobile view mode allows native terminal text selection", async () => {
+test("mobile view mode keeps drag handling while allowing native terminal text selection", async () => {
   const css = await readFile(responsiveCssUrl, "utf8");
   const hostRule = declarationsForSelector(
     css,
@@ -46,7 +46,7 @@ test("mobile view mode allows native terminal text selection", async () => {
     '.console-shell[data-mobile-input-mode="view"] .terminal-host .xterm',
   ).join("\n");
 
-  assert.match(hostRule, /touch-action:\s*auto\s*;/);
+  assert.match(hostRule, /touch-action:\s*none\s*;/);
   assert.match(xtermRule, /user-select:\s*text\s*;/);
   assert.match(xtermRule, /-webkit-user-select:\s*text\s*;/);
 });

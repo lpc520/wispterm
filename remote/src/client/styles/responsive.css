@@ -445,7 +445,7 @@
 
   .console-shell[data-mobile-input-mode="view"] .panels-stage[data-mobile-mode="single"] .terminal-mount,
   .console-shell[data-mobile-input-mode="view"] .panels-stage[data-mobile-mode="single"] .terminal-host {
-    touch-action: auto;
+    touch-action: none;
   }
 
   .console-shell[data-mobile-input-mode="view"] .terminal-host .xterm {

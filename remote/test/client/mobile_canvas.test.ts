@@ -15,6 +15,7 @@ import {
   canvasPanToScrollOffset,
   panYFromVerticalScrollbarThumb,
   shouldConsumeCanvasWheel,
+  shouldDeferCanvasPanPointerDownDefault,
   shouldStartCanvasPanDrag,
   terminalCanScrollHistory,
   touchHistoryScrollLines,
@@ -168,14 +169,29 @@ test("shouldStartCanvasPanDrag uses touch primary drag on mobile and middle drag
   assert.equal(shouldStartCanvasPanDrag({ mobile: false, isPrimary: false, button: 1 }), false);
 });
 
-test("shouldStartCanvasPanDrag lets mobile view mode keep native text selection", () => {
+test("shouldStartCanvasPanDrag keeps mobile view mode draggable", () => {
   assert.equal(
     shouldStartCanvasPanDrag({ mobile: true, isPrimary: true, button: 0, nativeSelection: true }),
-    false,
+    true,
   );
   assert.equal(
     shouldStartCanvasPanDrag({ mobile: false, isPrimary: true, button: 1, nativeSelection: true }),
     true,
+  );
+});
+
+test("mobile view mode defers pointerdown default prevention for long-press selection", () => {
+  assert.equal(
+    shouldDeferCanvasPanPointerDownDefault({ mobile: true, isPrimary: true, button: 0, nativeSelection: true }),
+    true,
+  );
+  assert.equal(
+    shouldDeferCanvasPanPointerDownDefault({ mobile: true, isPrimary: true, button: 0 }),
+    false,
+  );
+  assert.equal(
+    shouldDeferCanvasPanPointerDownDefault({ mobile: false, isPrimary: true, button: 1, nativeSelection: true }),
+    false,
   );
 });
 

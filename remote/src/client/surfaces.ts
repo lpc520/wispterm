@@ -13,6 +13,7 @@ import {
   panCanvasByWheel,
   resizeCanvasPan,
   shouldConsumeCanvasWheel,
+  shouldDeferCanvasPanPointerDownDefault,
   shouldStartCanvasPanDrag,
   terminalCanScrollHistory,
   touchHistoryScrollLines,
@@ -590,15 +591,17 @@ function bindCanvasPan(view: SurfaceView): () => void {
   let suppressClickButton: number | null = null;
   let scrollbarPointerId: number | null = null;
   let scrollbarGrabOffset = 0;
+  let pointerCaptureDeferred = false;
 
   const onPointerDown = (event: PointerEvent): void => {
+    const dragInput = {
+      mobile: isMobileRemoteShell(),
+      isPrimary: event.isPrimary,
+      button: event.button,
+      nativeSelection: state.mobileInputMode === "view",
+    };
     if (
-      !shouldStartCanvasPanDrag({
-        mobile: isMobileRemoteShell(),
-        isPrimary: event.isPrimary,
-        button: event.button,
-        nativeSelection: state.mobileInputMode === "view",
-      })
+      !shouldStartCanvasPanDrag(dragInput)
     ) return;
     const mobile = isMobileRemoteShell();
     updateCanvasPan(view);
@@ -607,23 +610,24 @@ function bindCanvasPan(view: SurfaceView): () => void {
     const hasScrollableHistory = mobile && view.term.buffer.active.baseY > 0;
     if (canvas.width <= viewport.width && canvas.height <= viewport.height && !hasScrollableHistory) return;
 
-    event.preventDefault();
+    pointerCaptureDeferred = shouldDeferCanvasPanPointerDownDefault(dragInput);
+    if (!pointerCaptureDeferred) event.preventDefault();
     activePointerId = event.pointerId;
     startClient = { x: event.clientX, y: event.clientY };
     lastHistoryClientY = event.clientY;
     startPan = view.canvasPan;
     dragged = false;
-    try {
-      mount.setPointerCapture(event.pointerId);
-    } catch {
-      // Pointer capture can fail if the browser cancels the touch during layout changes.
-    }
+    if (!pointerCaptureDeferred) captureCanvasPointer(event.pointerId);
   };
 
   const onPointerMove = (event: PointerEvent): void => {
     if (activePointerId !== event.pointerId) return;
     const delta = { x: event.clientX - startClient.x, y: event.clientY - startClient.y };
     if (!dragged && !isCanvasDrag(delta)) return;
+    if (pointerCaptureDeferred) {
+      pointerCaptureDeferred = false;
+      captureCanvasPointer(event.pointerId);
+    }
     if (isMobileRemoteShell() && Math.abs(delta.y) >= Math.abs(delta.x)) {
       const historyLines = touchHistoryScrollLines(event.clientY - lastHistoryClientY, terminalRowHeight(view));
       if (
@@ -687,6 +691,7 @@ function bindCanvasPan(view: SurfaceView): () => void {
   const finishPointer = (event: PointerEvent): void => {
     if (activePointerId !== event.pointerId) return;
     activePointerId = null;
+    pointerCaptureDeferred = false;
     if (dragged) {
       suppressClick = true;
       suppressClickButton = event.button;
@@ -696,6 +701,14 @@ function bindCanvasPan(view: SurfaceView): () => void {
       mount.releasePointerCapture(event.pointerId);
     } catch {
       // Pointer capture may already be gone after pointercancel.
+    }
+  };
+
+  const captureCanvasPointer = (pointerId: number): void => {
+    try {
+      mount.setPointerCapture(pointerId);
+    } catch {
+      // Pointer capture can fail if the browser cancels the touch during layout changes.
     }
   };
 

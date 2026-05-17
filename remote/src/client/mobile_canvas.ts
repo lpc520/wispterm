@@ -163,8 +163,11 @@ export function isCanvasDrag(delta: CanvasPoint): boolean {
 
 export function shouldStartCanvasPanDrag(input: CanvasPanDragInput): boolean {
   if (!input.isPrimary) return false;
-  if (input.mobile && input.nativeSelection) return false;
   return input.mobile ? input.button === 0 : input.button === 1;
+}
+
+export function shouldDeferCanvasPanPointerDownDefault(input: CanvasPanDragInput): boolean {
+  return input.mobile && input.nativeSelection === true;
 }
 
 export function shouldConsumeCanvasWheel(input: CanvasWheelInput): boolean {
