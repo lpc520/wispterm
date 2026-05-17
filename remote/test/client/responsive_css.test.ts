@@ -113,8 +113,12 @@ test("mobile surface selector collapses into a menu before crowding right contro
 
 test("mobile surface menu uses an opaque layer over terminal content", async () => {
   const css = await readFile(responsiveCssUrl, "utf8");
+  const barRule = declarationsForSelector(css, ".mobile-bar").join("\n");
   const menuRule = declarationsForSelector(css, ".mobile-surface-menu").join("\n");
 
+  assert.match(barRule, /position:\s*relative\s*;/);
+  assert.match(barRule, /z-index:\s*(?:[5-9][0-9]|[1-9][0-9]{2,})\s*;/);
+  assert.match(barRule, /overflow:\s*visible\s*;/);
   assert.match(menuRule, /z-index:\s*(?:[4-9][0-9]|[1-9][0-9]{2,})\s*;/);
   assert.match(menuRule, /background:\s*var\(--panel-strong\)\s*;/);
   assert.doesNotMatch(menuRule, /surface-overlay/);
