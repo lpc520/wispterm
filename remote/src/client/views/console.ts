@@ -195,16 +195,18 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
             ${iconMenu()}
           </button>
           <span class="mobile-bar-title" id="mobile-workspace-title">Phantty Remote</span>
-          <span class="status-pip" id="mobile-status-pip" data-state="offline" title="Disconnected"></span>
-          <button type="button" class="mobile-zoom-toggle" id="mobile-zoom-toggle" data-zoom="${mobileVisualZoomPercent(state.mobileVisualZoom)}" aria-label="${mobileVisualZoomToggleLabel(state.mobileVisualZoom)}" title="${mobileVisualZoomToggleLabel(state.mobileVisualZoom)}">
-            ${mobileVisualZoomLabel(state.mobileVisualZoom)}
-          </button>
-          <button type="button" class="mobile-input-mode-toggle" id="mobile-input-mode-toggle" data-mode="${state.mobileInputMode}" aria-label="${mobileInputModeToggleLabel(state.mobileInputMode)}" title="${mobileInputModeToggleLabel(state.mobileInputMode)}">
-            ${mobileInputModeLabel(state.mobileInputMode)}
-          </button>
-          <button type="button" class="icon-button" id="kbd-toggle" aria-label="Toggle keyboard">
-            ${iconKeyboard()}
-          </button>
+          <div class="mobile-chrome-controls" aria-label="Remote status controls">
+            <span class="status-pip" id="mobile-status-pip" data-state="offline" title="Disconnected"></span>
+            <button type="button" class="mobile-zoom-toggle" id="mobile-zoom-toggle" data-zoom="${mobileVisualZoomPercent(state.mobileVisualZoom)}" aria-label="${mobileVisualZoomToggleLabel(state.mobileVisualZoom)}" title="${mobileVisualZoomToggleLabel(state.mobileVisualZoom)}">
+              ${mobileVisualZoomCompactLabel(state.mobileVisualZoom)}
+            </button>
+            <button type="button" class="mobile-input-mode-toggle" id="mobile-input-mode-toggle" data-mode="${state.mobileInputMode}" aria-label="${mobileInputModeToggleLabel(state.mobileInputMode)}" title="${mobileInputModeToggleLabel(state.mobileInputMode)}">
+              ${mobileInputModeCompactLabel(state.mobileInputMode)}
+            </button>
+            <button type="button" class="mobile-keyboard-toggle" id="kbd-toggle" aria-label="Toggle keyboard" title="Toggle keyboard">
+              ${iconKeyboard()}
+            </button>
+          </div>
         </header>
         <div class="surface-strip" id="surface-strip"></div>
         <section class="terminal-panel">
@@ -485,7 +487,7 @@ function syncMobileInputModeUi(): void {
   if (toggle) {
     const label = mobileInputModeToggleLabel(mode);
     toggle.dataset.mode = mode;
-    toggle.textContent = mobileInputModeLabel(mode);
+    toggle.textContent = mobileInputModeCompactLabel(mode);
     toggle.setAttribute("aria-label", label);
     toggle.title = label;
   }
@@ -513,7 +515,7 @@ function syncMobileVisualZoomUi(): void {
 
   const label = mobileVisualZoomToggleLabel(zoom);
   toggle.dataset.zoom = String(percent);
-  toggle.textContent = mobileVisualZoomLabel(zoom);
+  toggle.textContent = mobileVisualZoomCompactLabel(zoom);
   toggle.setAttribute("aria-label", label);
   toggle.title = label;
 }
@@ -524,12 +526,23 @@ function mobileInputModeLabel(mode: MobileInputMode): string {
   return "View";
 }
 
+function mobileInputModeCompactLabel(mode: MobileInputMode): string {
+  if (mode === "keys") return "K";
+  if (mode === "text") return "T";
+  return "V";
+}
+
 function mobileInputModeToggleLabel(mode: MobileInputMode): string {
   return `Switch to ${mobileInputModeLabel(nextMobileInputMode(mode)).toLowerCase()} mode`;
 }
 
 function mobileVisualZoomToggleLabel(zoom: MobileVisualZoom): string {
   return `Switch terminal visual zoom to ${mobileVisualZoomLabel(nextMobileVisualZoom(zoom))}`;
+}
+
+function mobileVisualZoomCompactLabel(zoom: MobileVisualZoom): string {
+  if (zoom === 1) return "1x";
+  return String(zoom).replace(/^0/, "");
 }
 
 function nextMobileInputMode(mode: MobileInputMode): MobileInputMode {

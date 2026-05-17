@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 
 const responsiveCssUrl = new URL("../../src/client/styles/responsive.css", import.meta.url);
 const consoleCssUrl = new URL("../../src/client/styles/console.css", import.meta.url);
+const consoleViewUrl = new URL("../../src/client/views/console.ts", import.meta.url);
 
 test("mobile drawer keeps remote tabs usable on short screens", async () => {
   const css = await readFile(responsiveCssUrl, "utf8");
@@ -48,6 +49,37 @@ test("mobile view mode allows native terminal text selection", async () => {
   assert.match(hostRule, /touch-action:\s*auto\s*;/);
   assert.match(xtermRule, /user-select:\s*text\s*;/);
   assert.match(xtermRule, /-webkit-user-select:\s*text\s*;/);
+});
+
+test("mobile top bar uses compact status controls instead of large mode buttons", async () => {
+  const css = await readFile(responsiveCssUrl, "utf8");
+  const markup = await readFile(consoleViewUrl, "utf8");
+  const barRule = declarationsForSelector(css, ".mobile-bar").join("\n");
+  const controlsRule = declarationsForSelector(css, ".mobile-chrome-controls").join("\n");
+  const modeRule = declarationsForSelector(css, ".mobile-input-mode-toggle").join("\n");
+  const zoomRule = declarationsForSelector(css, ".mobile-zoom-toggle").join("\n");
+  const keyboardRule = declarationsForSelector(css, ".mobile-keyboard-toggle").join("\n");
+
+  assert.match(markup, /class="mobile-chrome-controls"/);
+  assert.match(markup, /mobileInputModeCompactLabel/);
+  assert.match(markup, /mobileVisualZoomCompactLabel/);
+  assert.match(barRule, /grid-template-columns:\s*40px\s+minmax\(0,\s*1fr\)\s+auto\s*;/);
+  assert.doesNotMatch(barRule, /52px|58px/);
+  assert.match(controlsRule, /display:\s*flex\s*;/);
+  for (const rule of [modeRule, zoomRule, keyboardRule]) {
+    assert.match(rule, /height:\s*32px\s*;/);
+    assert.doesNotMatch(rule, /height:\s*42px\s*;/);
+  }
+});
+
+test("mobile view mode keeps the keyboard status control subdued", async () => {
+  const css = await readFile(responsiveCssUrl, "utf8");
+  const keyboardViewRule = declarationsForSelector(
+    css,
+    '.console-shell[data-mobile-input-mode="view"] .mobile-keyboard-toggle',
+  ).join("\n");
+
+  assert.match(keyboardViewRule, /opacity:\s*0\.[0-9]+\s*;/);
 });
 
 function declarationsForSelector(css: string, selector: string): string[] {
