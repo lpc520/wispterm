@@ -44,8 +44,7 @@ class FakeRoot {
 
 test("native terminal input is blocked only for mobile view mode", () => {
   assert.equal(shouldBlockNativeTerminalInput(true, "view"), true);
-  assert.equal(shouldBlockNativeTerminalInput(true, "keys"), false);
-  assert.equal(shouldBlockNativeTerminalInput(true, "text"), false);
+  assert.equal(shouldBlockNativeTerminalInput(true, "edit"), false);
   assert.equal(shouldBlockNativeTerminalInput(false, "view"), false);
 });
 

@@ -1,7 +1,6 @@
 import type { LayoutState, LayoutTab, MobileInputMode, SurfaceView } from "./types";
 import {
   readSavedDesktopPanelMode,
-  readSavedKbdVisible,
   readSavedMobileVisualZoom,
   readSavedSidebarCollapsed,
 } from "./storage";
@@ -22,11 +21,11 @@ export const state = {
   surfaceViews: new Map<string, SurfaceView>(),
   notices: [] as string[],
   hasSeenLayout: false,
-  kbdVisible: readSavedKbdVisible() ?? true,
+  kbdVisible: false,
   drawerOpen: false,
   sidebarCollapsed: readSavedSidebarCollapsed() ?? false,
   desktopPanelMode: readSavedDesktopPanelMode(),
-  mobileInputMode: "keys" as MobileInputMode,
+  mobileInputMode: "edit" as MobileInputMode,
   mobileVisualZoom: readSavedMobileVisualZoom(),
   activeSessionKey: null as string | null,
 };

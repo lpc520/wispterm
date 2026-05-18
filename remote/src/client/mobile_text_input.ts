@@ -172,5 +172,5 @@ function shouldHandleMobileInput(): boolean {
 }
 
 function canUseMobileTextInput(): boolean {
-  return isMobileRemoteShell() && state.mobileInputMode !== "view";
+  return isMobileRemoteShell() && state.mobileInputMode === "edit";
 }

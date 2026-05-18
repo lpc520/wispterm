@@ -27,9 +27,9 @@ export function selectedMobileSurfaceKind(
 export function shouldShowMobileVirtualKeyboard(
   surfaceKind: MobileSurfaceKind,
   keyboardVisible: boolean,
-  inputMode: MobileInputMode = "keys",
+  inputMode: MobileInputMode = "edit",
 ): boolean {
-  return keyboardVisible && surfaceKind === "terminal" && inputMode === "keys";
+  return keyboardVisible && surfaceKind === "terminal" && inputMode === "edit";
 }
 
 function findSurface(surfaces: LayoutSurface[], id: string | null): LayoutSurface | null {

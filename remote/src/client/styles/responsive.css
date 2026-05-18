@@ -243,8 +243,8 @@
   }
 
   .mobile-input-mode-toggle {
-    width: 32px;
-    padding: 0;
+    min-width: 46px;
+    padding: 0 8px;
   }
 
   .mobile-zoom-toggle {
@@ -253,13 +253,8 @@
   }
 
   .mobile-keyboard-toggle {
-    width: 32px;
-    padding: 0;
-  }
-
-  .mobile-keyboard-toggle svg {
-    width: 17px;
-    height: 17px;
+    min-width: 38px;
+    padding: 0 7px;
   }
 
   .mobile-input-mode-toggle[data-mode="view"] {
@@ -277,6 +272,10 @@
   .console-shell[data-mobile-input-mode="view"] .mobile-keyboard-toggle {
     opacity: 0.45;
     background: var(--surface-overlay);
+  }
+
+  .mobile-keyboard-toggle:disabled {
+    cursor: default;
   }
 
   .console-shell[data-mobile-surface-kind="ai_chat"] #mobile-zoom-toggle,

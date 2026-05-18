@@ -1,12 +1,11 @@
 import type { ConnectionStatus, DesktopPanelMode, LayoutSurface, MobileInputMode, MobileVisualZoom } from "../types";
-import { iconClose, iconKeyboard, iconMenu, iconPanelMode, themeToggleMarkup } from "../icons";
+import { iconClose, iconMenu, iconPanelMode, themeToggleMarkup } from "../icons";
 import { bindThemeToggleButtons } from "../theme";
 import { activeSurfaceIdForInput, currentTab, state, pushNotice } from "../state";
 import {
   clearSessionKey,
   maskSessionKey,
   readSavedSessionKey,
-  saveKbdVisible,
   saveDesktopPanelMode,
   saveMobileVisualZoom,
   saveSessionKey,
@@ -217,10 +216,10 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
               ${mobileVisualZoomCompactLabel(state.mobileVisualZoom)}
             </button>
             <button type="button" class="mobile-input-mode-toggle" id="mobile-input-mode-toggle" data-mode="${state.mobileInputMode}" aria-label="${mobileInputModeToggleLabel(state.mobileInputMode)}" title="${mobileInputModeToggleLabel(state.mobileInputMode)}">
-              ${mobileInputModeCompactLabel(state.mobileInputMode)}
+              ${mobileInputModeLabel(state.mobileInputMode)}
             </button>
-            <button type="button" class="mobile-keyboard-toggle" id="kbd-toggle" aria-label="Toggle keyboard" title="Toggle keyboard">
-              ${iconKeyboard()}
+            <button type="button" class="mobile-keyboard-toggle" id="kbd-toggle" aria-label="Toggle shortcut keyboard" title="Toggle shortcut keyboard">
+              Key
             </button>
           </div>
         </header>
@@ -304,6 +303,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   updateMobileSurfaceMode();
   syncMobileInputModeUi();
   syncMobileVisualZoomUi();
+  syncMobileTextInputFocusForMode();
   updateInputUi();
   if (savedSessionKey) queueMicrotask(() => connect(savedSessionKey));
 }
@@ -555,6 +555,11 @@ function updateMobileSurfaceMode(): void {
     const chatMode = surfaceKind === "ai_chat";
     keyboardToggle.hidden = chatMode;
     keyboardToggle.setAttribute("aria-hidden", String(chatMode));
+    keyboardToggle.disabled = state.mobileInputMode === "view";
+    const keyLabel = state.kbdVisible ? "Hide shortcut keyboard" : "Show shortcut keyboard";
+    const label = state.mobileInputMode === "view" ? "Switch to Edit to use shortcut keys" : keyLabel;
+    keyboardToggle.setAttribute("aria-label", label);
+    keyboardToggle.title = label;
   }
   const inputModeToggle = document.querySelector<HTMLButtonElement>("#mobile-input-mode-toggle");
   if (inputModeToggle) {
@@ -590,6 +595,7 @@ function bindMobileChrome(): void {
     setSidebarCollapsed(false);
   });
   document.querySelector<HTMLButtonElement>("#kbd-toggle")?.addEventListener("click", () => {
+    if (state.mobileInputMode === "view") return;
     setKbdVisible(!state.kbdVisible);
   });
   document.querySelector<HTMLButtonElement>("#mobile-input-mode-toggle")?.addEventListener("click", () => {
@@ -635,10 +641,12 @@ function bindMobileSurfaceSelectorLayout(): void {
 function setMobileInputMode(mode: MobileInputMode): void {
   if (state.mobileInputMode === mode) return;
   state.mobileInputMode = mode;
-  if (mode === "text") {
-    focusMobileTextInput();
-  } else {
+  if (mode === "view") {
+    if (state.kbdVisible) setKbdVisible(false);
     blurMobileTextInput();
+  } else {
+    if (state.kbdVisible) setKbdVisible(false);
+    else focusMobileTextInput();
   }
   syncTerminalNativeInputGuards();
   updateSurfaceCursors();
@@ -655,7 +663,7 @@ function syncMobileInputModeUi(): void {
   if (toggle) {
     const label = mobileInputModeToggleLabel(mode);
     toggle.dataset.mode = mode;
-    toggle.textContent = mobileInputModeCompactLabel(mode);
+    toggle.textContent = mobileInputModeLabel(mode);
     toggle.setAttribute("aria-label", label);
     toggle.title = label;
   }
@@ -689,15 +697,7 @@ function syncMobileVisualZoomUi(): void {
 }
 
 function mobileInputModeLabel(mode: MobileInputMode): string {
-  if (mode === "keys") return "Keys";
-  if (mode === "text") return "Text";
-  return "View";
-}
-
-function mobileInputModeCompactLabel(mode: MobileInputMode): string {
-  if (mode === "keys") return "K";
-  if (mode === "text") return "T";
-  return "V";
+  return mode === "edit" ? "Edit" : "View";
 }
 
 function mobileInputModeToggleLabel(mode: MobileInputMode): string {
@@ -714,9 +714,7 @@ function mobileVisualZoomCompactLabel(zoom: MobileVisualZoom): string {
 }
 
 function nextMobileInputMode(mode: MobileInputMode): MobileInputMode {
-  if (mode === "keys") return "text";
-  if (mode === "text") return "view";
-  return "keys";
+  return mode === "edit" ? "view" : "edit";
 }
 
 function bindSidebarPages(): void {
@@ -1074,10 +1072,20 @@ function setSidebarCollapsed(collapsed: boolean): void {
 }
 
 function setKbdVisible(visible: boolean): void {
+  if (visible && state.mobileInputMode === "view") return;
   state.kbdVisible = visible;
-  saveKbdVisible(visible);
+  if (visible) blurMobileTextInput();
+  else if (state.mobileInputMode === "edit") focusMobileTextInput();
   const shell = document.querySelector<HTMLElement>(".console-shell");
   if (shell) shell.dataset.kbdVisible = String(visible);
   updateMobileSurfaceMode();
   requestAnimationFrame(() => refitAllSurfaces());
+}
+
+function syncMobileTextInputFocusForMode(): void {
+  if (state.mobileInputMode === "edit" && !state.kbdVisible) {
+    focusMobileTextInput();
+  } else {
+    blurMobileTextInput();
+  }
 }

@@ -8,6 +8,9 @@ type Listener = (event: { preventDefault(): void }) => void;
 
 class FakeButton {
   dataset: Record<string, string>;
+  disabled = false;
+  title = "";
+  attributes = new Map<string, string>();
   private listeners = new Map<string, Listener[]>();
 
   constructor(dataset: Record<string, string>) {
@@ -16,6 +19,10 @@ class FakeButton {
 
   addEventListener(type: string, listener: Listener): void {
     this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+
+  setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value);
   }
 
   click(): void {
@@ -39,6 +46,13 @@ class FakeKeyboard {
     if (selector === ".vkbd-key") return this.buttons;
     if (selector === "[data-vk-mod]") return this.buttons.filter((button) => button.dataset.vkMod);
     return [];
+  }
+
+  querySelector(selector: string): FakeButton | null {
+    if (selector === '[data-vk-key="ime"]') {
+      return this.buttons.find((button) => button.dataset.vkKey === "ime") ?? null;
+    }
+    return null;
   }
 }
 
@@ -92,10 +106,10 @@ test("sticky modifiers clear after special keys", () => {
 });
 
 test("virtual keyboard markup keeps the compact control key set", () => {
-  state.mobileInputMode = "keys";
+  state.mobileInputMode = "edit";
   const markup = renderVirtualKeyboardMarkup();
 
-  for (const label of ["Esc", "Tab", "↑", "←", "↓", "→", "^C", "^V", "⌫", "⏎", "IME"]) {
+  for (const label of ["Esc", "Tab", "↑", "←", "↓", "→", "^C", "^V", "⌫", "⏎", "ABC"]) {
     assert.match(markup, new RegExp(`>${escapeRegExp(label)}<`));
   }
 
@@ -108,10 +122,10 @@ test("virtual keyboard markup keeps the compact control key set", () => {
 });
 
 test("virtual keyboard exposes input mode state", () => {
-  state.mobileInputMode = "keys";
+  state.mobileInputMode = "edit";
   const markup = renderVirtualKeyboardMarkup();
 
-  assert.match(markup, /data-mobile-input-mode="keys"/);
+  assert.match(markup, /data-mobile-input-mode="edit"/);
 });
 
 test("virtual keyboard sends ctrl-v from the shortcut key", () => {
@@ -137,28 +151,27 @@ test("virtual keyboard sends ctrl-v from the shortcut key", () => {
   assert.deepEqual(sent, ["\x16"]);
 });
 
-test("IME key toggles the mobile text input focus target", () => {
+test("ABC key hides shortcut keyboard and returns to system input", () => {
   const ime = new FakeButton({ vkKey: "ime", active: "false" });
   const keyboard = new FakeKeyboard([ime]);
+  let hideCalls = 0;
 
   setupDocument(keyboard, true);
 
   state.selectedSurfaceId = "surface-a";
-  state.mobileInputMode = "keys";
-  bindVirtualKeyboard(() => {});
+  state.mobileInputMode = "edit";
+  bindVirtualKeyboard(() => {
+    hideCalls += 1;
+  });
 
   ime.click();
+  assert.equal(hideCalls, 1);
   assert.equal(fakeDocument.textarea.focusCalls, 1);
   assert.equal(fakeDocument.activeElement, fakeDocument.textarea);
-  assert.equal(ime.dataset.active, "true");
-
-  ime.click();
-  assert.equal(fakeDocument.textarea.blurCalls, 1);
-  assert.equal(fakeDocument.activeElement, null);
   assert.equal(ime.dataset.active, "false");
 });
 
-test("IME key is inert in view mode", () => {
+test("ABC key is inert in view mode", () => {
   const ime = new FakeButton({ vkKey: "ime", active: "false" });
   const keyboard = new FakeKeyboard([ime]);
 

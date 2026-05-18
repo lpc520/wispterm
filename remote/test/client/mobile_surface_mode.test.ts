@@ -48,9 +48,9 @@ describe("mobile surface mode", () => {
     assert.equal(shouldShowMobileVirtualKeyboard("terminal", false), false);
   });
 
-  it("only shows the shortcut keyboard in keys mode", () => {
-    assert.equal(shouldShowMobileVirtualKeyboard("terminal", true, "keys"), true);
-    assert.equal(shouldShowMobileVirtualKeyboard("terminal", true, "text"), false);
+  it("shows the shortcut keyboard from edit mode only when the key toggle is active", () => {
+    assert.equal(shouldShowMobileVirtualKeyboard("terminal", true, "edit"), true);
+    assert.equal(shouldShowMobileVirtualKeyboard("terminal", false, "edit"), false);
     assert.equal(shouldShowMobileVirtualKeyboard("terminal", true, "view"), false);
   });
 });

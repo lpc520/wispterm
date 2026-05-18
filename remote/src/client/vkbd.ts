@@ -1,5 +1,5 @@
 import { applyStickyMods, ctrlLetter, keyToSequence } from "./input_sequences";
-import { focusMobileTextInput, toggleMobileTextInput } from "./mobile_text_input";
+import { focusMobileTextInput } from "./mobile_text_input";
 import { activeSurfaceIdForInput, state } from "./state";
 import { shouldFocusTerminalElement } from "./focus_policy";
 
@@ -33,7 +33,7 @@ export function renderVirtualKeyboardMarkup(): string {
           ${key('data-vk-ctrl="v"', "^V", "vkbd-pill")}
           ${key('data-vk-key="bksp"', "⌫")}
           ${key('data-vk-key="enter"', "⏎")}
-          ${key('data-vk-key="ime" data-active="false"', "IME", "vkbd-wide vkbd-mod")}
+          ${key('data-vk-key="ime" data-active="false"', "ABC", "vkbd-wide vkbd-mod")}
         </div>
       </div>
     </section>
@@ -91,7 +91,7 @@ export function syncVirtualKeyboardInputMode(): void {
   const disabled = inputMode === "view";
   ime.disabled = disabled;
   ime.setAttribute("aria-disabled", String(disabled));
-  ime.title = disabled ? "IME disabled in view mode" : "Toggle IME";
+  ime.title = disabled ? "System keyboard disabled in view mode" : "Return to system keyboard";
   if (disabled) ime.dataset.active = "false";
 }
 
@@ -122,7 +122,9 @@ function dispatchVirtualKey(button: HTMLButtonElement, onHide: () => void): void
       button.dataset.active = "false";
       return;
     }
-    button.dataset.active = String(toggleMobileTextInput());
+    onHide();
+    button.dataset.active = "false";
+    focusMobileTextInput();
     return;
   }
 

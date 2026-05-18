@@ -88,6 +88,6 @@ export type ConnectionStatus = {
 
 export type DesktopPanelMode = "layout" | "single";
 
-export type MobileInputMode = "keys" | "text" | "view";
+export type MobileInputMode = "edit" | "view";
 
 export type MobileVisualZoom = 1 | 0.75 | 0.5 | 0.25;

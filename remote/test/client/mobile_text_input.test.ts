@@ -71,7 +71,7 @@ function setup(mobile: boolean): { textarea: FakeTextArea; sent: string[] } {
 
   const sent: string[] = [];
   state.selectedSurfaceId = "surface-a";
-  state.mobileInputMode = "keys";
+  state.mobileInputMode = "edit";
   setMobileTextInputSender((_surfaceId, data) => sent.push(data));
   bindMobileTextInput();
   return { textarea: fakeDocument.textarea, sent };
@@ -104,25 +104,16 @@ test("desktop hidden text input events do not dispatch terminal bytes", () => {
 
 test("focusMobileTextInput focuses the hidden textarea on mobile", () => {
   const { textarea } = setup(true);
-  state.mobileInputMode = "keys";
+  state.mobileInputMode = "edit";
 
   assert.equal(focusMobileTextInput(), true);
   assert.equal(textarea.focusCalls, 1);
   assert.equal(fakeDocument.activeElement, textarea);
 });
 
-test("text mode focuses the hidden textarea on mobile", () => {
+test("toggleMobileTextInput opens and closes the mobile system keyboard target", () => {
   const { textarea } = setup(true);
-  state.mobileInputMode = "text";
-
-  assert.equal(focusMobileTextInput(), true);
-  assert.equal(textarea.focusCalls, 1);
-  assert.equal(fakeDocument.activeElement, textarea);
-});
-
-test("toggleMobileTextInput opens and closes the mobile IME target", () => {
-  const { textarea } = setup(true);
-  state.mobileInputMode = "keys";
+  state.mobileInputMode = "edit";
 
   assert.equal(toggleMobileTextInput(), true);
   assert.equal(textarea.focusCalls, 1);
@@ -133,7 +124,7 @@ test("toggleMobileTextInput opens and closes the mobile IME target", () => {
   assert.equal(fakeDocument.activeElement, null);
 });
 
-test("view mode blocks focusing the mobile IME target", () => {
+test("view mode blocks focusing the mobile system keyboard target", () => {
   const { textarea } = setup(true);
   state.mobileInputMode = "view";
 
@@ -162,7 +153,7 @@ test("view mode ignores mobile text input events", () => {
 
 test("mobile text input dispatches committed composition text exactly once", () => {
   const { textarea, sent } = setup(true);
-  state.mobileInputMode = "keys";
+  state.mobileInputMode = "edit";
 
   textarea.dispatch("compositionstart");
   textarea.value = "n";
@@ -174,9 +165,9 @@ test("mobile text input dispatches committed composition text exactly once", () 
   assert.equal(textarea.value, "");
 });
 
-test("text mode dispatches committed input", () => {
+test("edit mode dispatches committed input", () => {
   const { textarea, sent } = setup(true);
-  state.mobileInputMode = "text";
+  state.mobileInputMode = "edit";
 
   textarea.value = "abc";
   textarea.dispatch("input");
@@ -187,7 +178,7 @@ test("text mode dispatches committed input", () => {
 
 test("mobile text input does not dispatch control bytes while composing", () => {
   const { textarea, sent } = setup(true);
-  state.mobileInputMode = "keys";
+  state.mobileInputMode = "edit";
 
   textarea.dispatch("compositionstart");
   const beforeInputBackspace = preventableEvent({
@@ -212,7 +203,7 @@ test("mobile text input does not dispatch control bytes while composing", () => 
 
 test("mobile text input ignores trailing input with already committed composition text", () => {
   const { textarea, sent } = setup(true);
-  state.mobileInputMode = "keys";
+  state.mobileInputMode = "edit";
 
   textarea.dispatch("compositionstart");
   textarea.value = "n";
@@ -228,7 +219,7 @@ test("mobile text input ignores trailing input with already committed compositio
 
 test("mobile text input sends later same-valued input after composition suppression expires", async () => {
   const { textarea, sent } = setup(true);
-  state.mobileInputMode = "keys";
+  state.mobileInputMode = "edit";
 
   textarea.dispatch("compositionstart");
   textarea.value = "你";
