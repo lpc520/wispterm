@@ -305,6 +305,9 @@
 
   .mobile-surface-selector {
     position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
     flex: 1 1 auto;
     min-width: 0;
     max-width: 100%;
@@ -316,6 +319,7 @@
 
   .mobile-surface-strip {
     display: flex;
+    flex: 1 1 auto;
     min-width: 0;
     gap: 6px;
     overflow: hidden;
@@ -376,6 +380,10 @@
     display: none;
   }
 
+  .mobile-surface-selector[data-collapsed="true"] {
+    justify-content: flex-end;
+  }
+
   .mobile-surface-selector[data-collapsed="true"] .mobile-surface-menu-toggle {
     display: inline-flex;
   }
@@ -383,7 +391,8 @@
   .mobile-surface-menu {
     position: absolute;
     top: calc(100% + 6px);
-    left: 0;
+    right: 0;
+    left: auto;
     z-index: 60;
     display: grid;
     min-width: min(220px, 74vw);
@@ -453,8 +462,32 @@
     -webkit-user-select: text;
   }
 
-  .canvas-scrollbar[data-visible="true"] {
-    display: none;
+  .panels-stage[data-mobile-mode="single"] .canvas-scrollbar {
+    top: 8px;
+    right: 5px;
+    bottom: 8px;
+    z-index: 6;
+    width: 5px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    box-shadow: none;
+    cursor: default;
+    pointer-events: none;
+  }
+
+  .panels-stage[data-mobile-mode="single"] .canvas-scrollbar[data-visible="true"] {
+    display: block;
+  }
+
+  .panels-stage[data-mobile-mode="single"] .canvas-scrollbar-thumb {
+    left: 0;
+    right: 0;
+    min-height: 24px;
+    border-radius: 999px;
+    background: var(--accent);
+    box-shadow: none;
+    cursor: default;
   }
 
   .console-shell[data-mobile-vkbd-visible="true"] {

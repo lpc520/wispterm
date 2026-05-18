@@ -124,6 +124,38 @@ test("mobile surface menu uses an opaque layer over terminal content", async () 
   assert.doesNotMatch(menuRule, /surface-overlay/);
 });
 
+test("mobile surface dropdown stays right-aligned near the chrome controls", async () => {
+  const css = await readFile(responsiveCssUrl, "utf8");
+  const selectorRule = declarationsForSelector(css, ".mobile-surface-selector").join("\n");
+  const collapsedSelectorRule = declarationsForSelector(
+    css,
+    '.mobile-surface-selector[data-collapsed="true"]',
+  ).join("\n");
+  const menuRule = declarationsForSelector(css, ".mobile-surface-menu").join("\n");
+
+  assert.match(selectorRule, /display:\s*flex\s*;/);
+  assert.match(selectorRule, /justify-content:\s*flex-start\s*;/);
+  assert.match(collapsedSelectorRule, /justify-content:\s*flex-end\s*;/);
+  assert.match(menuRule, /right:\s*0\s*;/);
+  assert.match(menuRule, /left:\s*auto\s*;/);
+});
+
+test("mobile canvas scrollbar is anchored to the viewport during visual zoom", async () => {
+  const css = await readFile(responsiveCssUrl, "utf8");
+  const scrollbarRule = declarationsForSelector(
+    css,
+    '.panels-stage[data-mobile-mode="single"] .canvas-scrollbar',
+  ).join("\n");
+  const visibleRule = declarationsForSelector(
+    css,
+    '.panels-stage[data-mobile-mode="single"] .canvas-scrollbar[data-visible="true"]',
+  ).join("\n");
+
+  assert.match(scrollbarRule, /right:\s*5px\s*;/);
+  assert.match(scrollbarRule, /pointer-events:\s*none\s*;/);
+  assert.match(visibleRule, /display:\s*block\s*;/);
+});
+
 test("mobile view mode keeps the keyboard status control subdued", async () => {
   const css = await readFile(responsiveCssUrl, "utf8");
   const keyboardViewRule = declarationsForSelector(

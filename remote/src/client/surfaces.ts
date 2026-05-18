@@ -34,6 +34,8 @@ import { REMOTE_TERMINAL_SCROLLBACK } from "./terminal_options";
 
 const PENDING_OUTPUT_LIMIT = 128 * 1024;
 const MOBILE_CANVAS_BOTTOM_GUTTER = 12;
+const MOBILE_SCROLLBAR_MIN_THUMB_HEIGHT = 24;
+const MOBILE_SCROLLBAR_VERTICAL_INSET = 8;
 const DESKTOP_SCROLLBAR_MIN_THUMB_HEIGHT = 32;
 const DESKTOP_SCROLLBAR_VERTICAL_INSET = 10;
 
@@ -867,17 +869,19 @@ function updateCanvasScrollbar(
   bottomGutter: number = isMobileRemoteShell() ? MOBILE_CANVAS_BOTTOM_GUTTER : 0,
 ): void {
   const hasRemoteGridDimensions = view.remoteCols !== null && view.remoteRows !== null;
-  if (isMobileRemoteShell() || !shouldUseCanvasPan(hasRemoteGridDimensions)) {
+  const mobile = isMobileRemoteShell();
+  if (!shouldUseCanvasPan(hasRemoteGridDimensions)) {
     hideCanvasScrollbar(view);
     return;
   }
 
+  const verticalInset = mobile ? MOBILE_SCROLLBAR_VERTICAL_INSET : DESKTOP_SCROLLBAR_VERTICAL_INSET;
   const trackHeight =
     view.scrollbar.clientHeight ||
-    Math.max(0, view.mount.clientHeight - DESKTOP_SCROLLBAR_VERTICAL_INSET * 2);
+    Math.max(0, view.mount.clientHeight - verticalInset * 2);
   const metrics = verticalScrollbarMetrics(view.canvasPan, viewport, canvas, trackHeight, {
     bottomGutter,
-    minThumbHeight: DESKTOP_SCROLLBAR_MIN_THUMB_HEIGHT,
+    minThumbHeight: mobile ? MOBILE_SCROLLBAR_MIN_THUMB_HEIGHT : DESKTOP_SCROLLBAR_MIN_THUMB_HEIGHT,
   });
   if (!metrics.visible) {
     hideCanvasScrollbar(view);
