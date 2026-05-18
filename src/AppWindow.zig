@@ -286,8 +286,7 @@ const RemoteAiInputRequest = struct {
 };
 
 const RemoteAiAgentOpenRequest = struct {
-    client: *remote.Client,
-    request_id: []u8,
+    request_id: []const u8,
 };
 
 // ============================================================================
@@ -1555,39 +1554,45 @@ fn remoteAiWrite(ctx: *anyopaque, data: []const u8) void {
 }
 
 fn remoteAiAgentOpen(ctx: *anyopaque, request_id: []const u8) void {
-    const window: *AppWindow = @ptrCast(@alignCast(ctx));
-    const client = window.app.remote_client orelse return;
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const client = app.remote_client orelse return;
 
-    const request = std.heap.page_allocator.create(RemoteAiAgentOpenRequest) catch {
+    const owned_request_id = std.heap.page_allocator.dupe(u8, request_id) catch {
         client.sendAiAgentOpenResult(request_id, .failed);
         return;
     };
-    request.* = .{
-        .client = client,
-        .request_id = std.heap.page_allocator.dupe(u8, request_id) catch {
-            std.heap.page_allocator.destroy(request);
-            client.sendAiAgentOpenResult(request_id, .failed);
-            return;
-        },
-    };
+    defer std.heap.page_allocator.free(owned_request_id);
 
-    const hwnd = window.getHwnd() orelse {
-        std.heap.page_allocator.free(request.request_id);
-        std.heap.page_allocator.destroy(request);
-        client.sendAiAgentOpenResult(request_id, .failed);
+    var hwnd: ?win32_backend.HWND = null;
+    {
+        app.mutex.lock();
+        defer app.mutex.unlock();
+        for (app.windows.items) |window| {
+            if (window.getHwnd()) |candidate| {
+                hwnd = candidate;
+                break;
+            }
+        }
+    }
+
+    const target = hwnd orelse {
+        if (app.remote_client) |current_client| {
+            current_client.sendAiAgentOpenResult(owned_request_id, .failed);
+        }
         return;
     };
 
-    const ok = win32_backend.PostMessageW(
-        hwnd,
+    var request = RemoteAiAgentOpenRequest{ .request_id = owned_request_id };
+    const result = win32_backend.SendMessageW(
+        target,
         WM_PHANTTY_REMOTE_OPEN_AI_AGENT,
         0,
-        @bitCast(@as(isize, @intCast(@intFromPtr(request)))),
-    ) != 0;
-    if (!ok) {
-        std.heap.page_allocator.free(request.request_id);
-        std.heap.page_allocator.destroy(request);
-        client.sendAiAgentOpenResult(request_id, .failed);
+        @bitCast(@as(isize, @intCast(@intFromPtr(&request)))),
+    );
+    if (result == 0) {
+        if (app.remote_client) |current_client| {
+            current_client.sendAiAgentOpenResult(owned_request_id, .failed);
+        }
     }
 }
 
@@ -1644,17 +1649,15 @@ fn handleRemoteAiInputRequest(request: *RemoteAiInputRequest) void {
 }
 
 fn handleRemoteAiAgentOpenRequest(request: *RemoteAiAgentOpenRequest) void {
-    defer {
-        std.heap.page_allocator.free(request.request_id);
-        std.heap.page_allocator.destroy(request);
-    }
+    const app = g_app orelse return;
+    const client = app.remote_client orelse return;
 
     const status: remote.AiAgentOpenStatus = switch (overlays.openDefaultAgentSessionForRemote()) {
         .opened => .opened,
         .no_profile => .no_profile,
         .failed => .failed,
     };
-    request.client.sendAiAgentOpenResult(request.request_id, status);
+    client.sendAiAgentOpenResult(request.request_id, status);
 
     if (status == .opened) {
         g_remote_layout_last_ms = 0;
@@ -2065,7 +2068,7 @@ fn installAgentToolHost(self: *AppWindow) void {
 
 fn installRemoteControlHandlers(self: *AppWindow) void {
     if (self.app.remote_client) |client| {
-        client.registerAiAgentOpener(self, remoteAiAgentOpen);
+        client.registerAiAgentOpener(self.app, remoteAiAgentOpen);
     }
 }
 
