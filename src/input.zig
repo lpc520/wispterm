@@ -18,6 +18,8 @@ const markdown_preview = @import("markdown_preview.zig");
 const markdown_preview_panel = AppWindow.markdown_preview_panel;
 const preview_token = @import("preview_token.zig");
 const browser_panel = AppWindow.browser_panel;
+const link_open = @import("link_open.zig");
+const system_browser = @import("system_browser.zig");
 const scp = @import("scp.zig");
 const input_shortcuts = @import("input_shortcuts.zig");
 const win32_backend = @import("apprt/win32.zig");
@@ -2119,13 +2121,18 @@ fn openUrl(surface: *Surface, url: []const u8) bool {
     defer allocator.free(target);
 
     const hwnd = if (AppWindow.g_window) |win| win.hwnd else null;
-    if (!browser_panel.openForSurface(allocator, hwnd, target, surface)) return false;
-    if (AppWindow.g_window) |win| {
-        syncGridFromWindowSizeImmediate(win.width, win.height);
+    switch (link_open.destinationForUrlClick(browser_panel.embeddedBrowserAvailable())) {
+        .embedded_browser => {
+            if (!browser_panel.openForSurface(allocator, hwnd, target, surface)) return false;
+            if (AppWindow.g_window) |win| {
+                syncGridFromWindowSizeImmediate(win.width, win.height);
+            }
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+            return true;
+        },
+        .system_browser => return system_browser.openUrl(allocator, hwnd, target),
     }
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
-    return true;
 }
 
 fn openUrlAtCell(surface: *Surface, cell_pos: CellPos) bool {

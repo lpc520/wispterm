@@ -18,6 +18,7 @@ comptime {
     _ = @import("file_backend.zig");
     _ = @import("file_explorer.zig");
     _ = @import("input_shortcuts.zig");
+    _ = @import("link_open.zig");
     _ = @import("markdown_preview.zig");
     _ = @import("preview_token.zig");
     _ = @import("remote_client.zig");
@@ -27,6 +28,7 @@ comptime {
     _ = @import("skill_registry.zig");
     _ = @import("scrollbar_model.zig");
     _ = @import("ssh_prompt.zig");
+    _ = @import("system_browser.zig");
     _ = @import("split_tree.zig");
 }
 

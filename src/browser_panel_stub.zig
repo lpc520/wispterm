@@ -71,6 +71,10 @@ pub fn panelWidthForWindow(window_width: i32, left_offset: f32, right_offset: f3
     return 0;
 }
 
+pub fn embeddedBrowserAvailable() bool {
+    return false;
+}
+
 pub fn open(parent: ?win32.HWND, url: []const u8) void {
     _ = parent;
     _ = url;

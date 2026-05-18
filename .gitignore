@@ -1,5 +1,6 @@
 # Zig build artifacts
 zig-out/
+zig-out-no-webview/
 zig-cache/
 .zig-cache/
 zig-pkg/

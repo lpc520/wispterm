@@ -37,6 +37,7 @@ extern fn phantty_webview2_navigate(browser: *BrowserHandle, url: [*:0]const u16
 extern fn phantty_webview2_is_ready(browser: *BrowserHandle) callconv(.c) c_int;
 extern fn phantty_webview2_last_error(browser: *BrowserHandle) callconv(.c) win32.HRESULT;
 extern fn phantty_webview2_destroy(browser: *BrowserHandle) callconv(.c) void;
+extern fn phantty_webview2_loader_available() callconv(.c) c_int;
 
 pub const Bounds = struct {
     left: i32,
@@ -82,6 +83,8 @@ threadlocal var g_url_edit_buf: [MAX_URL_BYTES]u8 = undefined;
 threadlocal var g_url_edit_len: usize = 0;
 threadlocal var g_url_edit_select_all: bool = false;
 threadlocal var g_tunnel: ?SshTunnel = null;
+threadlocal var g_availability_checked: bool = false;
+threadlocal var g_embedded_browser_available: bool = false;
 
 const SshTunnel = struct {
     child: std.process.Child,
@@ -164,7 +167,20 @@ pub fn panelWidthForWindow(window_width: i32, left_offset: f32, right_offset: f3
     return @max(MIN_WIDTH, @min(g_width, max_width));
 }
 
+pub fn embeddedBrowserAvailable() bool {
+    if (!g_availability_checked) {
+        g_embedded_browser_available = phantty_webview2_loader_available() != 0;
+        g_availability_checked = true;
+    }
+    return g_embedded_browser_available;
+}
+
 pub fn open(parent: ?win32.HWND, url: []const u8) void {
+    if (!embeddedBrowserAvailable()) {
+        g_visible = false;
+        return;
+    }
+
     setUrl(url);
     g_visible = true;
 
@@ -179,6 +195,11 @@ pub fn open(parent: ?win32.HWND, url: []const u8) void {
 }
 
 pub fn openForSurface(allocator: std.mem.Allocator, parent: ?win32.HWND, url: []const u8, surface: ?*const Surface) bool {
+    if (!embeddedBrowserAvailable()) {
+        close();
+        return false;
+    }
+
     var target = url;
     var tunneled_url: ?[]u8 = null;
     defer if (tunneled_url) |owned| allocator.free(owned);
@@ -205,6 +226,7 @@ pub fn toggle(parent: ?win32.HWND) void {
     if (g_visible) {
         close();
     } else {
+        if (!embeddedBrowserAvailable()) return;
         open(parent, DEFAULT_URL);
     }
 }
@@ -251,6 +273,11 @@ pub fn sync(parent: win32.HWND, window_width: i32, window_height: i32, titlebar_
         return;
     }
 
+    if (!embeddedBrowserAvailable()) {
+        close();
+        return;
+    }
+
     const bounds = boundsForWindow(window_width, window_height, titlebar_height, left_offset, right_offset);
     if (bounds.right <= bounds.left or bounds.bottom <= bounds.top) return;
 
@@ -262,6 +289,14 @@ pub fn sync(parent: win32.HWND, window_width: i32, window_height: i32, titlebar_
         g_browser = phantty_webview2_create(parent, webview_bounds.left, webview_bounds.top, webview_bounds.right, webview_bounds.bottom, wide_url);
         if (g_browser) |browser| {
             g_last_error = phantty_webview2_last_error(browser);
+            if (hresultFailed(g_last_error)) {
+                destroyBrowser();
+                g_visible = false;
+                return;
+            }
+        } else {
+            g_visible = false;
+            return;
         }
     }
 
@@ -285,6 +320,10 @@ fn destroyBrowser() void {
         phantty_webview2_destroy(browser);
         g_browser = null;
     }
+}
+
+fn hresultFailed(hr: win32.HRESULT) bool {
+    return hr < 0;
 }
 
 fn setUrl(url: []const u8) void {

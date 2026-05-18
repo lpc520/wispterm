@@ -86,6 +86,9 @@ jobs:
           $portableWebView2Version = "zig-out\dist\portable-webview2\version.txt"
           $portableWebView2Loader = "zig-out\dist\portable-webview2\WebView2Loader.dll"
           $portableWebView2Skills = "zig-out\dist\portable-webview2\skills"
+          $portableNoWebViewExe = "zig-out\dist\portable-no-webview\phantty.exe"
+          $portableNoWebViewVersion = "zig-out\dist\portable-no-webview\version.txt"
+          $portableNoWebViewSkills = "zig-out\dist\portable-no-webview\skills"
 
           if (!(Test-Path $portableExe)) {
             throw "Portable executable not found: $portableExe"
@@ -115,12 +118,25 @@ jobs:
             throw "Portable WebView2 skills directory not found: $portableWebView2Skills"
           }
 
+          if (!(Test-Path $portableNoWebViewExe)) {
+            throw "Portable no-WebView executable not found: $portableNoWebViewExe"
+          }
+
+          if (!(Test-Path $portableNoWebViewVersion)) {
+            throw "Portable no-WebView version file not found: $portableNoWebViewVersion"
+          }
+
+          if (!(Test-Path $portableNoWebViewSkills -PathType Container)) {
+            throw "Portable no-WebView skills directory not found: $portableNoWebViewSkills"
+          }
+
       - name: Create release assets
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $portableAsset = "phantty-windows-portable-$tag.zip"
           $portableWebView2Asset = "phantty-windows-portable-webview2-$tag.zip"
+          $portableNoWebViewAsset = "phantty-windows-portable-no-webview-$tag.zip"
 
           if (Test-Path $portableAsset) {
             Remove-Item $portableAsset -Force
@@ -128,9 +144,13 @@ jobs:
           if (Test-Path $portableWebView2Asset) {
             Remove-Item $portableWebView2Asset -Force
           }
+          if (Test-Path $portableNoWebViewAsset) {
+            Remove-Item $portableNoWebViewAsset -Force
+          }
 
           Compress-Archive -Path zig-out\dist\portable\* -DestinationPath $portableAsset -Force
           Compress-Archive -Path zig-out\dist\portable-webview2\* -DestinationPath $portableWebView2Asset -Force
+          Compress-Archive -Path zig-out\dist\portable-no-webview\* -DestinationPath $portableNoWebViewAsset -Force
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
@@ -146,6 +166,13 @@ jobs:
           path: phantty-windows-portable-webview2-${{ github.ref_name }}.zip
           if-no-files-found: error
 
+      - name: Upload portable no-WebView artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phantty-windows-portable-no-webview-${{ github.ref_name }}
+          path: phantty-windows-portable-no-webview-${{ github.ref_name }}.zip
+          if-no-files-found: error
+
       - name: Publish GitHub release
         shell: pwsh
         env:
@@ -154,6 +181,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $portableAsset = "phantty-windows-portable-$tag.zip"
           $portableWebView2Asset = "phantty-windows-portable-webview2-$tag.zip"
+          $portableNoWebViewAsset = "phantty-windows-portable-no-webview-$tag.zip"
 
           if (!(Test-Path $portableAsset)) {
             throw "Portable release asset not found: $portableAsset"
@@ -161,18 +189,22 @@ jobs:
           if (!(Test-Path $portableWebView2Asset)) {
             throw "Portable WebView2 release asset not found: $portableWebView2Asset"
           }
+          if (!(Test-Path $portableNoWebViewAsset)) {
+            throw "Portable no-WebView release asset not found: $portableNoWebViewAsset"
+          }
 
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $portableAsset $portableWebView2Asset --repo $env:GITHUB_REPOSITORY --clobber
+            gh release upload $tag $portableAsset $portableWebView2Asset $portableNoWebViewAsset --repo $env:GITHUB_REPOSITORY --clobber
           } else {
             $assetNotes = @(
               "Windows assets included in this release:",
               "",
               "- Portable: lightweight zip archive containing phantty.exe",
               "- Portable WebView2: zip archive containing phantty.exe and WebView2Loader.dll for the embedded browser",
+              "- Portable no-WebView: zip archive containing phantty.exe built with embedded WebView2 disabled",
               "",
-              "The unsigned IExpress setup executable is not published because Windows Defender can quarantine it as a false positive. Use the portable zip for now."
+              "The unsigned IExpress setup executable is not published because Windows Defender can quarantine it as a false positive. Use one of the portable zip assets for now."
             ) -join "`n"
 
             $releaseNotesPath = Join-Path "release-notes" "$tag.md"
@@ -187,7 +219,7 @@ jobs:
               $notes = $assetNotes
             }
 
-            gh release create $tag $portableAsset $portableWebView2Asset `
+            gh release create $tag $portableAsset $portableWebView2Asset $portableNoWebViewAsset `
               --repo $env:GITHUB_REPOSITORY `
               --verify-tag `
               --generate-notes `

@@ -19,6 +19,9 @@ typedef HRESULT (WINAPI *CreateCoreWebView2EnvironmentWithOptionsFn)(
     LPCWSTR userDataFolder,
     void *environmentOptions,
     ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *environmentCreatedHandler);
+typedef HRESULT (WINAPI *GetAvailableCoreWebView2BrowserVersionStringFn)(
+    LPCWSTR browserExecutableFolder,
+    LPWSTR *versionInfo);
 
 typedef struct ICoreWebView2EnvironmentVtbl {
     HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICoreWebView2Environment *This, REFIID riid, void **ppvObject);
@@ -398,6 +401,25 @@ static HMODULE load_loader(void) {
     HMODULE loader = LoadLibraryW(L"WebView2Loader.dll");
     if (loader) return loader;
     return try_load_from_nuget();
+}
+
+int phantty_webview2_loader_available(void) {
+    HMODULE loader = load_loader();
+    if (!loader) return 0;
+
+    FARPROC create_environment = GetProcAddress(loader, "CreateCoreWebView2EnvironmentWithOptions");
+    GetAvailableCoreWebView2BrowserVersionStringFn get_version =
+        (GetAvailableCoreWebView2BrowserVersionStringFn)GetProcAddress(loader, "GetAvailableCoreWebView2BrowserVersionString");
+    if (!create_environment || !get_version) {
+        FreeLibrary(loader);
+        return 0;
+    }
+
+    LPWSTR version = NULL;
+    HRESULT hr = get_version(NULL, &version);
+    if (version) CoTaskMemFree(version);
+    FreeLibrary(loader);
+    return SUCCEEDED(hr) ? 1 : 0;
 }
 
 static void build_user_data_folder(WCHAR *buf, size_t len) {

@@ -4,7 +4,8 @@ param(
     [string]$WebView2Version = '1.0.3912.50',
     [switch]$SkipBuild,
     [switch]$SkipInstaller,
-    [switch]$SkipWebView2Bundle
+    [switch]$SkipWebView2Bundle,
+    [switch]$SkipNoWebViewBundle
 )
 
 Set-StrictMode -Version Latest
@@ -103,6 +104,7 @@ function Copy-PortablePayload {
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $resolvedOutputDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputDir))
 $releaseVersion = Get-ReleaseVersion -ExplicitVersion $Version
+$noWebViewInstallDir = Join-Path $repoRoot 'zig-out-no-webview'
 
 if (-not $SkipBuild) {
     Push-Location $repoRoot
@@ -110,6 +112,13 @@ if (-not $SkipBuild) {
         & zig build -Doptimize=ReleaseFast
         if ($LASTEXITCODE -ne 0) {
             throw 'zig build -Doptimize=ReleaseFast failed.'
+        }
+        if (-not $SkipNoWebViewBundle) {
+            Remove-Item -Path $noWebViewInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+            & zig build -Doptimize=ReleaseFast -Dwebview=false -p $noWebViewInstallDir
+            if ($LASTEXITCODE -ne 0) {
+                throw 'zig build -Doptimize=ReleaseFast -Dwebview=false failed.'
+            }
         }
     } finally {
         Pop-Location
@@ -120,9 +129,14 @@ $binaryPath = Join-Path $repoRoot 'zig-out\bin\phantty.exe'
 if (-not (Test-Path $binaryPath)) {
     throw "Expected release binary was not found: $binaryPath"
 }
+$noWebViewBinaryPath = Join-Path $noWebViewInstallDir 'bin\phantty.exe'
+if (-not $SkipNoWebViewBundle -and -not (Test-Path $noWebViewBinaryPath)) {
+    throw "Expected no-WebView release binary was not found: $noWebViewBinaryPath"
+}
 
 $portableDir = Join-Path $resolvedOutputDir 'portable'
 $portableWebView2Dir = Join-Path $resolvedOutputDir 'portable-webview2'
+$portableNoWebViewDir = Join-Path $resolvedOutputDir 'portable-no-webview'
 $installerDir = Join-Path $resolvedOutputDir 'installer'
 $stagingDir = Join-Path $installerDir 'staging'
 $setupExe = Join-Path $installerDir 'phantty-setup.exe'
@@ -134,17 +148,23 @@ if (-not $SkipWebView2Bundle) {
     $webView2LoaderPath = Get-WebView2Loader -RepoRoot $repoRoot -Version $WebView2Version
 }
 
-Remove-Item -Path $portableDir, $portableWebView2Dir, $installerDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -Path $portableDir, $portableWebView2Dir, $portableNoWebViewDir, $installerDir -Recurse -Force -ErrorAction SilentlyContinue
 
 Copy-PortablePayload -BinaryPath $binaryPath -TargetDir $portableDir -ReleaseVersion $releaseVersion
 if ($webView2LoaderPath) {
     Copy-PortablePayload -BinaryPath $binaryPath -TargetDir $portableWebView2Dir -ReleaseVersion $releaseVersion -WebView2LoaderPath $webView2LoaderPath
+}
+if (-not $SkipNoWebViewBundle) {
+    Copy-PortablePayload -BinaryPath $noWebViewBinaryPath -TargetDir $portableNoWebViewDir -ReleaseVersion $releaseVersion
 }
 
 if ($SkipInstaller) {
     Write-Host "Portable build: $(Join-Path $portableDir 'phantty.exe')"
     if ($webView2LoaderPath) {
         Write-Host "Portable WebView2 build: $(Join-Path $portableWebView2Dir 'phantty.exe')"
+    }
+    if (-not $SkipNoWebViewBundle) {
+        Write-Host "Portable no-WebView build: $(Join-Path $portableNoWebViewDir 'phantty.exe')"
     }
     Write-Host 'Installer build skipped. Unsigned IExpress installers are prone to Windows Defender false positives.'
     exit 0
@@ -228,5 +248,8 @@ try {
 Write-Host "Portable build: $(Join-Path $portableDir 'phantty.exe')"
 if ($webView2LoaderPath) {
     Write-Host "Portable WebView2 build: $(Join-Path $portableWebView2Dir 'phantty.exe')"
+}
+if (-not $SkipNoWebViewBundle) {
+    Write-Host "Portable no-WebView build: $(Join-Path $portableNoWebViewDir 'phantty.exe')"
 }
 Write-Host "Installer build: $setupExe"
