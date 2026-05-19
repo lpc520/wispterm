@@ -123,6 +123,7 @@ threadlocal var g_copy_toast_len: usize = 0;
 
 const UPDATE_PROMPT_DURATION_MS: i64 = 10000;
 const UPDATE_STATUS_DURATION_MS: i64 = 2500;
+const SSH_CWD_HELP_URL = "https://github.com/xuzhougeng/phantty#ssh-current-directory-for-drag-and-drop-uploads";
 threadlocal var g_update_prompt_until_ms: i64 = 0;
 threadlocal var g_update_prompt_buf: [128]u8 = undefined;
 threadlocal var g_update_prompt_len: usize = 0;
@@ -3920,6 +3921,17 @@ fn showVersionToast() void {
 
 pub fn showUpdateCheckingToast() void {
     showUpdatePrompt(.{ .state = .checking }, false);
+}
+
+pub fn showSshCwdFallbackPrompt() void {
+    const msg = std.fmt.bufPrint(&g_update_prompt_buf, "SSH cwd unknown; click for setup", .{}) catch return;
+    g_update_prompt_len = msg.len;
+
+    const url_len = @min(g_update_prompt_url_buf.len, SSH_CWD_HELP_URL.len);
+    @memcpy(g_update_prompt_url_buf[0..url_len], SSH_CWD_HELP_URL[0..url_len]);
+    g_update_prompt_url_len = url_len;
+    g_update_prompt_clickable = true;
+    g_update_prompt_until_ms = std.time.milliTimestamp() + UPDATE_PROMPT_DURATION_MS;
 }
 
 pub fn showUpdateCheckResult(result: update_check.CheckResult) void {

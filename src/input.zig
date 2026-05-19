@@ -181,6 +181,45 @@ fn joinUnixPath(allocator: std.mem.Allocator, dir: []const u8, name: []const u8)
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ base, name }) catch null;
 }
 
+const SshDropRemoteDir = struct {
+    path: []u8,
+    used_fallback_pwd: bool,
+};
+
+fn resolveSshDropRemoteDir(allocator: std.mem.Allocator, osc7_cwd: ?[]const u8, fallback_pwd: []const u8) !SshDropRemoteDir {
+    if (osc7_cwd) |cwd| {
+        if (cwd.len > 0) {
+            return .{
+                .path = try allocator.dupe(u8, cwd),
+                .used_fallback_pwd = false,
+            };
+        }
+    }
+
+    const trimmed = std.mem.trim(u8, fallback_pwd, " \t\r\n");
+    if (trimmed.len == 0) return error.EmptyRemoteDir;
+    return .{
+        .path = try allocator.dupe(u8, trimmed),
+        .used_fallback_pwd = true,
+    };
+}
+
+test "ssh drop remote dir marks fallback when OSC 7 cwd is missing" {
+    const resolved = try resolveSshDropRemoteDir(std.testing.allocator, null, " /home/user\r\n");
+    defer std.testing.allocator.free(resolved.path);
+
+    try std.testing.expectEqualStrings("/home/user", resolved.path);
+    try std.testing.expect(resolved.used_fallback_pwd);
+}
+
+test "ssh drop remote dir prefers OSC 7 cwd without fallback warning" {
+    const resolved = try resolveSshDropRemoteDir(std.testing.allocator, "/srv/app", "/home/user\n");
+    defer std.testing.allocator.free(resolved.path);
+
+    try std.testing.expectEqualStrings("/srv/app", resolved.path);
+    try std.testing.expect(!resolved.used_fallback_pwd);
+}
+
 fn shellSingleQuoteForPaste(allocator: std.mem.Allocator, text: []const u8) ?[]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -410,18 +449,19 @@ fn handleSshTerminalFileDrop(local_path: []const u8) bool {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const remote_dir = if (surface.getCwd()) |cwd|
-        allocator.dupe(u8, cwd) catch return true
+    const remote_dir_info = if (surface.getCwd()) |cwd|
+        resolveSshDropRemoteDir(allocator, cwd, "") catch return true
     else blk: {
         const pwd = scp.sshExec(allocator, &conn, "pwd") orelse {
             std.debug.print("SSH file drop upload skipped: no remote cwd for active SSH surface\n", .{});
             return true;
         };
         defer allocator.free(pwd);
-        const trimmed = std.mem.trim(u8, pwd, " \t\r\n");
-        break :blk allocator.dupe(u8, trimmed) catch return true;
+        break :blk resolveSshDropRemoteDir(allocator, null, pwd) catch return true;
     };
-    defer allocator.free(remote_dir);
+    defer allocator.free(remote_dir_info.path);
+    const remote_dir = remote_dir_info.path;
+    if (remote_dir_info.used_fallback_pwd) overlays.showSshCwdFallbackPrompt();
 
     const filename = clipboardImageBasename(local_path);
     if (filename.len == 0) return true;

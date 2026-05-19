@@ -199,6 +199,48 @@ the built-in SSH launcher are supported. Manually typing `ssh user@host` inside
 a local shell is still treated as that local shell and cannot use remote file
 preview yet.
 
+### SSH current directory for drag-and-drop uploads
+
+Drag-and-drop uploads in Phantty SSH profile sessions use the active remote
+working directory when the shell reports it with OSC 7. This matches the
+terminal convention used by Ghostty shell integration. If the remote shell does
+not report OSC 7, Phantty falls back to running `pwd` through a fresh
+`ssh.exe` helper, which usually returns the SSH login directory instead of the
+directory you `cd`'d to in the interactive shell. In that case Phantty shows a
+clickable setup prompt.
+
+Add one of these snippets to the remote shell startup file, then start a new
+Phantty SSH session.
+
+For Bash, add this to `~/.bashrc`:
+
+```bash
+__phantty_report_cwd() {
+  printf '\033]7;file://%s%s\a' "${HOSTNAME:-localhost}" "$PWD"
+}
+PROMPT_COMMAND="__phantty_report_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+```
+
+For Zsh, add this to `~/.zshrc`:
+
+```zsh
+__phantty_report_cwd() {
+  printf '\033]7;file://%s%s\a' "${HOST:-localhost}" "$PWD"
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook chpwd __phantty_report_cwd
+add-zsh-hook precmd __phantty_report_cwd
+```
+
+For Fish, add this to `~/.config/fish/config.fish`:
+
+```fish
+function __phantty_report_cwd --on-variable PWD
+    printf '\e]7;file://%s%s\a' (hostname) (string escape --style=url $PWD)
+end
+__phantty_report_cwd
+```
+
 For old bastions or servers that still require disabled OpenSSH algorithms, set
 `ssh-legacy-algorithms = true`. This appends compatibility options for
 `ssh-rsa`, `ssh-dss`, older Diffie-Hellman KEX, and CBC ciphers to Phantty's SSH
