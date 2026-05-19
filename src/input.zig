@@ -471,6 +471,12 @@ pub threadlocal var g_markdown_preview_resize_hover: bool = false; // Mouse is o
 pub threadlocal var g_markdown_preview_resize_dragging: bool = false; // Currently dragging the preview edge
 pub threadlocal var g_browser_resize_hover: bool = false; // Mouse is over the WebView2 browser edge
 pub threadlocal var g_browser_resize_dragging: bool = false; // Currently dragging the browser edge
+const SIDEBAR_TAB_DRAG_THRESHOLD_PX: f64 = 6.0;
+threadlocal var g_sidebar_tab_drag_pressed: ?usize = null;
+threadlocal var g_sidebar_tab_drag_current: ?usize = null;
+threadlocal var g_sidebar_tab_drag_start_x: f64 = 0;
+threadlocal var g_sidebar_tab_drag_start_y: f64 = 0;
+threadlocal var g_sidebar_tab_drag_active: bool = false;
 
 // Internal state (moved from win32_input struct)
 threadlocal var plus_btn_pressed: bool = false;
@@ -544,6 +550,7 @@ pub fn cancelTransientMouseState(win: ?*win32_backend.Window) void {
     g_selecting = false;
     plus_btn_pressed = false;
     tab.g_tab_close_pressed = null;
+    resetSidebarTabDragState();
     overlays.g_scrollbar_dragging = false;
     g_scrollbar_drag_surface = null;
     g_ai_input_scroll_dragging = false;
@@ -1327,6 +1334,66 @@ fn hitTestSidebarTab(xpos: f64, ypos: f64) ?usize {
     return idx;
 }
 
+fn resetSidebarTabDragState() void {
+    g_sidebar_tab_drag_pressed = null;
+    g_sidebar_tab_drag_current = null;
+    g_sidebar_tab_drag_start_x = 0;
+    g_sidebar_tab_drag_start_y = 0;
+    g_sidebar_tab_drag_active = false;
+}
+
+fn beginSidebarTabPotentialDrag(tab_idx: usize, xpos: f64, ypos: f64) void {
+    if (tab.g_tab_count <= 1) return;
+    g_sidebar_tab_drag_pressed = tab_idx;
+    g_sidebar_tab_drag_current = tab_idx;
+    g_sidebar_tab_drag_start_x = xpos;
+    g_sidebar_tab_drag_start_y = ypos;
+    g_sidebar_tab_drag_active = false;
+}
+
+fn sidebarTabIndexForDragY(ypos: f64) ?usize {
+    if (!tab.g_sidebar_visible or tab.g_tab_count == 0) return null;
+
+    const list_top = titlebarHeight() + @as(f64, @floatCast(titlebar.sidebarHeaderHeight())) + 6;
+    const row_h = @as(f64, @floatCast(titlebar.sidebarRowHeight()));
+    if (ypos < list_top) return 0;
+
+    const idx_f = (ypos - list_top) / row_h;
+    const idx_raw: usize = @intFromFloat(@floor(idx_f));
+    if (idx_raw >= tab.g_tab_count) return tab.g_tab_count - 1;
+    return idx_raw;
+}
+
+fn updateSidebarTabDrag(xpos: f64, ypos: f64) bool {
+    const current = g_sidebar_tab_drag_current orelse return false;
+    if (!tab.g_sidebar_visible or tab.g_tab_count <= 1 or current >= tab.g_tab_count) {
+        resetSidebarTabDragState();
+        return false;
+    }
+
+    if (!g_sidebar_tab_drag_active) {
+        const dx = xpos - g_sidebar_tab_drag_start_x;
+        const dy = ypos - g_sidebar_tab_drag_start_y;
+        const distance = @sqrt(dx * dx + dy * dy);
+        if (distance < SIDEBAR_TAB_DRAG_THRESHOLD_PX) return true;
+        g_sidebar_tab_drag_active = true;
+        g_selecting = false;
+    }
+
+    const target = sidebarTabIndexForDragY(ypos) orelse return true;
+    if (target != current and AppWindow.reorderTab(current, target)) {
+        g_sidebar_tab_drag_current = target;
+    }
+
+    return true;
+}
+
+fn finishSidebarTabDrag() bool {
+    const consumed = g_sidebar_tab_drag_pressed != null or g_sidebar_tab_drag_active;
+    resetSidebarTabDragState();
+    return consumed;
+}
+
 fn hitTestSidebarPlusButton(xpos: f64, ypos: f64) bool {
     if (!tab.g_sidebar_visible) return false;
     const top = titlebarHeight();
@@ -1789,9 +1856,11 @@ fn handleSidebarPress(xpos: f64, ypos: f64) void {
 
     if (hitTestSidebarTab(xpos, ypos)) |tab_idx| {
         if (tab.g_tab_count > 1 and tab.g_tab_close_opacity[tab_idx] > 0.1 and hitTestSidebarTabCloseButton(xpos, ypos, tab_idx)) {
+            resetSidebarTabDragState();
             tab.g_tab_close_pressed = tab_idx;
             return;
         }
+        beginSidebarTabPotentialDrag(tab_idx, xpos, ypos);
         AppWindow.switchTab(tab_idx);
     }
 }
@@ -2837,6 +2906,10 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 return;
             }
 
+            if (finishSidebarTabDrag()) {
+                return;
+            }
+
             // Handle close button release — close tab if still on the close button
             if (tab.g_tab_close_pressed) |pressed_idx| {
                 tab.g_tab_close_pressed = null;
@@ -3036,6 +3109,8 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
         if (g_ai_input_scroll_chat) |chat| applyAiInputScrollbarDrag(chat, ypos);
         return;
     }
+
+    if (updateSidebarTabDrag(xpos, ypos)) return;
 
     // Handle divider dragging
     if (g_divider_dragging) {
