@@ -1358,6 +1358,18 @@ test "tab: reorder moves active tab forward" {
     g_tab_close_opacity[0] = 0.1;
     g_tab_close_opacity[1] = 0.2;
     g_tab_close_opacity[2] = 0.3;
+    g_tab_text_x_start[0] = 10;
+    g_tab_text_x_start[1] = 20;
+    g_tab_text_x_start[2] = 30;
+    g_tab_text_x_end[0] = 11;
+    g_tab_text_x_end[1] = 21;
+    g_tab_text_x_end[2] = 31;
+    g_tab_text_y_start[0] = 12;
+    g_tab_text_y_start[1] = 22;
+    g_tab_text_y_start[2] = 32;
+    g_tab_text_y_end[0] = 13;
+    g_tab_text_y_end[1] = 23;
+    g_tab_text_y_end[2] = 33;
 
     try std.testing.expect(reorderTab(0, 2));
 
@@ -1368,6 +1380,18 @@ test "tab: reorder moves active tab forward" {
     try std.testing.expectEqual(@as(f32, 0.2), g_tab_close_opacity[0]);
     try std.testing.expectEqual(@as(f32, 0.3), g_tab_close_opacity[1]);
     try std.testing.expectEqual(@as(f32, 0.1), g_tab_close_opacity[2]);
+    try std.testing.expectEqual(@as(f32, 20), g_tab_text_x_start[0]);
+    try std.testing.expectEqual(@as(f32, 30), g_tab_text_x_start[1]);
+    try std.testing.expectEqual(@as(f32, 10), g_tab_text_x_start[2]);
+    try std.testing.expectEqual(@as(f32, 21), g_tab_text_x_end[0]);
+    try std.testing.expectEqual(@as(f32, 31), g_tab_text_x_end[1]);
+    try std.testing.expectEqual(@as(f32, 11), g_tab_text_x_end[2]);
+    try std.testing.expectEqual(@as(f32, 22), g_tab_text_y_start[0]);
+    try std.testing.expectEqual(@as(f32, 32), g_tab_text_y_start[1]);
+    try std.testing.expectEqual(@as(f32, 12), g_tab_text_y_start[2]);
+    try std.testing.expectEqual(@as(f32, 23), g_tab_text_y_end[0]);
+    try std.testing.expectEqual(@as(f32, 33), g_tab_text_y_end[1]);
+    try std.testing.expectEqual(@as(f32, 13), g_tab_text_y_end[2]);
 }
 
 test "tab: reorder moves active tab backward" {
