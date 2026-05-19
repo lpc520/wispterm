@@ -749,6 +749,12 @@ pub fn switchTab(idx: usize) void {
     clearUiStateOnTabChange();
 }
 
+pub fn reorderTab(from_idx: usize, to_idx: usize) bool {
+    if (!tab.reorderTab(from_idx, to_idx)) return false;
+    clearUiStateOnTabChange();
+    return true;
+}
+
 pub fn splitFocused(direction: SplitTree.Split.Direction) void {
     _ = splitFocusedReturningSurface(direction);
 }
