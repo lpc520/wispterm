@@ -14,7 +14,7 @@
   <link rel="apple-touch-icon" href="assets/phantty.png">
   <link rel="alternate" hreflang="en" href="./">
   <link rel="alternate" hreflang="zh-CN" href="./zh.html">
-  <link rel="stylesheet" href="style.css?v=5">
+  <link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
   <header class="site-header">
@@ -29,6 +29,7 @@
         <a href="#config">Config</a>
         <a href="#shortcuts">Shortcuts</a>
         <a href="./themes.html">Themes</a>
+        <a href="./ai.html">AI</a>
         <a href="#faq">FAQ</a>
         <span class="lang-switch" role="group" aria-label="Language">
           <a class="lang active" href="./" aria-current="page">EN</a>
@@ -101,7 +102,7 @@ nothing to commit, working tree clean
           </div>
           <div class="feature">
             <h3>AI agent tabs</h3>
-            <p>Chat tabs can act as local agents: read terminal snapshots, run PowerShell, and type into opened SSH sessions with an approval card. The command center now includes <code>New Agent</code> for a direct agent launch path and <code>Select Agent History</code> for reopening saved conversations without leaving the picker.</p>
+            <p>Chat tabs can act as local agents: read terminal snapshots, run PowerShell, work with WSL and SSH sessions, load skills, and keep tool approval inside Phantty. <a href="./ai.html">Explore the AI workflow</a>.</p>
           </div>
           <div class="feature">
             <h3>453 themes built-in</h3>
@@ -235,27 +236,6 @@ ai-agent-output-limit  = 16384</code></pre>
       </div>
     </section>
 
-    <section id="agent-workflows" class="section">
-      <div class="container">
-        <h2>Agent workflows</h2>
-        <p class="section-lead">Phantty now has two fast paths for agent work: a direct command-center launch path, and a persisted history picker for getting back to old conversations.</p>
-        <div class="feature-grid">
-          <div class="feature">
-            <h3>New Agent from the command center</h3>
-            <p>Press <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd>, run <code>New Agent</code>, and Phantty immediately opens a new Agent tab with your default AI configuration. If no default AI profile is available yet, Phantty falls back to the AI configuration form instead of opening a broken tab.</p>
-          </div>
-          <div class="feature">
-            <h3>Select Agent History</h3>
-            <p>Run <code>Select Agent History</code> from the command center to open a command-center-native picker of saved agent sessions. It uses the same persisted history store as the sidebar, but keeps its own command-palette navigation model.</p>
-          </div>
-          <div class="feature">
-            <h3>Left sidebar history page</h3>
-            <p>On AI/Agent tabs, <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Alt</kbd><kbd>E</kbd> switches the left panel to <code>AGENT History</code>. On terminal tabs the same shortcut still shows the file explorer, so the sidebar follows the active tab type instead of trying to mix files and conversations in one list.</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
     <section id="faq" class="section">
       <div class="container">
         <h2>FAQ</h2>
@@ -312,6 +292,7 @@ ai-agent-output-limit  = 16384</code></pre>
       </div>
       <div class="footer-links">
         <a href="https://github.com/xuzhougeng/phantty" target="_blank" rel="noopener">GitHub</a>
+        <a href="./ai.html">AI</a>
         <a href="https://github.com/xuzhougeng/phantty/releases" target="_blank" rel="noopener">Releases</a>
         <a href="https://github.com/xuzhougeng/phantty/issues" target="_blank" rel="noopener">Issues</a>
         <a href="https://ghostty.org/" target="_blank" rel="noopener">Ghostty</a>

@@ -14,7 +14,7 @@
   <link rel="apple-touch-icon" href="assets/phantty.png">
   <link rel="alternate" hreflang="en" href="./">
   <link rel="alternate" hreflang="zh-CN" href="./zh.html">
-  <link rel="stylesheet" href="style.css?v=5">
+  <link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
   <header class="site-header">
@@ -29,6 +29,7 @@
         <a href="#config">配置</a>
         <a href="#shortcuts">快捷键</a>
         <a href="./themes.html">主题</a>
+        <a href="./ai.zh.html">AI</a>
         <a href="#faq">常见问题</a>
         <span class="lang-switch" role="group" aria-label="语言">
           <a class="lang" href="./">EN</a>
@@ -101,7 +102,7 @@
           </div>
           <div class="feature">
             <h3>AI Agent 标签</h3>
-            <p>AI Chat 可以变成桌面 Agent：读取终端快照、运行本地 PowerShell，并在确认后向已打开的 SSH 会话输入命令。现在命令面板里还提供了 <code>New Agent</code> 直开入口，以及 <code>Select Agent History</code> 用来直接恢复历史对话。</p>
+            <p>AI Chat 可以变成桌面 Agent：读取终端快照、运行本地 PowerShell、配合 WSL/SSH 会话、加载本地 Skills，并在 Phantty 内完成工具确认。<a href="./ai.zh.html">查看 AI 工作流</a>。</p>
           </div>
           <div class="feature">
             <h3>内置 453 款主题</h3>
@@ -235,27 +236,6 @@ ai-agent-output-limit  = 16384</code></pre>
       </div>
     </section>
 
-    <section id="agent-workflows" class="section">
-      <div class="container">
-        <h2>Agent 工作流</h2>
-        <p class="section-lead">Phantty 现在提供两条更快的 Agent 路径：一条是命令面板里的直接启动入口，另一条是可持久化恢复的历史会话选择器。</p>
-        <div class="feature-grid">
-          <div class="feature">
-            <h3>命令面板里的 New Agent</h3>
-            <p>按 <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd>，运行 <code>New Agent</code>，Phantty 会直接用默认 AI 配置打开一个新的 Agent 标签。如果当前还没有可用的默认 AI profile，就会退回 AI 配置表单，而不是打开一个不可用的空标签。</p>
-          </div>
-          <div class="feature">
-            <h3>Select Agent History</h3>
-            <p>在命令面板中运行 <code>Select Agent History</code>，会打开一个命令面板原生的历史会话选择器。它和左侧栏共用同一份持久化历史数据，但保留各自独立的选择与导航状态。</p>
-          </div>
-          <div class="feature">
-            <h3>左侧栏里的 Agent History 页面</h3>
-            <p>在 AI/Agent 标签里按 <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Alt</kbd><kbd>E</kbd>，左侧栏会切到 <code>AGENT History</code>。在终端标签里同一个快捷键仍然显示文件浏览器，所以侧栏会跟随当前标签类型，而不是把文件和会话历史混在同一个列表里。</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
     <section id="faq" class="section">
       <div class="container">
         <h2>常见问题</h2>
@@ -312,6 +292,7 @@ ai-agent-output-limit  = 16384</code></pre>
       </div>
       <div class="footer-links">
         <a href="https://github.com/xuzhougeng/phantty" target="_blank" rel="noopener">GitHub</a>
+        <a href="./ai.zh.html">AI</a>
         <a href="https://github.com/xuzhougeng/phantty/releases" target="_blank" rel="noopener">发布版本</a>
         <a href="https://github.com/xuzhougeng/phantty/issues" target="_blank" rel="noopener">问题反馈</a>
         <a href="https://ghostty.org/" target="_blank" rel="noopener">Ghostty</a>

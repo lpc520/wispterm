@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phantty AI Agent: DeepSeek-first terminal workflows</title>
+  <meta name="description" content="Configure Phantty AI Agent sessions with DeepSeek V4, local terminal tools, WSL/SSH support, skills, and approval-based command execution.">
+  <meta property="og:title" content="Phantty AI Agent">
+  <meta property="og:description" content="DeepSeek-first AI Agent sessions inside a native Windows terminal.">
+  <meta property="og:image" content="assets/phantty.png">
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#1b1e28">
+  <link rel="icon" href="assets/favicon.ico">
+  <link rel="apple-touch-icon" href="assets/phantty.png">
+  <link rel="alternate" hreflang="en" href="./ai.html">
+  <link rel="alternate" hreflang="zh-CN" href="./ai.zh.html">
+  <link rel="stylesheet" href="style.css?v=6">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container nav">
+      <a class="brand" href="./">
+        <img src="assets/phantty.png" alt="" width="28" height="28">
+        <span>Phantty</span>
+      </a>
+      <nav class="nav-links">
+        <a href="./#features">Features</a>
+        <a href="./#install">Install</a>
+        <a href="./#config">Config</a>
+        <a href="./#shortcuts">Shortcuts</a>
+        <a href="./themes.html">Themes</a>
+        <a class="active-link" href="./ai.html" aria-current="page">AI</a>
+        <span class="lang-switch" role="group" aria-label="Language">
+          <a class="lang active" href="./ai.html" aria-current="page">EN</a>
+          <a class="lang" href="./ai.zh.html">中文</a>
+        </span>
+        <a class="github" href="https://github.com/xuzhougeng/phantty" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="ai-hero">
+      <div class="container ai-hero-grid">
+        <div class="ai-hero-copy">
+          <p class="eyebrow">DeepSeek-first agent sessions</p>
+          <h1>Run agent work inside Phantty</h1>
+          <p class="tagline">Open a native AI Agent tab that can inspect terminal context, run local PowerShell or cmd tools, work with WSL and SSH sessions, load local skills, and keep approvals in the terminal UI.</p>
+          <div class="cta-row left">
+            <a class="cta primary" href="#setup">Configure DeepSeek</a>
+            <a class="cta secondary" href="#tools">Agent tools</a>
+          </div>
+        </div>
+
+        <div class="terminal-preview ai-preview" aria-hidden="true">
+          <div class="tp-titlebar">
+            <span class="tp-dot red"></span>
+            <span class="tp-dot yellow"></span>
+            <span class="tp-dot green"></span>
+            <span class="tp-title">phantty — AI Agent</span>
+          </div>
+          <div class="tp-tabs">
+            <div class="tp-tab active">agent</div>
+            <div class="tp-tab">pwsh</div>
+            <div class="tp-tab">ssh: lab</div>
+          </div>
+          <div class="tp-body">
+            <pre><span class="prompt">You</span> <span class="cmd">Inspect this repo and find the test command.</span>
+<span class="muted">Phantty tool request</span>
+<span class="branch">terminal_list</span> <span class="muted">visible surfaces: pwsh, ssh: lab</span>
+<span class="branch">terminal_select</span> <span class="muted">surface=pwsh</span>
+<span class="branch">powershell_exec</span> <span class="muted">rg -n "test" README.md build.zig</span>
+<span class="ok">approved</span>
+
+<span class="prompt">Agent</span> <span class="cmd">Use zig build test. I found it in build.zig.</span></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="overview" class="section">
+      <div class="container">
+        <h2>AI that understands the terminal</h2>
+        <p class="section-lead">Phantty keeps agent work close to the shell state you already have open. It does not need a separate browser workspace to understand tabs, split panes, local commands, WSL, and SSH sessions.</p>
+        <div class="feature-grid">
+          <div class="feature">
+            <h3>DeepSeek V4 profiles</h3>
+            <p>The default profile targets OpenAI-compatible Chat Completions at <code>https://api.deepseek.com</code> with <code>deepseek-v4-pro</code>. Use <code>deepseek-v4-flash</code> when you want a faster, lighter profile.</p>
+          </div>
+          <div class="feature">
+            <h3>Terminal-aware tools</h3>
+            <p>Agent tools can list visible terminal surfaces, select the intended tab or panel, run local commands, and type into active REPL, WSL, or SSH contexts.</p>
+          </div>
+          <div class="feature">
+            <h3>Approval-based execution</h3>
+            <p>Tool requests appear in Phantty before execution when permission is set to <code>confirm</code>. Switch to <code>full</code> only for trusted workflows.</p>
+          </div>
+          <div class="feature">
+            <h3>Saved conversations</h3>
+            <p>Agent sessions are persisted so you can reopen work from the command center with <code>Select Agent History</code> or use the left sidebar history page on AI tabs.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="setup" class="section alt">
+      <div class="container">
+        <h2>Configure DeepSeek V4</h2>
+        <p class="section-lead">Open the session launcher with <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>T</kbd>, choose <code>AI Agent</code>, and fill the AI profile. If no profile exists, Phantty opens this form before the first agent launch.</p>
+        <div class="ai-setup-grid">
+          <div class="setup-panel">
+            <h3>Recommended agent profile</h3>
+            <table class="config-table">
+              <tbody>
+                <tr><th>Profile name</th><td><code>DeepSeek</code></td></tr>
+                <tr><th>Base URL</th><td><code>https://api.deepseek.com</code></td></tr>
+                <tr><th>API key</th><td>Your DeepSeek key, or leave empty when <code>DEEPSEEK_API_KEY</code> is set</td></tr>
+                <tr><th>Model</th><td><code>deepseek-v4-pro</code></td></tr>
+                <tr><th>Thinking</th><td><code>enabled</code></td></tr>
+                <tr><th>Effort</th><td><code>max</code> for coding-heavy agent work; <code>high</code> is Phantty's built-in default</td></tr>
+                <tr><th>Stream</th><td><code>false</code></td></tr>
+                <tr><th>Agent</th><td><code>true</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="setup-panel">
+            <h3>Environment key</h3>
+            <p>When the profile base URL points to DeepSeek and the profile key is empty, Phantty reads <code>DEEPSEEK_API_KEY</code> from the process environment.</p>
+<pre class="code-block"><code>$env:DEEPSEEK_API_KEY = "sk-your-deepseek-api-key"
+
+# Optional: persist for future PowerShell sessions
+[Environment]::SetEnvironmentVariable(
+  "DEEPSEEK_API_KEY",
+  "sk-your-deepseek-api-key",
+  "User"
+)</code></pre>
+            <p class="section-foot">DeepSeek V4 models expose a 1M context length and support thinking mode through <code>thinking</code> plus <code>reasoning_effort</code>. Phantty forwards these OpenAI-compatible request fields directly.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tools" class="section">
+      <div class="container">
+        <h2>Agent tools and boundaries</h2>
+        <p class="section-lead">The agent can help with local work without losing track of which terminal it is controlling. Phantty requires an explicit terminal selection before write tools target another surface.</p>
+        <div class="feature-grid">
+          <div class="feature">
+            <h3>Local commands</h3>
+            <p>PowerShell and cmd commands run as background child processes where possible, so tool execution does not flash a separate console window.</p>
+          </div>
+          <div class="feature">
+            <h3>WSL and SSH routing</h3>
+            <p>The agent can inspect visible terminal surfaces and route writes to the selected WSL or SSH session rather than guessing from focus alone.</p>
+          </div>
+          <div class="feature">
+            <h3>Terminal selection</h3>
+            <p>Tool calls use surface IDs from <code>terminal_list</code>. Before writing, the agent calls <code>terminal_select</code> to make the target explicit.</p>
+          </div>
+          <div class="feature">
+            <h3>Permission mode</h3>
+            <p>Keep <code>ai-agent-permission = confirm</code> for normal use. Use <code>full</code> only when you trust both the task and the opened workspace.</p>
+          </div>
+        </div>
+<pre class="code-block"><code># AI Chat agent tools
+ai-agent-enabled            = true
+ai-agent-permission         = confirm   # confirm | full
+ai-agent-command-timeout-ms = 60000
+ai-agent-output-limit       = 16384</code></pre>
+      </div>
+    </section>
+
+    <section id="skills" class="section alt">
+      <div class="container">
+        <h2>Skills and fast paths</h2>
+        <p class="section-lead">Skills let you keep reusable instructions next to the terminal. They are loaded into the next request and saved into chat history as replayable context.</p>
+        <div class="feature-grid">
+          <div class="feature">
+            <h3>Skill locations</h3>
+            <p>Phantty discovers <code>SKILL.md</code> files under <code>%APPDATA%\phantty\skills</code>, <code>.\skills</code> in the current working directory, and <code>skills</code> next to <code>phantty.exe</code>.</p>
+          </div>
+          <div class="feature">
+            <h3>Load a skill</h3>
+            <p>Use <code>$skill-name your request</code> in the AI Agent tab to load that skill for the next request without changing global configuration.</p>
+          </div>
+          <div class="feature">
+            <h3>Slash commands</h3>
+            <p><code>/skills</code> lists discovered skills, <code>/commands</code> lists local AI commands, and <code>/reload-skills</code> refreshes future skill calls from disk.</p>
+          </div>
+          <div class="feature">
+            <h3>Command center paths</h3>
+            <p>Run <code>New Agent</code> from <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd>, or reopen saved sessions with <code>Select Agent History</code>.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="troubleshooting" class="section">
+      <div class="container">
+        <h2>Troubleshooting</h2>
+        <div class="feature-grid">
+          <div class="feature">
+            <h3>Missing API key</h3>
+            <p>Set <code>DEEPSEEK_API_KEY</code> before launching Phantty, or save the key in the AI profile.</p>
+          </div>
+          <div class="feature">
+            <h3>Authentication or balance errors</h3>
+            <p>For <code>401</code> errors, check the key and base URL. For payment errors, check the DeepSeek Platform balance.</p>
+          </div>
+          <div class="feature">
+            <h3>No tool execution</h3>
+            <p>Set the profile's <code>Agent</code> field to <code>true</code>, and approve tool cards when permission mode is <code>confirm</code>.</p>
+          </div>
+          <div class="feature">
+            <h3>Model aliases</h3>
+            <p>Use current DeepSeek V4 model IDs such as <code>deepseek-v4-pro</code> or <code>deepseek-v4-flash</code> rather than legacy aliases.</p>
+          </div>
+        </div>
+        <p class="section-foot">References: <a href="https://api-docs.deepseek.com/quick_start/pricing/" target="_blank" rel="noopener">DeepSeek model details</a> and <a href="https://api-docs.deepseek.com/guides/thinking_mode" target="_blank" rel="noopener">DeepSeek thinking mode</a>.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div>
+        <img src="assets/phantty.png" alt="" width="20" height="20">
+        <span>Phantty · MIT License</span>
+      </div>
+      <div class="footer-links">
+        <a href="./">Home</a>
+        <a href="./themes.html">Themes</a>
+        <a href="https://github.com/xuzhougeng/phantty/releases" target="_blank" rel="noopener">Releases</a>
+        <a href="https://github.com/xuzhougeng/phantty/issues" target="_blank" rel="noopener">Issues</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

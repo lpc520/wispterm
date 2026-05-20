@@ -754,6 +754,119 @@ pre.code-block code {
   }
 }
 
+/* AI Agent page */
+.ai-hero {
+  padding: 78px 0 64px;
+  background:
+    radial-gradient(ellipse 70% 48% at 24% 0%, rgba(93, 228, 199, 0.16), transparent 62%),
+    linear-gradient(180deg, rgba(37, 43, 55, 0.54), rgba(27, 30, 40, 0));
+}
+.ai-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(360px, 1.05fr);
+  gap: 44px;
+  align-items: center;
+}
+.ai-hero-copy {
+  min-width: 0;
+}
+.ai-hero-copy h1 {
+  max-width: 760px;
+  text-align: left;
+}
+.ai-hero-copy .tagline {
+  max-width: 700px;
+  margin-left: 0;
+  text-align: left;
+}
+.cta-row.left {
+  justify-content: flex-start;
+}
+.ai-preview {
+  max-width: none;
+  width: 100%;
+}
+.ai-setup-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+.setup-panel {
+  min-width: 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+}
+.setup-panel h3 {
+  margin: 0 0 14px;
+  color: var(--fg);
+  font-size: 1.08rem;
+}
+.setup-panel p {
+  color: var(--fg-muted);
+  margin: 0 0 16px;
+}
+.setup-panel .section-foot {
+  margin-bottom: 0;
+}
+.config-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--fg-muted);
+  font-size: 0.92rem;
+}
+.config-table th,
+.config-table td {
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(58, 66, 89, 0.72);
+  vertical-align: top;
+  text-align: left;
+}
+.config-table tr:last-child th,
+.config-table tr:last-child td {
+  border-bottom: none;
+}
+.config-table th {
+  width: 32%;
+  min-width: 118px;
+  padding-right: 16px;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+@media (max-width: 920px) {
+  .ai-hero-grid,
+  .ai-setup-grid {
+    grid-template-columns: 1fr;
+  }
+  .ai-hero {
+    padding: 58px 0 44px;
+  }
+}
+
+@media (max-width: 520px) {
+  .setup-panel {
+    padding: 18px;
+  }
+  .config-table,
+  .config-table tbody,
+  .config-table tr,
+  .config-table th,
+  .config-table td {
+    display: block;
+    width: 100%;
+  }
+  .config-table th {
+    padding: 10px 0 3px;
+    border-bottom: none;
+  }
+  .config-table td {
+    padding: 0 0 10px;
+  }
+}
+
 /* Credits */
 .credits ul {
   margin: 0;

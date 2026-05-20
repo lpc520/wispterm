@@ -5,6 +5,8 @@ This folder is the source for the Phantty GitHub Pages site.
 ## Files
 
 - `index.html` — landing page (hero, features, install, config, shortcuts).
+- `ai.html` / `ai.zh.html` — DeepSeek-first AI Agent workflow pages.
+- `themes.html` — built-in theme gallery.
 - `style.css` — Poimandres-inspired dark styling.
 - `assets/phantty.png` — logo (mirrored from repo `assets/phantty.png`).
 - `assets/favicon.ico` — favicon (mirrored from repo `assets/phantty.ico`).

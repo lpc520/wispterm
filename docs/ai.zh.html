@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phantty AI Agent：DeepSeek 优先的终端工作流</title>
+  <meta name="description" content="在 Phantty 中配置 DeepSeek V4 AI Agent：本地终端工具、WSL/SSH 支持、Skills 和带确认的命令执行。">
+  <meta property="og:title" content="Phantty AI Agent">
+  <meta property="og:description" content="内置在 Windows 原生终端里的 DeepSeek 优先 AI Agent 会话。">
+  <meta property="og:image" content="assets/phantty.png">
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#1b1e28">
+  <link rel="icon" href="assets/favicon.ico">
+  <link rel="apple-touch-icon" href="assets/phantty.png">
+  <link rel="alternate" hreflang="en" href="./ai.html">
+  <link rel="alternate" hreflang="zh-CN" href="./ai.zh.html">
+  <link rel="stylesheet" href="style.css?v=6">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container nav">
+      <a class="brand" href="./zh.html">
+        <img src="assets/phantty.png" alt="" width="28" height="28">
+        <span>Phantty</span>
+      </a>
+      <nav class="nav-links">
+        <a href="./zh.html#features">特性</a>
+        <a href="./zh.html#install">安装</a>
+        <a href="./zh.html#config">配置</a>
+        <a href="./zh.html#shortcuts">快捷键</a>
+        <a href="./themes.html">主题</a>
+        <a class="active-link" href="./ai.zh.html" aria-current="page">AI</a>
+        <span class="lang-switch" role="group" aria-label="语言">
+          <a class="lang" href="./ai.html">EN</a>
+          <a class="lang active" href="./ai.zh.html" aria-current="page">中文</a>
+        </span>
+        <a class="github" href="https://github.com/xuzhougeng/phantty" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="ai-hero">
+      <div class="container ai-hero-grid">
+        <div class="ai-hero-copy">
+          <p class="eyebrow">DeepSeek 优先的 Agent 会话</p>
+          <h1>在 Phantty 里完成 Agent 工作</h1>
+          <p class="tagline">打开一个原生 AI Agent 标签，让它读取终端上下文、运行本地 PowerShell 或 cmd 工具、配合 WSL/SSH 会话、加载本地 Skills，并把工具确认留在终端 UI 内。</p>
+          <div class="cta-row left">
+            <a class="cta primary" href="#setup">配置 DeepSeek</a>
+            <a class="cta secondary" href="#tools">Agent 工具</a>
+          </div>
+        </div>
+
+        <div class="terminal-preview ai-preview" aria-hidden="true">
+          <div class="tp-titlebar">
+            <span class="tp-dot red"></span>
+            <span class="tp-dot yellow"></span>
+            <span class="tp-dot green"></span>
+            <span class="tp-title">phantty — AI Agent</span>
+          </div>
+          <div class="tp-tabs">
+            <div class="tp-tab active">agent</div>
+            <div class="tp-tab">pwsh</div>
+            <div class="tp-tab">ssh: lab</div>
+          </div>
+          <div class="tp-body">
+            <pre><span class="prompt">你</span> <span class="cmd">检查这个仓库，找出测试命令。</span>
+<span class="muted">Phantty 工具请求</span>
+<span class="branch">terminal_list</span> <span class="muted">可见 surface: pwsh, ssh: lab</span>
+<span class="branch">terminal_select</span> <span class="muted">surface=pwsh</span>
+<span class="branch">powershell_exec</span> <span class="muted">rg -n "test" README.md build.zig</span>
+<span class="ok">已确认</span>
+
+<span class="prompt">Agent</span> <span class="cmd">测试命令是 zig build test，位置在 build.zig。</span></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="overview" class="section">
+      <div class="container">
+        <h2>理解终端现场的 AI</h2>
+        <p class="section-lead">Phantty 把 Agent 工作留在你已经打开的 Shell 状态旁边。它不需要额外的浏览器工作区，就能理解标签、分屏、本地命令、WSL 和 SSH 会话。</p>
+        <div class="feature-grid">
+          <div class="feature">
+            <h3>DeepSeek V4 Profile</h3>
+            <p>默认 Profile 面向 OpenAI 兼容的 Chat Completions，Base URL 为 <code>https://api.deepseek.com</code>，模型为 <code>deepseek-v4-pro</code>。需要更轻快时可使用 <code>deepseek-v4-flash</code>。</p>
+          </div>
+          <div class="feature">
+            <h3>理解终端的工具</h3>
+            <p>Agent 工具可以列出可见终端 surface，选择目标标签或面板，运行本地命令，并向当前 REPL、WSL 或 SSH 上下文输入内容。</p>
+          </div>
+          <div class="feature">
+            <h3>带确认的执行</h3>
+            <p>当权限为 <code>confirm</code> 时，工具请求会先显示在 Phantty 中再执行。只有在可信任务和可信工作区中，才建议切到 <code>full</code>。</p>
+          </div>
+          <div class="feature">
+            <h3>可恢复的对话</h3>
+            <p>Agent 会话会持久化保存。可以在命令面板中用 <code>Select Agent History</code> 恢复，也可以在 AI 标签的左侧栏查看历史。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="setup" class="section alt">
+      <div class="container">
+        <h2>配置 DeepSeek V4</h2>
+        <p class="section-lead">按 <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>T</kbd> 打开会话启动器，选择 <code>AI Agent</code>，然后填写 AI Profile。如果还没有 Profile，Phantty 会在首次启动 Agent 前先打开配置表单。</p>
+        <div class="ai-setup-grid">
+          <div class="setup-panel">
+            <h3>推荐 Agent Profile</h3>
+            <table class="config-table">
+              <tbody>
+                <tr><th>Profile name</th><td><code>DeepSeek</code></td></tr>
+                <tr><th>Base URL</th><td><code>https://api.deepseek.com</code></td></tr>
+                <tr><th>API key</th><td>你的 DeepSeek API Key；如果设置了 <code>DEEPSEEK_API_KEY</code>，可以留空</td></tr>
+                <tr><th>Model</th><td><code>deepseek-v4-pro</code></td></tr>
+                <tr><th>Thinking</th><td><code>enabled</code></td></tr>
+                <tr><th>Effort</th><td>重度编码 Agent 建议 <code>max</code>；Phantty 内置默认值是 <code>high</code></td></tr>
+                <tr><th>Stream</th><td><code>false</code></td></tr>
+                <tr><th>Agent</th><td><code>true</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="setup-panel">
+            <h3>环境变量 API Key</h3>
+            <p>当 Profile 的 Base URL 指向 DeepSeek，并且 Profile 内没有保存 API Key 时，Phantty 会从进程环境中读取 <code>DEEPSEEK_API_KEY</code>。</p>
+<pre class="code-block"><code>$env:DEEPSEEK_API_KEY = "sk-your-deepseek-api-key"
+
+# 可选：持久保存到后续 PowerShell 会话
+[Environment]::SetEnvironmentVariable(
+  "DEEPSEEK_API_KEY",
+  "sk-your-deepseek-api-key",
+  "User"
+)</code></pre>
+            <p class="section-foot">DeepSeek V4 模型提供 1M 上下文，并通过 <code>thinking</code> 与 <code>reasoning_effort</code> 支持思考模式。Phantty 会直接转发这些 OpenAI 兼容请求字段。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tools" class="section">
+      <div class="container">
+        <h2>Agent 工具与边界</h2>
+        <p class="section-lead">Agent 可以辅助本地工作，同时不会混淆它正在控制哪个终端。Phantty 要求写入类工具先明确选择目标 terminal surface。</p>
+        <div class="feature-grid">
+          <div class="feature">
+            <h3>本地命令</h3>
+            <p>PowerShell 和 cmd 工具命令会尽量作为隐藏的后台子进程运行，因此执行工具时不会弹出额外控制台窗口。</p>
+          </div>
+          <div class="feature">
+            <h3>WSL 与 SSH 路由</h3>
+            <p>Agent 可以检查可见终端 surface，并把写入路由到选中的 WSL 或 SSH 会话，而不是只依赖当前焦点猜测。</p>
+          </div>
+          <div class="feature">
+            <h3>明确选择终端</h3>
+            <p>工具调用会使用 <code>terminal_list</code> 返回的 surface ID。写入前，Agent 会通过 <code>terminal_select</code> 明确目标。</p>
+          </div>
+          <div class="feature">
+            <h3>权限模式</h3>
+            <p>日常使用建议保持 <code>ai-agent-permission = confirm</code>。只有在你信任任务和当前工作区时，再使用 <code>full</code>。</p>
+          </div>
+        </div>
+<pre class="code-block"><code># AI Chat Agent 工具
+ai-agent-enabled            = true
+ai-agent-permission         = confirm   # confirm | full
+ai-agent-command-timeout-ms = 60000
+ai-agent-output-limit       = 16384</code></pre>
+      </div>
+    </section>
+
+    <section id="skills" class="section alt">
+      <div class="container">
+        <h2>Skills 与快速入口</h2>
+        <p class="section-lead">Skills 可以把可复用指令放在终端旁边。它们会被加载到下一次请求，并作为可重放上下文保存进聊天历史。</p>
+        <div class="feature-grid">
+          <div class="feature">
+            <h3>Skill 搜索位置</h3>
+            <p>Phantty 会在 <code>%APPDATA%\phantty\skills</code>、当前工作目录的 <code>.\skills</code>，以及 <code>phantty.exe</code> 同级的 <code>skills</code> 下发现 <code>SKILL.md</code>。</p>
+          </div>
+          <div class="feature">
+            <h3>加载 Skill</h3>
+            <p>在 AI Agent 标签中输入 <code>$skill-name your request</code>，即可为下一次请求加载指定 Skill，不需要改全局配置。</p>
+          </div>
+          <div class="feature">
+            <h3>Slash Commands</h3>
+            <p><code>/skills</code> 列出已发现 Skills，<code>/commands</code> 列出本地 AI 命令，<code>/reload-skills</code> 让后续 Skill 调用从磁盘重新读取。</p>
+          </div>
+          <div class="feature">
+            <h3>命令面板入口</h3>
+            <p>按 <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd> 后运行 <code>New Agent</code> 可直接新开 Agent；运行 <code>Select Agent History</code> 可恢复历史会话。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="troubleshooting" class="section">
+      <div class="container">
+        <h2>故障排查</h2>
+        <div class="feature-grid">
+          <div class="feature">
+            <h3>Missing API key</h3>
+            <p>启动 Phantty 前设置 <code>DEEPSEEK_API_KEY</code>，或把 API Key 保存到 AI Profile。</p>
+          </div>
+          <div class="feature">
+            <h3>认证或余额错误</h3>
+            <p>遇到 <code>401</code> 时检查 API Key 和 Base URL。遇到付费相关错误时，检查 DeepSeek 开放平台余额。</p>
+          </div>
+          <div class="feature">
+            <h3>工具没有执行</h3>
+            <p>确认 Profile 的 <code>Agent</code> 字段是 <code>true</code>，并在权限为 <code>confirm</code> 时确认工具卡片。</p>
+          </div>
+          <div class="feature">
+            <h3>模型别名</h3>
+            <p>请使用当前 DeepSeek V4 模型 ID，例如 <code>deepseek-v4-pro</code> 或 <code>deepseek-v4-flash</code>，不要继续依赖旧别名。</p>
+          </div>
+        </div>
+        <p class="section-foot">参考：<a href="https://api-docs.deepseek.com/zh-cn/quick_start/pricing/" target="_blank" rel="noopener">DeepSeek 模型详情</a> 与 <a href="https://api-docs.deepseek.com/zh-cn/guides/thinking_mode" target="_blank" rel="noopener">DeepSeek 思考模式</a>。</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div>
+        <img src="assets/phantty.png" alt="" width="20" height="20">
+        <span>Phantty · MIT 协议</span>
+      </div>
+      <div class="footer-links">
+        <a href="./zh.html">首页</a>
+        <a href="./themes.html">主题</a>
+        <a href="https://github.com/xuzhougeng/phantty/releases" target="_blank" rel="noopener">发布版本</a>
+        <a href="https://github.com/xuzhougeng/phantty/issues" target="_blank" rel="noopener">问题反馈</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
