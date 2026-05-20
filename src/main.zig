@@ -5,21 +5,33 @@
 //! in AppWindow.zig.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Config = @import("config.zig");
 const directwrite = @import("directwrite.zig");
 const App = @import("App.zig");
 const image_decoder = @import("image_decoder.zig");
 const app_metadata = @import("app_metadata.zig");
 
+extern "kernel32" fn AttachConsole(dwProcessId: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL;
+
 // ============================================================================
 // Font Discovery Test Functions (use --list-fonts or --test-font-discovery)
 // ============================================================================
 
-fn listSystemFonts(allocator: std.mem.Allocator) !void {
-    std.debug.print("Listing system fonts via DirectWrite...\n\n", .{});
+fn prepareCliConsole() void {
+    if (comptime builtin.os.tag == .windows) {
+        _ = std.os.windows.GetStdHandle(std.os.windows.STD_OUTPUT_HANDLE) catch {
+            const ATTACH_PARENT_PROCESS: std.os.windows.DWORD = 0xFFFFFFFF;
+            _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        };
+    }
+}
+
+fn listSystemFonts(allocator: std.mem.Allocator, writer: anytype) !void {
+    try writer.print("Listing system fonts via DirectWrite...\n\n", .{});
 
     var dw = directwrite.FontDiscovery.init() catch |err| {
-        std.debug.print("Failed to initialize DirectWrite: {}\n", .{err});
+        try writer.print("Failed to initialize DirectWrite: {}\n", .{err});
         return err;
     };
     defer dw.deinit();
@@ -30,17 +42,17 @@ fn listSystemFonts(allocator: std.mem.Allocator) !void {
         allocator.free(families);
     }
 
-    std.debug.print("Found {} font families:\n", .{families.len});
+    try writer.print("Found {} font families:\n", .{families.len});
     for (families, 0..) |family, i| {
-        std.debug.print("  {d:4}. {s}\n", .{ i + 1, family });
+        try writer.print("  {d:4}. {s}\n", .{ i + 1, family });
     }
 }
 
-fn testFontDiscovery(allocator: std.mem.Allocator) !void {
-    std.debug.print("Testing font discovery...\n\n", .{});
+fn testFontDiscovery(allocator: std.mem.Allocator, writer: anytype) !void {
+    try writer.print("Testing font discovery...\n\n", .{});
 
     var dw = directwrite.FontDiscovery.init() catch |err| {
-        std.debug.print("Failed to initialize DirectWrite: {}\n", .{err});
+        try writer.print("Failed to initialize DirectWrite: {}\n", .{err});
         return err;
     };
     defer dw.deinit();
@@ -57,20 +69,20 @@ fn testFontDiscovery(allocator: std.mem.Allocator) !void {
     };
 
     for (test_fonts) |font_name| {
-        std.debug.print("Looking for '{s}'... ", .{font_name});
+        try writer.print("Looking for '{s}'... ", .{font_name});
 
         if (dw.findFontFilePath(allocator, font_name, .NORMAL, .NORMAL)) |maybe_result| {
             if (maybe_result) |result| {
                 var r = result;
                 defer r.deinit();
-                std.debug.print("FOUND\n", .{});
-                std.debug.print("  Path: {s}\n", .{result.path});
-                std.debug.print("  Face index: {}\n\n", .{result.face_index});
+                try writer.writeAll("FOUND\n");
+                try writer.print("  Path: {s}\n", .{result.path});
+                try writer.print("  Face index: {}\n\n", .{result.face_index});
             } else {
-                std.debug.print("NOT FOUND\n\n", .{});
+                try writer.writeAll("NOT FOUND\n\n");
             }
         } else |err| {
-            std.debug.print("ERROR: {}\n\n", .{err});
+            try writer.print("ERROR: {}\n\n", .{err});
         }
     }
 }
@@ -81,6 +93,17 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Handle special commands before loading full config
+    const cli_command_mode =
+        Config.hasCommand(allocator, "help") or
+        Config.hasCommand(allocator, "h") or
+        Config.hasCommand(allocator, "version") or
+        Config.hasCommand(allocator, "v") or
+        Config.hasCommand(allocator, "list-fonts") or
+        Config.hasCommand(allocator, "list-themes") or
+        Config.hasCommand(allocator, "test-font-discovery") or
+        Config.hasCommand(allocator, "show-config-path");
+    if (cli_command_mode) prepareCliConsole();
+
     if (Config.hasCommand(allocator, "help") or Config.hasCommand(allocator, "h")) {
         Config.printHelp();
         return;
@@ -90,7 +113,7 @@ pub fn main() !void {
         return;
     }
     if (Config.hasCommand(allocator, "list-fonts")) {
-        try listSystemFonts(allocator);
+        try listSystemFonts(allocator, std.fs.File.stdout().deprecatedWriter());
         return;
     }
     if (Config.hasCommand(allocator, "list-themes")) {
@@ -98,7 +121,7 @@ pub fn main() !void {
         return;
     }
     if (Config.hasCommand(allocator, "test-font-discovery")) {
-        try testFontDiscovery(allocator);
+        try testFontDiscovery(allocator, std.fs.File.stdout().deprecatedWriter());
         return;
     }
     if (Config.hasCommand(allocator, "show-config-path")) {

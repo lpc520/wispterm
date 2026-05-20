@@ -3,7 +3,8 @@
 /// Follows Ghostty's configuration format: a simple `key = value` text file.
 /// Config is loaded from the following locations (in order, later overrides earlier):
 ///
-///   1. %APPDATA%\phantty\config
+///   1. Main config file: --config/--config-path, phantty.conf next to phantty.exe,
+///      or %APPDATA%\phantty\config
 ///   2. CLI flags (--key value)
 ///
 /// The syntax uses Ghostty's format:
@@ -22,6 +23,7 @@ const directwrite = @import("directwrite.zig");
 const themes = @import("themes.zig");
 
 const log = std.log.scoped(.config);
+const portable_config_basename = "phantty.conf";
 
 // ============================================================================
 // Theme
@@ -487,8 +489,24 @@ fn pathInConfigDir(allocator: std.mem.Allocator, basename: []const u8) ![]const 
 }
 
 /// Default config file path: `<config-dir>/config`. See `pathInConfigDir`.
-pub fn configFilePath(allocator: std.mem.Allocator) ![]const u8 {
+pub fn defaultConfigFilePath(allocator: std.mem.Allocator) ![]const u8 {
     return pathInConfigDir(allocator, "config");
+}
+
+/// Active main config file path.
+/// Priority: CLI --config/--config-path, phantty.conf next to phantty.exe,
+/// then the default config path.
+pub fn configFilePath(allocator: std.mem.Allocator) ![]const u8 {
+    if (try mainConfigPathArgFromProcess(allocator)) |explicit_path| {
+        return explicit_path;
+    }
+
+    if (try portableConfigFilePath(allocator)) |portable_path| {
+        if (pathExists(portable_path)) return portable_path;
+        allocator.free(portable_path);
+    }
+
+    return defaultConfigFilePath(allocator);
 }
 
 /// Default session-state file path: `<config-dir>/session.json`. See `pathInConfigDir`.
@@ -498,12 +516,93 @@ pub fn sessionFilePath(allocator: std.mem.Allocator) ![]const u8 {
 
 /// Print the path that would be used for the config file.
 pub fn printConfigPath(allocator: std.mem.Allocator) void {
+    writeConfigPath(allocator, std.fs.File.stdout().deprecatedWriter()) catch {};
+}
+
+pub fn writeConfigPath(allocator: std.mem.Allocator, writer: anytype) !void {
     if (configFilePath(allocator)) |path| {
         defer allocator.free(path);
-        std.debug.print("Config file: {s}\n", .{path});
+        try writer.print("Config file: {s}\n", .{path});
     } else |_| {
-        std.debug.print("Config file: (could not determine path)\n", .{});
+        try writer.writeAll("Config file: (could not determine path)\n");
     }
+}
+
+fn mainConfigPathArgFromProcess(allocator: std.mem.Allocator) !?[]const u8 {
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+    return mainConfigPathArg(allocator, args);
+}
+
+fn mainConfigPathArg(allocator: std.mem.Allocator, args: []const []const u8) !?[]const u8 {
+    var result: ?[]const u8 = null;
+    errdefer if (result) |path| allocator.free(path);
+
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+
+        if (std.mem.eql(u8, arg, "--config") or std.mem.eql(u8, arg, "--config-path")) {
+            if (i + 1 >= args.len) continue;
+            i += 1;
+            if (args[i].len == 0) continue;
+            if (result) |path| allocator.free(path);
+            result = try allocator.dupe(u8, args[i]);
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, arg, "--config=")) {
+            const value = arg["--config=".len..];
+            if (value.len == 0) continue;
+            if (result) |path| allocator.free(path);
+            result = try allocator.dupe(u8, value);
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, arg, "--config-path=")) {
+            const value = arg["--config-path=".len..];
+            if (value.len == 0) continue;
+            if (result) |path| allocator.free(path);
+            result = try allocator.dupe(u8, value);
+            continue;
+        }
+    }
+
+    return result;
+}
+
+fn portableConfigFilePath(allocator: std.mem.Allocator) !?[]const u8 {
+    const exe_path = std.fs.selfExePathAlloc(allocator) catch return null;
+    defer allocator.free(exe_path);
+
+    const exe_dir = std.fs.path.dirname(exe_path) orelse return null;
+    return try std.fs.path.join(allocator, &.{ exe_dir, portable_config_basename });
+}
+
+fn selectConfigFilePath(
+    allocator: std.mem.Allocator,
+    explicit_path: ?[]const u8,
+    portable_path: ?[]const u8,
+    default_path: []const u8,
+) ![]const u8 {
+    if (explicit_path) |path| {
+        return try allocator.dupe(u8, path);
+    }
+    if (portable_path) |path| {
+        if (pathExists(path)) {
+            return try allocator.dupe(u8, path);
+        }
+    }
+    return try allocator.dupe(u8, default_path);
+}
+
+fn pathExists(path: []const u8) bool {
+    if (std.fs.path.isAbsolute(path)) {
+        std.fs.accessAbsolute(path, .{}) catch return false;
+        return true;
+    }
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
 }
 
 // ============================================================================
@@ -883,6 +982,7 @@ fn loadCliArgs(self: *Config, allocator: std.mem.Allocator) !void {
         // Handle --key=value form
         if (std.mem.indexOf(u8, arg, "=")) |eq_pos| {
             const flag = stripDashes(arg[0..eq_pos]);
+            if (isMainConfigPathFlag(flag)) continue;
             const value = arg[eq_pos + 1 ..];
             self.applyKeyValue(allocator, flag, value, ".");
             continue;
@@ -893,6 +993,14 @@ fn loadCliArgs(self: *Config, allocator: std.mem.Allocator) !void {
 
         // Special commands (not config keys, handled by main)
         if (isSpecialCommand(flag)) continue;
+        if (isMainConfigPathFlag(flag)) {
+            if (i + 1 < args.len) {
+                i += 1;
+            } else {
+                log.warn("flag --{s} requires a value", .{flag});
+            }
+            continue;
+        }
 
         // Short aliases and backward-compatible renames
         const resolved_flag = if (std.mem.eql(u8, flag, "f") or std.mem.eql(u8, flag, "font"))
@@ -910,6 +1018,11 @@ fn loadCliArgs(self: *Config, allocator: std.mem.Allocator) !void {
             log.warn("flag --{s} requires a value", .{flag});
         }
     }
+}
+
+fn isMainConfigPathFlag(flag: []const u8) bool {
+    return std.mem.eql(u8, flag, "config") or
+        std.mem.eql(u8, flag, "config-path");
 }
 
 pub fn isSpecialCommand(flag: []const u8) bool {
@@ -1011,21 +1124,31 @@ fn applyColorOverrides(self: *Config) void {
 // ============================================================================
 
 pub fn listThemes() void {
-    std.debug.print("Available built-in themes ({} total):\n\n", .{themes.entries.len});
+    writeThemes(std.fs.File.stdout().deprecatedWriter()) catch {};
+}
+
+pub fn writeThemes(writer: anytype) !void {
+    try writer.print("Available built-in themes ({} total):\n\n", .{themes.entries.len});
     for (&themes.entries) |*entry| {
-        std.debug.print("  {s}\n", .{entry.name});
+        try writer.print("  {s}\n", .{entry.name});
     }
-    std.debug.print("\nUser themes in %APPDATA%\\phantty\\themes\\ take priority.\n", .{});
-    std.debug.print("Set with: theme = <name>\n", .{});
+    try writer.writeAll("\nUser themes in %APPDATA%\\phantty\\themes\\ take priority.\n");
+    try writer.writeAll("Set with: theme = <name>\n");
 }
 
 pub fn printHelp() void {
-    std.debug.print(
+    writeHelp(std.fs.File.stdout().deprecatedWriter()) catch {};
+}
+
+pub fn writeHelp(writer: anytype) !void {
+    try writer.writeAll(
         \\Phantty - A terminal emulator
         \\
         \\Usage: phantty [options]
         \\
         \\Options:
+        \\  --config <path>              Use this file as the main config
+        \\  --config-path <path>         Alias for --config
         \\  --font-family <name>         Font family (default: embedded fallback)
         \\  -f <name>                    Alias for --font-family
         \\  --font-family-cjk <name>     Preferred font for Chinese/Japanese/Korean glyphs
@@ -1050,7 +1173,7 @@ pub fn printHelp() void {
         \\  --ai-agent-command-timeout-ms <ms> Agent command timeout budget
         \\  --ai-agent-output-limit <bytes> Max bytes returned by each tool
         \\  --auto-update-check <bool>  Check GitHub Releases after startup
-        \\  --config-file <path>         Load additional config file (prefix ? for optional)
+        \\  --config-file <path>         Include another config file (prefix ? for optional)
         \\  --remote-enabled <bool>      Enable opt-in remote access foundation
         \\  --remote-server-url <url>    Cloudflare relay URL
         \\  --remote-server-fingerprint <fp> Expected relay fingerprint
@@ -1087,7 +1210,7 @@ pub fn printHelp() void {
         \\  --test-font-discovery        Test font discovery for common fonts
         \\  --help, -h                   Show this help message
         \\
-        \\Config file: %APPDATA%\phantty\config
+        \\Config priority: --config/--config-path, phantty.conf next to phantty.exe, then %APPDATA%\phantty\config
         \\User themes: %APPDATA%\phantty\themes\
         \\
         \\Config file uses Ghostty's key = value format. Example:
@@ -1109,8 +1232,9 @@ pub fn printHelp() void {
         \\  phantty --background "#1a1b26" --foreground "#c0caf5"
         \\  phantty --theme poimandres
         \\  phantty --window-height 40 --window-width 120
+        \\  phantty --config profiles\powershell.conf
         \\
-    , .{});
+    );
 }
 
 // ============================================================================
@@ -1295,6 +1419,8 @@ const default_config_template =
     \\# Phantty Configuration
     \\# Ghostty-compatible key = value format
     \\# See: phantty --help
+    \\# Main config path priority: --config/--config-path, phantty.conf next to phantty.exe,
+    \\# then %APPDATA%\phantty\config.
     \\
     \\# Font
     \\# font-family = JetBrains Mono
@@ -1413,6 +1539,92 @@ test "config: sessionFilePath sits next to configFilePath" {
     defer allocator.free(session);
     try std.testing.expect(std.mem.endsWith(u8, session, "session.json"));
     try std.testing.expect(std.mem.indexOf(u8, session, "phantty") != null);
+}
+
+test "config: explicit main config path beats portable and default paths" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = try tmp.dir.realpath(".", &dir_buf);
+    const portable_path = try std.fs.path.join(allocator, &.{ dir_path, "phantty.conf" });
+    defer allocator.free(portable_path);
+    const default_path = try std.fs.path.join(allocator, &.{ dir_path, "appdata", "config" });
+    defer allocator.free(default_path);
+    const explicit_path = try std.fs.path.join(allocator, &.{ dir_path, "profiles", "pwsh.conf" });
+    defer allocator.free(explicit_path);
+
+    var portable_file = try tmp.dir.createFile("phantty.conf", .{});
+    portable_file.close();
+
+    const selected = try selectConfigFilePath(allocator, explicit_path, portable_path, default_path);
+    defer allocator.free(selected);
+    try std.testing.expectEqualStrings(explicit_path, selected);
+}
+
+test "config: portable config next to exe beats default config when present" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = try tmp.dir.realpath(".", &dir_buf);
+    const portable_path = try std.fs.path.join(allocator, &.{ dir_path, "phantty.conf" });
+    defer allocator.free(portable_path);
+    const default_path = try std.fs.path.join(allocator, &.{ dir_path, "appdata", "config" });
+    defer allocator.free(default_path);
+
+    var portable_file = try tmp.dir.createFile("phantty.conf", .{});
+    portable_file.close();
+
+    const selected = try selectConfigFilePath(allocator, null, portable_path, default_path);
+    defer allocator.free(selected);
+    try std.testing.expectEqualStrings(portable_path, selected);
+}
+
+test "config: default config is used when explicit and portable paths are absent" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = try tmp.dir.realpath(".", &dir_buf);
+    const portable_path = try std.fs.path.join(allocator, &.{ dir_path, "phantty.conf" });
+    defer allocator.free(portable_path);
+    const default_path = try std.fs.path.join(allocator, &.{ dir_path, "appdata", "config" });
+    defer allocator.free(default_path);
+
+    const selected = try selectConfigFilePath(allocator, null, portable_path, default_path);
+    defer allocator.free(selected);
+    try std.testing.expectEqualStrings(default_path, selected);
+}
+
+test "config: main config path arg supports --config and --config-path" {
+    const allocator = std.testing.allocator;
+
+    const config_arg = try mainConfigPathArg(allocator, &.{ "phantty", "--config", "profiles/cmd.conf" });
+    defer if (config_arg) |path| allocator.free(path);
+    try std.testing.expectEqualStrings("profiles/cmd.conf", config_arg.?);
+
+    const config_path_arg = try mainConfigPathArg(allocator, &.{ "phantty", "--config-path=profiles/pwsh.conf" });
+    defer if (config_path_arg) |path| allocator.free(path);
+    try std.testing.expectEqualStrings("profiles/pwsh.conf", config_path_arg.?);
+}
+
+test "config: help text is writable to a caller-provided writer" {
+    const allocator = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try writeHelp(out.writer(allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "Usage: phantty [options]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "--config <path>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "--config-file <path>") != null);
 }
 
 test "config: restore-tabs-on-startup parses true/false" {

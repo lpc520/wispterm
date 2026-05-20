@@ -117,10 +117,15 @@ Options:
   --background-image-mode <m>  fill | fit | center | tile (default: fill)
   --window-height <rows>       Initial window height in cells (default: 0=auto, min: 4)
   --window-width <cols>        Initial window width in cells (default: 0=auto, min: 10)
+  --config <path>              Use this file as the main config
+  --config-path <path>         Alias for --config
+  --config-file <path>         Include another config file (prefix ? for optional)
   --version, -v                Print the Phantty version and exit
+  --show-config-path           Print the resolved main config path
   --list-fonts                 List available system fonts
+  --list-themes                List available themes
   --test-font-discovery        Test DirectWrite font discovery
-  --help                       Show help
+  --help, -h                   Show help
 ```
 
 ## Keyboard shortcuts
@@ -377,11 +382,15 @@ Notes:
 
 ## Configuration
 
-Phantty uses a Ghostty-compatible config file format (`key = value` pairs). The config file is loaded from `%APPDATA%\phantty\config`.
+Phantty uses a Ghostty-compatible config file format (`key = value` pairs). The main config path is resolved in this order:
+
+1. `--config <path>` or `--config-path <path>`
+2. `phantty.conf` next to `phantty.exe` (portable profile)
+3. `%APPDATA%\phantty\config`
 
 Press `Ctrl+,` to open the config file in your default editor, or run `phantty.exe --show-config-path` to print the resolved path.
 
-CLI flags override config file values (last wins).
+CLI flags override config file values (last wins). `config-file = extra.conf` and `--config-file extra.conf` include additional config files; they do not change the main config path.
 
 ### Example config
 
