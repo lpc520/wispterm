@@ -337,6 +337,31 @@ fn currentToolHost() ?ToolHost {
 
 const SlashCommand = enum { skills, commands, reload_skills, unknown };
 
+pub const SlashCommandSuggestion = struct {
+    command: []const u8,
+    description: []const u8,
+};
+
+const SlashCommandEntry = struct {
+    suggestion: SlashCommandSuggestion,
+    action: SlashCommand,
+};
+
+const slash_command_entries = [_]SlashCommandEntry{
+    .{
+        .suggestion = .{ .command = "/skills", .description = "list available skills" },
+        .action = .skills,
+    },
+    .{
+        .suggestion = .{ .command = "/commands", .description = "list slash commands" },
+        .action = .commands,
+    },
+    .{
+        .suggestion = .{ .command = "/reload-skills", .description = "rescan skills for future calls" },
+        .action = .reload_skills,
+    },
+};
+
 const SkillInvocation = struct {
     skill_name: []const u8,
     prompt: []const u8,
@@ -345,12 +370,47 @@ const SkillInvocation = struct {
 fn parseSlashCommand(input: []const u8) ?SlashCommand {
     const trimmed = std.mem.trim(u8, input, " \t\r\n");
     if (!std.mem.startsWith(u8, trimmed, "/")) return null;
-    if (std.mem.eql(u8, trimmed, "/skills")) return .skills;
-    if (std.mem.eql(u8, trimmed, "/commands")) return .commands;
-    if (std.mem.eql(u8, trimmed, "/reload-skills")) return .reload_skills;
+    for (slash_command_entries) |entry| {
+        if (std.mem.eql(u8, trimmed, entry.suggestion.command)) return entry.action;
+    }
     if (std.mem.indexOfAny(u8, trimmed[1..], "/ \t\r\n") != null) return null;
     if (trimmed.len < "/help".len) return null;
     return .unknown;
+}
+
+fn slashCommandSuggestionPrefix(input: []const u8, cursor_raw: usize) ?[]const u8 {
+    if (input.len == 0 or input[0] != '/') return null;
+    const cursor = @min(cursor_raw, input.len);
+    if (cursor == 0) return null;
+    const token_end = slashCommandTokenEnd(input);
+    if (cursor > token_end) return null;
+    return input[0..cursor];
+}
+
+fn slashCommandTokenEnd(input: []const u8) usize {
+    var end: usize = 0;
+    while (end < input.len and !isAsciiWhitespace(input[end])) : (end += 1) {}
+    return end;
+}
+
+pub fn slashCommandSuggestionCountForInput(input: []const u8, cursor: usize) usize {
+    const prefix = slashCommandSuggestionPrefix(input, cursor) orelse return 0;
+    var count: usize = 0;
+    for (slash_command_entries) |entry| {
+        if (std.mem.startsWith(u8, entry.suggestion.command, prefix)) count += 1;
+    }
+    return count;
+}
+
+pub fn slashCommandSuggestionAtForInput(input: []const u8, cursor: usize, suggestion_index: usize) ?SlashCommandSuggestion {
+    const prefix = slashCommandSuggestionPrefix(input, cursor) orelse return null;
+    var match_index: usize = 0;
+    for (slash_command_entries) |entry| {
+        if (!std.mem.startsWith(u8, entry.suggestion.command, prefix)) continue;
+        if (match_index == suggestion_index) return entry.suggestion;
+        match_index += 1;
+    }
+    return null;
 }
 
 fn parseSkillInvocation(input: []const u8) ?SkillInvocation {
@@ -380,11 +440,21 @@ fn isAsciiWhitespace(ch: u8) bool {
 
 fn slashCommandOutput(allocator: std.mem.Allocator, command: SlashCommand) ![]u8 {
     return switch (command) {
-        .commands => allocator.dupe(u8, "Available commands:\n/skills - list available skills\n/commands - list slash commands\n/reload-skills - rescan skills for future calls"),
+        .commands => slashCommandListOutput(allocator),
         .reload_skills => allocator.dupe(u8, "Skills will be re-read from disk on the next skill call."),
         .unknown => allocator.dupe(u8, "Unknown command. Use /commands to list commands."),
         .skills => listSkillsForDisplay(allocator),
     };
+}
+
+fn slashCommandListOutput(allocator: std.mem.Allocator) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "Available commands:");
+    for (slash_command_entries) |entry| {
+        try out.print(allocator, "\n{s} - {s}", .{ entry.suggestion.command, entry.suggestion.description });
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 fn listSkillsForDisplay(allocator: std.mem.Allocator) ![]u8 {
@@ -597,6 +667,7 @@ pub const Session = struct {
     input_scroll_row: usize = 0,
     input_scroll_follow_cursor: bool = true,
     input_select_all: bool = false,
+    slash_suggestion_selected: usize = 0,
     transcript_select_all: bool = false,
     status_buf: [512]u8 = undefined,
     status_len: usize = 0,
@@ -779,6 +850,26 @@ pub const Session = struct {
         return self.input_cursor;
     }
 
+    pub fn slashCommandSuggestionCount(self: *Session) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return slashCommandSuggestionCountForInput(self.input(), self.input_cursor);
+    }
+
+    pub fn slashCommandSuggestionAt(self: *Session, index: usize) ?SlashCommandSuggestion {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return slashCommandSuggestionAtForInput(self.input(), self.input_cursor, index);
+    }
+
+    pub fn slashCommandSuggestionSelectedIndex(self: *Session) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const count = slashCommandSuggestionCountForInput(self.input(), self.input_cursor);
+        if (count == 0) return 0;
+        return @min(self.slash_suggestion_selected, count - 1);
+    }
+
     pub fn status(self: *const Session) []const u8 {
         return self.status_buf[0..self.status_len];
     }
@@ -826,6 +917,7 @@ pub const Session = struct {
             self.input_scroll_row = 0;
             self.input_scroll_follow_cursor = true;
             self.input_select_all = false;
+            self.slash_suggestion_selected = 0;
         }
         self.transcript_select_all = false;
         self.insertInputBytesLocked(buf[0..len]);
@@ -840,6 +932,7 @@ pub const Session = struct {
             self.input_scroll_row = 0;
             self.input_scroll_follow_cursor = true;
             self.input_select_all = false;
+            self.slash_suggestion_selected = 0;
         }
         self.transcript_select_all = false;
         self.insertInputBytesLocked(text);
@@ -892,6 +985,7 @@ pub const Session = struct {
             self.input_cursor = 0;
             self.input_scroll_row = 0;
             self.input_scroll_follow_cursor = true;
+            self.slash_suggestion_selected = 0;
             self.clearSelectionLocked();
             self.mutex.unlock();
             return;
@@ -906,10 +1000,11 @@ pub const Session = struct {
             win32_backend.VK_DELETE => self.deleteInput(),
             win32_backend.VK_LEFT => self.moveInputCursorLeft(),
             win32_backend.VK_RIGHT => self.moveInputCursorRight(),
-            win32_backend.VK_UP => self.moveInputCursorVertical(max_cols, -1),
-            win32_backend.VK_DOWN => self.moveInputCursorVertical(max_cols, 1),
+            win32_backend.VK_UP => if (!self.moveSlashSuggestionSelection(-1)) self.moveInputCursorVertical(max_cols, -1),
+            win32_backend.VK_DOWN => if (!self.moveSlashSuggestionSelection(1)) self.moveInputCursorVertical(max_cols, 1),
             win32_backend.VK_HOME => self.moveInputCursorHome(),
             win32_backend.VK_END => self.moveInputCursorEnd(),
+            win32_backend.VK_TAB => _ = self.completeSlashSuggestion(),
             win32_backend.VK_ESCAPE => {
                 if (self.request_inflight) {
                     self.stopRequest();
@@ -1290,6 +1385,7 @@ pub const Session = struct {
         for (self.messages.items) |msg| msg.deinit(self.allocator);
         self.messages.clearRetainingCapacity();
         self.scroll_px = 0;
+        self.slash_suggestion_selected = 0;
         self.clearSelectionLocked();
         self.setStatusLocked("Cleared");
         history_change = self.captureHistoryChangeLocked();
@@ -1347,6 +1443,7 @@ pub const Session = struct {
             self.input_cursor = 0;
             self.input_scroll_row = 0;
             self.input_scroll_follow_cursor = true;
+            self.slash_suggestion_selected = 0;
             self.clearSelectionLocked();
             return;
         }
@@ -1367,6 +1464,7 @@ pub const Session = struct {
             self.input_cursor = 0;
             self.input_scroll_row = 0;
             self.input_scroll_follow_cursor = true;
+            self.slash_suggestion_selected = 0;
             self.clearSelectionLocked();
             return;
         }
@@ -1384,6 +1482,7 @@ pub const Session = struct {
         self.clearSelectionLocked();
         self.input_cursor = previousUtf8Boundary(self.input(), self.input_cursor);
         self.input_scroll_follow_cursor = true;
+        self.slash_suggestion_selected = 0;
     }
 
     fn moveInputCursorRight(self: *Session) void {
@@ -1392,6 +1491,7 @@ pub const Session = struct {
         self.clearSelectionLocked();
         self.input_cursor = nextUtf8Boundary(self.input(), self.input_cursor);
         self.input_scroll_follow_cursor = true;
+        self.slash_suggestion_selected = 0;
     }
 
     fn moveInputCursorHome(self: *Session) void {
@@ -1400,6 +1500,7 @@ pub const Session = struct {
         self.clearSelectionLocked();
         self.input_cursor = 0;
         self.input_scroll_follow_cursor = true;
+        self.slash_suggestion_selected = 0;
     }
 
     fn moveInputCursorEnd(self: *Session) void {
@@ -1408,6 +1509,7 @@ pub const Session = struct {
         self.clearSelectionLocked();
         self.input_cursor = self.input_len;
         self.input_scroll_follow_cursor = true;
+        self.slash_suggestion_selected = 0;
     }
 
     fn moveInputCursorVertical(self: *Session, max_cols_raw: usize, delta: i32) void {
@@ -1423,6 +1525,58 @@ pub const Session = struct {
         const target_row = if (delta < 0) current.row - 1 else current.row + 1;
         self.input_cursor = byteOffsetForVisualPosition(text, target_row, current.col, max_cols) orelse return;
         self.input_scroll_follow_cursor = true;
+        self.slash_suggestion_selected = 0;
+    }
+
+    fn moveSlashSuggestionSelection(self: *Session, delta: i32) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const count = slashCommandSuggestionCountForInput(self.input(), self.input_cursor);
+        if (count == 0) return false;
+        const current = @min(self.slash_suggestion_selected, count - 1);
+        self.slash_suggestion_selected = if (delta < 0)
+            if (current == 0) count - 1 else current - 1
+        else if (delta > 0)
+            (current + 1) % count
+        else
+            current;
+        self.clearSelectionLocked();
+        return true;
+    }
+
+    fn completeSlashSuggestion(self: *Session) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const count = slashCommandSuggestionCountForInput(self.input(), self.input_cursor);
+        if (count == 0) return false;
+        const selected = @min(self.slash_suggestion_selected, count - 1);
+        const suggestion = slashCommandSuggestionAtForInput(self.input(), self.input_cursor, selected) orelse return false;
+        const token_end = slashCommandTokenEnd(self.input());
+        const suffix_len = self.input_len - token_end;
+        if (suggestion.command.len + suffix_len > self.input_buf.len) return false;
+
+        if (suggestion.command.len > token_end) {
+            std.mem.copyBackwards(
+                u8,
+                self.input_buf[suggestion.command.len .. suggestion.command.len + suffix_len],
+                self.input_buf[token_end..self.input_len],
+            );
+        } else if (suggestion.command.len < token_end) {
+            std.mem.copyForwards(
+                u8,
+                self.input_buf[suggestion.command.len .. suggestion.command.len + suffix_len],
+                self.input_buf[token_end..self.input_len],
+            );
+        }
+        @memcpy(self.input_buf[0..suggestion.command.len], suggestion.command);
+        self.input_len = suggestion.command.len + suffix_len;
+        self.input_cursor = suggestion.command.len;
+        self.input_scroll_follow_cursor = true;
+        self.slash_suggestion_selected = 0;
+        self.clearSelectionLocked();
+        return true;
     }
 
     fn insertInputBytesLocked(self: *Session, text: []const u8) void {
@@ -1443,6 +1597,7 @@ pub const Session = struct {
         self.input_len += len;
         self.input_cursor += len;
         self.input_scroll_follow_cursor = true;
+        self.slash_suggestion_selected = 0;
     }
 
     fn deleteInputRangeLocked(self: *Session, start: usize, end: usize) void {
@@ -1457,6 +1612,7 @@ pub const Session = struct {
         }
         self.input_len -= removed;
         if (self.input_cursor > self.input_len) self.input_cursor = self.input_len;
+        self.slash_suggestion_selected = 0;
     }
 
     fn clampInputCursorLocked(self: *Session) void {
@@ -3955,6 +4111,48 @@ test "ai chat avoids slash command false positives" {
     try std.testing.expect(parseSlashCommand("/api") == null);
     try std.testing.expect(parseSlashCommand("/usr/bin") == null);
     try std.testing.expect(parseSlashCommand("/help me") == null);
+}
+
+test "ai chat slash command suggestions show and filter from input" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    session.appendInputText("/");
+
+    try std.testing.expectEqual(@as(usize, 3), session.slashCommandSuggestionCount());
+    try std.testing.expectEqualStrings("/skills", session.slashCommandSuggestionAt(0).?.command);
+
+    session.appendInputText("c");
+    try std.testing.expectEqual(@as(usize, 1), session.slashCommandSuggestionCount());
+    try std.testing.expectEqualStrings("/commands", session.slashCommandSuggestionAt(0).?.command);
+}
+
+test "ai chat slash command suggestions use arrows and tab completion" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    session.appendInputText("/");
+
+    session.handleKey(.{ .vk = win32_backend.VK_DOWN, .ctrl = false, .shift = false, .alt = false });
+    try std.testing.expectEqual(@as(usize, 1), session.slashCommandSuggestionSelectedIndex());
+
+    session.handleKey(.{ .vk = win32_backend.VK_TAB, .ctrl = false, .shift = false, .alt = false });
+    try std.testing.expectEqualStrings("/commands", session.input());
+    try std.testing.expectEqual(@as(usize, "/commands".len), session.inputCursor());
+}
+
+test "ai chat enter submits slash commands instead of completing suggestions" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    session.appendInputText("/commands");
+
+    session.handleKey(.{ .vk = win32_backend.VK_RETURN, .ctrl = false, .shift = false, .alt = false });
+
+    try std.testing.expectEqualStrings("", session.input());
+    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
+    try std.testing.expectEqual(Role.tool, session.messages.items[0].role);
+    try std.testing.expect(std.mem.indexOf(u8, session.messages.items[0].content, "/commands - list slash commands") != null);
+
+    for (session.messages.items) |msg| msg.deinit(allocator);
+    session.messages.deinit(allocator);
 }
 
 test "ai chat lists skills from explicit root paths" {

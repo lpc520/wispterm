@@ -952,6 +952,7 @@ fn isAiChatKey(ev: win32_backend.KeyEvent) bool {
         ev.vk == win32_backend.VK_DOWN or
         ev.vk == win32_backend.VK_HOME or
         ev.vk == win32_backend.VK_END or
+        ev.vk == win32_backend.VK_TAB or
         ev.vk == win32_backend.VK_ESCAPE) return true;
     if (ev.ctrl and !ev.alt and (ev.vk == 0x41 or ev.vk == 0x55 or ev.vk == 0x4C)) return true; // Ctrl+A / Ctrl+U / Ctrl+L
     return false;

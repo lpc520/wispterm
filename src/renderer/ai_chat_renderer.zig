@@ -42,6 +42,11 @@ const DETAIL_RULE_W: f32 = 3;
 const TABLE_MAX_COLS: usize = 8;
 const TABLE_CELL_PAD_X: f32 = 10;
 const TABLE_MIN_COL_W: f32 = 56;
+const SUGGESTION_ROW_H: f32 = 28;
+const SUGGESTION_PAD_Y: f32 = 6;
+const SUGGESTION_GAP: f32 = 6;
+const SUGGESTION_MAX_W: f32 = 560;
+const SUGGESTION_COMMAND_W: f32 = 148;
 
 pub const HitTarget = union(enum) {
     copy_message: usize,
@@ -306,6 +311,7 @@ pub fn render(
     if (approval) |view| {
         renderApprovalCard(view, x + LINE_PAD_X, input_h + APPROVAL_GAP, w - LINE_PAD_X * 2, APPROVAL_H);
     }
+    renderSlashSuggestions(session, layout);
 }
 
 pub fn interactionHitTest(
@@ -896,6 +902,56 @@ fn permissionDisplayName(permission: ai_chat.AgentPermission) []const u8 {
         .confirm => "Ask",
         .full => "Full",
     };
+}
+
+fn renderSlashSuggestions(session: *ai_chat.Session, layout: InputLayout) void {
+    const input_text = session.input();
+    const count = ai_chat.slashCommandSuggestionCountForInput(input_text, session.input_cursor);
+    if (count == 0) return;
+
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const popup_w = @min(layout.field_w, SUGGESTION_MAX_W);
+    const popup_x = layout.field_x;
+    const popup_y = layout.field_y + layout.field_h + SUGGESTION_GAP;
+    const popup_h = SUGGESTION_PAD_Y * 2 + SUGGESTION_ROW_H * @as(f32, @floatFromInt(count));
+    const popup_bg = mixColor(bg, fg, 0.085);
+    const border = mixColor(bg, accent, 0.36);
+    const selected = @min(session.slash_suggestion_selected, count - 1);
+
+    gl_init.renderQuadAlpha(popup_x, popup_y, popup_w, popup_h, popup_bg, 0.98);
+    gl_init.renderQuadAlpha(popup_x, popup_y + popup_h - 1, popup_w, 1, border, 0.78);
+    gl_init.renderQuadAlpha(popup_x, popup_y, popup_w, 1, mixColor(bg, fg, 0.20), 0.82);
+    gl_init.renderQuadAlpha(popup_x, popup_y, 1, popup_h, mixColor(bg, fg, 0.16), 0.72);
+    gl_init.renderQuadAlpha(popup_x + popup_w - 1, popup_y, 1, popup_h, mixColor(bg, fg, 0.16), 0.72);
+
+    const top = popup_y + popup_h - SUGGESTION_PAD_Y;
+    for (0..count) |i| {
+        const row_y = top - @as(f32, @floatFromInt(i + 1)) * SUGGESTION_ROW_H;
+        if (i == selected) {
+            gl_init.renderQuadAlpha(popup_x + 4, row_y + 2, popup_w - 8, SUGGESTION_ROW_H - 4, mixColor(bg, accent, 0.18), 0.90);
+            gl_init.renderQuadAlpha(popup_x + 4, row_y + 2, 3, SUGGESTION_ROW_H - 4, accent, 0.82);
+        }
+        const suggestion = ai_chat.slashCommandSuggestionAtForInput(input_text, session.input_cursor, i) orelse continue;
+        const text_y = row_y + @round((SUGGESTION_ROW_H - font.g_titlebar_cell_height) / 2);
+        _ = titlebar.renderTextLimited(
+            suggestion.command,
+            popup_x + 14,
+            text_y,
+            if (i == selected) mixColor(fg, accent, 0.14) else fg,
+            @min(SUGGESTION_COMMAND_W, popup_w - 28),
+        );
+        if (popup_w > SUGGESTION_COMMAND_W + 44) {
+            _ = titlebar.renderTextLimited(
+                suggestion.description,
+                popup_x + 14 + SUGGESTION_COMMAND_W,
+                text_y,
+                mixColor(bg, fg, 0.62),
+                popup_w - SUGGESTION_COMMAND_W - 28,
+            );
+        }
+    }
 }
 
 fn renderApprovalCard(view: ai_chat.ApprovalView, x: f32, y: f32, w: f32, h: f32) void {
