@@ -1352,7 +1352,7 @@ pub fn sessionLauncherExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_
 
 fn openPowerShellSession() void {
     sessionLauncherClose();
-    _ = AppWindow.spawnTabWithCommandUtf8("powershell.exe -NoLogo -NoProfile");
+    _ = AppWindow.spawnConfiguredPowerShellTab();
 }
 
 fn openWslSession() void {
@@ -2400,7 +2400,7 @@ fn sessionDesiredBoxWidth() f32 {
         return desired;
     }
 
-    desired = @max(desired, sessionTwoColumnWidth("PowerShell", "new terminal"));
+    desired = @max(desired, sessionTwoColumnWidth("PowerShell", AppWindow.configuredPowerShellSessionDetail()));
     desired = @max(desired, sessionTwoColumnWidth("SSH", "connect server"));
     desired = @max(desired, sessionTwoColumnWidth("WSL", "wsl.exe ~"));
     desired = @max(desired, sessionTwoColumnWidth("AI Agent", defaultAiModeLabel()));
@@ -2665,7 +2665,7 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
             }
             return;
         }
-        renderSessionRow(layout, window_height, 0, "PowerShell", "new terminal", g_session_launcher_selected == 0);
+        renderSessionRow(layout, window_height, 0, "PowerShell", AppWindow.configuredPowerShellSessionDetail(), g_session_launcher_selected == 0);
         renderSessionRow(layout, window_height, 1, "SSH", "connect server", g_session_launcher_selected == 1);
         renderSessionRow(layout, window_height, 2, "WSL", "wsl.exe ~", g_session_launcher_selected == 2);
         renderSessionRow(layout, window_height, 3, "AI Agent", defaultAiModeLabel(), g_session_launcher_selected == 3);

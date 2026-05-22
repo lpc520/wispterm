@@ -587,6 +587,68 @@ pub fn spawnTabWithCommandUtf8ReturningSurface(command: []const u8) ?*Surface {
     return activeSurface();
 }
 
+pub fn syncDefaultShellCommandFromConfig(shell: []const u8) void {
+    tab.g_shell_cmd_len = App.resolveShellCommandUtf16(&tab.g_shell_cmd_buf, shell);
+}
+
+fn shellExecutableTokenUtf16(raw: []const u16) []const u16 {
+    var start: usize = 0;
+    var end: usize = raw.len;
+
+    while (end > start and raw[end - 1] == 0) : (end -= 1) {}
+    while (start < end and (raw[start] == ' ' or raw[start] == '\t')) : (start += 1) {}
+    if (start >= end) return raw[start..end];
+
+    if (raw[start] == '"') {
+        start += 1;
+        var quote_end = start;
+        while (quote_end < end and raw[quote_end] != '"') : (quote_end += 1) {}
+        return raw[start..quote_end];
+    }
+
+    var token_end = start;
+    while (token_end < end and raw[token_end] != ' ' and raw[token_end] != '\t') : (token_end += 1) {}
+    return raw[start..token_end];
+}
+
+fn shellBasenameUtf16(raw: []const u16) []const u16 {
+    const token = shellExecutableTokenUtf16(raw);
+    var start: usize = 0;
+    for (token, 0..) |unit, idx| {
+        if (unit == '\\' or unit == '/') start = idx + 1;
+    }
+    return token[start..];
+}
+
+fn utf16AsciiEqlIgnoreCase(wide: []const u16, ascii: []const u8) bool {
+    if (wide.len != ascii.len) return false;
+    for (wide, ascii) |wide_unit, ascii_unit| {
+        if (wide_unit > 0x7f) return false;
+        const wide_ascii: u8 = @intCast(wide_unit);
+        if (std.ascii.toLower(wide_ascii) != std.ascii.toLower(ascii_unit)) return false;
+    }
+    return true;
+}
+
+fn shellCommandLooksLikePwsh(shell_cmd: []const u16) bool {
+    const base = shellBasenameUtf16(shell_cmd);
+    return utf16AsciiEqlIgnoreCase(base, "pwsh.exe") or utf16AsciiEqlIgnoreCase(base, "pwsh");
+}
+
+pub fn configuredPowerShellCommandForShell(shell_cmd: []const u16) []const u8 {
+    if (shellCommandLooksLikePwsh(shell_cmd)) return "pwsh.exe -NoLogo -NoProfile";
+    return "powershell.exe -NoLogo -NoProfile";
+}
+
+pub fn configuredPowerShellSessionDetail() []const u8 {
+    if (shellCommandLooksLikePwsh(tab.getShellCmd())) return "pwsh.exe";
+    return "powershell.exe";
+}
+
+pub fn spawnConfiguredPowerShellTab() bool {
+    return spawnTabWithCommandUtf8(configuredPowerShellCommandForShell(tab.getShellCmd()));
+}
+
 pub fn spawnAiChatTab(
     name: []const u8,
     base_url: []const u8,
@@ -1119,6 +1181,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     if (g_app) |app| {
         app.updateConfig(cfg);
     }
+    syncDefaultShellCommandFromConfig(cfg.shell);
     ai_chat.configureAgent(.{
         .enabled = cfg.@"ai-agent-enabled",
         .permission = cfg.@"ai-agent-permission",
@@ -1899,7 +1962,7 @@ fn agentTabCommand(kind_raw: []const u8, command_raw: ?[]const u8) anyerror!?[]c
 
     const kind = std.mem.trim(u8, kind_raw, " \t\r\n");
     if (kind.len == 0 or std.ascii.eqlIgnoreCase(kind, "default")) return null;
-    if (std.ascii.eqlIgnoreCase(kind, "powershell")) return "powershell.exe -NoLogo -NoProfile";
+    if (std.ascii.eqlIgnoreCase(kind, "powershell")) return configuredPowerShellCommandForShell(tab.getShellCmd());
     if (std.ascii.eqlIgnoreCase(kind, "pwsh")) return "pwsh.exe -NoLogo -NoProfile";
     if (std.ascii.eqlIgnoreCase(kind, "cmd")) return "cmd.exe";
     if (std.ascii.eqlIgnoreCase(kind, "wsl")) return "wsl.exe ~";
@@ -3082,4 +3145,42 @@ fn runMainLoop(self: *AppWindow) !void {
     browser_panel.deinit();
 
     // Tab cleanup is handled by AppWindow.deinit()
+}
+
+test "appwindow: PowerShell session command follows configured PowerShell flavor" {
+    const testing = std.testing;
+
+    const powershell = std.unicode.utf8ToUtf16LeStringLiteral("powershell.exe");
+    try testing.expectEqualStrings(
+        "powershell.exe -NoLogo -NoProfile",
+        configuredPowerShellCommandForShell(powershell),
+    );
+
+    const pwsh = std.unicode.utf8ToUtf16LeStringLiteral("pwsh.exe");
+    try testing.expectEqualStrings(
+        "pwsh.exe -NoLogo -NoProfile",
+        configuredPowerShellCommandForShell(pwsh),
+    );
+
+    const quoted_pwsh = std.unicode.utf8ToUtf16LeStringLiteral("\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoLogo");
+    try testing.expectEqualStrings(
+        "pwsh.exe -NoLogo -NoProfile",
+        configuredPowerShellCommandForShell(quoted_pwsh),
+    );
+}
+
+test "appwindow: syncDefaultShellCommandFromConfig refreshes tab default shell" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    defer {
+        tab.g_shell_cmd_buf = [_]u16{0} ** tab.g_shell_cmd_buf.len;
+        tab.g_shell_cmd_len = 0;
+    }
+
+    syncDefaultShellCommandFromConfig("pwsh");
+
+    const actual = try std.unicode.utf16LeToUtf8Alloc(allocator, tab.getShellCmd());
+    defer allocator.free(actual);
+    try testing.expectEqualStrings("pwsh.exe", actual);
 }

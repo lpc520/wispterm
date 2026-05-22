@@ -123,6 +123,29 @@ fn freeOptStr(allocator: std.mem.Allocator, s: ?[]const u8) void {
     if (s) |v| allocator.free(v);
 }
 
+fn copyShellLiteral(out_buf: *[256]u16, lit: []const u16) usize {
+    const len = @min(lit.len, out_buf.len - 1);
+    @memcpy(out_buf[0..len], lit[0..len]);
+    out_buf[len] = 0;
+    return len;
+}
+
+pub fn resolveShellCommandUtf16(out_buf: *[256]u16, cmd: []const u8) usize {
+    if (std.mem.eql(u8, cmd, "cmd")) {
+        return copyShellLiteral(out_buf, std.unicode.utf8ToUtf16LeStringLiteral("cmd.exe"));
+    } else if (std.mem.eql(u8, cmd, "powershell")) {
+        return copyShellLiteral(out_buf, std.unicode.utf8ToUtf16LeStringLiteral("powershell.exe"));
+    } else if (std.mem.eql(u8, cmd, "pwsh")) {
+        return copyShellLiteral(out_buf, std.unicode.utf8ToUtf16LeStringLiteral("pwsh.exe"));
+    } else if (std.mem.eql(u8, cmd, "wsl")) {
+        return copyShellLiteral(out_buf, std.unicode.utf8ToUtf16LeStringLiteral("wsl.exe"));
+    }
+
+    const len = std.unicode.utf8ToUtf16Le(out_buf[0 .. out_buf.len - 1], cmd) catch 0;
+    out_buf[len] = 0;
+    return len;
+}
+
 /// Initialize the App with configuration.
 pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
     const font_family = try dupeStr(allocator, cfg.@"font-family");
@@ -203,33 +226,7 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
         .window_threads = .empty,
     };
 
-    // Resolve shell command from config
-    const cmd = cfg.shell;
-    if (std.mem.eql(u8, cmd, "cmd")) {
-        const lit = std.unicode.utf8ToUtf16LeStringLiteral("cmd.exe");
-        @memcpy(app.shell_cmd_buf[0..lit.len], lit);
-        app.shell_cmd_buf[lit.len] = 0;
-        app.shell_cmd_len = lit.len;
-    } else if (std.mem.eql(u8, cmd, "powershell")) {
-        const lit = std.unicode.utf8ToUtf16LeStringLiteral("powershell.exe");
-        @memcpy(app.shell_cmd_buf[0..lit.len], lit);
-        app.shell_cmd_buf[lit.len] = 0;
-        app.shell_cmd_len = lit.len;
-    } else if (std.mem.eql(u8, cmd, "pwsh")) {
-        const lit = std.unicode.utf8ToUtf16LeStringLiteral("pwsh.exe");
-        @memcpy(app.shell_cmd_buf[0..lit.len], lit);
-        app.shell_cmd_buf[lit.len] = 0;
-        app.shell_cmd_len = lit.len;
-    } else if (std.mem.eql(u8, cmd, "wsl")) {
-        const lit = std.unicode.utf8ToUtf16LeStringLiteral("wsl.exe");
-        @memcpy(app.shell_cmd_buf[0..lit.len], lit);
-        app.shell_cmd_buf[lit.len] = 0;
-        app.shell_cmd_len = lit.len;
-    } else {
-        const len = std.unicode.utf8ToUtf16Le(&app.shell_cmd_buf, cmd) catch 0;
-        app.shell_cmd_buf[len] = 0;
-        app.shell_cmd_len = len;
-    }
+    app.shell_cmd_len = resolveShellCommandUtf16(&app.shell_cmd_buf, cfg.shell);
     std.debug.print("Shell command resolved: '{s}'\n", .{cfg.shell});
     if (app.remote_client) |client| {
         std.debug.print("Remote session key: {s}\n", .{client.sessionKey()});
@@ -335,6 +332,7 @@ pub fn updateConfig(self: *App, cfg: *const Config) void {
     self.ai_agent_output_limit = cfg.@"ai-agent-output-limit";
     self.restore_tabs_on_startup = cfg.@"restore-tabs-on-startup";
     self.auto_update_check = cfg.@"auto-update-check";
+    self.shell_cmd_len = resolveShellCommandUtf16(&self.shell_cmd_buf, cfg.shell);
 }
 
 // ============================================================================
@@ -674,4 +672,22 @@ pub fn deinit(self: *App) void {
 
     self.windows.deinit(self.allocator);
     self.window_threads.deinit(self.allocator);
+}
+
+test "app: updateConfig refreshes configured shell command" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Config{};
+    cfg.shell = "powershell";
+    var app = try App.init(allocator, cfg);
+    defer app.deinit();
+
+    var next = Config{};
+    next.shell = "pwsh";
+    app.updateConfig(&next);
+
+    const actual = try std.unicode.utf16LeToUtf8Alloc(allocator, app.getShellCmd());
+    defer allocator.free(actual);
+    try testing.expectEqualStrings("pwsh.exe", actual);
 }
