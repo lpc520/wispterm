@@ -635,9 +635,16 @@ fn shellCommandLooksLikePwsh(shell_cmd: []const u16) bool {
     return utf16AsciiEqlIgnoreCase(base, "pwsh.exe") or utf16AsciiEqlIgnoreCase(base, "pwsh");
 }
 
+fn shellCommandLooksLikePowerShell(shell_cmd: []const u16) bool {
+    const base = shellBasenameUtf16(shell_cmd);
+    return shellCommandLooksLikePwsh(shell_cmd) or
+        utf16AsciiEqlIgnoreCase(base, "powershell.exe") or
+        utf16AsciiEqlIgnoreCase(base, "powershell");
+}
+
 pub fn configuredPowerShellCommandForShell(shell_cmd: []const u16) []const u8 {
-    if (shellCommandLooksLikePwsh(shell_cmd)) return "pwsh.exe -NoLogo -NoProfile";
-    return "powershell.exe -NoLogo -NoProfile";
+    if (shellCommandLooksLikePwsh(shell_cmd)) return "pwsh.exe";
+    return "powershell.exe";
 }
 
 pub fn configuredPowerShellSessionDetail() []const u8 {
@@ -646,7 +653,16 @@ pub fn configuredPowerShellSessionDetail() []const u8 {
 }
 
 pub fn spawnConfiguredPowerShellTab() bool {
-    return spawnTabWithCommandUtf8(configuredPowerShellCommandForShell(tab.getShellCmd()));
+    const shell_cmd = tab.getShellCmd();
+    if (shellCommandLooksLikePowerShell(shell_cmd)) {
+        const allocator = g_allocator orelse return false;
+        var cwd_buf: [260]u16 = undefined;
+        const cwd = getActiveCwd(&cwd_buf);
+        if (!tab.spawnTabWithCommandAndCwd(allocator, term_cols, term_rows, shell_cmd, g_cursor_style, g_cursor_blink, cwd)) return false;
+        clearUiStateOnTabChange();
+        return true;
+    }
+    return spawnTabWithCommandUtf8(configuredPowerShellCommandForShell(shell_cmd));
 }
 
 pub fn spawnAiChatTab(
@@ -3152,19 +3168,19 @@ test "appwindow: PowerShell session command follows configured PowerShell flavor
 
     const powershell = std.unicode.utf8ToUtf16LeStringLiteral("powershell.exe");
     try testing.expectEqualStrings(
-        "powershell.exe -NoLogo -NoProfile",
+        "powershell.exe",
         configuredPowerShellCommandForShell(powershell),
     );
 
     const pwsh = std.unicode.utf8ToUtf16LeStringLiteral("pwsh.exe");
     try testing.expectEqualStrings(
-        "pwsh.exe -NoLogo -NoProfile",
+        "pwsh.exe",
         configuredPowerShellCommandForShell(pwsh),
     );
 
     const quoted_pwsh = std.unicode.utf8ToUtf16LeStringLiteral("\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoLogo");
     try testing.expectEqualStrings(
-        "pwsh.exe -NoLogo -NoProfile",
+        "pwsh.exe",
         configuredPowerShellCommandForShell(quoted_pwsh),
     );
 }
