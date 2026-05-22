@@ -183,6 +183,7 @@ pub fn deinit(self: *AppWindow) void {
     tab.g_tab_count = 0;
     tab.g_remote_client = null;
     if (is_last_window) deinitGlobalAgentHistoryStore(self.allocator);
+    markdown_preview_panel.deinit();
     browser_panel.deinit();
 }
 
@@ -2805,6 +2806,10 @@ fn runMainLoop(self: *AppWindow) !void {
         if (config_watcher) |*w| checkConfigReload(allocator, w);
         overlays.tickSessionLauncher();
         file_explorer.tickAsync();
+        if (markdown_preview_panel.tickAsync()) {
+            g_force_rebuild = true;
+            g_cells_valid = false;
+        }
         maybePrintMemoryDebug(std.time.milliTimestamp());
         flushAgentHistoryStoreIfDirty(false);
 
@@ -3073,6 +3078,7 @@ fn runMainLoop(self: *AppWindow) !void {
 
     // Clean up file explorer async state (join background thread, free job)
     file_explorer.deinit();
+    markdown_preview_panel.deinit();
     browser_panel.deinit();
 
     // Tab cleanup is handled by AppWindow.deinit()

@@ -47,10 +47,6 @@ pub const pasteImageFromClipboard = clipboard.pasteImageFromClipboard;
 pub const writeTextToActivePty = clipboard.writeTextToActivePty;
 pub const writeTextToSurfacePty = clipboard.writeTextToSurfacePty;
 const looksLikePreviewPath = preview_source.looksLikePreviewPath;
-const readLocalPreviewSource = preview_source.readLocalPreviewSource;
-const readRemotePreviewSource = preview_source.readRemotePreviewSource;
-const readWslPreviewSource = preview_source.readWslPreviewSource;
-const readTerminalPreviewSource = preview_source.readTerminalPreviewSource;
 const resolveTerminalPreviewPath = preview_source.resolveTerminalPreviewPath;
 const basenameForPreview = preview_source.basenameForPreview;
 const buildPreviewCommand = preview_source.buildPreviewCommand;
@@ -1972,17 +1968,34 @@ fn updateInteractiveUnderlineAtMouse(xpos: f64, ypos: f64, ctrl: bool, shift: bo
     setUrlUnderline(surface, viewportOffsetForSurface(surface) + token.row, token.start_col, token.end_col);
 }
 
-fn openRenderedPreview(allocator: std.mem.Allocator, kind: markdown_preview.Kind, title: []const u8, path: []const u8, source: []const u8) bool {
-    _ = allocator;
-    const perf = ui_perf.begin("input.open_rendered_preview");
+fn openPreviewAsync(kind: markdown_preview.Kind, title: []const u8, path: []const u8, source_kind: markdown_preview_panel.PreviewSourceKind) bool {
+    const perf = ui_perf.begin("input.open_preview_async");
     defer perf.end();
 
-    markdown_preview_panel.open(kind, title, path, source);
+    if (!markdown_preview_panel.beginAsyncLoad(kind, title, path, source_kind)) {
+        file_explorer.setTransferStatus(.failed, "Preview failed");
+        return true;
+    }
     if (AppWindow.g_window) |win| syncPanelGridFromWindowSize(win.width, win.height);
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
-    file_explorer.setTransferStatus(.success, title);
     return true;
+}
+
+fn fileExplorerPreviewSourceKind() ?markdown_preview_panel.PreviewSourceKind {
+    return switch (file_explorer.g_mode) {
+        .local => .local,
+        .wsl => .wsl,
+        .remote => if (file_explorer.g_has_ssh_conn) .{ .remote = file_explorer.g_ssh_conn } else null,
+    };
+}
+
+fn terminalPreviewSourceKind(surface: *Surface) ?markdown_preview_panel.PreviewSourceKind {
+    return switch (surface.launch_kind) {
+        .windows => .local,
+        .wsl => .wsl,
+        .ssh => if (surface.ssh_connection) |conn| .{ .remote = conn } else null,
+    };
 }
 
 fn openFileExplorerPreview(row_idx: usize) bool {
@@ -1995,20 +2008,13 @@ fn openFileExplorerPreview(row_idx: usize) bool {
 
     const path = entry.path_buf[0..entry.path_len];
     const kind = markdown_preview.detectKind(path) orelse return false;
-    const allocator = AppWindow.g_allocator orelse return false;
     const title = entry.name_buf[0..entry.name_len];
-
-    const source = switch (file_explorer.g_mode) {
-        .local => readLocalPreviewSource(allocator, path),
-        .wsl => readWslPreviewSource(allocator, path),
-        .remote => readRemotePreviewSource(allocator, path),
-    } catch |err| {
-        file_explorer.setTransferStatus(.failed, if (err == error.PreviewTooLarge) "Preview too large" else "Preview failed");
+    const source_kind = fileExplorerPreviewSourceKind() orelse {
+        file_explorer.setTransferStatus(.failed, "Preview failed");
         return true;
     };
-    defer allocator.free(source);
 
-    return openRenderedPreview(allocator, kind, title, path, source);
+    return openPreviewAsync(kind, title, path, source_kind);
 }
 
 fn openPreviewPanelForCell(surface: *Surface, cell_pos: CellPos) bool {
@@ -2023,13 +2029,12 @@ fn openPreviewPanelForCell(surface: *Surface, cell_pos: CellPos) bool {
         };
         defer allocator.free(resolved_path);
 
-        const source = readTerminalPreviewSource(allocator, surface, resolved_path) catch |err| {
-            file_explorer.setTransferStatus(.failed, if (err == error.PreviewTooLarge) "Preview too large" else "Preview failed");
+        const source_kind = terminalPreviewSourceKind(surface) orelse {
+            file_explorer.setTransferStatus(.failed, "Preview failed");
             return true;
         };
-        defer allocator.free(source);
 
-        return openRenderedPreview(allocator, kind, basenameForPreview(path), resolved_path, source);
+        return openPreviewAsync(kind, basenameForPreview(path), resolved_path, source_kind);
     }
 
     const command = buildPreviewCommand(allocator, path) orelse return false;

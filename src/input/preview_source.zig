@@ -22,6 +22,12 @@ fn isPreviewImagePath(path: []const u8) bool {
         endsWithIgnoreCase(path, ".webp");
 }
 
+pub const SourceKind = union(enum) {
+    local,
+    wsl,
+    remote: Surface.SshConnection,
+};
+
 pub fn looksLikePreviewPath(path: []const u8) bool {
     if (path.len == 0) return false;
     if (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://")) return false;
@@ -85,6 +91,14 @@ fn readSshPreviewSource(allocator: std.mem.Allocator, conn: *const Surface.SshCo
 pub fn readRemotePreviewSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (!file_explorer.g_has_ssh_conn) return error.PreviewFailed;
     return readSshPreviewSource(allocator, &file_explorer.g_ssh_conn, path);
+}
+
+pub fn readPreviewSourceForKind(allocator: std.mem.Allocator, source_kind: SourceKind, path: []const u8) ![]u8 {
+    return switch (source_kind) {
+        .local => readLocalPreviewSource(allocator, path),
+        .wsl => readWslPreviewSource(allocator, path),
+        .remote => |conn| readSshPreviewSource(allocator, &conn, path),
+    };
 }
 
 fn buildWslPreviewReadCommand(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
