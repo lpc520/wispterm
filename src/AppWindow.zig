@@ -219,6 +219,7 @@ threadlocal var g_debug_memory: bool = false;
 threadlocal var g_debug_memory_last_ms: i64 = 0;
 threadlocal var g_remote_layout_last_ms: i64 = 0;
 threadlocal var g_remote_ai_sinks: [tab.MAX_TABS]RemoteAiInputSink = undefined;
+threadlocal var g_last_transfer_notification_seq: u64 = 0;
 
 // Global theme (set at startup via config)
 pub threadlocal var g_theme: Theme = Theme.default();
@@ -1170,6 +1171,7 @@ fn onWin32Resize(width: i32, height: i32) void {
     overlays.renderDebugOverlay(@floatFromInt(fb_width));
     overlays.renderCloseShortcutConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
+    overlays.renderTransferToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderUpdatePrompt(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderWindowCloseConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
 
@@ -1199,6 +1201,15 @@ pub fn reloadConfigImmediate(allocator: std.mem.Allocator) void {
     };
     defer cfg.deinit(allocator);
     applyReloadedConfig(allocator, &cfg);
+}
+
+fn syncTransferToastFromFileExplorer() void {
+    const notification = file_explorer.latestTransferNotification() orelse return;
+    if (notification.seq == g_last_transfer_notification_seq) return;
+    g_last_transfer_notification_seq = notification.seq;
+    overlays.showTransferToast(notification.kind, notification.status, notification.message);
+    g_force_rebuild = true;
+    g_cells_valid = false;
 }
 
 /// Apply freshly loaded configuration to this window/font/theme state.
@@ -2895,6 +2906,7 @@ fn runMainLoop(self: *AppWindow) !void {
         if (config_watcher) |*w| checkConfigReload(allocator, w);
         overlays.tickSessionLauncher();
         file_explorer.tickAsync();
+        syncTransferToastFromFileExplorer();
         if (markdown_preview_panel.tickAsync()) {
             g_force_rebuild = true;
             g_cells_valid = false;
@@ -3144,6 +3156,7 @@ fn runMainLoop(self: *AppWindow) !void {
         overlays.renderDebugOverlay(@floatFromInt(fb_width));
         overlays.renderCloseShortcutConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
+        overlays.renderTransferToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderUpdatePrompt(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderWindowCloseConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
         renderImePreedit(win, fb_width, fb_height);

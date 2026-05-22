@@ -2054,7 +2054,7 @@ fn downloadTerminalFileAtCell(surface: *Surface, cell_pos: CellPos) bool {
     defer allocator.free(path);
 
     const resolved_path = resolveTerminalPreviewPath(allocator, surface, path) catch {
-        file_explorer.setTransferStatus(.failed, "Download failed");
+        file_explorer.setTransferStatusForKind(.download, .failed, "Download failed");
         return true;
     };
     defer allocator.free(resolved_path);
@@ -2065,13 +2065,13 @@ fn downloadTerminalFileAtCell(surface: *Surface, cell_pos: CellPos) bool {
     var dl_buf: [260]u8 = undefined;
     const dl_path = getDownloadsFolder(&dl_buf);
     if (dl_path.len == 0) {
-        file_explorer.setTransferStatus(.failed, "Download folder missing");
+        file_explorer.setTransferStatusForKind(.download, .failed, "Download folder missing");
         return true;
     }
 
     var dst_buf: [512]u8 = undefined;
     const dst = std.fmt.bufPrint(&dst_buf, "{s}\\{s}", .{ dl_path, name }) catch {
-        file_explorer.setTransferStatus(.failed, "Path too long");
+        file_explorer.setTransferStatusForKind(.download, .failed, "Path too long");
         return true;
     };
 

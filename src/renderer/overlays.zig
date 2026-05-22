@@ -95,6 +95,13 @@ threadlocal var g_copy_toast_until_ms: i64 = 0;
 threadlocal var g_copy_toast_buf: [64]u8 = undefined;
 threadlocal var g_copy_toast_len: usize = 0;
 
+const TRANSFER_TOAST_DURATION_MS: i64 = 2500;
+threadlocal var g_transfer_toast_until_ms: i64 = 0;
+threadlocal var g_transfer_toast_sticky: bool = false;
+threadlocal var g_transfer_toast_status: AppWindow.file_explorer.TransferStatus = .idle;
+threadlocal var g_transfer_toast_buf: [160]u8 = undefined;
+threadlocal var g_transfer_toast_len: usize = 0;
+
 const UPDATE_PROMPT_DURATION_MS: i64 = 10000;
 const UPDATE_STATUS_DURATION_MS: i64 = 2500;
 const SSH_CWD_HELP_URL = "https://github.com/xuzhougeng/phantty#ssh-current-directory-for-drag-and-drop-uploads";
@@ -3352,6 +3359,61 @@ pub fn showCopyToast(byte_count: usize) void {
     g_copy_toast_until_ms = std.time.milliTimestamp() + COPY_TOAST_DURATION_MS;
 }
 
+fn transferToastVerb(kind: AppWindow.file_explorer.TransferKind, status: AppWindow.file_explorer.TransferStatus) []const u8 {
+    return switch (kind) {
+        .download => switch (status) {
+            .in_progress => "Downloading",
+            .success => "Downloaded",
+            .failed => "Download failed",
+            .idle => "Download",
+        },
+        .upload => switch (status) {
+            .in_progress => "Uploading",
+            .success => "Uploaded",
+            .failed => "Upload failed",
+            .idle => "Upload",
+        },
+    };
+}
+
+fn formatTransferToast(
+    buf: []u8,
+    kind: AppWindow.file_explorer.TransferKind,
+    status: AppWindow.file_explorer.TransferStatus,
+    message: []const u8,
+) ![]u8 {
+    return std.fmt.bufPrint(buf, "{s}: {s}", .{ transferToastVerb(kind, status), message });
+}
+
+pub fn showTransferToast(
+    kind: AppWindow.file_explorer.TransferKind,
+    status: AppWindow.file_explorer.TransferStatus,
+    message: []const u8,
+) void {
+    const msg = formatTransferToast(&g_transfer_toast_buf, kind, status, message) catch return;
+    g_transfer_toast_len = msg.len;
+    g_transfer_toast_status = status;
+    g_transfer_toast_sticky = status == .in_progress;
+    g_transfer_toast_until_ms = std.time.milliTimestamp() + TRANSFER_TOAST_DURATION_MS;
+}
+
+test "overlays: transfer toast text describes download states" {
+    var buf: [160]u8 = undefined;
+
+    try std.testing.expectEqualStrings(
+        "Downloading: file.txt",
+        try formatTransferToast(&buf, .download, .in_progress, "file.txt"),
+    );
+    try std.testing.expectEqualStrings(
+        "Downloaded: file.txt",
+        try formatTransferToast(&buf, .download, .success, "file.txt"),
+    );
+    try std.testing.expectEqualStrings(
+        "Download failed: file.txt",
+        try formatTransferToast(&buf, .download, .failed, "file.txt"),
+    );
+}
+
 fn showVersionToast() void {
     const msg = app_metadata.versionLine(&g_copy_toast_buf) catch return;
     g_copy_toast_len = msg.len;
@@ -3516,6 +3578,42 @@ pub fn renderCopyToast(window_width: f32, window_height: f32) void {
         titlebar.renderTitlebarChar(@intCast(ch), x, y, text_color);
         x += titlebar.titlebarGlyphAdvance(@intCast(ch));
     }
+}
+
+pub fn renderTransferToast(window_width: f32, window_height: f32) void {
+    _ = window_height;
+    const now = std.time.milliTimestamp();
+    if (!g_transfer_toast_sticky and now >= g_transfer_toast_until_ms) return;
+    if (g_transfer_toast_len == 0) return;
+
+    const text = g_transfer_toast_buf[0..g_transfer_toast_len];
+    const pad_h: f32 = 14;
+    const pad_v: f32 = 6;
+    const line_h = font.g_titlebar_cell_height + pad_v * 2;
+
+    var text_width: f32 = 0;
+    for (text) |ch| {
+        text_width += titlebar.titlebarGlyphAdvance(@intCast(ch));
+    }
+
+    const max_w = @max(180.0, window_width - 32.0);
+    const bg_w = @min(text_width + pad_h * 2, max_w);
+    const bg_x = @round(@max(12.0, window_width - bg_w - 16.0));
+    const bg_y: f32 = 60;
+
+    const accent = switch (g_transfer_toast_status) {
+        .in_progress => AppWindow.g_theme.cursor_color,
+        .success => .{ 0.24, 1.0, 0.44 },
+        .failed => .{ 1.0, 0.30, 0.28 },
+        .idle => AppWindow.g_theme.foreground,
+    };
+    const bg = mixColor(AppWindow.g_theme.background, accent, 0.16);
+    gl_init.renderQuadAlpha(bg_x, bg_y, bg_w, line_h, bg, 0.96);
+    gl_init.renderQuadAlpha(bg_x, bg_y, 3, line_h, accent, 0.88);
+
+    const text_x = bg_x + pad_h;
+    const y = bg_y + pad_v;
+    renderTitlebarTextStrongLimited(text, text_x, y, accent, bg_w - pad_h * 2);
 }
 
 pub fn renderUpdatePrompt(window_width: f32, window_height: f32) void {

@@ -233,7 +233,8 @@ fn renderFiles(
         }
     }
 
-    // Transfer status bar at bottom of panel (auto-hides after 5 seconds)
+    // Loading status stays local to the panel; transfer status is shown by the
+    // global bottom-right toast so terminal and File Explorer downloads match.
     if (file_explorer.g_loading) {
         const status_h: f32 = @max(24, font.g_titlebar_cell_height + 8);
         const status_y: f32 = 0;
@@ -241,39 +242,6 @@ fn renderFiles(
         const ty = status_y + (status_h - font.g_titlebar_cell_height) / 2;
         const prefix_end = titlebar.renderTextLimited("Loading: ", panel_x + 8, ty, accent, explorer_w - 16);
         _ = titlebar.renderTextLimited(file_explorer.g_loading_msg[0..file_explorer.g_loading_msg_len], prefix_end, ty, fg, explorer_w - (prefix_end - panel_x) - 8);
-    } else if (file_explorer.g_transfer_status != .idle) {
-        const now = std.time.milliTimestamp();
-        const elapsed = now - file_explorer.g_transfer_time;
-        if (elapsed < 5000 or file_explorer.g_transfer_status == .in_progress) {
-            const status_h: f32 = @max(24, font.g_titlebar_cell_height + 8);
-            const status_y: f32 = 0; // bottom of panel (GL y=0)
-            const status_bg_color = switch (file_explorer.g_transfer_status) {
-                .in_progress => blend(bg, accent, 0.15),
-                .success => blend(bg, .{ 0.2, 0.8, 0.2 }, 0.15),
-                .failed => blend(bg, .{ 0.8, 0.2, 0.2 }, 0.15),
-                .idle => unreachable,
-            };
-            gl_init.renderQuad(panel_x, status_y, explorer_w, status_h, status_bg_color);
-
-            const prefix = switch (file_explorer.g_transfer_status) {
-                .in_progress => "Transferring: ",
-                .success => "Done: ",
-                .failed => "Failed: ",
-                .idle => unreachable,
-            };
-            const status_text_color = switch (file_explorer.g_transfer_status) {
-                .in_progress => accent,
-                .success => blend(bg, .{ 0.2, 0.9, 0.2 }, 0.9),
-                .failed => blend(bg, .{ 0.9, 0.2, 0.2 }, 0.9),
-                .idle => unreachable,
-            };
-            const ty = status_y + (status_h - font.g_titlebar_cell_height) / 2;
-            const prefix_end = titlebar.renderTextLimited(prefix, panel_x + 8, ty, status_text_color, explorer_w - 16);
-            _ = titlebar.renderTextLimited(file_explorer.g_transfer_msg[0..file_explorer.g_transfer_msg_len], prefix_end, ty, fg, explorer_w - (prefix_end - panel_x) - 8);
-        } else {
-            // Auto-hide after timeout
-            file_explorer.g_transfer_status = .idle;
-        }
     }
 }
 

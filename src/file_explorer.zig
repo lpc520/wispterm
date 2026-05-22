@@ -66,6 +66,20 @@ pub threadlocal var g_loading_msg: [128]u8 = undefined;
 pub threadlocal var g_loading_msg_len: u8 = 0;
 
 pub const TransferStatus = enum { idle, in_progress, success, failed };
+pub const TransferKind = enum { upload, download };
+
+pub const TransferNotification = struct {
+    seq: u64,
+    kind: TransferKind,
+    status: TransferStatus,
+    message: []const u8,
+};
+
+pub threadlocal var g_transfer_notification_seq: u64 = 0;
+threadlocal var g_transfer_notification_kind: TransferKind = .download;
+threadlocal var g_transfer_notification_status: TransferStatus = .idle;
+threadlocal var g_transfer_notification_msg: [128]u8 = undefined;
+threadlocal var g_transfer_notification_msg_len: u8 = 0;
 
 // Scroll state
 pub threadlocal var g_scroll_offset: f32 = 0;
@@ -122,7 +136,6 @@ threadlocal var g_async_job: ?*AsyncListJob = null;
 threadlocal var g_pending_async_list: ?PendingAsyncList = null;
 threadlocal var g_async_context_id: u64 = 1;
 
-const TransferKind = enum { upload, download };
 const TransferFn = *const fn (std.mem.Allocator, *const Surface.SshConnection, []const u8, []const u8) scp.TransferResult;
 pub const TransferSuccessCallback = *const fn (?*anyopaque) void;
 pub const TransferDestroyCallback = *const fn (?*anyopaque) void;
@@ -920,7 +933,7 @@ fn startTransferJob(kind: TransferKind, conn: *const Surface.SshConnection, src:
 fn startTransferJobWithCompletion(kind: TransferKind, conn: *const Surface.SshConnection, src: []const u8, dst: []const u8, display: []const u8, transfer_fn: TransferFn, completion: TransferCompletion) bool {
     if (src.len > TRANSFER_PATH_MAX or dst.len > TRANSFER_PATH_MAX) {
         destroyTransferCompletion(completion);
-        setTransferStatus(.failed, "Path too long");
+        setTransferStatusForKind(kind, .failed, "Path too long");
         return false;
     }
 
@@ -945,7 +958,7 @@ fn startTransferRequest(request: TransferRequest) bool {
     if (g_transfer_job != null) {
         g_transfer_queue.append(std.heap.page_allocator, request) catch {
             destroyTransferRequest(request);
-            setTransferStatus(.failed, "Transfer queue full");
+            setTransferStatusForKind(request.kind, .failed, "Transfer queue full");
             return false;
         };
         return true;
@@ -957,7 +970,7 @@ fn startTransferRequestNow(request: TransferRequest) bool {
     const allocator = std.heap.page_allocator;
     const job = allocator.create(TransferJob) catch {
         destroyTransferRequest(request);
-        setTransferStatus(.failed, "Transfer start failed");
+        setTransferStatusForKind(request.kind, .failed, "Transfer start failed");
         return false;
     };
 
@@ -968,12 +981,12 @@ fn startTransferRequestNow(request: TransferRequest) bool {
     const thread = std.Thread.spawn(.{}, transferThread, .{job}) catch {
         allocator.destroy(job);
         destroyTransferRequest(request);
-        setTransferStatus(.failed, "Transfer start failed");
+        setTransferStatusForKind(request.kind, .failed, "Transfer start failed");
         return false;
     };
     job.thread = thread;
     g_transfer_job = job;
-    setTransferStatus(.in_progress, job.request.display_buf[0..job.request.display_len]);
+    setTransferStatusForKind(job.request.kind, .in_progress, job.request.display_buf[0..job.request.display_len]);
     return true;
 }
 
@@ -1000,13 +1013,13 @@ fn tickTransferJob() void {
     const display = job.request.display_buf[0..job.request.display_len];
     switch (job.result) {
         .ok => {
-            setTransferStatus(.success, display);
+            setTransferStatusForKind(job.request.kind, .success, display);
             if (job.request.completion.on_success) |callback| callback(job.request.completion.context);
             if (job.request.kind == .upload and job.request.context_id == g_async_context_id and g_mode == .remote and g_has_ssh_conn) {
                 rescanRemote();
             }
         },
-        else => setTransferStatus(.failed, display),
+        else => setTransferStatusForKind(job.request.kind, .failed, display),
     }
 }
 
@@ -1052,6 +1065,12 @@ fn resetTransferStateForTest() void {
     g_transfer_queue.clearRetainingCapacity();
     g_transfer_status = .idle;
     g_transfer_msg_len = 0;
+    g_transfer_notification_seq = 0;
+    g_transfer_notification_msg_len = 0;
+}
+
+fn latestTransferNotificationForTest() ?TransferNotification {
+    return latestTransferNotification();
 }
 
 /// Clean up any in-flight async job. Call on window close to avoid leaking
@@ -1064,6 +1083,8 @@ pub fn deinit() void {
     }
     for (g_transfer_queue.items) |request| destroyTransferRequest(request);
     g_transfer_queue.clearAndFree(std.heap.page_allocator);
+    g_transfer_notification_seq = 0;
+    g_transfer_notification_msg_len = 0;
     if (g_async_job) |job| {
         // Wait for the background thread to finish
         if (job.thread) |thread| thread.join();
@@ -1350,6 +1371,30 @@ pub fn setTransferStatus(status: TransferStatus, msg: []const u8) void {
     g_transfer_time = std.time.milliTimestamp();
 }
 
+pub fn setTransferStatusForKind(kind: TransferKind, status: TransferStatus, msg: []const u8) void {
+    setTransferStatus(status, msg);
+    publishTransferNotification(kind, status, msg);
+}
+
+fn publishTransferNotification(kind: TransferKind, status: TransferStatus, msg: []const u8) void {
+    g_transfer_notification_seq +%= 1;
+    if (g_transfer_notification_seq == 0) g_transfer_notification_seq = 1;
+    g_transfer_notification_kind = kind;
+    g_transfer_notification_status = status;
+    g_transfer_notification_msg_len = @intCast(@min(msg.len, g_transfer_notification_msg.len));
+    @memcpy(g_transfer_notification_msg[0..g_transfer_notification_msg_len], msg[0..g_transfer_notification_msg_len]);
+}
+
+pub fn latestTransferNotification() ?TransferNotification {
+    if (g_transfer_notification_seq == 0) return null;
+    return .{
+        .seq = g_transfer_notification_seq,
+        .kind = g_transfer_notification_kind,
+        .status = g_transfer_notification_status,
+        .message = g_transfer_notification_msg[0..g_transfer_notification_msg_len],
+    };
+}
+
 /// Download the selected remote file to a local directory.
 pub fn downloadSelected(local_dir: []const u8) void {
     if (g_mode != .remote or !g_has_ssh_conn) return;
@@ -1368,7 +1413,10 @@ pub fn downloadSelected(local_dir: []const u8) void {
     // Destination: local_dir\filename
     var dst_buf: [512]u8 = undefined;
     const name = entry.name_buf[0..entry.name_len];
-    const dst = std.fmt.bufPrint(&dst_buf, "{s}\\{s}", .{ local_dir, name }) catch return;
+    const dst = std.fmt.bufPrint(&dst_buf, "{s}\\{s}", .{ local_dir, name }) catch {
+        setTransferStatusForKind(.download, .failed, "Path too long");
+        return;
+    };
 
     _ = startTransferJob(.download, &g_ssh_conn, src, dst, name, scp.transfer);
 }
@@ -1428,7 +1476,7 @@ pub fn downloadRemoteFileToPath(remote_path: []const u8, local_path: []const u8,
 
 fn downloadRemoteFileToPathWithTransfer(remote_path: []const u8, local_path: []const u8, display_name: []const u8, conn: *const Surface.SshConnection, transfer_fn: TransferFn) bool {
     if (conn.user_len + conn.host_len + remote_path.len + 2 > 512) {
-        setTransferStatus(.failed, "Path too long");
+        setTransferStatusForKind(.download, .failed, "Path too long");
         return false;
     }
 
@@ -1558,6 +1606,23 @@ test "file_explorer: download helper starts transfer with explicit remote path" 
     try std.testing.expectEqual(TransferStatus.in_progress, g_transfer_status);
     try std.testing.expectEqualStrings("file.txt", g_transfer_msg[0..g_transfer_msg_len]);
     try std.testing.expect(g_transfer_job != null);
+}
+
+test "file_explorer: download transfer emits notification" {
+    resetTransferStateForTest();
+    defer resetTransferStateForTest();
+
+    var conn: Surface.SshConnection = .{};
+    conn.user_buf[0] = 'u';
+    conn.user_len = 1;
+    conn.host_buf[0] = 'h';
+    conn.host_len = 1;
+    try std.testing.expect(downloadRemoteFileToPathWithTransfer("/tmp/file.txt", "C:\\Users\\me\\Downloads\\file.txt", "file.txt", &conn, transferOkForTest));
+
+    const notification = latestTransferNotificationForTest() orelse return error.MissingTransferNotification;
+    try std.testing.expectEqual(TransferKind.download, notification.kind);
+    try std.testing.expectEqual(TransferStatus.in_progress, notification.status);
+    try std.testing.expectEqualStrings("file.txt", notification.message);
 }
 
 test "buildChildPathInto avoids duplicate separators" {
