@@ -5,6 +5,7 @@ const workflow = fs.readFileSync(".github/workflows/windows-release.yml", "utf8"
 const build = fs.readFileSync("build.zig", "utf8");
 const packageScript = fs.readFileSync("packaging/windows/package.ps1", "utf8");
 const readme = fs.readFileSync("README.md", "utf8");
+const developmentDocs = fs.readFileSync("docs/development.md", "utf8");
 
 assert.match(packageScript, /portable-no-webview/);
 assert.match(packageScript, /-Dwebview=false/);
@@ -24,5 +25,6 @@ assert.match(workflow, /Portable no-WebView:/);
 assert.match(workflow, /plugins\\skills\\inspect-computer-config\\SKILL\.md/);
 assert.match(workflow, /plugins\\skills\\inspect-computer-config\\scripts\\inspect_computer_config\.py/);
 
-assert.match(readme, /portable-no-webview/);
-assert.match(readme, /phantty-windows-portable-no-webview-vX\.Y\.Z\.zip/);
+assert.match(readme, /docs\/development\.md/);
+assert.match(developmentDocs, /portable-no-webview/);
+assert.match(developmentDocs, /phantty-windows-portable-no-webview-vX\.Y\.Z\.zip/);
