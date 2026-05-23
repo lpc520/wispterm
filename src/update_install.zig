@@ -14,6 +14,8 @@ pub const PayloadError = error{
     MissingWebView2Loader,
 };
 
+const ZipEntryNameError = error{UnsafeZipEntryName};
+
 pub const PreparedUpdate = struct {
     work_dir: []u8,
     zip_path: []u8,
@@ -113,6 +115,61 @@ fn replaceDirWithBackup(temp_dir: []const u8, final_dir: []const u8, backup_dir:
     };
 }
 
+fn isWindowsDriveQualified(name: []const u8) bool {
+    return name.len >= 3 and
+        std.ascii.isAlphabetic(name[0]) and
+        name[1] == ':' and
+        (name[2] == '/' or name[2] == '\\');
+}
+
+fn isIllegalWindowsNameChar(c: u8) bool {
+    return switch (c) {
+        '<', '>', ':', '"', '|', '?', '*' => true,
+        else => false,
+    };
+}
+
+fn validateZipEntryName(name: []const u8) ZipEntryNameError!void {
+    if (name.len == 0) return error.UnsafeZipEntryName;
+    if (name[0] == '/' or name[0] == '\\') return error.UnsafeZipEntryName;
+    if (isWindowsDriveQualified(name)) return error.UnsafeZipEntryName;
+
+    var component_start: usize = 0;
+    var saw_component = false;
+    for (name, 0..) |c, i| {
+        if (isIllegalWindowsNameChar(c)) return error.UnsafeZipEntryName;
+        if (c != '/' and c != '\\') continue;
+
+        if (i == component_start) return error.UnsafeZipEntryName;
+        const component = name[component_start..i];
+        if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return error.UnsafeZipEntryName;
+        saw_component = true;
+        component_start = i + 1;
+    }
+
+    if (component_start == name.len) {
+        if (!saw_component) return error.UnsafeZipEntryName;
+        return;
+    }
+
+    const component = name[component_start..];
+    if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return error.UnsafeZipEntryName;
+}
+
+fn validateZipEntryNames(zip_file: *std.fs.File, read_buf: []u8) !void {
+    try zip_file.seekTo(0);
+    var reader = zip_file.reader(read_buf);
+    var iter = try std.zip.Iterator.init(&reader);
+    var filename_buf: [std.fs.max_path_bytes]u8 = undefined;
+    while (try iter.next()) |entry| {
+        if (entry.filename_len > filename_buf.len) return error.ZipInsufficientBuffer;
+        try reader.seekTo(entry.header_zip_offset + @sizeOf(std.zip.CentralDirectoryFileHeader));
+        try reader.interface.readSliceAll(filename_buf[0..entry.filename_len]);
+        try validateZipEntryName(filename_buf[0..entry.filename_len]);
+    }
+    try zip_file.seekTo(0);
+}
+
 pub fn extractZipToPayload(zip_path: []const u8, payload_dir: []const u8) !void {
     const temp_payload_dir = try siblingTempPath(std.heap.page_allocator, payload_dir, ".tmp");
     defer std.heap.page_allocator.free(temp_payload_dir);
@@ -133,8 +190,9 @@ pub fn extractZipToPayload(zip_path: []const u8, payload_dir: []const u8) !void 
         var zip_file = try std.fs.openFileAbsolute(zip_path, .{});
         defer zip_file.close();
         var read_buf: [16 * 1024]u8 = undefined;
+        try validateZipEntryNames(&zip_file, &read_buf);
         var reader = zip_file.reader(&read_buf);
-        try std.zip.extract(payload, &reader, .{ .allow_backslashes = false });
+        try std.zip.extract(payload, &reader, .{ .allow_backslashes = true });
     }
 
     try replaceDirWithBackup(temp_payload_dir, payload_dir, backup_payload_dir);
@@ -303,4 +361,31 @@ test "update_install: replacing payload preserves old payload until temp moves i
     try std.testing.expect(!dirExists(tmp.dir, "payload.tmp"));
     try std.testing.expect(fileExists(tmp.dir, "payload/new.txt"));
     try std.testing.expect(!fileExists(tmp.dir, "payload/old.txt"));
+}
+
+test "update_install: zip entry validation allows safe backslash separators" {
+    try validateZipEntryName("plugins\\skill\\SKILL.md");
+    try validateZipEntryName("plugins/");
+}
+
+test "update_install: zip entry validation rejects windows unsafe names" {
+    const unsafe_names = [_][]const u8{
+        "",
+        "/phantty.exe",
+        "\\phantty.exe",
+        "//phantty.exe",
+        "\\\\server\\share\\phantty.exe",
+        "C:\\Phantty\\phantty.exe",
+        "C:/Phantty/phantty.exe",
+        "plugins//skill",
+        "plugins\\\\skill",
+        "plugins/./skill",
+        "plugins/../skill",
+        "plugins/skill:name",
+        "plugins/skill?.md",
+    };
+
+    for (unsafe_names) |name| {
+        try std.testing.expectError(error.UnsafeZipEntryName, validateZipEntryName(name));
+    }
 }
