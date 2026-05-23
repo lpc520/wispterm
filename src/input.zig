@@ -2274,7 +2274,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             return;
         }
         if (overlays.updatePromptHitTest(xpos, ypos, @floatFromInt(fb.height))) {
-            overlays.openLatestRelease();
+            overlays.activateUpdatePrompt();
             return;
         }
         if (overlays.remoteKeyCopyHitTest(xpos, ypos, @floatFromInt(fb.height))) {

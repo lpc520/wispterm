@@ -110,12 +110,14 @@ threadlocal var g_transfer_cancel_confirm_visible: bool = false;
 const UPDATE_PROMPT_DURATION_MS: i64 = 10000;
 const UPDATE_STATUS_DURATION_MS: i64 = 2500;
 const SSH_CWD_HELP_URL = "https://github.com/xuzhougeng/phantty#ssh-current-directory-for-downloads-and-uploads";
+const UpdatePromptAction = enum { none, open_release, install_update };
 threadlocal var g_update_prompt_until_ms: i64 = 0;
 threadlocal var g_update_prompt_buf: [128]u8 = undefined;
 threadlocal var g_update_prompt_len: usize = 0;
 threadlocal var g_update_prompt_url_buf: [256]u8 = undefined;
 threadlocal var g_update_prompt_url_len: usize = 0;
 threadlocal var g_update_prompt_clickable: bool = false;
+threadlocal var g_update_prompt_action: UpdatePromptAction = .none;
 threadlocal var g_update_prompt_rect: ?DebugLineRect = null;
 
 threadlocal var g_close_shortcut_confirm_until_ms: i64 = 0;
@@ -463,6 +465,10 @@ fn executeCommand(action: CommandAction) void {
         .check_for_updates => {
             showUpdateCheckingToast();
             if (AppWindow.g_app) |app| app.requestManualUpdateCheck();
+        },
+        .install_update => {
+            showUpdatePrompt(.{ .state = .downloading }, .none);
+            if (AppWindow.g_app) |app| app.requestUpdateInstall();
         },
         .open_latest_release => openLatestRelease(),
     }
@@ -3830,7 +3836,7 @@ fn showVersionToast() void {
 }
 
 pub fn showUpdateCheckingToast() void {
-    showUpdatePrompt(.{ .state = .checking }, false);
+    showUpdatePrompt(.{ .state = .checking }, .none);
 }
 
 pub fn showSshCwdFallbackPrompt() void {
@@ -3841,31 +3847,43 @@ pub fn showSshCwdFallbackPrompt() void {
     @memcpy(g_update_prompt_url_buf[0..url_len], SSH_CWD_HELP_URL[0..url_len]);
     g_update_prompt_url_len = url_len;
     g_update_prompt_clickable = true;
+    g_update_prompt_action = .open_release;
     g_update_prompt_until_ms = std.time.milliTimestamp() + UPDATE_PROMPT_DURATION_MS;
 }
 
 pub fn showUpdateCheckResult(result: update_check.CheckResult) void {
     if (result.state == .idle) return;
-    showUpdatePrompt(result, result.state == .update_available and result.release_url.len > 0);
+    const action: UpdatePromptAction = if (result.state == .update_available and result.asset_download_url.len > 0)
+        .install_update
+    else if (result.state == .update_available and result.release_url.len > 0)
+        .open_release
+    else if (result.state == .install_failed and result.release_url.len > 0)
+        .open_release
+    else
+        .none;
+    showUpdatePrompt(result, action);
 }
 
-fn showUpdatePrompt(result: update_check.CheckResult, clickable: bool) void {
+fn showUpdatePrompt(result: update_check.CheckResult, action: UpdatePromptAction) void {
     var status_buf: [96]u8 = undefined;
     const status = update_check.formatStatusMessage(&status_buf, result) catch return;
-    const msg = if (clickable)
-        std.fmt.bufPrint(&g_update_prompt_buf, "{s}  click to open", .{status}) catch return
-    else
-        std.fmt.bufPrint(&g_update_prompt_buf, "{s}", .{status}) catch return;
+    const suffix = switch (action) {
+        .install_update => "  click to install",
+        .open_release => "  click to open",
+        .none => "",
+    };
+    const msg = std.fmt.bufPrint(&g_update_prompt_buf, "{s}{s}", .{ status, suffix }) catch return;
 
     g_update_prompt_len = msg.len;
     g_update_prompt_url_len = 0;
-    if (clickable) {
+    if (action == .open_release and result.release_url.len > 0) {
         const url_len = @min(g_update_prompt_url_buf.len, result.release_url.len);
         @memcpy(g_update_prompt_url_buf[0..url_len], result.release_url[0..url_len]);
         g_update_prompt_url_len = url_len;
     }
-    g_update_prompt_clickable = clickable;
-    g_update_prompt_until_ms = std.time.milliTimestamp() + if (clickable) UPDATE_PROMPT_DURATION_MS else UPDATE_STATUS_DURATION_MS;
+    g_update_prompt_clickable = action != .none;
+    g_update_prompt_action = action;
+    g_update_prompt_until_ms = std.time.milliTimestamp() + if (action != .none) UPDATE_PROMPT_DURATION_MS else UPDATE_STATUS_DURATION_MS;
 }
 
 pub fn showCloseShortcutConfirm(duration_ms: i64) void {
@@ -4156,6 +4174,16 @@ pub fn openLatestRelease() void {
         update_check.latest_release_page_url;
     const hwnd = if (AppWindow.g_window) |w| w.hwnd else null;
     _ = system_browser.openUrl(allocator, hwnd, url);
+}
+
+pub fn activateUpdatePrompt() void {
+    switch (g_update_prompt_action) {
+        .install_update => {
+            if (AppWindow.g_app) |app| app.requestUpdateInstall();
+        },
+        .open_release => openLatestRelease(),
+        .none => {},
+    }
 }
 
 pub fn remoteKeyOverlayDismiss(key: []const u8) void {
