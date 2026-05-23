@@ -147,6 +147,9 @@ pub fn draw(
     gl.UseProgram.?(gl_init.simple_color_shader);
     gl_init.setProjectionForProgram(gl_init.simple_color_shader, window_height);
     gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.simple_color_shader, "opacity"), 1.0);
+    gl.Uniform1i.?(gl.GetUniformLocation.?(gl_init.simple_color_shader, "text"), 0);
+    gl.BindVertexArray.?(gl_init.vao);
+    gl.ActiveTexture.?(c.GL_TEXTURE0);
 
     for (rend.kitty_placements.items) |placement| {
         if (placement.layer != layer) continue;

@@ -34,7 +34,7 @@ def emit_png(
         control.append(f"c={cols}")
     if rows is not None:
         control.append(f"r={rows}")
-    if move_cursor:
+    if not move_cursor:
         control.append("C=1")
 
     chunks = list(_chunk_bytes(base64.b64encode(png_bytes)))
