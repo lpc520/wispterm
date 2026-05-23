@@ -186,6 +186,10 @@ pub threadlocal var g_explorer_resize_hover: bool = false; // Mouse is over the 
 pub threadlocal var g_explorer_resize_dragging: bool = false; // Currently dragging the file explorer edge
 pub threadlocal var g_markdown_preview_resize_hover: bool = false; // Mouse is over the preview resize edge
 pub threadlocal var g_markdown_preview_resize_dragging: bool = false; // Currently dragging the preview edge
+threadlocal var g_markdown_preview_image_dragging: bool = false;
+threadlocal var g_markdown_preview_image_hover: bool = false;
+threadlocal var g_markdown_preview_image_drag_last_x: f64 = 0;
+threadlocal var g_markdown_preview_image_drag_last_y: f64 = 0;
 pub threadlocal var g_browser_resize_hover: bool = false; // Mouse is over the WebView2 browser edge
 pub threadlocal var g_browser_resize_dragging: bool = false; // Currently dragging the browser edge
 const SIDEBAR_TAB_DRAG_THRESHOLD_PX: f64 = 6.0;
@@ -279,6 +283,10 @@ pub fn cancelTransientMouseState(win: ?*win32_backend.Window) void {
     g_explorer_resize_dragging = false;
     g_markdown_preview_resize_hover = false;
     g_markdown_preview_resize_dragging = false;
+    g_markdown_preview_image_dragging = false;
+    g_markdown_preview_image_hover = false;
+    g_markdown_preview_image_drag_last_x = 0;
+    g_markdown_preview_image_drag_last_y = 0;
     g_browser_resize_hover = false;
     g_browser_resize_dragging = false;
     g_selecting = false;
@@ -2321,6 +2329,13 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             if (hitTestMarkdownPreviewPanel(xpos, ypos)) {
                 file_explorer.g_focused = false;
                 if (file_explorer.g_op_mode != .none) file_explorer.cancelOp();
+                if (markdown_preview_panel.g_kind == .image and markdown_preview_panel.g_load_status == .ready) {
+                    g_markdown_preview_image_dragging = true;
+                    g_markdown_preview_image_hover = true;
+                    g_markdown_preview_image_drag_last_x = xpos;
+                    g_markdown_preview_image_drag_last_y = ypos;
+                    _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEALL));
+                }
                 return;
             }
 
@@ -2521,6 +2536,16 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             g_scrollbar_drag_surface = null;
             g_ai_input_scroll_dragging = false;
             g_ai_input_scroll_chat = null;
+            if (g_markdown_preview_image_dragging) {
+                g_markdown_preview_image_dragging = false;
+                const cursor_id = if (hitTestMarkdownPreviewPanel(xpos, ypos) and markdown_preview_panel.g_kind == .image and markdown_preview_panel.g_load_status == .ready)
+                    win32_backend.IDC_SIZEALL
+                else
+                    win32_backend.IDC_ARROW;
+                g_markdown_preview_image_hover = cursor_id == win32_backend.IDC_SIZEALL;
+                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, cursor_id));
+                return;
+            }
             if (g_sidebar_resize_dragging) {
                 g_sidebar_resize_dragging = false;
                 g_sidebar_resize_hover = hitTestSidebarResizeHandle(xpos, ypos);
@@ -2769,6 +2794,17 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
         if (g_ai_input_scroll_chat) |chat| applyAiInputScrollbarDrag(chat, ypos);
         return;
     }
+    if (g_markdown_preview_image_dragging) {
+        const delta_x: f32 = @floatCast(xpos - g_markdown_preview_image_drag_last_x);
+        const delta_y: f32 = @floatCast(ypos - g_markdown_preview_image_drag_last_y);
+        g_markdown_preview_image_drag_last_x = xpos;
+        g_markdown_preview_image_drag_last_y = ypos;
+        if (markdown_preview_panel.panImageBy(delta_x, delta_y)) {
+            AppWindow.g_force_rebuild = true;
+        }
+        _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEALL));
+        return;
+    }
 
     if (updateSidebarTabDrag(xpos, ypos)) return;
 
@@ -2848,6 +2884,15 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
         } else if (g_markdown_preview_resize_hover) {
             _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_ARROW));
             g_markdown_preview_resize_hover = false;
+        }
+        const over_preview_image = hitTestMarkdownPreviewPanel(xpos, ypos) and markdown_preview_panel.g_kind == .image and markdown_preview_panel.g_load_status == .ready;
+        if (over_preview_image) {
+            _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEALL));
+            g_markdown_preview_image_hover = true;
+            return;
+        } else if (g_markdown_preview_image_hover) {
+            _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_ARROW));
+            g_markdown_preview_image_hover = false;
         }
         const over_browser_resize = hitTestBrowserResizeHandle(xpos, ypos);
         if (over_browser_resize) {

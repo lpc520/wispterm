@@ -35,7 +35,8 @@ navigate. Drag the browser panel's left edge to resize it.
 
 The preview panel can be resized by dragging its left edge. Markdown and text
 previews scroll with the mouse wheel; image previews zoom in and out with the
-mouse wheel. `Ctrl+Shift+W` closes the preview panel before closing a split.
+mouse wheel and can be dragged to pan after zooming. `Ctrl+Shift+W` closes the
+preview panel before closing a split.
 
 SSH previews require Phantty's SSH profile metadata, so sessions launched from
 the built-in SSH launcher are supported. Manually typing `ssh user@host` inside

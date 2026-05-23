@@ -53,6 +53,8 @@ pub threadlocal var g_path_len: usize = 0;
 threadlocal var g_source: ?[]u8 = null;
 threadlocal var g_content_generation: u64 = 0;
 threadlocal var g_image_zoom: f32 = 1.0;
+threadlocal var g_image_pan_x: f32 = 0;
+threadlocal var g_image_pan_y: f32 = 0;
 threadlocal var g_preview_request_id: u64 = 0;
 threadlocal var g_preview_jobs: std.ArrayListUnmanaged(*PreviewJob) = .empty;
 
@@ -120,6 +122,7 @@ fn applyFailedWithoutSource(owner_tab: usize, kind: markdown_preview.Kind, previ
     g_load_status = .failed;
     g_scroll_offset = 0;
     g_image_zoom = 1.0;
+    resetImagePan();
     g_content_generation +%= 1;
 
     g_title_len = @min(preview_title.len, g_title_buf.len);
@@ -138,6 +141,7 @@ fn applyOwnedContentForOwner(owner_tab: usize, kind: markdown_preview.Kind, prev
     g_load_status = status;
     g_scroll_offset = 0;
     g_image_zoom = 1.0;
+    resetImagePan();
     g_content_generation +%= 1;
 
     g_title_len = @min(preview_title.len, g_title_buf.len);
@@ -157,6 +161,7 @@ pub fn close() void {
     g_load_status = .idle;
     g_scroll_offset = 0;
     g_image_zoom = 1.0;
+    resetImagePan();
     g_title_len = 0;
     g_path_len = 0;
     g_content_generation +%= 1;
@@ -183,6 +188,14 @@ pub fn imageZoom() f32 {
     return g_image_zoom;
 }
 
+pub fn imagePanX() f32 {
+    return g_image_pan_x;
+}
+
+pub fn imagePanY() f32 {
+    return g_image_pan_y;
+}
+
 pub fn zoomImageBySteps(steps: usize, zoom_in: bool) bool {
     if (g_kind != .image) return false;
     var next = g_image_zoom;
@@ -194,6 +207,21 @@ pub fn zoomImageBySteps(steps: usize, zoom_in: bool) bool {
     if (@abs(next - g_image_zoom) < 0.001) return false;
     g_image_zoom = next;
     return true;
+}
+
+pub fn panImageBy(delta_x: f32, delta_y: f32) bool {
+    if (g_kind != .image or g_load_status != .ready) return false;
+    if (delta_x == 0 and delta_y == 0) return false;
+    g_image_pan_x += delta_x;
+    g_image_pan_y += delta_y;
+    return true;
+}
+
+pub fn clampImagePan(view_w: f32, view_h: f32, draw_w: f32, draw_h: f32) void {
+    const max_x = if (draw_w > view_w) (draw_w - view_w) / 2 else 0;
+    const max_y = if (draw_h > view_h) (draw_h - view_h) / 2 else 0;
+    g_image_pan_x = @max(-max_x, @min(max_x, g_image_pan_x));
+    g_image_pan_y = @max(-max_y, @min(max_y, g_image_pan_y));
 }
 
 pub fn scrollBy(delta: f32) void {
@@ -326,6 +354,11 @@ fn freeSource() void {
     g_source = null;
 }
 
+fn resetImagePan() void {
+    g_image_pan_x = 0;
+    g_image_pan_y = 0;
+}
+
 fn destroyPreviewJob(job: *PreviewJob) void {
     if (job.source) |source_text| std.heap.page_allocator.free(source_text);
     std.heap.page_allocator.destroy(job);
@@ -354,6 +387,7 @@ fn resetAsyncForTest() void {
     g_load_status = .idle;
     g_scroll_offset = 0;
     g_image_zoom = 1.0;
+    resetImagePan();
     g_title_len = 0;
     g_path_len = 0;
     g_content_generation +%= 1;
@@ -402,6 +436,27 @@ test "markdown_preview_panel: image zoom is image-only and clamped" {
 
     try std.testing.expect(zoomImageBySteps(100, false));
     try std.testing.expectEqual(@as(f32, 0.25), imageZoom());
+}
+
+test "markdown_preview_panel: image pan is image-only and clamped" {
+    resetAsyncForTest();
+    defer resetAsyncForTest();
+
+    g_kind = .text;
+    g_load_status = .ready;
+    try std.testing.expect(!panImageBy(12, 8));
+    try std.testing.expectEqual(@as(f32, 0), imagePanX());
+    try std.testing.expectEqual(@as(f32, 0), imagePanY());
+
+    g_kind = .image;
+    try std.testing.expect(panImageBy(200, -80));
+    clampImagePan(100, 100, 300, 160);
+    try std.testing.expectEqual(@as(f32, 100), imagePanX());
+    try std.testing.expectEqual(@as(f32, -30), imagePanY());
+
+    clampImagePan(400, 200, 300, 160);
+    try std.testing.expectEqual(@as(f32, 0), imagePanX());
+    try std.testing.expectEqual(@as(f32, 0), imagePanY());
 }
 
 fn previewReadOkForTest(allocator: std.mem.Allocator, _: PreviewSourceKind, _: markdown_preview.Kind, _: []const u8) PreviewReadResult {

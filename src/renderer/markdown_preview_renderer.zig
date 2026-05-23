@@ -214,8 +214,9 @@ fn renderImageDocument(
 
     const draw_w = image_w * scale;
     const draw_h = image_h * scale;
-    const draw_x = content_x + (content_w - draw_w) / 2;
-    const draw_top = body_top + (body_h - draw_h) / 2;
+    panel.clampImagePan(content_w, body_h, draw_w, draw_h);
+    const draw_x = content_x + (content_w - draw_w) / 2 + panel.imagePanX();
+    const draw_top = body_top + (body_h - draw_h) / 2 + panel.imagePanY();
     const draw_y = window_height - draw_top - draw_h;
 
     const gl = AppWindow.gl;
