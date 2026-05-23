@@ -9,6 +9,9 @@ from pathlib import Path
 
 ESC = "\x1b"
 ST = "\x1b\\"
+OSC = "\x1b]"
+BEL = "\x07"
+PHANTTY_IMAGE_OSC = "7747;PhanttyImage="
 
 
 def _chunk_bytes(data: bytes, chunk_size: int = 4096):
@@ -22,6 +25,8 @@ def emit_png(
     cols: int | None = None,
     rows: int | None = None,
     move_cursor: bool = True,
+    image_id: int | None = None,
+    phantty_fallback: bool = True,
     stream=None,
 ):
     if stream is None:
@@ -29,7 +34,10 @@ def emit_png(
 
         stream = sys.stdout
 
-    control = ["a=T", "f=100", "t=d"]
+    if image_id is None:
+        image_id = max(1, os.getpid() & 0x7FFFFFFF)
+
+    control = ["a=T", "f=100", "t=d", f"i={image_id}", f"p={image_id}"]
     if cols is not None:
         control.append(f"c={cols}")
     if rows is not None:
@@ -39,10 +47,14 @@ def emit_png(
 
     chunks = list(_chunk_bytes(base64.b64encode(png_bytes)))
     for index, chunk in enumerate(chunks):
-        parts = list(control)
-        parts.append(f"m={1 if index + 1 < len(chunks) else 0}")
+        more = 1 if index + 1 < len(chunks) else 0
+        parts = list(control) if index == 0 else []
+        parts.append(f"m={more}")
+        command = ",".join(parts)
         payload = chunk.decode("ascii")
-        stream.write(f"{ESC}_G{','.join(parts)};{payload}{ST}")
+        stream.write(f"{ESC}_G{command};{payload}{ST}")
+        if phantty_fallback:
+            stream.write(f"{OSC}{PHANTTY_IMAGE_OSC}{command};{payload}{BEL}")
     stream.flush()
 
 

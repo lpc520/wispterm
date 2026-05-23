@@ -47,6 +47,21 @@ pub const Selection = struct {
 /// OSC parser state machine — handles sequences split across PTY reads.
 const OscParseState = enum { ground, esc, osc_num, osc_semi, osc_title };
 
+const ImageOscParseState = enum {
+    ground,
+    esc,
+    osc_prefix,
+    image_osc,
+    image_osc_esc,
+    image_overflow,
+    image_overflow_esc,
+    passthrough_osc,
+    passthrough_osc_esc,
+};
+
+const PHANTTY_IMAGE_OSC_PREFIX = "7747;PhanttyImage=";
+const PHANTTY_IMAGE_OSC_MAX = 16 * 1024;
+
 /// Coarse launch environment for terminal-side integrations such as path paste.
 pub const LaunchKind = enum {
     windows,
@@ -267,6 +282,9 @@ osc7_title: [256]u8 = undefined,
 osc7_title_len: usize = 0,
 got_osc7_this_batch: bool = false,
 
+phantty_image_osc_state: ImageOscParseState = .ground,
+phantty_image_osc_buf: std.ArrayListUnmanaged(u8) = .empty,
+
 // Raw CWD path from OSC 7 (Unix-style, e.g., "/home/user/dir")
 cwd_path: [512]u8 = undefined,
 cwd_path_len: usize = 0,
@@ -399,6 +417,8 @@ pub fn init(
     surface.osc_buf_len = 0;
     surface.osc7_title_len = 0;
     surface.got_osc7_this_batch = false;
+    surface.phantty_image_osc_state = .ground;
+    surface.phantty_image_osc_buf = .empty;
     surface.cwd_path_len = 0;
     surface.initial_cwd_path_len = 0;
     surface.agent_detection = .{};
@@ -516,6 +536,7 @@ pub fn deinit(self: *Surface, allocator: std.mem.Allocator) void {
     self.mailbox.deinit();
 
     // 3. Now safe to tear down everything — no other thread is accessing.
+    self.phantty_image_osc_buf.deinit(allocator);
     self.vt_stream.deinit();
     self.command.deinit();
     self.pty.deinit();
@@ -773,6 +794,175 @@ fn captureInitialCwd(self: *Surface, cwd: ?[*:0]const u16) void {
 /// Reset OSC batch state — call before each PTY read batch.
 pub fn resetOscBatch(self: *Surface) void {
     self.got_osc7_this_batch = false;
+}
+
+/// Feed terminal output to the VT parser, translating Phantty's private OSC
+/// image fallback back into the Ghostty/Kitty APC protocol in stream order.
+pub fn feedVtWithPhanttyImageFallback(self: *Surface, data: []const u8) void {
+    var passthrough_start: usize = 0;
+
+    for (data, 0..) |byte, i| {
+        switch (self.phantty_image_osc_state) {
+            .ground => {
+                if (byte == 0x1b) {
+                    if (i > passthrough_start) {
+                        self.vt_stream.nextSlice(data[passthrough_start..i]);
+                    }
+                    self.phantty_image_osc_state = .esc;
+                    passthrough_start = i + 1;
+                }
+            },
+            .esc => {
+                if (byte == ']') {
+                    self.phantty_image_osc_buf.clearRetainingCapacity();
+                    self.phantty_image_osc_state = .osc_prefix;
+                    passthrough_start = i + 1;
+                } else {
+                    self.vt_stream.nextSlice("\x1b");
+                    self.vt_stream.nextSlice(data[i .. i + 1]);
+                    self.phantty_image_osc_state = .ground;
+                    passthrough_start = i + 1;
+                }
+            },
+            .osc_prefix => {
+                const matched = self.phantty_image_osc_buf.items.len;
+                if (matched < PHANTTY_IMAGE_OSC_PREFIX.len and
+                    byte == PHANTTY_IMAGE_OSC_PREFIX[matched])
+                {
+                    if (!self.appendPhanttyImageOscByte(byte)) {
+                        self.phantty_image_osc_buf.clearRetainingCapacity();
+                        self.phantty_image_osc_state = .image_overflow;
+                    } else if (self.phantty_image_osc_buf.items.len == PHANTTY_IMAGE_OSC_PREFIX.len) {
+                        self.phantty_image_osc_buf.clearRetainingCapacity();
+                        self.phantty_image_osc_state = .image_osc;
+                    }
+                    passthrough_start = i + 1;
+                } else {
+                    self.replayNonImageOscPrefix();
+                    self.vt_stream.nextSlice(data[i .. i + 1]);
+                    self.phantty_image_osc_state = switch (byte) {
+                        0x07 => .ground,
+                        0x1b => .passthrough_osc_esc,
+                        else => .passthrough_osc,
+                    };
+                    passthrough_start = i + 1;
+                }
+            },
+            .image_osc => switch (byte) {
+                0x07 => {
+                    self.handlePhanttyImageOsc();
+                    self.phantty_image_osc_state = .ground;
+                    passthrough_start = i + 1;
+                },
+                0x1b => {
+                    self.phantty_image_osc_state = .image_osc_esc;
+                    passthrough_start = i + 1;
+                },
+                else => {
+                    if (!self.appendPhanttyImageOscByte(byte)) {
+                        self.phantty_image_osc_buf.clearRetainingCapacity();
+                        self.phantty_image_osc_state = .image_overflow;
+                    }
+                    passthrough_start = i + 1;
+                },
+            },
+            .image_osc_esc => {
+                if (byte == '\\') {
+                    self.handlePhanttyImageOsc();
+                    self.phantty_image_osc_state = .ground;
+                } else {
+                    if (!self.appendPhanttyImageOscByte(0x1b) or
+                        !self.appendPhanttyImageOscByte(byte))
+                    {
+                        self.phantty_image_osc_buf.clearRetainingCapacity();
+                        self.phantty_image_osc_state = .image_overflow;
+                    } else {
+                        self.phantty_image_osc_state = .image_osc;
+                    }
+                }
+                passthrough_start = i + 1;
+            },
+            .image_overflow => switch (byte) {
+                0x07 => {
+                    self.phantty_image_osc_state = .ground;
+                    passthrough_start = i + 1;
+                },
+                0x1b => {
+                    self.phantty_image_osc_state = .image_overflow_esc;
+                    passthrough_start = i + 1;
+                },
+                else => passthrough_start = i + 1,
+            },
+            .image_overflow_esc => {
+                self.phantty_image_osc_state = if (byte == '\\') .ground else .image_overflow;
+                passthrough_start = i + 1;
+            },
+            .passthrough_osc => switch (byte) {
+                0x07 => {
+                    if (i + 1 > passthrough_start) {
+                        self.vt_stream.nextSlice(data[passthrough_start .. i + 1]);
+                    }
+                    self.phantty_image_osc_state = .ground;
+                    passthrough_start = i + 1;
+                },
+                0x1b => self.phantty_image_osc_state = .passthrough_osc_esc,
+                else => {},
+            },
+            .passthrough_osc_esc => {
+                if (byte == '\\') {
+                    if (i + 1 > passthrough_start) {
+                        self.vt_stream.nextSlice(data[passthrough_start .. i + 1]);
+                    }
+                    self.phantty_image_osc_state = .ground;
+                    passthrough_start = i + 1;
+                } else {
+                    self.phantty_image_osc_state = .passthrough_osc;
+                }
+            },
+        }
+    }
+
+    switch (self.phantty_image_osc_state) {
+        .ground, .passthrough_osc, .passthrough_osc_esc => {
+            if (data.len > passthrough_start) {
+                self.vt_stream.nextSlice(data[passthrough_start..]);
+            }
+        },
+        else => {},
+    }
+}
+
+fn appendPhanttyImageOscByte(self: *Surface, byte: u8) bool {
+    if (self.phantty_image_osc_buf.items.len >= PHANTTY_IMAGE_OSC_MAX) return false;
+    self.phantty_image_osc_buf.append(self.allocator, byte) catch return false;
+    return true;
+}
+
+fn replayNonImageOscPrefix(self: *Surface) void {
+    self.vt_stream.nextSlice("\x1b]");
+    if (self.phantty_image_osc_buf.items.len > 0) {
+        self.vt_stream.nextSlice(self.phantty_image_osc_buf.items);
+        self.phantty_image_osc_buf.clearRetainingCapacity();
+    }
+}
+
+fn handlePhanttyImageOsc(self: *Surface) void {
+    defer self.phantty_image_osc_buf.clearRetainingCapacity();
+
+    const kitty = self.phantty_image_osc_buf.items;
+    if (std.mem.indexOfScalar(u8, kitty, ';') == null) return;
+
+    const seq = self.allocator.alloc(u8, 3 + kitty.len + 2) catch return;
+    defer self.allocator.free(seq);
+
+    seq[0] = 0x1b;
+    seq[1] = '_';
+    seq[2] = 'G';
+    @memcpy(seq[3 .. 3 + kitty.len], kitty);
+    seq[3 + kitty.len] = 0x1b;
+    seq[4 + kitty.len] = '\\';
+
+    self.vt_stream.nextSlice(seq);
 }
 
 /// Scan PTY output for OSC 0/1/2/7 title sequences.

@@ -142,7 +142,7 @@ fn processOutput(surface: *Surface, data: []const u8) void {
     defer surface.render_state.mutex.unlock();
 
     surface.resetOscBatch();
-    surface.vt_stream.nextSlice(data);
+    surface.feedVtWithPhanttyImageFallback(data);
     surface.scanForOscTitle(data);
     surface.noteAgentOutput(data);
     surface.dirty.store(true, .release);
