@@ -2,6 +2,8 @@ const std = @import("std");
 
 pub const latest_release_api_url = "https://api.github.com/repos/xuzhougeng/phantty/releases/latest";
 pub const latest_release_page_url = "https://github.com/xuzhougeng/phantty/releases/latest";
+pub const asset_name_buffer_len = 128;
+pub const asset_download_url_buffer_len = 512;
 
 pub const Order = enum { older, equal, newer, unknown };
 pub const State = enum {
@@ -56,6 +58,13 @@ pub const CheckResult = struct {
     asset_name: []const u8 = "",
     asset_download_url: []const u8 = "",
     asset_size: u64 = 0,
+};
+
+pub const CheckResultBuffers = struct {
+    latest_version: []u8,
+    release_url: []u8,
+    asset_name: []u8,
+    asset_download_url: []u8,
 };
 
 const Semver = struct {
@@ -193,12 +202,35 @@ pub fn portableAssetName(tag_name: []const u8, flavor: PortableFlavor, buf: []u8
 }
 
 pub fn selectPortableAsset(release: ReleaseInfo, flavor: PortableFlavor) ?ReleaseAsset {
-    var expected_buf: [128]u8 = undefined;
-    const expected = portableAssetName(release.tag_name, flavor, &expected_buf) catch return null;
     for (release.assets) |asset| {
-        if (std.mem.eql(u8, asset.name, expected)) return asset;
+        if (portableAssetNameMatches(asset.name, release.tag_name, flavor)) return asset;
     }
     return null;
+}
+
+fn portableAssetNameMatches(name: []const u8, tag_name: []const u8, flavor: PortableFlavor) bool {
+    const Parts = struct {
+        prefix: []const u8,
+        suffix: []const u8,
+    };
+    const parts = switch (flavor) {
+        .portable => Parts{
+            .prefix = "phantty-windows-portable-",
+            .suffix = ".zip",
+        },
+        .portable_webview2 => Parts{
+            .prefix = "phantty-windows-portable-webview2-",
+            .suffix = ".zip",
+        },
+        .portable_no_webview => Parts{
+            .prefix = "phantty-windows-portable-no-webview-",
+            .suffix = ".zip",
+        },
+    };
+    return name.len == parts.prefix.len + tag_name.len + parts.suffix.len and
+        std.mem.startsWith(u8, name, parts.prefix) and
+        std.mem.endsWith(u8, name, parts.suffix) and
+        std.mem.eql(u8, name[parts.prefix.len .. parts.prefix.len + tag_name.len], tag_name);
 }
 
 pub fn evaluateReleaseForFlavor(current_version: []const u8, release: ReleaseInfo, flavor: PortableFlavor) CheckResult {
@@ -241,44 +273,40 @@ pub fn formatStatusMessage(buf: []u8, result: CheckResult) ![]const u8 {
 
 pub fn copyResult(
     result: CheckResult,
-    latest_version_buf: []u8,
-    release_url_buf: []u8,
-    asset_name_buf: []u8,
-    asset_download_url_buf: []u8,
+    buffers: CheckResultBuffers,
 ) CheckResult {
+    const latest_version = copyExact(buffers.latest_version, result.latest_version) orelse return .{ .state = .failed };
+    const release_url = copyExact(buffers.release_url, result.release_url) orelse return .{ .state = .failed };
+    const asset_name = copyExact(buffers.asset_name, result.asset_name) orelse return .{ .state = .failed };
+    const asset_download_url = copyExact(buffers.asset_download_url, result.asset_download_url) orelse return .{ .state = .failed };
+
     return .{
         .state = result.state,
-        .latest_version = copyBounded(latest_version_buf, result.latest_version),
-        .release_url = copyBounded(release_url_buf, result.release_url),
-        .asset_name = copyBounded(asset_name_buf, result.asset_name),
-        .asset_download_url = copyBounded(asset_download_url_buf, result.asset_download_url),
+        .latest_version = latest_version,
+        .release_url = release_url,
+        .asset_name = asset_name,
+        .asset_download_url = asset_download_url,
         .asset_size = result.asset_size,
     };
 }
 
-fn copyBounded(buf: []u8, value: []const u8) []const u8 {
-    if (buf.len == 0 or value.len == 0) return "";
-    const len = @min(buf.len, value.len);
-    @memcpy(buf[0..len], value[0..len]);
-    return buf[0..len];
+fn copyExact(buf: []u8, value: []const u8) ?[]const u8 {
+    if (value.len == 0) return "";
+    if (buf.len < value.len) return null;
+    @memcpy(buf[0..value.len], value);
+    return buf[0..value.len];
 }
 
 pub fn fetchLatestRelease(
     allocator: std.mem.Allocator,
     current_version: []const u8,
-    latest_version_buf: []u8,
-    release_url_buf: []u8,
-    asset_name_buf: []u8,
-    asset_download_url_buf: []u8,
+    buffers: CheckResultBuffers,
 ) CheckResult {
     return fetchLatestReleaseForFlavor(
         allocator,
         current_version,
         .portable,
-        latest_version_buf,
-        release_url_buf,
-        asset_name_buf,
-        asset_download_url_buf,
+        buffers,
     );
 }
 
@@ -286,10 +314,7 @@ pub fn fetchLatestReleaseForFlavor(
     allocator: std.mem.Allocator,
     current_version: []const u8,
     flavor: PortableFlavor,
-    latest_version_buf: []u8,
-    release_url_buf: []u8,
-    asset_name_buf: []u8,
-    asset_download_url_buf: []u8,
+    buffers: CheckResultBuffers,
 ) CheckResult {
     var client: std.http.Client = .{
         .allocator = allocator,
@@ -319,10 +344,7 @@ pub fn fetchLatestReleaseForFlavor(
 
     return copyResult(
         evaluateReleaseForFlavor(current_version, release, flavor),
-        latest_version_buf,
-        release_url_buf,
-        asset_name_buf,
-        asset_download_url_buf,
+        buffers,
     );
 }
 
@@ -396,7 +418,12 @@ test "update_check: copies result strings into caller buffers" {
         .asset_name = "phantty-windows-portable-v0.23.3.zip",
         .asset_download_url = "https://example.test/portable.zip",
         .asset_size = 1234,
-    }, &version_buf, &url_buf, &asset_name_buf, &asset_url_buf);
+    }, .{
+        .latest_version = &version_buf,
+        .release_url = &url_buf,
+        .asset_name = &asset_name_buf,
+        .asset_download_url = &asset_url_buf,
+    });
 
     try std.testing.expectEqual(State.update_available, copied.state);
     try std.testing.expectEqualStrings("v0.23.3", copied.latest_version);
@@ -404,6 +431,31 @@ test "update_check: copies result strings into caller buffers" {
     try std.testing.expectEqualStrings("phantty-windows-portable-v0.23.3.zip", copied.asset_name);
     try std.testing.expectEqualStrings("https://example.test/portable.zip", copied.asset_download_url);
     try std.testing.expectEqual(@as(u64, 1234), copied.asset_size);
+}
+
+test "update_check: copy result fails when asset buffers are too small" {
+    var version_buf: [16]u8 = undefined;
+    var url_buf: [96]u8 = undefined;
+    var asset_name_buf: [8]u8 = undefined;
+    var asset_url_buf: [12]u8 = undefined;
+    const copied = copyResult(.{
+        .state = .update_available,
+        .latest_version = "v0.23.3",
+        .release_url = "https://github.com/xuzhougeng/phantty/releases/tag/v0.23.3",
+        .asset_name = "phantty-windows-portable-v0.23.3.zip",
+        .asset_download_url = "https://example.test/portable.zip",
+        .asset_size = 1234,
+    }, .{
+        .latest_version = &version_buf,
+        .release_url = &url_buf,
+        .asset_name = &asset_name_buf,
+        .asset_download_url = &asset_url_buf,
+    });
+
+    try std.testing.expectEqual(State.failed, copied.state);
+    try std.testing.expectEqualStrings("", copied.asset_name);
+    try std.testing.expectEqualStrings("", copied.asset_download_url);
+    try std.testing.expectEqual(@as(u64, 0), copied.asset_size);
 }
 
 test "update_check: selects portable asset for runtime flavor" {
