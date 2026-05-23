@@ -1,4 +1,13 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+extern "kernel32" fn CompareStringOrdinal(
+    lpString1: [*]const u16,
+    cchCount1: i32,
+    lpString2: [*]const u16,
+    cchCount2: i32,
+    bIgnoreCase: i32,
+) callconv(.winapi) i32;
 
 pub const Options = struct {
     pid: u32,
@@ -142,14 +151,14 @@ fn normalizeWindowsPath(path: []const u8, buf: []u8) ?[]const u8 {
         out_len = 2;
         for (path[8..]) |ch| {
             if (out_len >= buf.len) return null;
-            buf[out_len] = if (ch == '/') '\\' else std.ascii.toLower(ch);
+            buf[out_len] = if (ch == '/') '\\' else ch;
             out_len += 1;
         }
     } else {
         const source = canonicalWindowsPath(path);
         for (source) |ch| {
             if (out_len >= buf.len) return null;
-            buf[out_len] = if (ch == '/') '\\' else std.ascii.toLower(ch);
+            buf[out_len] = if (ch == '/') '\\' else ch;
             out_len += 1;
         }
     }
@@ -160,12 +169,100 @@ fn normalizeWindowsPath(path: []const u8, buf: []u8) ?[]const u8 {
     return trimTrailingSeparators(normalized, root_len);
 }
 
+fn simpleWindowsCaseFold(codepoint: u21) u21 {
+    if (codepoint >= 'A' and codepoint <= 'Z') return codepoint + 0x20;
+    if (codepoint >= 0x00C0 and codepoint <= 0x00D6) return codepoint + 0x20;
+    if (codepoint >= 0x00D8 and codepoint <= 0x00DE) return codepoint + 0x20;
+    if (codepoint == 0x0178) return 0x00FF;
+    if (codepoint >= 0x0100 and codepoint <= 0x0177 and codepoint % 2 == 0) return codepoint + 1;
+    if (codepoint >= 0x0181 and codepoint <= 0x024E) {
+        return switch (codepoint) {
+            0x0181 => 0x0253,
+            0x0182, 0x0184, 0x0187, 0x018B, 0x0191, 0x0198, 0x01A0, 0x01A2, 0x01A4, 0x01A7, 0x01AC, 0x01AF, 0x01B3, 0x01B5, 0x01B8, 0x01BC, 0x01CD, 0x01CF, 0x01D1, 0x01D3, 0x01D5, 0x01D7, 0x01D9, 0x01DB, 0x01DE, 0x01E0, 0x01E2, 0x01E4, 0x01E6, 0x01E8, 0x01EA, 0x01EC, 0x01EE, 0x01F4, 0x01F8, 0x01FA, 0x01FC, 0x01FE, 0x0200, 0x0202, 0x0204, 0x0206, 0x0208, 0x020A, 0x020C, 0x020E, 0x0210, 0x0212, 0x0214, 0x0216, 0x0218, 0x021A, 0x021C, 0x021E, 0x0220, 0x0222, 0x0224, 0x0226, 0x0228, 0x022A, 0x022C, 0x022E, 0x0230, 0x0232, 0x0246, 0x0248, 0x024A, 0x024C, 0x024E => codepoint + 1,
+            0x0186 => 0x0254,
+            0x0189 => 0x0256,
+            0x018A => 0x0257,
+            0x018E => 0x01DD,
+            0x018F => 0x0259,
+            0x0190 => 0x025B,
+            0x0193 => 0x0260,
+            0x0194 => 0x0263,
+            0x0196 => 0x0269,
+            0x0197 => 0x0268,
+            0x019C => 0x026F,
+            0x019D => 0x0272,
+            0x019F => 0x0275,
+            0x01A6 => 0x0280,
+            0x01A9 => 0x0283,
+            0x01AE => 0x0288,
+            0x01B1 => 0x028A,
+            0x01B2 => 0x028B,
+            0x01B7 => 0x0292,
+            0x01F1, 0x01F2 => 0x01F3,
+            0x023A => 0x2C65,
+            0x023B => 0x023C,
+            0x023D => 0x019A,
+            0x023E => 0x2C66,
+            0x0241 => 0x0242,
+            0x0243 => 0x0180,
+            0x0244 => 0x0289,
+            0x0245 => 0x028C,
+            else => codepoint,
+        };
+    }
+    if (codepoint >= 0x0391 and codepoint <= 0x03A1) return codepoint + 0x20;
+    if (codepoint >= 0x03A3 and codepoint <= 0x03AB) return codepoint + 0x20;
+    if (codepoint == 0x0386) return 0x03AC;
+    if (codepoint >= 0x0388 and codepoint <= 0x038A) return codepoint + 0x25;
+    if (codepoint == 0x038C) return 0x03CC;
+    if (codepoint >= 0x038E and codepoint <= 0x038F) return codepoint + 0x3F;
+    if (codepoint >= 0x0400 and codepoint <= 0x040F) return codepoint + 0x50;
+    if (codepoint >= 0x0410 and codepoint <= 0x042F) return codepoint + 0x20;
+    return codepoint;
+}
+
+fn windowsCaseInsensitiveUtf8Equal(a: []const u8, b: []const u8) bool {
+    if (comptime builtin.os.tag == .windows) {
+        if (windowsCaseInsensitiveUtf16Equal(a, b)) |equal| return equal;
+    }
+
+    const a_view = std.unicode.Utf8View.init(a) catch return std.mem.eql(u8, a, b);
+    const b_view = std.unicode.Utf8View.init(b) catch return std.mem.eql(u8, a, b);
+    var a_it = a_view.iterator();
+    var b_it = b_view.iterator();
+    while (true) {
+        const a_cp = a_it.nextCodepoint();
+        const b_cp = b_it.nextCodepoint();
+        if (a_cp == null or b_cp == null) return a_cp == null and b_cp == null;
+        if (simpleWindowsCaseFold(a_cp.?) != simpleWindowsCaseFold(b_cp.?)) return false;
+    }
+}
+
+fn windowsCaseInsensitiveUtf16Equal(a: []const u8, b: []const u8) ?bool {
+    var a_buf: [4096]u16 = undefined;
+    var b_buf: [4096]u16 = undefined;
+    const a_len = std.unicode.utf8ToUtf16Le(&a_buf, a) catch return null;
+    const b_len = std.unicode.utf8ToUtf16Le(&b_buf, b) catch return null;
+    const result = CompareStringOrdinal(
+        a_buf[0..a_len].ptr,
+        @intCast(a_len),
+        b_buf[0..b_len].ptr,
+        @intCast(b_len),
+        1,
+    );
+    return switch (result) {
+        2 => true,
+        1, 3 => false,
+        else => null,
+    };
+}
+
 fn windowsAbsolutePathEqual(a: []const u8, b: []const u8) bool {
     var a_buf: [4096]u8 = undefined;
     var b_buf: [4096]u8 = undefined;
     const a_normalized = normalizeWindowsPath(a, &a_buf) orelse return false;
     const b_normalized = normalizeWindowsPath(b, &b_buf) orelse return false;
-    return std.mem.eql(u8, a_normalized, b_normalized);
+    return windowsCaseInsensitiveUtf8Equal(a_normalized, b_normalized);
 }
 
 fn nativeAbsolutePathEqual(a: []const u8, b: []const u8) bool {
@@ -407,6 +504,15 @@ test "updater_core: rejects equal Windows paths ignoring case and trailing separ
         .pid = 1,
         .source = "D:/Tools/Phantty/",
         .target = "d:/tools/phantty",
+        .restart = false,
+    }));
+}
+
+test "updater_core: rejects equal Windows paths with non-ASCII case differences" {
+    try std.testing.expectError(error.SourceEqualsTarget, validateOptions(.{
+        .pid = 1,
+        .source = "C:\\Apps\\Ångström",
+        .target = "c:\\apps\\ångström\\",
         .restart = false,
     }));
 }
