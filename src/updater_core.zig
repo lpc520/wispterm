@@ -101,11 +101,18 @@ fn windowsRootLen(path: []const u8) usize {
     return 0;
 }
 
+fn canonicalWindowsPath(path: []const u8) []const u8 {
+    if (path.len >= 7 and (path[0] == '\\' or path[0] == '/') and (path[1] == '\\' or path[1] == '/') and path[2] == '?' and (path[3] == '\\' or path[3] == '/') and std.ascii.isAlphabetic(path[4]) and path[5] == ':' and (path[6] == '\\' or path[6] == '/')) {
+        return path[4..];
+    }
+    return path;
+}
+
 fn uncRootLenFrom(path: []const u8, start: usize) usize {
     const server_end = findSeparator(path, start) orelse return path.len;
     const share_start = server_end + 1;
     const share_end = findSeparator(path, share_start) orelse return path.len;
-    return share_end + 1;
+    return share_end;
 }
 
 fn findSeparator(path: []const u8, start: usize) ?usize {
@@ -126,20 +133,39 @@ fn isWindowsAbsolute(path: []const u8) bool {
     return windowsRootLen(path) > 0;
 }
 
-fn windowsAbsolutePathEqual(a: []const u8, b: []const u8) bool {
-    const a_root_len = windowsRootLen(a);
-    const b_root_len = windowsRootLen(b);
-    if (a_root_len == 0 or b_root_len == 0) return false;
-    const a_trimmed = trimTrailingSeparators(a, a_root_len);
-    const b_trimmed = trimTrailingSeparators(b, b_root_len);
-    if (a_trimmed.len != b_trimmed.len) return false;
-
-    for (a_trimmed, b_trimmed) |a_ch, b_ch| {
-        const a_norm = if (a_ch == '/') '\\' else std.ascii.toLower(a_ch);
-        const b_norm = if (b_ch == '/') '\\' else std.ascii.toLower(b_ch);
-        if (a_norm != b_norm) return false;
+fn normalizeWindowsPath(path: []const u8, buf: []u8) ?[]const u8 {
+    var out_len: usize = 0;
+    if (path.len >= 8 and (path[0] == '\\' or path[0] == '/') and (path[1] == '\\' or path[1] == '/') and path[2] == '?' and (path[3] == '\\' or path[3] == '/') and std.ascii.eqlIgnoreCase(path[4..7], "UNC") and (path[7] == '\\' or path[7] == '/')) {
+        if (buf.len < 2) return null;
+        buf[0] = '\\';
+        buf[1] = '\\';
+        out_len = 2;
+        for (path[8..]) |ch| {
+            if (out_len >= buf.len) return null;
+            buf[out_len] = if (ch == '/') '\\' else std.ascii.toLower(ch);
+            out_len += 1;
+        }
+    } else {
+        const source = canonicalWindowsPath(path);
+        for (source) |ch| {
+            if (out_len >= buf.len) return null;
+            buf[out_len] = if (ch == '/') '\\' else std.ascii.toLower(ch);
+            out_len += 1;
+        }
     }
-    return true;
+
+    const normalized = buf[0..out_len];
+    const root_len = windowsRootLen(normalized);
+    if (root_len == 0) return null;
+    return trimTrailingSeparators(normalized, root_len);
+}
+
+fn windowsAbsolutePathEqual(a: []const u8, b: []const u8) bool {
+    var a_buf: [4096]u8 = undefined;
+    var b_buf: [4096]u8 = undefined;
+    const a_normalized = normalizeWindowsPath(a, &a_buf) orelse return false;
+    const b_normalized = normalizeWindowsPath(b, &b_buf) orelse return false;
+    return std.mem.eql(u8, a_normalized, b_normalized);
 }
 
 fn nativeAbsolutePathEqual(a: []const u8, b: []const u8) bool {
@@ -298,6 +324,10 @@ pub fn restoreBackup(allocator: std.mem.Allocator, backup: []const u8, target: [
         };
         defer allocator.free(target_path);
         if (!pathExists(backup_path)) {
+            if (!entry.optional) {
+                restored_all = false;
+                continue;
+            }
             deletePath(target_path, entry.directory) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => restored_all = false,
@@ -413,6 +443,38 @@ test "updater_core: rejects equal extended Windows paths ignoring case and trail
     }));
 }
 
+test "updater_core: rejects equal extended and non-extended Windows paths" {
+    try std.testing.expectError(error.SourceEqualsTarget, validateOptions(.{
+        .pid = 1,
+        .source = "\\\\?\\C:\\Apps\\Phantty",
+        .target = "C:\\Apps\\Phantty",
+        .restart = false,
+    }));
+
+    try std.testing.expectError(error.SourceEqualsTarget, validateOptions(.{
+        .pid = 1,
+        .source = "\\\\?\\UNC\\Server\\Share\\App",
+        .target = "\\\\server\\share\\App",
+        .restart = false,
+    }));
+}
+
+test "updater_core: rejects equal UNC share roots with optional trailing separator" {
+    try std.testing.expectError(error.SourceEqualsTarget, validateOptions(.{
+        .pid = 1,
+        .source = "\\\\server\\share",
+        .target = "\\\\SERVER\\SHARE\\",
+        .restart = false,
+    }));
+
+    try std.testing.expectError(error.SourceEqualsTarget, validateOptions(.{
+        .pid = 1,
+        .source = "\\\\?\\UNC\\server\\share",
+        .target = "\\\\server\\share\\",
+        .restart = false,
+    }));
+}
+
 test "updater_core: successful replacement preserves portable user config" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -488,6 +550,22 @@ test "updater_core: restore removes optional target entry absent from backup" {
     try std.testing.expect(restoreBackup(std.testing.allocator, backup, target));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("target/WebView2Loader.dll", .{}));
     try expectFileContents(tmp.dir, "target/phantty.exe", "old exe");
+}
+
+test "updater_core: restore reports failure for missing required backup entry" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writePayload(tmp.dir, "backup", "old");
+    try writePayload(tmp.dir, "target", "new");
+    try tmp.dir.deleteFile("backup/phantty.exe");
+
+    const backup = try tmp.dir.realpathAlloc(std.testing.allocator, "backup");
+    defer std.testing.allocator.free(backup);
+    const target = try tmp.dir.realpathAlloc(std.testing.allocator, "target");
+    defer std.testing.allocator.free(target);
+
+    try std.testing.expect(!restoreBackup(std.testing.allocator, backup, target));
 }
 
 test "updater_core: preflight rejects mismatched manifest kinds" {
