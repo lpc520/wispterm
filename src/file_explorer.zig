@@ -1697,9 +1697,9 @@ test "file_explorer: owner follows tab close and reorder" {
     try std.testing.expectEqual(@as(?usize, 3), g_owner_tab);
 
     onTabReordered(0, 2);
-    try std.testing.expectEqual(@as(?usize, 2), g_owner_tab);
+    try std.testing.expectEqual(@as(?usize, 3), g_owner_tab);
 
-    onTabClosed(2);
+    onTabClosed(3);
     try std.testing.expectEqual(@as(?usize, null), g_owner_tab);
     try std.testing.expect(!g_visible);
 }
