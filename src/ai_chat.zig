@@ -72,6 +72,11 @@ pub const Message = struct {
     }
 };
 
+pub const MarkdownExportMode = enum {
+    full,
+    clean,
+};
+
 pub const TextSelectionRange = struct {
     start: usize,
     end: usize,
@@ -1130,6 +1135,12 @@ pub const Session = struct {
         return self.toHistoryRecordLocked(allocator);
     }
 
+    pub fn allocMarkdownExport(self: *Session, allocator: std.mem.Allocator, mode: MarkdownExportMode) ![]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.allocMarkdownExportLocked(allocator, mode);
+    }
+
     pub fn handleChar(self: *Session, codepoint: u21) void {
         if (codepoint == 'y' or codepoint == 'Y') {
             if (self.resolveApproval(true)) return;
@@ -1976,6 +1987,73 @@ pub const Session = struct {
         return out.toOwnedSlice(allocator);
     }
 
+    fn allocMarkdownExportLocked(self: *Session, allocator: std.mem.Allocator, mode: MarkdownExportMode) ![]u8 {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(allocator);
+
+        try appendMarkdownDocumentHeader(allocator, &out, self.title(), self.model(), self.sessionId(), mode == .full);
+        switch (mode) {
+            .full => try self.appendFullMarkdownExportLocked(allocator, &out),
+            .clean => try self.appendCleanMarkdownExportLocked(allocator, &out),
+        }
+
+        if (out.items.len == 0) try out.appendSlice(allocator, "# Phantty AI Chat\n\nNo messages yet.\n");
+        return out.toOwnedSlice(allocator);
+    }
+
+    fn appendFullMarkdownExportLocked(self: *Session, allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+        if (self.messages.items.len == 0) {
+            try out.appendSlice(allocator, "No messages yet.\n");
+            return;
+        }
+
+        for (self.messages.items) |msg| {
+            const heading = if (msg.role == .tool and msg.tool_name != null and msg.tool_name.?.len > 0)
+                "Tool"
+            else
+                msg.role.label();
+            try appendMarkdownSection(allocator, out, heading, msg.content);
+
+            if (msg.reasoning) |reasoning| {
+                if (reasoning.len > 0) try appendMarkdownCodeSection(allocator, out, "Thinking", reasoning);
+            }
+            if (msg.usage_footer) |footer| {
+                if (footer.len > 0) try appendMarkdownCodeSection(allocator, out, "Usage", footer);
+            }
+        }
+    }
+
+    fn appendCleanMarkdownExportLocked(self: *Session, allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+        var user_count: usize = 0;
+        for (self.messages.items) |msg| {
+            if (msg.role == .user and msg.content.len > 0) user_count += 1;
+        }
+
+        try out.appendSlice(allocator, "## User Input\n\n");
+        if (user_count == 0) {
+            try out.appendSlice(allocator, "No user input yet.\n\n");
+        } else {
+            var seen: usize = 0;
+            for (self.messages.items) |msg| {
+                if (msg.role != .user or msg.content.len == 0) continue;
+                if (user_count > 1) {
+                    try out.writer(allocator).print("### {d}\n\n", .{seen + 1});
+                }
+                try appendMarkdownBody(allocator, out, msg.content);
+                seen += 1;
+                try out.appendSlice(allocator, "\n");
+            }
+        }
+
+        try out.appendSlice(allocator, "## Final Result\n\n");
+        if (latestAssistantContent(self.messages.items)) |content| {
+            try appendMarkdownBody(allocator, out, content);
+            try out.append(allocator, '\n');
+        } else {
+            try out.appendSlice(allocator, "No assistant result yet.\n");
+        }
+    }
+
     fn allocTranscriptSelectionTextLocked(self: *Session, allocator: std.mem.Allocator) (error{NoSelection} || std.mem.Allocator.Error)![]u8 {
         const selection = self.transcript_selection orelse return error.NoSelection;
         const range = selection.range() orelse return error.NoSelection;
@@ -2395,6 +2473,137 @@ fn appendClipboardSection(
     try out.appendSlice(allocator, label);
     try out.appendSlice(allocator, ":\r\n");
     try out.appendSlice(allocator, text);
+}
+
+fn appendMarkdownDocumentHeader(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    title: []const u8,
+    model: []const u8,
+    session_id: []const u8,
+    include_metadata: bool,
+) !void {
+    try out.appendSlice(allocator, "# ");
+    try appendMarkdownInline(allocator, out, if (title.len > 0) title else "Phantty AI Chat");
+    try out.appendSlice(allocator, "\n\n");
+    if (!include_metadata) return;
+    if (model.len > 0) {
+        try out.appendSlice(allocator, "- Model: `");
+        try appendMarkdownInline(allocator, out, model);
+        try out.appendSlice(allocator, "`\n");
+    }
+    if (session_id.len > 0) {
+        try out.appendSlice(allocator, "- Session: `");
+        try appendMarkdownInline(allocator, out, session_id);
+        try out.appendSlice(allocator, "`\n");
+    }
+    try out.appendSlice(allocator, "\n");
+}
+
+fn appendMarkdownSection(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    label: []const u8,
+    text: []const u8,
+) !void {
+    try out.appendSlice(allocator, "## ");
+    try appendMarkdownInline(allocator, out, label);
+    try out.appendSlice(allocator, "\n\n");
+    try appendMarkdownBody(allocator, out, text);
+    try out.appendSlice(allocator, "\n\n");
+}
+
+fn appendMarkdownCodeSection(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    label: []const u8,
+    text: []const u8,
+) !void {
+    try out.appendSlice(allocator, "## ");
+    try appendMarkdownInline(allocator, out, label);
+    try out.appendSlice(allocator, "\n\n");
+    try appendMarkdownFence(allocator, out, text);
+    try out.appendSlice(allocator, "\n");
+}
+
+fn appendMarkdownInline(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    text: []const u8,
+) !void {
+    var previous_space = false;
+    for (text) |ch| {
+        if (ch == '\r' or ch == '\n' or ch == '\t') {
+            if (!previous_space) {
+                try out.append(allocator, ' ');
+                previous_space = true;
+            }
+            continue;
+        }
+        try out.append(allocator, ch);
+        previous_space = ch == ' ';
+    }
+}
+
+fn appendMarkdownBody(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    text: []const u8,
+) !void {
+    if (text.len == 0) {
+        try out.appendSlice(allocator, "_(empty)_\n");
+        return;
+    }
+    try out.appendSlice(allocator, text);
+    if (text[text.len - 1] != '\n') try out.append(allocator, '\n');
+}
+
+fn appendMarkdownFence(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    text: []const u8,
+) !void {
+    const fence_len = @max(@as(usize, 3), longestBacktickRun(text) + 1);
+    try appendRepeatedByte(allocator, out, '`', fence_len);
+    try out.appendSlice(allocator, "text\n");
+    try out.appendSlice(allocator, text);
+    if (text.len == 0 or text[text.len - 1] != '\n') try out.append(allocator, '\n');
+    try appendRepeatedByte(allocator, out, '`', fence_len);
+    try out.appendSlice(allocator, "\n");
+}
+
+fn appendRepeatedByte(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    byte: u8,
+    count: usize,
+) !void {
+    var i: usize = 0;
+    while (i < count) : (i += 1) try out.append(allocator, byte);
+}
+
+fn longestBacktickRun(text: []const u8) usize {
+    var longest: usize = 0;
+    var current: usize = 0;
+    for (text) |ch| {
+        if (ch == '`') {
+            current += 1;
+            longest = @max(longest, current);
+        } else {
+            current = 0;
+        }
+    }
+    return longest;
+}
+
+fn latestAssistantContent(messages: []const Message) ?[]const u8 {
+    var i = messages.len;
+    while (i > 0) {
+        i -= 1;
+        const msg = messages[i];
+        if (msg.role == .assistant and msg.content.len > 0) return msg.content;
+    }
+    return null;
 }
 
 fn appendLimitedSection(
@@ -5865,6 +6074,87 @@ test "ai chat message clipboard exports one bubble" {
     const copied = try session.allocMessageClipboardText(allocator, 1);
     defer allocator.free(copied);
     try std.testing.expectEqualStrings("second", copied);
+}
+
+test "ai chat Markdown export includes full transcript details" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    defer {
+        for (session.messages.items) |msg| msg.deinit(allocator);
+        session.messages.deinit(allocator);
+    }
+    session.copyTitle("Chat Export");
+    session.copyModel("model-x");
+    session.copySessionId("session-export");
+
+    try session.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "status?"),
+    });
+    try session.messages.append(allocator, .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "ready"),
+        .reasoning = try allocator.dupe(u8, "checked state"),
+        .usage_footer = try allocator.dupe(u8, "total 3"),
+    });
+
+    const markdown = try session.allocMarkdownExport(allocator, .full);
+    defer allocator.free(markdown);
+
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "# Chat Export") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "## You\n\nstatus?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "## AI\n\nready") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "## Thinking") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "checked state") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "## Usage") != null);
+}
+
+test "ai chat clean Markdown export keeps user inputs and final answer only" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    defer {
+        for (session.messages.items) |msg| msg.deinit(allocator);
+        session.messages.deinit(allocator);
+    }
+    session.copyTitle("Clean Export");
+    session.copyModel("model-hidden");
+    session.copySessionId("session-hidden");
+
+    try session.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "first prompt"),
+    });
+    try session.messages.append(allocator, .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "intermediate answer"),
+        .reasoning = try allocator.dupe(u8, "hidden thinking"),
+    });
+    try session.messages.append(allocator, .{
+        .role = .tool,
+        .content = try allocator.dupe(u8, "tool output"),
+    });
+    try session.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "second prompt"),
+    });
+    try session.messages.append(allocator, .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "final answer"),
+        .usage_footer = try allocator.dupe(u8, "total 9"),
+    });
+
+    const markdown = try session.allocMarkdownExport(allocator, .clean);
+    defer allocator.free(markdown);
+
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "first prompt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "second prompt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "final answer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "intermediate answer") == null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "hidden thinking") == null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "tool output") == null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "total 9") == null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "model-hidden") == null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "session-hidden") == null);
 }
 
 test "ai chat stop request suppresses late assistant result" {

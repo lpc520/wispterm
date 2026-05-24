@@ -30,6 +30,19 @@ the assistant reply. This follows DeepSeek's
 Completed requests show elapsed time in the AI Chat status area, and token usage
 when the provider returns OpenAI-compatible `usage` fields.
 
+## Markdown Export
+
+Use the command center to run `Export AI Chat Markdown` for the full transcript,
+including reasoning, tool details, and usage metadata.
+
+Use `Export AI Chat Markdown Clean` when you want a publishing-friendly record:
+it writes only user prompts and the final AI answer, without thinking blocks,
+tool output, or usage metadata. This is useful for notes, blog drafts, and
+WeChat public account posts.
+
+Phantty opens a Windows save dialog with a Markdown filename so you can choose
+the destination path. After saving, the saved path is copied to the clipboard.
+
 Agent tool commands run as hidden background child processes where possible, so
 local PowerShell/cmd tool calls do not flash a separate console window.
 

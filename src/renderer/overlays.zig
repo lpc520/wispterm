@@ -461,6 +461,8 @@ fn executeCommand(action: CommandAction) void {
         .copy_remote_key => {
             _ = AppWindow.input.copyRemoteSessionKeyToClipboard();
         },
+        .export_ai_chat_markdown => AppWindow.exportActiveAiChatMarkdown(.full),
+        .export_ai_chat_markdown_clean => AppWindow.exportActiveAiChatMarkdown(.clean),
         .show_version => showVersionToast(),
         .check_for_updates => {
             showUpdateCheckingToast();
@@ -3703,6 +3705,15 @@ pub fn showCopyToast(byte_count: usize) void {
     const msg = std.fmt.bufPrint(&g_copy_toast_buf, "Copied ({d} bytes)", .{byte_count}) catch return;
     g_copy_toast_len = msg.len;
     g_copy_toast_until_ms = std.time.milliTimestamp() + COPY_TOAST_DURATION_MS;
+}
+
+pub fn showStatusToast(message: []const u8) void {
+    const len = @min(message.len, g_copy_toast_buf.len);
+    @memcpy(g_copy_toast_buf[0..len], message[0..len]);
+    g_copy_toast_len = len;
+    g_copy_toast_until_ms = std.time.milliTimestamp() + COPY_TOAST_DURATION_MS;
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
 }
 
 fn transferToastVerb(kind: AppWindow.file_explorer.TransferKind, status: AppWindow.file_explorer.TransferStatus) []const u8 {

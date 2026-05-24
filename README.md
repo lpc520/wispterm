@@ -5,7 +5,8 @@ A Windows terminal written in Zig, powered by [libghostty-vt](https://github.com
 > [!NOTE]
 > This repository is a fork of [arya-s/phantty](https://github.com/arya-s/phantty),
 > with additional features layered on top: an embedded WebView2 browser panel,
-> a file explorer with Markdown/text/table/image preview, AI Agent sessions,
+> a file explorer with Markdown/text/table/image preview, AI Agent sessions with
+> Markdown export,
 > an opt-in remote-access client,
 > Kitty Graphics image protocol support, and a configurable background image.
 
@@ -20,7 +21,7 @@ A Windows terminal written in Zig, powered by [libghostty-vt](https://github.com
 - **Splits and tabs** - vertical/horizontal splits, tab strip, focus-follows-mouse, equalize sizes
 - **File Explorer and previews** - browse local, WSL, and SSH files; preview Markdown/text/tables/images without leaving the terminal
 - **Embedded browser panel** - open web URLs in a side WebView2 panel, with SSH loopback tunneling for profile sessions
-- **AI Agent sessions** - launch an OpenAI-compatible Agent tab directly and configure profiles in Settings
+- **AI Agent sessions** - launch OpenAI-compatible Agent tabs, configure profiles, restore history, and export full or clean Markdown transcripts
 - **Kitty Graphics protocol** - display inline images and PDFs from remote shells via `imgcat.py` / `pdfcat.py`
 - **Opt-in remote access** - share a session key over a Cloudflare-hosted relay (disabled by default)
 
@@ -131,6 +132,19 @@ Use `keybind = clear` before custom bindings if you want to remove all defaults 
 | **Ctrl+Shift+Tab**                                                             | Previous tab                                                                       |
 | **Alt+1**-**9**                                                                | Switch to tab 1-9 (when that tab exists)                                           |
 | **Ctrl+,**                                                                     | Open config file in the default editor                                             |
+
+## AI Chat Markdown export
+
+In an active AI Chat or Agent tab, open the command center with `Ctrl+Shift+P`
+and run:
+
+- `Export AI Chat Markdown` to save the full transcript, including thinking,
+  tool details, and usage metadata.
+- `Export AI Chat Markdown Clean` to save a publishing-friendly Markdown file
+  with only the user inputs and the final AI answer.
+
+Phantty opens a Windows save dialog with a `.md` filename. After saving, the
+saved path is copied to the clipboard.
 
 ## SSH current directory for downloads and uploads
 

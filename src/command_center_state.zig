@@ -23,6 +23,8 @@ pub const CommandAction = enum {
     font_size_increase,
     toggle_maximize,
     copy_remote_key,
+    export_ai_chat_markdown,
+    export_ai_chat_markdown_clean,
     show_version,
     check_for_updates,
     install_update,
@@ -58,6 +60,8 @@ pub const command_entries = [_]CommandEntry{
     .{ .title = "Increase Font Size", .detail = "Make terminal text larger", .shortcut = "", .action = .font_size_increase },
     .{ .title = "Toggle Maximize", .detail = "Maximize or restore the window", .shortcut = "", .action = .toggle_maximize },
     .{ .title = "Copy Remote Key", .detail = "Copy the active Phantty remote session key", .shortcut = "click Remote key", .action = .copy_remote_key },
+    .{ .title = "Export AI Chat Markdown", .detail = "Save the active AI Chat transcript as Markdown", .shortcut = "", .action = .export_ai_chat_markdown },
+    .{ .title = "Export AI Chat Markdown Clean", .detail = "Save user prompts and the final AI result without thinking", .shortcut = "", .action = .export_ai_chat_markdown_clean },
     .{ .title = "Version", .detail = "Show Phantty version", .shortcut = app_metadata.version, .action = .show_version },
     .{ .title = "Check for Updates", .detail = "Check GitHub Releases for a newer Phantty version", .shortcut = "", .action = .check_for_updates },
     .{ .title = "Install Update", .detail = "Install the last detected portable update", .shortcut = "", .action = .install_update },
@@ -237,6 +241,11 @@ test "command center includes update check actions" {
     try std.testing.expectEqual(CommandAction.check_for_updates, findCommandAction("Check for Updates"));
     try std.testing.expectEqual(CommandAction.install_update, findCommandAction("Install Update"));
     try std.testing.expectEqual(CommandAction.open_latest_release, findCommandAction("Open Latest Release"));
+}
+
+test "command center includes AI Markdown export actions" {
+    try std.testing.expectEqual(CommandAction.export_ai_chat_markdown, findCommandAction("Export AI Chat Markdown"));
+    try std.testing.expectEqual(CommandAction.export_ai_chat_markdown_clean, findCommandAction("Export AI Chat Markdown Clean"));
 }
 
 test "command center New Agent launch path forces agent mode when profiles exist" {

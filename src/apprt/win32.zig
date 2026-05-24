@@ -420,6 +420,38 @@ pub const OPENFILENAMEA = extern struct {
 
 pub extern "comdlg32" fn GetOpenFileNameA(lpofn: *OPENFILENAMEA) callconv(.winapi) BOOL;
 
+pub const OPENFILENAMEW = extern struct {
+    lStructSize: DWORD = @sizeOf(OPENFILENAMEW),
+    hwndOwner: ?HWND = null,
+    hInstance: ?HINSTANCE = null,
+    lpstrFilter: ?[*:0]const WCHAR = null,
+    lpstrCustomFilter: ?[*]WCHAR = null,
+    nMaxCustFilter: DWORD = 0,
+    nFilterIndex: DWORD = 0,
+    lpstrFile: ?[*]WCHAR = null,
+    nMaxFile: DWORD = 0,
+    lpstrFileTitle: ?[*]WCHAR = null,
+    nMaxFileTitle: DWORD = 0,
+    lpstrInitialDir: ?[*:0]const WCHAR = null,
+    lpstrTitle: ?[*:0]const WCHAR = null,
+    Flags: DWORD = 0,
+    nFileOffset: WORD = 0,
+    nFileExtension: WORD = 0,
+    lpstrDefExt: ?[*:0]const WCHAR = null,
+    lCustData: usize = 0,
+    lpfnHook: ?*const anyopaque = null,
+    lpTemplateName: ?[*:0]const WCHAR = null,
+};
+
+pub const OFN_OVERWRITEPROMPT: DWORD = 0x00000002;
+pub const OFN_HIDEREADONLY: DWORD = 0x00000004;
+pub const OFN_NOCHANGEDIR: DWORD = 0x00000008;
+pub const OFN_PATHMUSTEXIST: DWORD = 0x00000800;
+pub const OFN_EXPLORER: DWORD = 0x00080000;
+pub const OFN_ENABLESIZING: DWORD = 0x00800000;
+
+pub extern "comdlg32" fn GetSaveFileNameW(lpofn: *OPENFILENAMEW) callconv(.winapi) BOOL;
+
 // Shell drag-drop
 pub const HDROP = *opaque {};
 pub extern "shell32" fn DragAcceptFiles(hWnd: HWND, fAccept: BOOL) callconv(.winapi) void;

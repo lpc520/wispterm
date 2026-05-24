@@ -379,6 +379,41 @@ pub fn activeAiChat() ?*ai_chat.Session {
     return tab.activeAiChat();
 }
 
+pub fn exportActiveAiChatMarkdown(mode: ai_chat.MarkdownExportMode) void {
+    const allocator = g_allocator orelse return;
+    const session = activeAiChat() orelse {
+        overlays.showStatusToast("Open an AI Chat tab first");
+        return;
+    };
+
+    const markdown = session.allocMarkdownExport(allocator, mode) catch |err| {
+        log.warn("failed to render AI chat Markdown export: {}", .{err});
+        overlays.showStatusToast("Markdown export failed");
+        return;
+    };
+    defer allocator.free(markdown);
+
+    const path = chooseAiChatMarkdownExportPath(allocator, mode) catch |err| {
+        log.warn("failed to choose AI chat Markdown export path: {}", .{err});
+        overlays.showStatusToast("Markdown export failed");
+        return;
+    } orelse return;
+    defer allocator.free(path);
+
+    writeFilePath(path, markdown) catch |err| {
+        log.warn("failed to write AI chat Markdown export {s}: {}", .{ path, err });
+        overlays.showStatusToast("Markdown export failed");
+        return;
+    };
+
+    if (input.copyTextToClipboard(path)) {
+        overlays.showStatusToast("Exported Markdown; path copied");
+    } else {
+        overlays.showStatusToast("Exported Markdown");
+    }
+    std.debug.print("Exported AI chat Markdown to {s}\n", .{path});
+}
+
 pub fn currentTitlebarHeight() f32 {
     if (g_window) |w| return @floatFromInt(w.titlebar_height);
     return titlebar.titlebarHeight();
@@ -400,6 +435,114 @@ pub fn rightPanelsWidthForWindow(window_width: i32) f32 {
 
 pub fn browserPanelRightOffset() f32 {
     return markdown_preview_panel.width();
+}
+
+fn aiChatExportRoot(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "APPDATA")) |appdata| {
+        defer allocator.free(appdata);
+        return std.fs.path.join(allocator, &.{ appdata, "phantty", "exports" });
+    } else |_| {}
+    if (std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME")) |xdg| {
+        defer allocator.free(xdg);
+        return std.fs.path.join(allocator, &.{ xdg, "phantty", "exports" });
+    } else |_| {}
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+        defer allocator.free(home);
+        return std.fs.path.join(allocator, &.{ home, ".config", "phantty", "exports" });
+    } else |_| {}
+    return error.NoExportPath;
+}
+
+fn chooseAiChatMarkdownExportPath(
+    allocator: std.mem.Allocator,
+    mode: ai_chat.MarkdownExportMode,
+) !?[]u8 {
+    const root = try aiChatExportRoot(allocator);
+    defer allocator.free(root);
+    std.fs.cwd().makePath(root) catch |err| {
+        log.warn("failed to create AI chat export directory {s}: {}", .{ root, err });
+    };
+
+    const suffix = switch (mode) {
+        .full => "full",
+        .clean => "clean",
+    };
+    const filename = try std.fmt.allocPrint(
+        allocator,
+        "ai-chat-{d}-{s}.md",
+        .{ std.time.milliTimestamp(), suffix },
+    );
+    defer allocator.free(filename);
+
+    return saveMarkdownDialogPath(allocator, root, filename);
+}
+
+fn saveMarkdownDialogPath(
+    allocator: std.mem.Allocator,
+    initial_dir: []const u8,
+    default_filename: []const u8,
+) !?[]u8 {
+    const max_file_chars = 32768;
+    const file_buf = try allocator.alloc(win32_backend.WCHAR, max_file_chars);
+    defer allocator.free(file_buf);
+    @memset(file_buf, 0);
+
+    const filename_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, default_filename);
+    defer allocator.free(filename_w);
+    const filename_len = @min(filename_w.len, file_buf.len - 1);
+    @memcpy(file_buf[0..filename_len], filename_w[0..filename_len]);
+    file_buf[filename_len] = 0;
+
+    const initial_dir_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, initial_dir);
+    defer allocator.free(initial_dir_w);
+
+    const filter = std.unicode.utf8ToUtf16LeStringLiteral("Markdown (*.md)\x00*.md\x00All Files (*.*)\x00*.*\x00");
+    const title_text = std.unicode.utf8ToUtf16LeStringLiteral("Save AI Chat Markdown");
+    const def_ext = std.unicode.utf8ToUtf16LeStringLiteral("md");
+    var ofn: win32_backend.OPENFILENAMEW = .{
+        .hwndOwner = if (g_window) |w| w.hwnd else null,
+        .lpstrFilter = filter,
+        .nFilterIndex = 1,
+        .lpstrFile = file_buf.ptr,
+        .nMaxFile = @intCast(file_buf.len),
+        .lpstrInitialDir = initial_dir_w.ptr,
+        .lpstrTitle = title_text,
+        .Flags = win32_backend.OFN_OVERWRITEPROMPT |
+            win32_backend.OFN_HIDEREADONLY |
+            win32_backend.OFN_NOCHANGEDIR |
+            win32_backend.OFN_PATHMUSTEXIST |
+            win32_backend.OFN_EXPLORER |
+            win32_backend.OFN_ENABLESIZING,
+        .lpstrDefExt = def_ext,
+    };
+
+    if (win32_backend.GetSaveFileNameW(&ofn) == 0) {
+        overlays.showStatusToast("Markdown export cancelled");
+        return null;
+    }
+
+    var len: usize = 0;
+    while (len < file_buf.len and file_buf[len] != 0) : (len += 1) {}
+    if (len == 0) return null;
+    const path = try std.unicode.utf16LeToUtf8Alloc(allocator, file_buf[0..len]);
+    return path;
+}
+
+fn writeFilePath(path: []const u8, bytes: []const u8) !void {
+    if (std.fs.path.dirname(path)) |dir| {
+        try std.fs.cwd().makePath(dir);
+    }
+
+    if (std.fs.path.isAbsolute(path)) {
+        var file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(bytes);
+        return;
+    }
+
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(bytes);
 }
 
 fn syncWindowTitlebarHeight(win: *win32_backend.Window) f32 {
