@@ -2,14 +2,14 @@
 /// Phase 4 will populate these; for now they are type definitions.
 ///
 /// Modeled after Ghostty's `src/renderer/cell.zig`.
-
-/// Background cell — just a grid position and a color.
+/// Background cell — grid position, color, and alpha.
 pub const CellBg = extern struct {
     grid_col: u16,
     grid_row: u16,
     r: f32,
     g: f32,
     b: f32,
+    a: f32,
 };
 
 /// Foreground cell — grid position, glyph offset/size, atlas UVs, and color.

@@ -13,7 +13,6 @@
 ///
 /// Note: GL operations are performed by AppWindow since it owns the GL context.
 /// Renderer just stores the handles.
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ghostty_vt = @import("ghostty-vt");
@@ -50,6 +49,7 @@ pub const CellBg = extern struct {
     r: f32,
     g: f32,
     b: f32,
+    a: f32,
 };
 
 /// Foreground (glyph) cell instance data for GPU

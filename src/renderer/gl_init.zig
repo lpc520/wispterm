@@ -82,7 +82,9 @@ const bg_vertex_source: [*c]const u8 =
     \\uniform vec2 cellSize;
     \\uniform vec2 gridOffset;
     \\uniform float windowHeight;
+    \\layout (location = 3) in float aAlpha;
     \\flat out vec3 vColor;
+    \\flat out float vAlpha;
     \\void main() {
     \\    // Cell top-left in screen coords
     \\    float cx = gridOffset.x + aGridPos.x * cellSize.x;
@@ -90,19 +92,19 @@ const bg_vertex_source: [*c]const u8 =
     \\    vec2 pos = vec2(cx, cy) + aQuad * cellSize;
     \\    gl_Position = projection * vec4(pos, 0.0, 1.0);
     \\    vColor = aColor;
+    \\    vAlpha = aAlpha;
     \\}
 ;
 
 const bg_fragment_source: [*c]const u8 =
     \\#version 330 core
     \\flat in vec3 vColor;
-    \\uniform float uBgOpacity;
+    \\flat in float vAlpha;
     \\out vec4 fragColor;
     \\void main() {
     \\    // The pipeline blend func is (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA),
-    \\    // so an alpha of uBgOpacity correctly reveals the framebuffer (the
-    \\    // background image) underneath proportionally to (1 - uBgOpacity).
-    \\    fragColor = vec4(vColor, uBgOpacity);
+    \\    // so per-cell alpha controls whether wallpaper shows through.
+    \\    fragColor = vec4(vColor, vAlpha);
     \\}
 ;
 
@@ -314,7 +316,7 @@ pub fn initInstancedBuffers() void {
     gl.EnableVertexAttribArray.?(0);
     gl.VertexAttribPointer.?(0, 2, c.GL_FLOAT, c.GL_FALSE, 2 * @sizeOf(f32), null);
 
-    // Attrs 1-2: per-instance BG data
+    // Attrs 1-3: per-instance BG data
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, bg_instance_vbo);
     gl.BufferData.?(c.GL_ARRAY_BUFFER, @sizeOf(Renderer.CellBg) * Renderer.MAX_CELLS, null, c.GL_STREAM_DRAW);
     const bg_stride: c.GLsizei = @sizeOf(Renderer.CellBg);
@@ -326,6 +328,10 @@ pub fn initInstancedBuffers() void {
     gl.EnableVertexAttribArray.?(2);
     gl.VertexAttribPointer.?(2, 3, c.GL_FLOAT, c.GL_FALSE, bg_stride, @ptrFromInt(2 * @sizeOf(f32)));
     gl.VertexAttribDivisor.?(2, 1);
+    // Attr 3: alpha
+    gl.EnableVertexAttribArray.?(3);
+    gl.VertexAttribPointer.?(3, 1, c.GL_FLOAT, c.GL_FALSE, bg_stride, @ptrFromInt(5 * @sizeOf(f32)));
+    gl.VertexAttribDivisor.?(3, 1);
 
     gl.BindVertexArray.?(0);
 

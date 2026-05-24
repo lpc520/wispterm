@@ -238,6 +238,7 @@ pub fn rebuildCells(rend: *Renderer) void {
     rend.fg_cell_count = 0;
     rend.color_fg_cell_count = 0;
     image_renderer.uploadPending(rend);
+    const normal_bg_alpha: f32 = if (AppWindow.background_image.g_enabled) gl_init.g_bg_opacity else 1.0;
 
     for (0..render_rows) |row_idx| {
         const row_f: f32 = @floatFromInt(row_idx);
@@ -265,19 +266,21 @@ pub fn rebuildCells(rend: *Renderer) void {
                 // Draw cell background normally (cursor shape drawn by overlay)
                 if (sc.bg) |bg| {
                     if (rend.bg_cell_count < rend.bg_cells.items.len) {
-                        rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2] };
+                        rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2], .a = normal_bg_alpha };
                         rend.bg_cell_count += 1;
                     }
                 }
             } else if (is_selected) {
                 if (rend.bg_cell_count < rend.bg_cells.items.len) {
-                    rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = g_theme.selection_background[0], .g = g_theme.selection_background[1], .b = g_theme.selection_background[2] };
+                    // Match Ghostty: selected cells stay fully opaque even when
+                    // regular cell backgrounds reveal a wallpaper underneath.
+                    rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = g_theme.selection_background[0], .g = g_theme.selection_background[1], .b = g_theme.selection_background[2], .a = 1.0 };
                     rend.bg_cell_count += 1;
                 }
                 fg_color = g_theme.selection_foreground orelse g_theme.foreground;
             } else if (sc.bg) |bg| {
                 if (rend.bg_cell_count < rend.bg_cells.items.len) {
-                    rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2] };
+                    rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2], .a = normal_bg_alpha };
                     rend.bg_cell_count += 1;
                 }
             }
@@ -408,12 +411,6 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
         gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.bg_shader, "cellSize"), font.cell_width, font.cell_height);
         gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.bg_shader, "gridOffset"), offset_x, offset_y);
         gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.bg_shader, "windowHeight"), window_height);
-        // Only thin out cell backgrounds when a wallpaper is actually loaded —
-        // otherwise lowering background-opacity would make selections / colored
-        // cells translucent over an opaque theme bg, which is just a darkening
-        // effect with no useful visual.
-        const bg_opacity: f32 = if (AppWindow.background_image.g_enabled) gl_init.g_bg_opacity else 1.0;
-        gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.bg_shader, "uBgOpacity"), bg_opacity);
         gl_init.setProjectionForProgram(gl_init.bg_shader, window_height);
 
         gl.BindVertexArray.?(gl_init.bg_vao);
