@@ -245,6 +245,7 @@ threadlocal var g_start_maximize: bool = false;
 threadlocal var g_start_fullscreen: bool = false;
 threadlocal var g_quake_mode: bool = true;
 threadlocal var g_quake_hidden: bool = false;
+threadlocal var g_quake_frame: ?quick_terminal.Frame = null;
 threadlocal var g_quake_hotkey_registered: bool = false;
 pub threadlocal var g_keybinds: keybind.Set = keybind.Set.defaults();
 threadlocal var g_debug_memory: bool = false;
@@ -2268,10 +2269,39 @@ fn quakeWorkAreaForWindow(win: *win32_backend.Window) ?quick_terminal.WorkArea {
     };
 }
 
-fn applyQuakeFrame(win: *win32_backend.Window) void {
+fn currentQuakeFrame(win: *win32_backend.Window) ?quick_terminal.Frame {
+    var rect: win32_backend.RECT = undefined;
+    if (win32_backend.GetWindowRect(win.hwnd, &rect) == 0) return null;
+    const width = rect.right - rect.left;
+    const height = rect.bottom - rect.top;
+    if (width <= 0 or height <= 0) return null;
+    return .{ .x = rect.left, .y = rect.top, .width = width, .height = height };
+}
+
+fn rememberQuakeFrame(win: *win32_backend.Window) void {
+    if (win.is_minimized or win.is_fullscreen) return;
+    if (win32_backend.IsZoomed(win.hwnd) != 0) return;
+
+    const frame = currentQuakeFrame(win) orelse return;
+    if (quakeWorkAreaForWindow(win)) |work_area| {
+        if (!quick_terminal.frameIntersectsWorkArea(frame, work_area)) return;
+    }
+    g_quake_frame = frame;
+}
+
+fn applyQuakeFrame(win: *win32_backend.Window, use_cached_frame: bool) void {
     const work_area = quakeWorkAreaForWindow(win) orelse return;
-    const frame = quick_terminal.calculateFrame(.{ .work_area = work_area });
-    win.setOuterFrame(frame.x, frame.y, frame.width, frame.height, true);
+    const frame = if (use_cached_frame) frame: {
+        if (g_quake_frame) |cached| {
+            if (quick_terminal.frameIntersectsWorkArea(cached, work_area)) {
+                break :frame cached;
+            }
+            g_quake_frame = null;
+        }
+        break :frame quick_terminal.calculateFrame(.{ .work_area = work_area });
+    } else quick_terminal.calculateFrame(.{ .work_area = work_area });
+
+    win.setOuterFrame(frame.x, frame.y, frame.width, frame.height, false);
 }
 
 fn quakeHotkeyBinding() ?keybind.Binding {
@@ -2303,14 +2333,15 @@ pub fn toggleQuakeVisibility() void {
     if (!g_quake_mode) return;
     const win = g_window orelse return;
 
-    if (g_quake_hidden) {
-        applyQuakeFrame(win);
+    if (g_quake_hidden or win.is_minimized) {
+        applyQuakeFrame(win, true);
         _ = win32_backend.ShowWindow(win.hwnd, win32_backend.SW_SHOW);
         _ = win32_backend.SetForegroundWindow(win.hwnd);
         g_quake_hidden = false;
         g_force_rebuild = true;
         g_cells_valid = false;
     } else {
+        rememberQuakeFrame(win);
         win.clearTransientInputQueues();
         _ = win32_backend.ShowWindow(win.hwnd, win32_backend.SW_HIDE);
         g_quake_hidden = true;
@@ -2988,7 +3019,7 @@ fn runMainLoop(self: *AppWindow) !void {
     const total_height_padding = (render_padding + titlebar_height) + render_padding + explicit_top + explicit_bottom; // 44 + 10 + 20 = 74
 
     if (g_quake_mode) {
-        applyQuakeFrame(&win32_window);
+        applyQuakeFrame(&win32_window, false);
     } else if (term_cols > 0 and term_rows > 0) {
         // If config specifies window-width/window-height, resize window to fit that grid.
         // term_cols/term_rows were set from config at init.

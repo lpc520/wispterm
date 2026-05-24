@@ -1247,7 +1247,7 @@ pub const Window = struct {
     pub fn setOuterFrame(self: *Window, x: i32, y: i32, w: i32, h: i32, topmost: bool) void {
         _ = SetWindowPos(
             self.hwnd,
-            if (topmost) HWND_TOPMOST else null,
+            if (topmost) HWND_TOPMOST else HWND_NOTOPMOST,
             x,
             y,
             w,

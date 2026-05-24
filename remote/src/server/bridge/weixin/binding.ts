@@ -18,6 +18,8 @@ export const DEFAULT_WEIXIN_SETTINGS: WeixinSettings = {
   reply_timeout_ms: 120000,
 };
 
+const writeQueues = new Map<string, Promise<void>>();
+
 export class WeixinBindingStore {
   readonly root: string;
   readonly dir: string;
@@ -105,6 +107,17 @@ async function writeAtomicJson(path: string, value: unknown, mode: number, shoul
 }
 
 async function writeAtomicText(path: string, value: string, mode: number, shouldContinue?: () => boolean): Promise<boolean> {
+  const previous = writeQueues.get(path) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(() => writeAtomicTextUnlocked(path, value, mode, shouldContinue));
+  let cleanup: Promise<void>;
+  cleanup = next.then(() => undefined, () => undefined).finally(() => {
+    if (writeQueues.get(path) === cleanup) writeQueues.delete(path);
+  });
+  writeQueues.set(path, cleanup);
+  return next;
+}
+
+async function writeAtomicTextUnlocked(path: string, value: string, mode: number, shouldContinue?: () => boolean): Promise<boolean> {
   if (shouldContinue?.() === false) return false;
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;

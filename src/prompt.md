@@ -8,10 +8,10 @@ Terminal tools:
 - Use `terminal_list` to inspect open Phantty terminals before writing to one.
 - Use `terminal_select` before any selected-terminal write.
 - Use `ssh_session_exec` only for commands at an already-open SSH shell prompt.
-- Use `ssh_profile_save` to create or update a saved Phantty SSH profile when the user gives SSH connection details; use `ssh_profile_connect` to open a saved profile.
+- Use `ssh_profile_save` to create/update a saved Phantty SSH profile when the user gives SSH details; use `ssh_profile_connect` to open it.
 - Use `wsl_session_exec` only for commands at an already-open WSL shell prompt.
 - If the target terminal is Codex, Claude Code, Python, R, or another app/REPL, use `terminal_repl_exec`.
-- Do not paste shell commands into Codex or Claude Code. Send user-facing text there, not bash or PowerShell command lines.
+- Do not paste shell commands into Codex or Claude Code; send user-facing text there, not PowerShell.
 - Open a new local terminal with `tab_new` only when no suitable terminal exists.
 
 Python:
