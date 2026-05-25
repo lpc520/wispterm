@@ -15,6 +15,7 @@ const platform_display = @import("platform/display.zig");
 const font_backend = @import("platform/font_backend.zig");
 const platform_process = @import("platform/process.zig");
 const platform_pty_command = @import("platform/pty_command.zig");
+const platform_thread_control = @import("platform/thread_control.zig");
 const window_backend = @import("platform/window_backend.zig");
 const remote = @import("remote_client.zig");
 const weixin = @import("weixin/controller.zig");
@@ -937,7 +938,13 @@ pub fn deinit(self: *App) void {
     }
 
     if (self.weixin_controller) |controller| {
-        controller.destroy();
+        if (!controller.destroyForProcessExit(.{
+            .request_synchronous_io_cancel = platform_thread_control.requestSynchronousIoCancel,
+            .wait_for_exit = platform_thread_control.waitForExit,
+        })) {
+            std.debug.print("weixin controller left allocated for process exit after shutdown timeout; exiting now\n", .{});
+            std.process.exit(0);
+        }
         self.weixin_controller = null;
     }
 

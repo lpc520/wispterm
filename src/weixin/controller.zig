@@ -9,6 +9,9 @@ const ilink = @import("ilink_client.zig");
 const poller = @import("poller.zig");
 const control_mod = @import("control.zig");
 
+const SHUTDOWN_JOIN_TIMEOUT_MS: u32 = 1500;
+pub const ThreadControl = poller.ThreadControl;
+
 pub const Controller = struct {
     allocator: std.mem.Allocator,
     state_path: []u8,
@@ -35,7 +38,7 @@ pub const Controller = struct {
     login_status: types.QrStatusKind = .unknown,
     login_qr_arena: ?std.heap.ArenaAllocator = null,
     login_qr_string: []const u8 = "",
-    login_qr_img_base64: []const u8 = "",
+    login_qr_content: []const u8 = "",
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -67,23 +70,69 @@ pub const Controller = struct {
         self.allocator.destroy(self);
     }
 
+    /// Process-exit variant: do not block forever on iLink long-poll/login HTTP
+    /// calls. If a worker cannot be joined promptly, it is detached and this
+    /// Controller intentionally remains allocated until the process exits.
+    pub fn destroyForProcessExit(self: *Controller, thread_control: ThreadControl) bool {
+        self.login_active.store(false, .release);
+        if (!self.joinLoginThreadForProcessExit(thread_control)) return false;
+        if (!self.stopForProcessExit(thread_control)) return false;
+
+        if (self.login_qr_arena) |*a| a.deinit();
+        self.clearBinding();
+        self.allocator.free(self.state_path);
+        self.allocator.destroy(self);
+        return true;
+    }
+
     /// Starts QR login on a background thread (idempotent). A panel polls
     /// loginSnapshot() for the QR + status; on confirmation the binding is
     /// persisted and polling starts automatically.
     pub fn startLoginAsync(self: *Controller) !void {
         if (self.login_active.swap(true, .acq_rel)) return; // already running
-        self.setLoginStatus(.wait);
+        if (self.login_thread) |th| {
+            th.join();
+            self.login_thread = null;
+        }
+        self.resetLoginSnapshot(.wait);
         self.login_thread = std.Thread.spawn(.{}, loginThreadMain, .{self}) catch |err| {
             self.login_active.store(false, .release);
             return err;
         };
+        std.debug.print("weixin QR login started\n", .{});
     }
 
     pub const LoginSnapshot = struct {
         status: types.QrStatusKind,
         qr_string: []const u8,
-        qr_img_base64: []const u8,
+        qr_content: []const u8,
     };
+
+    pub const Status = struct {
+        running: bool,
+        has_token: bool,
+        has_owner: bool,
+        has_bot_id: bool,
+        login_active: bool,
+        login_status: types.QrStatusKind,
+    };
+
+    pub fn statusSnapshot(self: *Controller) Status {
+        const login_active = self.login_active.load(.acquire);
+        self.login_mutex.lock();
+        const login_status = self.login_status;
+        self.login_mutex.unlock();
+        const poller_active = self.running and !self.poll.stop_requested.load(.acquire);
+
+        return .{
+            .running = poller_active,
+            .has_token = self.token.len != 0,
+            .has_owner = self.owner.len != 0,
+            .has_bot_id = self.bot_id.len != 0,
+            .login_active = login_active,
+            .login_status = login_status,
+        };
+    }
 
     /// Thread-safe snapshot for a UI panel. Returned strings are copied into `arena`.
     pub fn loginSnapshot(self: *Controller, arena: std.mem.Allocator) !LoginSnapshot {
@@ -92,7 +141,7 @@ pub const Controller = struct {
         return .{
             .status = self.login_status,
             .qr_string = try arena.dupe(u8, self.login_qr_string),
-            .qr_img_base64 = try arena.dupe(u8, self.login_qr_img_base64),
+            .qr_content = try arena.dupe(u8, self.login_qr_content),
         };
     }
 
@@ -129,14 +178,24 @@ pub const Controller = struct {
         self.login_active.store(false, .release);
     }
 
-    fn setLoginQr(self: *Controller, qr_string: []const u8, img_base64: []const u8) void {
+    fn setLoginQr(self: *Controller, qr_string: []const u8, qr_content: []const u8) void {
         self.login_mutex.lock();
         defer self.login_mutex.unlock();
         if (self.login_qr_arena) |*a| a.deinit();
         self.login_qr_arena = std.heap.ArenaAllocator.init(self.allocator);
         const a = self.login_qr_arena.?.allocator();
         self.login_qr_string = a.dupe(u8, qr_string) catch "";
-        self.login_qr_img_base64 = a.dupe(u8, img_base64) catch "";
+        self.login_qr_content = a.dupe(u8, qr_content) catch "";
+    }
+
+    fn resetLoginSnapshot(self: *Controller, status: types.QrStatusKind) void {
+        self.login_mutex.lock();
+        defer self.login_mutex.unlock();
+        if (self.login_qr_arena) |*a| a.deinit();
+        self.login_qr_arena = null;
+        self.login_qr_string = "";
+        self.login_qr_content = "";
+        self.login_status = status;
     }
 
     fn setLoginStatus(self: *Controller, status: types.QrStatusKind) void {
@@ -150,20 +209,37 @@ pub const Controller = struct {
         var loaded = try state_store.load(self.allocator, self.state_path);
         defer loaded.deinit(self.allocator);
         if (loaded.binding.bot_token.len == 0) return; // not logged in yet
-        try self.startWithBinding(loaded.binding);
+        try self.startWithBinding(loaded.binding, .{
+            .bootstrap_skip_pending = loaded.binding.sync_buf.len == 0,
+        });
     }
 
     /// Stops the poller, persisting the latest sync cursor so the next start
     /// resumes where it left off.
     pub fn stop(self: *Controller) void {
+        self.stopInternal(true);
+    }
+
+    fn stopInternal(self: *Controller, persist_sync: bool) void {
         if (!self.running) return;
         self.poll.stop();
         // Persist the advanced sync cursor (best-effort).
-        self.persist(self.poll.sync_buf) catch {};
+        if (persist_sync) self.persist(self.poll.sync_buf) catch {};
         self.allocator.free(self.poll.sync_buf);
         // ilink.Client holds no persistent resources (it opens a fresh
         // std.http.Client per request), so there is nothing to deinit here.
         self.running = false;
+    }
+
+    fn stopForProcessExit(self: *Controller, thread_control: ThreadControl) bool {
+        if (!self.running) return true;
+        if (!self.poll.stopForProcessExit(thread_control)) return false;
+
+        // Persist the advanced sync cursor (best-effort).
+        self.persist(self.poll.sync_buf) catch {};
+        self.allocator.free(self.poll.sync_buf);
+        self.running = false;
+        return true;
     }
 
     /// Clears the persisted owner + token and stops. Used by "Unbind".
@@ -200,7 +276,8 @@ pub const Controller = struct {
             .sync_buf = "",
         };
         try self.persistBinding(binding);
-        try self.startWithBinding(binding);
+        try self.startWithBinding(binding, .{ .bootstrap_skip_pending = false });
+        std.debug.print("weixin QR login confirmed; polling started\n", .{});
     }
 
     // --- internals ---
@@ -209,8 +286,15 @@ pub const Controller = struct {
         return if (self.base_url.len != 0) self.base_url else ilink_default_base_url;
     }
 
-    fn startWithBinding(self: *Controller, binding: types.Binding) !void {
-        if (self.running) return;
+    const StartOptions = struct {
+        bootstrap_skip_pending: bool = false,
+    };
+
+    fn startWithBinding(self: *Controller, binding: types.Binding, options: StartOptions) !void {
+        if (self.running) {
+            std.debug.print("weixin direct binding refresh requested; stopping existing poller\n", .{});
+            self.stopInternal(false);
+        }
         try self.setBinding(binding);
 
         self.client = ilink.Client.init(self.allocator, self.base_url, self.token);
@@ -222,9 +306,12 @@ pub const Controller = struct {
             .owner = self.owner,
             .account_id = self.bot_id,
             .sync_buf = try self.allocator.dupe(u8, binding.sync_buf),
+            .sync_callback = .{ .ctx = self, .callback = persistSyncAdapter },
+            .bootstrap_skip_pending = options.bootstrap_skip_pending,
         };
         try self.poll.start();
         self.running = true;
+        std.debug.print("weixin direct binding loaded; poller active\n", .{});
     }
 
     fn setBinding(self: *Controller, b: types.Binding) !void {
@@ -263,6 +350,27 @@ pub const Controller = struct {
 
     fn persistBinding(self: *Controller, binding: types.Binding) !void {
         try state_store.save(self.allocator, self.state_path, binding);
+    }
+
+    fn persistSyncAdapter(ctx: *anyopaque, sync_buf: []const u8) anyerror!void {
+        const self: *Controller = @ptrCast(@alignCast(ctx));
+        try self.persist(sync_buf);
+    }
+
+    fn joinLoginThreadForProcessExit(self: *Controller, thread_control: ThreadControl) bool {
+        if (self.login_thread) |th| {
+            _ = thread_control.request_synchronous_io_cancel(th);
+            if (thread_control.wait_for_exit(th, SHUTDOWN_JOIN_TIMEOUT_MS)) {
+                th.join();
+                self.login_thread = null;
+                return true;
+            }
+            th.detach();
+            self.login_thread = null;
+            std.debug.print("weixin QR login shutdown timed out; detaching for process exit\n", .{});
+            return false;
+        }
+        return true;
     }
 };
 
@@ -331,4 +439,20 @@ test "loginSnapshot on a fresh controller reports unknown/empty" {
     const snap = try ctrl.loginSnapshot(arena.allocator());
     try t.expectEqual(types.QrStatusKind.unknown, snap.status);
     try t.expectEqual(@as(usize, 0), snap.qr_string.len);
+}
+
+test "status on a fresh controller reports disconnected idle" {
+    const path = "zig-cache-tmp-weixin-ctrl-status.json";
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    const ctrl = try Controller.create(t.allocator, path, NoopControl.iface(), .{});
+    defer ctrl.destroy();
+
+    const s = ctrl.statusSnapshot();
+    try t.expect(!s.running);
+    try t.expect(!s.has_token);
+    try t.expect(!s.has_owner);
+    try t.expect(!s.has_bot_id);
+    try t.expect(!s.login_active);
+    try t.expectEqual(types.QrStatusKind.unknown, s.login_status);
 }

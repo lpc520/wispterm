@@ -640,7 +640,7 @@ fn parseContent(self: *Config, allocator: std.mem.Allocator, content: []const u8
 
         if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
             const key = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
-            const raw_value = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t");
+            const raw_value = stripInlineComment(std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t"));
             // Strip optional quotes
             const value = stripQuotes(raw_value);
 
@@ -1542,6 +1542,24 @@ fn stripQuotes(s: []const u8) []const u8 {
     return s;
 }
 
+fn stripInlineComment(s: []const u8) []const u8 {
+    var in_quotes = false;
+    var escaped = false;
+    for (s, 0..) |ch, i| {
+        if (in_quotes and ch == '\\' and !escaped) {
+            escaped = true;
+            continue;
+        }
+        if (ch == '"' and !escaped) {
+            in_quotes = !in_quotes;
+        } else if (ch == '#' and !in_quotes and i > 0 and std.ascii.isWhitespace(s[i - 1])) {
+            return std.mem.trimRight(u8, s[0..i], " \t");
+        }
+        escaped = false;
+    }
+    return s;
+}
+
 pub fn hexToColor(hex: u24) Color {
     const r: f32 = @as(f32, @floatFromInt((hex >> 16) & 0xFF)) / 255.0;
     const g: f32 = @as(f32, @floatFromInt((hex >> 8) & 0xFF)) / 255.0;
@@ -1716,6 +1734,24 @@ test "config: quake mode defaults enabled and parses true false" {
 
     cfg.applyKeyValue(allocator, "quake-mode", "maybe", ".");
     try std.testing.expectEqual(true, cfg.@"quake-mode");
+}
+
+test "config: inline comments after values are ignored" {
+    const allocator = std.testing.allocator;
+    var cfg: Config = .{};
+    defer cfg.deinit(allocator);
+
+    cfg.parseContent(
+        allocator,
+        "background-image-mode = fit   # fill | fit | center | tile\n" ++
+            "background = #112233   # color comment\n" ++
+            "title = \"hello # not a comment\"\n",
+        ".",
+    );
+
+    try std.testing.expectEqual(BackgroundImageMode.fit, cfg.@"background-image-mode");
+    try std.testing.expectEqual(hexToColor(0x112233), cfg.background.?);
+    try std.testing.expectEqualStrings("hello # not a comment", cfg.title.?);
 }
 
 test "config: keybind directives override default action bindings" {

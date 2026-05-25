@@ -1025,6 +1025,14 @@ fn handleKey(ev: platform_input.KeyEvent) void {
         overlays.settingsPageHandleKey(key_event);
         return;
     }
+    if (AppWindow.weixin_qr_panel.visible()) {
+        switch (ev.key_code) {
+            platform_input.key_escape => overlays.weixinQrPanelHandleAction(.close),
+            platform_input.key_enter => if (AppWindow.weixin_qr_panel.status() == .expired) overlays.weixinQrPanelHandleAction(.retry),
+            else => {},
+        }
+        return;
+    }
     // File explorer key handling (when focused and in operation mode)
     if (file_explorer.g_focused and file_explorer.isVisibleForActiveTab()) {
         if (handleFileExplorerKey(ev)) return;
@@ -2333,6 +2341,19 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             if (!overlays.commandPaletteContainsPoint(xpos, ypos, w_f, h_f, top_offset)) {
                 overlays.commandPaletteClose();
             }
+        }
+        return;
+    }
+    if (AppWindow.weixin_qr_panel.visible()) {
+        if (ev.button == .left and ev.action == .press) {
+            const win = AppWindow.g_window orelse return;
+            const fb = window_backend.framebufferSize(win);
+            const w_f: f32 = @floatFromInt(fb.width);
+            const h_f: f32 = @floatFromInt(fb.height);
+            const top_offset: f32 = @floatCast(titlebarHeight());
+            const xpos: f64 = @floatFromInt(ev.x);
+            const ypos: f64 = @floatFromInt(ev.y);
+            overlays.weixinQrPanelHandleAction(AppWindow.weixin_qr_panel.executeAt(xpos, ypos, w_f, h_f, top_offset));
         }
         return;
     }

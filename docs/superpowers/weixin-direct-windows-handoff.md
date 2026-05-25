@@ -13,11 +13,30 @@ builds for Windows (`build.zig`: `uses_windows_backend = os_tag == .windows`).
 - Ships **off by default**: `weixin-direct-enabled = false`.
 - Backend is wired: config → `App.startWeixin` → `weixin.Controller` →
   `ilink.Client` + `poller.Poller`, with Control marshalled to the UI thread.
-- **Blocker for the full loop:** no GUI login entry point exists. The QR-login
-  backend (`controller.startLoginAsync()` / `loginSnapshot()`) is done, but
-  nothing calls it. `startWeixin` only calls `controller.start()`, which loads a
-  *persisted* binding from `weixin.json` and stays idle if there is no token.
-  → You must either build the QR panel, or pre-seed `weixin.json` (see Phase 1).
+- GUI login/control entries now exist: Command Center → **Connect WeChat**
+  starts `controller.startLoginAsync()` and renders the QR login panel. Command
+  Center → **WeChat: Start** starts polling from the saved binding,
+  **WeChat: Stop** stops polling while keeping the binding,
+  **WeChat: Status** shows the current state, and **WeChat: Unbind** clears the
+  stored binding.
+- `/term` and `/keys` now resolve the active terminal surface and write through
+  the same queued PTY input boundary used by remote input.
+- AI follow-up sends are wired: after the ACK, the poller compares AI transcript
+  snapshots against the baseline and sends progress/final replies back through
+  iLink. This still needs live Windows/WeChat smoke testing across slow tool
+  calls and final replies.
+- Live Windows fixes applied after initial smoke:
+  - QR panel renders the ilink QR payload directly instead of trying to decode
+    it as a PNG.
+  - Config hot-reload only reacts to the actual config file mtime, so WeChat
+    state writes no longer spam config reloads.
+  - Inline config comments after values are stripped, so
+    `background-image-mode fill   # fill | fit | center | tile` parses as
+    `fill`.
+  - App shutdown uses a bounded WeChat process-exit path. It asks Windows to
+    cancel synchronous I/O on the poll/login/follow-up threads, waits briefly,
+    and only detaches/leaks the controller if a long-poll refuses to return
+    before process exit.
 
 ---
 
@@ -51,20 +70,22 @@ builds for Windows (`build.zig`: `uses_windows_backend = os_tag == .windows`).
 
 ---
 
-## Phase 1 — Login / binding  ⚠️ BLOCKED until a login entry exists
+## Phase 1 — Login / binding
 
 Pick one:
 
-**Option A (recommended) — build the QR panel + "Connect WeChat" action.**
-Backend is ready; you only need UI glue:
+**Option A (recommended) — use the QR panel + "Connect WeChat" action.**
 - On the action, call `controller.startLoginAsync()` (spawns the login thread).
-- Each frame, call `controller.loginSnapshot(arena)` → `{status, qr_string, qr_img_base64}`.
-  Render `qr_img_base64` (base64 PNG; decode via `src/image_decoder.zig`) or the
-  raw `qr_string` as a QR.
+- Each frame, call `controller.loginSnapshot(arena)` → `{status, qr_string, qr_content}`.
+  `qrcode_img_content` is a QR payload string, not an inline PNG; `src/weixin/qr_panel.zig`
+  encodes it with `src/weixin/qr_code.zig`, and
+  `src/renderer/weixin_qr_renderer.zig` renders the QR matrix directly.
 - `status` transitions `wait → scaned → confirmed` (or `expired`). On
   `confirmed`, the controller persists `weixin.json` and starts polling
   automatically (`controller.confirmLogin`, `controller.zig:191`).
 - Add an "Unbind" action → `controller.unbind()`.
+- Command Center also exposes "Start", "Stop", and "Status" actions for the
+  saved binding, so you can pause/resume polling without clearing the token.
 
 **Option B (quick smoke without UI) — pre-seed the state file.**
 If you already have a bot token, drop a `weixin.json` at
@@ -101,22 +122,37 @@ What this exercises: `wxIsConnected`, `wxFindAiSurface`, `wxOpenAiAgent`,
 `wxSendInput` (all in `AppWindow.zig:2027+`), marshalled to the UI thread via the
 synchronous `.weixin_control` message; routing in `src/weixin/agent.zig`.
 
+Expected logs while testing:
+- `weixin poll received N message(s)` when iLink delivers inbound messages.
+- `weixin reply sent: N bytes` for the immediate ACK/command reply.
+- `weixin AI followup started` then `weixin AI followup final sent: N bytes`
+  when the AI transcript produces a final answer.
+- `warning(stream): unimplemented mode: 9001` can appear from terminal VT input
+  and is unrelated to WeChat.
+
+If replies feel delayed, distinguish the paths:
+- Inbound message delivery depends on iLink long-poll waking. The local poller
+  is not intentionally sleeping 5 seconds after successful polls.
+- The AI final reply is transcript-driven and checked once per second after the
+  immediate ACK.
+- Repeated `Config file changed, reloading...` after WeChat messages should no
+  longer happen; if it does, inspect `%APPDATA%\phantty` writes and
+  `src/config_watcher.zig`.
+
+Shutdown smoke:
+- Close the window after WeChat direct is connected and idle. The process should
+  exit without needing Ctrl+C and without a post-close segfault.
+- Repeat while a message is being handled or while an AI follow-up is waiting.
+  A shutdown timeout log is acceptable only if iLink is still blocking, but the
+  process should still terminate promptly.
+
 ---
 
-## Phase 3 — Known gaps (won't work until implemented)
+## Phase 3 — Known gaps
 
-All marked `TODO(weixin-windows)`:
+Current gaps:
 
-1. **`/term` and `/keys` do nothing** — `wxFindTerminalSurface` returns `null`
-   (`AppWindow.zig:2037`). Needs: resolve the active writable terminal surface
-   and write to its PTY (mirror the remote path's per-surface `write_fn`).
-
-2. **No AI progress streaming** — `wxTranscript` returns `""`
-   (`AppWindow.zig:2055`). Needs: render `activeAiChat()` into the
-   `You:/AI:/Status:` label format that `src/weixin/reply_progress.zig` parses,
-   then have the poller act on `expect_ai_progress`.
-
-3. **Auto-bind owner not persisted** — without `weixin-allowed-user`, any sender
+1. **Auto-bind owner not persisted** — without `weixin-allowed-user`, any sender
    is accepted within a session but the owner isn't written back to
    `weixin.json`. Needs a bind-callback from the poller to `controller.persist`.
    (Security note: until then, set `weixin-allowed-user` explicitly for any
