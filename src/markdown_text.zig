@@ -240,9 +240,10 @@ pub const CleanedLine = struct {
     fence_label: []const u8 = "",
 };
 
-/// Cleaned display text + style for one source line. `buf` holds the cleaned
-/// bytes; the returned `text` is a slice into `buf`. Mirrors the renderer's
-/// prepareMarkdownLine text logic exactly.
+/// Extract the cleaned display text + style for one source line. `buf` holds
+/// the cleaned bytes; the returned `text` is a slice into `buf`. The renderer's
+/// prepareMarkdownLine duplicates these text branches (it also adds colors and
+/// line heights); both must be updated together when new constructs are added.
 pub fn cleanedLine(buf: *[1024]u8, raw_line: []const u8, in_code: bool) CleanedLine {
     const trimmed = std.mem.trimLeft(u8, raw_line, " \t");
     if (trimmed.len == 0) return .{ .style = .blank };
@@ -309,8 +310,9 @@ pub fn tableBlockDisplayLen(text: []const u8, start: usize, end: usize) usize {
     return total;
 }
 
-/// Display offset (within a table block) of the row at `row_index` (counting
-/// only non-separator rows). Used by the hit-test to map a table click.
+/// Display offset (within a table block) of the row at `row_index`, counting
+/// only non-separator rows. Returns the total block display length if
+/// `row_index` >= the number of rows (i.e. an "end of block" offset).
 pub fn tableRowDisplayOffsetWithin(text: []const u8, start: usize, end: usize, row_index: usize) usize {
     var offset: usize = 0;
     var row: usize = 0;
@@ -338,8 +340,11 @@ fn tableRowDisplayLen(line: []const u8) usize {
     return total;
 }
 
-/// Build the message's cleaned display text — the exact text the transcript
-/// renders, in one contiguous buffer. Selection offsets index into this.
+/// Build the message's cleaned display text — the text the transcript renders,
+/// in one contiguous buffer, used as the single offset space for selection.
+/// Every source line contributes its cleaned text + '\n'; structural lines
+/// (fences, rules, blanks) contribute a bare '\n' each so offsets stay
+/// contiguous. Selection offsets index into this buffer.
 pub fn allocDisplayText(allocator: std.mem.Allocator, content: []const u8) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
