@@ -98,9 +98,13 @@ Linux (native):
 
 ### Invariants to maintain
 
-- [ ] Keep the `build.zig` `@compileError` guards that forbid leaking target
+- [x] Keep the `build.zig` `@compileError` guards that forbid leaking target
       OS booleans / Windows-specific names into app modules, so the core/host
-      boundary cannot be quietly re-broken over time.
+      boundary cannot be quietly re-broken over time. The guard patterns now
+      live in `src/build_guards.zig` (`firstLeak`); `build.zig` runs them over
+      its own source at comptime on every build, and `test_main.zig` imports the
+      module so the guard logic is covered by unit tests instead of relying on
+      `build.zig`'s own never-executed `test` blocks.
 - [x] Remove the remaining direct win32 reference in `src/test_main.zig` so no
       shared/test code outside `src/platform/` depends on a platform runtime.
       The `apprt/win32.zig` API-surface leak checks now live in

@@ -1,28 +1,13 @@
 const std = @import("std");
+const build_guards = @import("src/build_guards.zig");
 
 comptime {
     @setEvalBranchQuota(200_000);
-    const source = @embedFile("build.zig");
-    const concrete_backend = "win" ++ "http";
-    if (std.mem.indexOf(u8, source, "supports_" ++ concrete_backend ++ "_remote_transport") != null or
-        std.mem.indexOf(u8, source, "platform_supports_" ++ concrete_backend ++ "_remote_transport") != null)
-    {
-        @compileError("build.zig must expose remote transport as a platform capability, not a WinHTTP-specific build option");
-    }
-    if (std.mem.indexOf(u8, source, "addOption(bool, \"target_is_" ++ "windows\"") != null or
-        std.mem.indexOf(u8, source, "addOption(bool, \"platform_" ++ "supports_") != null)
-    {
-        @compileError("build.zig must keep platform feature gates inside the build script instead of exposing target booleans to app modules");
-    }
-    if (std.mem.indexOf(u8, source, "supports_" ++ "win32_resources") != null or
-        std.mem.indexOf(u8, source, "supports_" ++ "windows_subsystem") != null)
-    {
-        @compileError("build.zig platform capability names must describe artifact roles instead of concrete Windows implementation names");
-    }
-    if (std.mem.indexOf(u8, source, "is_" ++ "windows: bool") != null or
-        std.mem.indexOf(u8, source, ".is_" ++ "windows") != null)
-    {
-        @compileError("build.zig platform feature gates must expose artifact capabilities, not target OS booleans");
+    // Forbid leaking target-OS booleans / Windows-specific names into the build
+    // script's app-facing options. The patterns and messages live in
+    // src/build_guards.zig so the same logic is unit-tested by test_main.zig.
+    if (build_guards.firstLeak(@embedFile("build.zig"))) |message| {
+        @compileError(message);
     }
 }
 
