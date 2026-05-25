@@ -873,6 +873,7 @@ pub const Session = struct {
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     scroll_px: f32 = 0,
+    scrollbar_show_time: i64 = 0,
     approval_mutex: std.Thread.Mutex = .{},
     approval_cond: std.Thread.Condition = .{},
     approval_pending: bool = false,
@@ -1699,6 +1700,14 @@ pub const Session = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.scroll_px = @max(0.0, self.scroll_px + delta_px);
+        self.scrollbar_show_time = std.time.milliTimestamp();
+    }
+
+    pub fn scrollToPx(self: *Session, px: f32) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.scroll_px = @max(0.0, px);
+        self.scrollbar_show_time = std.time.milliTimestamp();
     }
 
     pub fn inputScrollRow(self: *Session) usize {
