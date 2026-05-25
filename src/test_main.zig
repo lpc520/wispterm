@@ -664,6 +664,7 @@ comptime {
     _ = @import("weixin/ilink_codec.zig");
     _ = @import("weixin/ilink_client.zig");
     _ = @import("weixin/poller.zig");
+    _ = @import("weixin/controller.zig");
     _ = @import("renderer/overlay_keys.zig");
     _ = @import("selection_unit.zig");
     _ = @import("session_persist.zig");
