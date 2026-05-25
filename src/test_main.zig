@@ -645,6 +645,7 @@ comptime {
     _ = @import("platform/remote_transport.zig");
     _ = @import("platform/session_lock.zig");
     _ = @import("platform/text.zig");
+    _ = @import("platform/thread_control.zig");
     _ = @import("platform/threading.zig");
     _ = @import("platform/update_package.zig");
     _ = @import("platform/webview.zig");
@@ -666,6 +667,8 @@ comptime {
     _ = @import("weixin/ilink_client.zig");
     _ = @import("weixin/poller.zig");
     _ = @import("weixin/controller.zig");
+    _ = @import("weixin/qr_code.zig");
+    _ = @import("weixin/qr_panel.zig");
     _ = @import("renderer/overlay_keys.zig");
     _ = @import("selection_unit.zig");
     _ = @import("session_persist.zig");

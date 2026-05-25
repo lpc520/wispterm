@@ -50,6 +50,8 @@ pub const file_explorer = @import("file_explorer.zig");
 pub const file_explorer_renderer = @import("renderer/file_explorer_renderer.zig");
 pub const markdown_preview_panel = @import("markdown_preview_panel.zig");
 pub const markdown_preview_renderer = @import("renderer/markdown_preview_renderer.zig");
+pub const weixin_qr_panel = @import("weixin/qr_panel.zig");
+pub const weixin_qr_renderer = @import("renderer/weixin_qr_renderer.zig");
 pub const browser_panel = if (build_options.webview)
     @import("browser_panel.zig")
 else
@@ -1315,6 +1317,7 @@ fn onPlatformResize(width: i32, height: i32) void {
     overlays.renderCommandPalette(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+    weixin_qr_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderDebugOverlay(@floatFromInt(fb_width));
     overlays.renderCloseShortcutConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
@@ -1944,15 +1947,18 @@ fn handleRemoteAiAgentOpenRequest(request: *RemoteAiAgentOpenRequest) void {
 // reads/acts on tab state, mirroring the remote .remote_ai_input path.
 //
 // UNVERIFIED AT RUNTIME: cross-compiles to the Windows exe, but has not been run
-// (no Windows runtime / live WeChat here). /term-/keys terminal delegation and
-// the AI transcript (for reply-progress streaming) are intentionally stubbed.
+// (no Windows runtime / live WeChat here). AI progress follow-up timers remain
+// in the poller backlog; the UI control surface below exposes terminal writes
+// and AI transcript snapshots for that layer.
 // ============================================================================
 
 var g_weixin_ui_handle = std.atomic.Value(usize).init(0);
 var g_weixin_ctx: u8 = 0;
+var g_weixin_transcript_mutex: std.Thread.Mutex = .{};
+var g_weixin_transcript_owned: []u8 = &.{};
 
 const WeixinRequest = struct {
-    op: enum { find_ai, open_ai, send_input },
+    op: enum { find_ai, find_term, open_ai, send_input, latest_transcript },
     // send_input input (valid for the duration of the synchronous call):
     surface_id: [16]u8 = [_]u8{0} ** 16,
     bytes: []const u8 = "",
@@ -1961,6 +1967,7 @@ const WeixinRequest = struct {
     out_surface_id: [16]u8 = [_]u8{0} ** 16,
     open_result: weixin_control.OpenResult = .failed,
     sent: bool = false,
+    transcript: []u8 = &.{},
 };
 
 /// Index of the AI-chat tab to target: the active tab if it is AI chat, else the
@@ -1984,12 +1991,48 @@ fn weixinTabIndexFromSurfaceId(id: [16]u8) ?usize {
     return std.fmt.parseInt(usize, id[6..16], 10) catch null;
 }
 
+fn weixinActiveTerminalSurface() ?*Surface {
+    if (tab.g_active_tab < tab.g_tab_count) {
+        if (tab.g_tabs[tab.g_active_tab]) |ts| {
+            if (ts.kind == .terminal) {
+                if (ts.focusedSurface()) |surface| return surface;
+            }
+        }
+    }
+    for (0..tab.g_tab_count) |i| {
+        if (tab.g_tabs[i]) |ts| {
+            if (ts.kind == .terminal) {
+                if (ts.focusedSurface()) |surface| return surface;
+            }
+        }
+    }
+    return null;
+}
+
+fn weixinTerminalSurfaceFromId(id: [16]u8) ?*Surface {
+    for (0..tab.g_tab_count) |tab_index| {
+        const tab_state = tab.g_tabs[tab_index] orelse continue;
+        if (tab_state.kind != .terminal) continue;
+        var it = tab_state.tree.iterator();
+        while (it.next()) |entry| {
+            if (std.mem.eql(u8, entry.surface.remote_id[0..], id[0..])) return entry.surface;
+        }
+    }
+    return null;
+}
+
 /// Runs on the UI thread (dispatched from the window message pump).
 fn handleWeixinControlRequest(req: *WeixinRequest) void {
     switch (req.op) {
         .find_ai => {
             if (weixinActiveAiTabIndex()) |idx| {
                 req.out_surface_id = remoteAiSurfaceId(idx);
+                req.found = true;
+            }
+        },
+        .find_term => {
+            if (weixinActiveTerminalSurface()) |surface| {
+                req.out_surface_id = surface.remote_id;
                 req.found = true;
             }
         },
@@ -2002,14 +2045,27 @@ fn handleWeixinControlRequest(req: *WeixinRequest) void {
             if (req.open_result == .opened) g_force_rebuild = true;
         },
         .send_input => {
-            const idx = weixinTabIndexFromSurfaceId(req.surface_id) orelse return;
-            if (idx >= tab.g_tab_count) return;
+            if (weixinTabIndexFromSurfaceId(req.surface_id)) |idx| {
+                if (idx >= tab.g_tab_count) return;
+                const tab_state = tab.g_tabs[idx] orelse return;
+                if (tab_state.kind != .ai_chat) return;
+                const session = tab_state.ai_chat_session orelse return;
+                session.applyRemoteInput(req.bytes);
+                g_force_rebuild = true;
+                req.sent = true;
+                return;
+            }
+            const surface = weixinTerminalSurfaceFromId(req.surface_id) orelse return;
+            surface.queuePtyWrite(req.bytes);
+            req.sent = true;
+        },
+        .latest_transcript => {
+            const idx = weixinActiveAiTabIndex() orelse return;
             const tab_state = tab.g_tabs[idx] orelse return;
             if (tab_state.kind != .ai_chat) return;
             const session = tab_state.ai_chat_session orelse return;
-            session.applyRemoteInput(req.bytes);
-            g_force_rebuild = true;
-            req.sent = true;
+            req.transcript = session.allocRemoteSnapshot(std.heap.page_allocator) catch return;
+            req.found = true;
         },
     }
 }
@@ -2035,9 +2091,9 @@ fn wxFindAiSurface(_: *anyopaque) ?weixin_control.Surface {
 }
 
 fn wxFindTerminalSurface(_: *anyopaque) ?weixin_control.Surface {
-    // TODO(weixin-windows): resolve the active writable terminal surface and
-    // marshal input to its PTY (the remote path uses per-surface sink write_fn).
-    return null;
+    var req = WeixinRequest{ .op = .find_term };
+    if (!weixinDispatch(&req) or !req.found) return null;
+    return .{ .id = req.out_surface_id, .title = "" };
 }
 
 fn wxOpenAiAgent(_: *anyopaque, _: u32) weixin_control.OpenResult {
@@ -2053,9 +2109,14 @@ fn wxSendInput(_: *anyopaque, surface_id: [16]u8, bytes: []const u8) bool {
 }
 
 fn wxTranscript(_: *anyopaque) []const u8 {
-    // TODO(weixin-windows): render activeAiChat() into the "You:/AI:/Status:"
-    // label format that reply_progress.zig parses, to enable progress streaming.
-    return "";
+    var req = WeixinRequest{ .op = .latest_transcript };
+    if (!weixinDispatch(&req) or !req.found) return "";
+
+    g_weixin_transcript_mutex.lock();
+    defer g_weixin_transcript_mutex.unlock();
+    if (g_weixin_transcript_owned.len != 0) std.heap.page_allocator.free(g_weixin_transcript_owned);
+    g_weixin_transcript_owned = req.transcript;
+    return g_weixin_transcript_owned;
 }
 
 const weixin_vtable = weixin_control.Control.VTable{
@@ -2071,6 +2132,13 @@ const weixin_vtable = weixin_control.Control.VTable{
 /// the dummy ctx is unused.
 pub fn weixinControl() weixin_control.Control {
     return .{ .ctx = &g_weixin_ctx, .vtable = &weixin_vtable };
+}
+
+fn clearWeixinTranscriptCache() void {
+    g_weixin_transcript_mutex.lock();
+    defer g_weixin_transcript_mutex.unlock();
+    if (g_weixin_transcript_owned.len != 0) std.heap.page_allocator.free(g_weixin_transcript_owned);
+    g_weixin_transcript_owned = &.{};
 }
 
 fn buildRemoteSurfaceSnapshot(allocator: std.mem.Allocator, surface: *Surface) ![]u8 {
@@ -3689,6 +3757,7 @@ fn runMainLoop(self: *AppWindow) !void {
         overlays.renderCommandPalette(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+        weixin_qr_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderDebugOverlay(@floatFromInt(fb_width));
         overlays.renderCloseShortcutConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
@@ -3715,8 +3784,16 @@ fn runMainLoop(self: *AppWindow) !void {
         }
     }
 
+    // Stop accepting cross-thread WeChat control calls before UI-owned globals
+    // and renderer resources start tearing down. The App-level controller is
+    // stopped shortly after this window loop returns.
+    g_weixin_ui_handle.store(0, .release);
+
     // Clean up file explorer async state (join background thread, free job)
     file_explorer.deinit();
+    weixin_qr_renderer.deinit();
+    weixin_qr_panel.deinit();
+    clearWeixinTranscriptCache();
     markdown_preview_renderer.deinit();
     markdown_preview_panel.deinit();
     browser_panel.deinit();

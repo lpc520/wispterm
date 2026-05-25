@@ -24,6 +24,8 @@ pub const CommandAction = enum {
     font_size_increase,
     toggle_maximize,
     copy_remote_key,
+    connect_wechat,
+    unbind_wechat,
     export_ai_chat_markdown,
     export_ai_chat_markdown_clean,
     show_version,
@@ -61,6 +63,8 @@ pub const command_entries = [_]CommandEntry{
     .{ .title = "Increase Font Size", .detail = "Make terminal text larger", .shortcut = "", .action = .font_size_increase },
     .{ .title = "Toggle Maximize", .detail = "Maximize or restore the window", .shortcut = "", .action = .toggle_maximize },
     .{ .title = "Copy Remote Key", .detail = "Copy the active Phantty remote session key", .shortcut = "click Remote key", .action = .copy_remote_key },
+    .{ .title = "Connect WeChat", .detail = "Scan a QR code to connect WeChat direct control", .shortcut = "", .action = .connect_wechat },
+    .{ .title = "WeChat: Unbind", .detail = "Clear the stored WeChat direct binding", .shortcut = "", .action = .unbind_wechat },
     .{ .title = "Export AI Chat Markdown", .detail = "Save the active AI Chat transcript as Markdown", .shortcut = "", .action = .export_ai_chat_markdown },
     .{ .title = "Export AI Chat Markdown Clean", .detail = "Save user prompts and the final AI result without thinking", .shortcut = "", .action = .export_ai_chat_markdown_clean },
     .{ .title = "Version", .detail = "Show Phantty version", .shortcut = app_metadata.version, .action = .show_version },
@@ -248,6 +252,11 @@ test "command center includes update check actions" {
 test "command center includes AI Markdown export actions" {
     try std.testing.expectEqual(CommandAction.export_ai_chat_markdown, findCommandAction("Export AI Chat Markdown"));
     try std.testing.expectEqual(CommandAction.export_ai_chat_markdown_clean, findCommandAction("Export AI Chat Markdown Clean"));
+}
+
+test "command center includes WeChat direct actions" {
+    try std.testing.expectEqual(CommandAction.connect_wechat, findCommandAction("Connect WeChat"));
+    try std.testing.expectEqual(CommandAction.unbind_wechat, findCommandAction("WeChat: Unbind"));
 }
 
 test "command center browser text is backend neutral" {

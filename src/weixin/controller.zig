@@ -9,6 +9,9 @@ const ilink = @import("ilink_client.zig");
 const poller = @import("poller.zig");
 const control_mod = @import("control.zig");
 
+const SHUTDOWN_JOIN_TIMEOUT_MS: u32 = 1500;
+pub const ThreadControl = poller.ThreadControl;
+
 pub const Controller = struct {
     allocator: std.mem.Allocator,
     state_path: []u8,
@@ -35,7 +38,7 @@ pub const Controller = struct {
     login_status: types.QrStatusKind = .unknown,
     login_qr_arena: ?std.heap.ArenaAllocator = null,
     login_qr_string: []const u8 = "",
-    login_qr_img_base64: []const u8 = "",
+    login_qr_content: []const u8 = "",
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -67,22 +70,42 @@ pub const Controller = struct {
         self.allocator.destroy(self);
     }
 
+    /// Process-exit variant: do not block forever on iLink long-poll/login HTTP
+    /// calls. If a worker cannot be joined promptly, it is detached and this
+    /// Controller intentionally remains allocated until the process exits.
+    pub fn destroyForProcessExit(self: *Controller, thread_control: ThreadControl) bool {
+        self.login_active.store(false, .release);
+        if (!self.joinLoginThreadForProcessExit(thread_control)) return false;
+        if (!self.stopForProcessExit(thread_control)) return false;
+
+        if (self.login_qr_arena) |*a| a.deinit();
+        self.clearBinding();
+        self.allocator.free(self.state_path);
+        self.allocator.destroy(self);
+        return true;
+    }
+
     /// Starts QR login on a background thread (idempotent). A panel polls
     /// loginSnapshot() for the QR + status; on confirmation the binding is
     /// persisted and polling starts automatically.
     pub fn startLoginAsync(self: *Controller) !void {
         if (self.login_active.swap(true, .acq_rel)) return; // already running
-        self.setLoginStatus(.wait);
+        if (self.login_thread) |th| {
+            th.join();
+            self.login_thread = null;
+        }
+        self.resetLoginSnapshot(.wait);
         self.login_thread = std.Thread.spawn(.{}, loginThreadMain, .{self}) catch |err| {
             self.login_active.store(false, .release);
             return err;
         };
+        std.debug.print("weixin QR login started\n", .{});
     }
 
     pub const LoginSnapshot = struct {
         status: types.QrStatusKind,
         qr_string: []const u8,
-        qr_img_base64: []const u8,
+        qr_content: []const u8,
     };
 
     /// Thread-safe snapshot for a UI panel. Returned strings are copied into `arena`.
@@ -92,7 +115,7 @@ pub const Controller = struct {
         return .{
             .status = self.login_status,
             .qr_string = try arena.dupe(u8, self.login_qr_string),
-            .qr_img_base64 = try arena.dupe(u8, self.login_qr_img_base64),
+            .qr_content = try arena.dupe(u8, self.login_qr_content),
         };
     }
 
@@ -129,14 +152,24 @@ pub const Controller = struct {
         self.login_active.store(false, .release);
     }
 
-    fn setLoginQr(self: *Controller, qr_string: []const u8, img_base64: []const u8) void {
+    fn setLoginQr(self: *Controller, qr_string: []const u8, qr_content: []const u8) void {
         self.login_mutex.lock();
         defer self.login_mutex.unlock();
         if (self.login_qr_arena) |*a| a.deinit();
         self.login_qr_arena = std.heap.ArenaAllocator.init(self.allocator);
         const a = self.login_qr_arena.?.allocator();
         self.login_qr_string = a.dupe(u8, qr_string) catch "";
-        self.login_qr_img_base64 = a.dupe(u8, img_base64) catch "";
+        self.login_qr_content = a.dupe(u8, qr_content) catch "";
+    }
+
+    fn resetLoginSnapshot(self: *Controller, status: types.QrStatusKind) void {
+        self.login_mutex.lock();
+        defer self.login_mutex.unlock();
+        if (self.login_qr_arena) |*a| a.deinit();
+        self.login_qr_arena = null;
+        self.login_qr_string = "";
+        self.login_qr_content = "";
+        self.login_status = status;
     }
 
     fn setLoginStatus(self: *Controller, status: types.QrStatusKind) void {
@@ -164,6 +197,17 @@ pub const Controller = struct {
         // ilink.Client holds no persistent resources (it opens a fresh
         // std.http.Client per request), so there is nothing to deinit here.
         self.running = false;
+    }
+
+    fn stopForProcessExit(self: *Controller, thread_control: ThreadControl) bool {
+        if (!self.running) return true;
+        if (!self.poll.stopForProcessExit(thread_control)) return false;
+
+        // Persist the advanced sync cursor (best-effort).
+        self.persist(self.poll.sync_buf) catch {};
+        self.allocator.free(self.poll.sync_buf);
+        self.running = false;
+        return true;
     }
 
     /// Clears the persisted owner + token and stops. Used by "Unbind".
@@ -201,6 +245,7 @@ pub const Controller = struct {
         };
         try self.persistBinding(binding);
         try self.startWithBinding(binding);
+        std.debug.print("weixin QR login confirmed; polling started\n", .{});
     }
 
     // --- internals ---
@@ -225,6 +270,7 @@ pub const Controller = struct {
         };
         try self.poll.start();
         self.running = true;
+        std.debug.print("weixin direct binding loaded; poller active\n", .{});
     }
 
     fn setBinding(self: *Controller, b: types.Binding) !void {
@@ -263,6 +309,22 @@ pub const Controller = struct {
 
     fn persistBinding(self: *Controller, binding: types.Binding) !void {
         try state_store.save(self.allocator, self.state_path, binding);
+    }
+
+    fn joinLoginThreadForProcessExit(self: *Controller, thread_control: ThreadControl) bool {
+        if (self.login_thread) |th| {
+            _ = thread_control.request_synchronous_io_cancel(th);
+            if (thread_control.wait_for_exit(th, SHUTDOWN_JOIN_TIMEOUT_MS)) {
+                th.join();
+                self.login_thread = null;
+                return true;
+            }
+            th.detach();
+            self.login_thread = null;
+            std.debug.print("weixin QR login shutdown timed out; detaching for process exit\n", .{});
+            return false;
+        }
+        return true;
     }
 };
 

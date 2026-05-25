@@ -91,7 +91,18 @@ pub const Client = struct {
             std.time.milliTimestamp(), self.rng.random().int(u32),
         });
         const body = try codec.buildSendTextBody(a, to_user_id, text, context_token, client_id);
-        _ = try self.fetch(a, .POST, "/ilink/bot/sendmessage", body, null);
+        const resp = try self.fetch(a, .POST, "/ilink/bot/sendmessage", body, null);
+        const W = struct { ret: ?i64 = null, errcode: i64 = 0, message: []const u8 = "" };
+        const w = try std.json.parseFromSliceLeaky(W, a, resp, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        });
+        if (w.ret) |ret| {
+            if (ret != 0) {
+                std.debug.print("weixin sendmessage failed: ret={} errcode={} message={s}\n", .{ ret, w.errcode, w.message });
+                return error.IlinkSendMessageFailed;
+            }
+        }
     }
 
     /// Performs one HTTP request, returning the response body bytes allocated in

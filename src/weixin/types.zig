@@ -28,7 +28,7 @@ pub const GetUpdatesResult = struct {
 pub const QrCode = struct {
     ret: i64 = 0,
     qrcode: []const u8 = "",
-    /// base64 PNG content, when the API returns an inline image
+    /// Text payload that must be encoded into the scanable QR image.
     qrcode_img_content: []const u8 = "",
 };
 

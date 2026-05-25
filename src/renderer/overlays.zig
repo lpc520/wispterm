@@ -26,6 +26,7 @@ const platform_pty_command = @import("../platform/pty_command.zig");
 const update_check = @import("../update_check.zig");
 const keybind = @import("../keybind.zig");
 const overlay_keys = @import("overlay_keys.zig");
+const weixin_qr_panel = @import("../weixin/qr_panel.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -451,6 +452,8 @@ fn executeCommand(action: CommandAction) void {
         .copy_remote_key => {
             _ = AppWindow.input.copyRemoteSessionKeyToClipboard();
         },
+        .connect_wechat => connectWeixinDirect(),
+        .unbind_wechat => unbindWeixinDirect(),
         .export_ai_chat_markdown => AppWindow.exportActiveAiChatMarkdown(.full),
         .export_ai_chat_markdown_clean => AppWindow.exportActiveAiChatMarkdown(.clean),
         .show_version => showVersionToast(),
@@ -471,6 +474,63 @@ fn executeCommand(action: CommandAction) void {
             }
         },
         .open_latest_release => openLatestRelease(),
+    }
+}
+
+fn activeWeixinController() ?*weixin_qr_panel.Controller {
+    const app = AppWindow.g_app orelse return null;
+    return app.weixin_controller;
+}
+
+fn connectWeixinDirect() void {
+    const allocator = AppWindow.g_allocator orelse std.heap.page_allocator;
+    const controller = activeWeixinController() orelse {
+        showStatusToast("Enable weixin-direct-enabled first");
+        return;
+    };
+    weixin_qr_panel.start(allocator, controller) catch {
+        showStatusToast("WeChat login failed to start");
+        return;
+    };
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+}
+
+fn unbindWeixinDirect() void {
+    const controller = activeWeixinController() orelse {
+        showStatusToast("WeChat direct is not active");
+        return;
+    };
+    controller.unbind() catch {
+        showStatusToast("WeChat unbind failed");
+        return;
+    };
+    weixin_qr_panel.close();
+    showStatusToast("WeChat unbound");
+}
+
+pub fn weixinQrPanelHandleAction(action: weixin_qr_panel.Action) void {
+    switch (action) {
+        .none => {},
+        .close => {
+            weixin_qr_panel.close();
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+        },
+        .retry => {
+            const allocator = AppWindow.g_allocator orelse std.heap.page_allocator;
+            const controller = weixin_qr_panel.controller() orelse activeWeixinController() orelse {
+                showStatusToast("WeChat direct is not active");
+                return;
+            };
+            weixin_qr_panel.start(allocator, controller) catch {
+                showStatusToast("WeChat login failed to start");
+                return;
+            };
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+        },
+        .unbind => unbindWeixinDirect(),
     }
 }
 
