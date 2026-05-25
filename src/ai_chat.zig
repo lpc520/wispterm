@@ -1341,7 +1341,10 @@ pub const Session = struct {
             self.clearSelectionLocked();
             return;
         }
-        const offset = clampUtf8Boundary(msg.content, byte_offset);
+        // byte_offset is a display-text offset (see markdown_text.allocDisplayText);
+        // it is already a valid boundary. Do not clamp against raw msg.content,
+        // whose length differs from the display text. The copy path re-clamps.
+        const offset = byte_offset;
         self.input_select_all = false;
         self.transcript_select_all = false;
         self.transcript_selection = .{
@@ -1358,7 +1361,7 @@ pub const Session = struct {
         if (selection.message_index != message_index or message_index >= self.messages.items.len) return;
         const msg = self.messages.items[message_index];
         if (msg.role != .assistant) return;
-        selection.cursor = clampUtf8Boundary(msg.content, byte_offset);
+        selection.cursor = byte_offset; // display-text offset; copy path re-clamps
         self.transcript_selection = selection;
     }
 
@@ -6152,6 +6155,30 @@ test "ai chat transcript selection copies cleaned markdown text" {
     const copied = try session.allocClipboardText(allocator);
     defer allocator.free(copied);
     try std.testing.expectEqualStrings("生成的完整 Markdown", copied);
+}
+
+test "ai chat transcript selection over table is not truncated to raw length" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    defer {
+        for (session.messages.items) |msg| msg.deinit(allocator);
+        session.messages.deinit(allocator);
+    }
+
+    try session.messages.append(allocator, .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "a|b|c\n-|-|-\nd|e|f"),
+    });
+
+    // Raw content is 17 bytes; the cleaned display text
+    // "a | b | c\nd | e | f\n" is 20 bytes (borderless table: each '|' → " | ").
+    // Selecting the whole thing must not truncate the selection to the raw length.
+    session.beginTranscriptSelection(0, 0);
+    session.updateTranscriptSelection(0, 20);
+
+    const copied = try session.allocClipboardText(allocator);
+    defer allocator.free(copied);
+    try std.testing.expectEqualStrings("a | b | c\nd | e | f\n", copied);
 }
 
 test "ai chat message clipboard exports one bubble" {
