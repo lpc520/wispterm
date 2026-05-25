@@ -2,9 +2,9 @@
 
 ## Overview
 
-Phantty is a Windows terminal emulator written in Zig. It uses [libghostty-vt](https://github.com/ghostty-org/ghostty) (Ghostty's VT parser and terminal state machine) for terminal emulation, with its own rendering pipeline (OpenGL + FreeType + DirectWrite on Windows).
+Phantty is a terminal emulator written in Zig, currently shipping on Windows. It uses [libghostty-vt](https://github.com/ghostty-org/ghostty) (Ghostty's VT parser and terminal state machine) for terminal emulation, with its own rendering pipeline (OpenGL + FreeType, plus DirectWrite for font discovery on Windows).
 
-This is a **Windows-only** project. Development is expected to happen on Windows in PowerShell, targeting `x86_64-windows-gnu`.
+Windows is the **primary and default development target** (`x86_64-windows-gnu`), and day-to-day development happens on Windows in PowerShell. Platform-specific code lives behind narrow interfaces in `src/platform/` (per-platform implementations plus `_unsupported`/`_posix` stubs) so that macOS and Linux ports become possible without rewriting the terminal core. Those native ports are not yet implemented; see `TODO.md` for the portability roadmap.
 
 ## Hard Rules
 
@@ -28,124 +28,19 @@ Exception: work under `remote/` is Phantty's own web remote console and relay im
 
 ## Build Commands
 
-```powershell
-zig build                         # Default Debug build; use this for development.
-zig build -Doptimize=ReleaseFast  # Optimized ReleaseFast build with Windows GUI subsystem (no console window).
-Remove-Item -Recurse -Force .\zig-out, .\.zig-cache -ErrorAction SilentlyContinue
-```
-
-**Always use `zig build`** for builds during PowerShell development. Only use `zig build -Doptimize=ReleaseFast` for final/shipping builds.
-
-The Makefile may exist as a convenience wrapper, but normal development instructions must use PowerShell plus direct `zig` commands. Do not assume non-PowerShell shell tooling.
-
-### Zig Toolchain
-
-Use Zig 0.15.2 on Windows and make sure `zig.exe` is available on `PATH`.
-
-Check the active Zig version from PowerShell:
-
-```powershell
-zig version
-```
-
-`build.zig` already defaults to `x86_64-windows-gnu`, so a normal development build should not need an explicit `-Dtarget`.
-
-After a successful debug build, the expected artifact is:
-
-```powershell
-Test-Path .\zig-out\bin\phantty.exe
-Get-Item .\zig-out\bin\phantty.exe
-```
-
-`Remove-Item -Recurse -Force .\zig-out, .\.zig-cache -ErrorAction SilentlyContinue` removes build outputs and Zig caches.
+Develop on Windows in PowerShell with direct `zig` commands (do not assume non-PowerShell tooling). Use `zig build` for development; only use `zig build -Doptimize=ReleaseFast` for final/shipping builds. `build.zig` defaults to `x86_64-windows-gnu`. Full build commands, the required Zig toolchain version, and artifact checks live in [docs/development.md](docs/development.md#building).
 
 ## Windows UI Automation
 
-When debugging UI behavior, automate Phantty as a real visible Windows app from PowerShell. Prefer Win32-driven automation over shell-only assumptions.
-
-Use the checked-in automation script for File Explorer regressions:
-
-```powershell
-zig build
-powershell -NoProfile -ExecutionPolicy Bypass -File .\debug\test-file-explorer-ui.ps1
-```
-
-The script launches a real Phantty window, sets DPI awareness, fixes the window position and size, captures before/after screenshots, crops the right panel, sends `Ctrl+Shift+Alt+E`, performs a region-based pixel check, and writes screenshots plus JSON metrics under `zig-out\ui-test\`.
-
-When adding more UI automation, follow the same pattern:
-- Wait until `MainWindowHandle` is non-zero, call `ShowWindow` and `SetForegroundWindow`, then click inside the client area before sending keys.
-- Prefer Win32 `keybd_event` or `SendInput` for shortcuts; `System.Windows.Forms.SendKeys` can silently miss GLFW/terminal windows when focus is not exactly right.
-- Capture both full-window and cropped target-region screenshots, and inspect the crop when a pixel check fails.
-- Always clean up test windows with `CloseMainWindow()`, then `Stop-Process -Force` if the process remains.
+When debugging UI behavior, automate Phantty as a real visible Windows app from PowerShell using Win32-driven automation rather than shell-only assumptions. The checked-in scripts and conventions are in [docs/development.md](docs/development.md#windows-ui-automation).
 
 ## Windows SSH/SCP Compatibility
 
-When changing SSH/SCP code paths (`src/scp.zig`, SSH clipboard image paste, remote file explorer listing/upload/download, or SSH session metadata), test against the existing real SSH profile in `%APPDATA%\phantty\ssh_hosts` whenever it is available. The profile fields are hex encoded as `name, host, user, password, port`; decode them locally for the test, but never print or commit the password. At minimum, verify:
-
-```powershell
-ssh.exe ... user@host pwd
-scp.exe ... local-file user@host:/tmp/test-file
-ssh.exe -T ... user@host "cat > '/tmp/test-file'"  # only if testing the stream fallback
-```
-
-Do **not** add OpenSSH connection sharing (`ControlMaster`, `ControlPersist`, `ControlPath`) to helper `ssh.exe` or `scp.exe` commands on Windows. Windows OpenSSH does not provide the Unix-domain socket behavior those options expect here; it reproduces as `getsockname failed: Not a socket`, `Read from remote host ...: Unknown error`, `scp.exe: Connection closed`, or `lost connection`. This broke SCP uploads even though the same profile and remote service worked without those options.
-
-Keep stderr visible for helper `ssh.exe`/`scp.exe` failures. Do not reduce failures to a generic "SSH image upload failed"; preserve the underlying OpenSSH error so regressions can be diagnosed without guessing.
+When changing SSH/SCP code paths (`src/scp.zig`, SSH clipboard image paste, remote file explorer, or SSH session metadata), test against the real profile in `%APPDATA%\phantty\ssh_hosts` when available — but never print or commit the password. Two hard rules: do **not** add OpenSSH connection sharing (`ControlMaster`/`ControlPersist`/`ControlPath`) to helper `ssh.exe`/`scp.exe` commands (it breaks SCP on Windows OpenSSH), and keep the underlying OpenSSH stderr visible rather than collapsing it to a generic failure. Test commands and the full rationale are in [docs/development.md](docs/development.md#windows-sshscp-compatibility).
 
 ## Windows Development Compatibility
 
-This repository must remain safe to check out and develop on Windows.
-
-Before finishing changes that add, remove, rename, or move files, check for Windows-incompatible paths:
-
-```powershell
-$paths = git ls-files
-$reserved = @('CON', 'PRN', 'AUX', 'NUL') + (1..9 | ForEach-Object { "COM$_"; "LPT$_" })
-$violations = [System.Collections.Generic.List[object]]::new()
-$collisions = [System.Collections.Generic.List[object]]::new()
-$seen = @{}
-
-foreach ($path in $paths) {
-    foreach ($part in ($path -split '/')) {
-        $stem = ($part -split '\.')[0].ToUpperInvariant()
-        $reasons = @()
-        if ($part.IndexOfAny([char[]]'<>:"\|?*') -ge 0) { $reasons += 'illegal_char' }
-        if ($part.EndsWith(' ') -or $part.EndsWith('.')) { $reasons += 'trailing_space_or_dot' }
-        if ($reserved -contains $stem) { $reasons += 'reserved_name' }
-        if ($reasons.Count -gt 0) {
-            $violations.Add([pscustomobject]@{ Path = $path; Part = $part; Reasons = ($reasons -join ',') })
-        }
-    }
-
-    $key = $path.ToLowerInvariant()
-    if ($seen.ContainsKey($key) -and $seen[$key] -ne $path) {
-        $collisions.Add([pscustomobject]@{ A = $seen[$key]; B = $path })
-    } else {
-        $seen[$key] = $path
-    }
-}
-
-"tracked_files=$($paths.Count)"
-"windows_name_violations=$($violations.Count)"
-$violations | ForEach-Object { "violation`t$($_.Path)`t$($_.Part)`t$($_.Reasons)" }
-"casefold_collisions=$($collisions.Count)"
-$collisions | ForEach-Object { "collision`t$($_.A)`t$($_.B)" }
-$longest = $paths | Sort-Object Length -Descending | Select-Object -First 1
-"max_path_length=$($longest.Length) $longest"
-```
-
-Also check for symlinks, which are often painful on Windows checkouts:
-
-```powershell
-git ls-files -s | Select-String '^120000'
-```
-
-Rules of thumb:
-- Do not introduce files whose names differ only by case. Windows checkout is case-insensitive by default.
-- Avoid Windows-reserved names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`) in any path segment, even with extensions.
-- Avoid characters illegal on Windows: `< > : " \ | ? *`.
-- Avoid trailing spaces or trailing dots in any path segment.
-- Keep paths reasonably short. Current longest tracked path is expected to be well below Windows path limits.
+This repository must remain safe to check out and develop on Windows. Before finishing changes that add, remove, rename, or move files, run the Windows path-safety checks — reserved names, illegal characters, case-fold collisions, symlinks, and path length — documented in [docs/development.md](docs/development.md#windows-checkout-safety).
 
 ## Project Structure
 
@@ -158,12 +53,16 @@ src/                         # Windows desktop terminal application
 ├── input.zig                # Keyboard/mouse shortcuts and command dispatch
 ├── config.zig               # Config loading (file + CLI), theme resolution, key=value parser
 ├── config_watcher.zig       # Hot-reload via ReadDirectoryChangesW
-├── pty.zig                  # Windows ConPTY pseudo-terminal
+├── pty.zig                  # App-facing PTY API (re-exports src/platform/pty.zig)
 ├── remote_client.zig        # Outbound Phantty Remote relay client
 ├── file_explorer.zig        # Local/SSH file explorer state and operations
 ├── browser_panel.zig        # Embedded browser panel and SSH tunnel handling
-├── directwrite.zig          # DirectWrite FFI for Windows font discovery
-├── themes.zig              # Embedded Ghostty-compatible themes
+├── themes.zig               # Embedded Ghostty-compatible themes
+├── platform/                # Platform abstraction layer: narrow capability
+│                            #   interfaces with per-platform impls (_windows) and
+│                            #   _unsupported/_posix stubs — PTY/process, window/input
+│                            #   backends, font discovery, clipboard, file dialogs,
+│                            #   remote transport, embedded browser, updater, etc.
 ├── appwindow/               # Tab and split-tree helpers for AppWindow
 ├── apprt/                   # Win32/windowing support code
 ├── font/                    # Font manager, atlas, embedded fallback, sprite glyphs
@@ -220,7 +119,7 @@ Key mapping of Phantty files to Ghostty counterparts:
 | `src/font/embedded.zig` | Ghostty's embedded Cozette font | Same fallback font |
 | `src/main.zig` (rendering) | [`src/renderer/OpenGL.zig`](https://github.com/ghostty-org/ghostty/blob/main/src/renderer/OpenGL.zig) | OpenGL rendering, cell grid, shaders |
 | `src/main.zig` (input) | [`src/apprt/glfw.zig`](https://github.com/ghostty-org/ghostty/blob/main/src/apprt/glfw.zig) | GLFW key/mouse handling |
-| `src/directwrite.zig` | [`src/font/discovery.zig`](https://github.com/ghostty-org/ghostty/blob/main/src/font/discovery.zig) | Font discovery (Phantty uses DirectWrite directly) |
+| `src/platform/font_discovery_windows.zig` | [`src/font/discovery.zig`](https://github.com/ghostty-org/ghostty/blob/main/src/font/discovery.zig) | Font discovery (Phantty uses DirectWrite directly on Windows) |
 
 When adding features:
 - Check how Ghostty implements it first
@@ -230,11 +129,7 @@ When adding features:
 
 ## Config System
 
-Config file location: `%APPDATA%\phantty\config` (on Windows). The config directory and a default config file are created automatically at startup.
-
-Config is loaded in order (last wins): defaults → config file → CLI flags.
-
-Press `Ctrl+,` at runtime to open the config in notepad — changes are hot-reloaded via the file watcher.
+Config lives at `%APPDATA%\phantty\config`, is loaded defaults → config file → CLI flags (last wins), and hot-reloads via the file watcher (`Ctrl+,` to edit). Full details — path resolution order, portable profile, and all keys — are in [docs/configuration.md](docs/configuration.md).
 
 ## Dependencies
 

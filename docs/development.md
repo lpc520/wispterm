@@ -9,7 +9,28 @@ Remove-Item -Recurse -Force .\zig-out, .\.zig-cache -ErrorAction SilentlyContinu
 ```
 
 The `Makefile` may still exist as a convenience wrapper, but normal Windows
-development should use PowerShell and direct `zig` commands.
+development should use PowerShell and direct `zig` commands. Always use
+`zig build` for development; only use `zig build -Doptimize=ReleaseFast` for
+final/shipping builds.
+
+### Zig Toolchain
+
+Use Zig 0.15.2 on Windows and make sure `zig.exe` is available on `PATH`. Check
+the active version from PowerShell:
+
+```powershell
+zig version
+```
+
+`build.zig` already defaults to `x86_64-windows-gnu`, so a normal development
+build should not need an explicit `-Dtarget`.
+
+After a successful debug build, the expected artifact is:
+
+```powershell
+Test-Path .\zig-out\bin\phantty.exe
+Get-Item .\zig-out\bin\phantty.exe
+```
 
 ## Why The UI Is Custom Drawn
 
@@ -56,6 +77,121 @@ Important labels include `appwindow.on_win32_resize`,
 preview is visible, the table preview labels should move with the regression.
 For that scenario, add `-ManualSetupSeconds 15`, open the CSV/TSV preview during
 the pause, then let the script run the resize sequence.
+
+## Windows UI Automation
+
+When debugging UI behavior, automate Phantty as a real visible Windows app from
+PowerShell. Prefer Win32-driven automation over shell-only assumptions.
+
+Use the checked-in automation script for File Explorer regressions:
+
+```powershell
+zig build
+powershell -NoProfile -ExecutionPolicy Bypass -File .\debug\test-file-explorer-ui.ps1
+```
+
+The script launches a real Phantty window, sets DPI awareness, fixes the window
+position and size, captures before/after screenshots, crops the right panel,
+sends `Ctrl+Shift+Alt+E`, performs a region-based pixel check, and writes
+screenshots plus JSON metrics under `zig-out\ui-test\`.
+
+When adding more UI automation, follow the same pattern:
+
+- Wait until `MainWindowHandle` is non-zero, call `ShowWindow` and
+  `SetForegroundWindow`, then click inside the client area before sending keys.
+- Prefer Win32 `keybd_event` or `SendInput` for shortcuts;
+  `System.Windows.Forms.SendKeys` can silently miss GLFW/terminal windows when
+  focus is not exactly right.
+- Capture both full-window and cropped target-region screenshots, and inspect
+  the crop when a pixel check fails.
+- Always clean up test windows with `CloseMainWindow()`, then `Stop-Process
+  -Force` if the process remains.
+
+## Windows Checkout Safety
+
+This repository must remain safe to check out and develop on Windows. Before
+finishing changes that add, remove, rename, or move files, check for
+Windows-incompatible paths:
+
+```powershell
+$paths = git ls-files
+$reserved = @('CON', 'PRN', 'AUX', 'NUL') + (1..9 | ForEach-Object { "COM$_"; "LPT$_" })
+$violations = [System.Collections.Generic.List[object]]::new()
+$collisions = [System.Collections.Generic.List[object]]::new()
+$seen = @{}
+
+foreach ($path in $paths) {
+    foreach ($part in ($path -split '/')) {
+        $stem = ($part -split '\.')[0].ToUpperInvariant()
+        $reasons = @()
+        if ($part.IndexOfAny([char[]]'<>:"\|?*') -ge 0) { $reasons += 'illegal_char' }
+        if ($part.EndsWith(' ') -or $part.EndsWith('.')) { $reasons += 'trailing_space_or_dot' }
+        if ($reserved -contains $stem) { $reasons += 'reserved_name' }
+        if ($reasons.Count -gt 0) {
+            $violations.Add([pscustomobject]@{ Path = $path; Part = $part; Reasons = ($reasons -join ',') })
+        }
+    }
+
+    $key = $path.ToLowerInvariant()
+    if ($seen.ContainsKey($key) -and $seen[$key] -ne $path) {
+        $collisions.Add([pscustomobject]@{ A = $seen[$key]; B = $path })
+    } else {
+        $seen[$key] = $path
+    }
+}
+
+"tracked_files=$($paths.Count)"
+"windows_name_violations=$($violations.Count)"
+$violations | ForEach-Object { "violation`t$($_.Path)`t$($_.Part)`t$($_.Reasons)" }
+"casefold_collisions=$($collisions.Count)"
+$collisions | ForEach-Object { "collision`t$($_.A)`t$($_.B)" }
+$longest = $paths | Sort-Object Length -Descending | Select-Object -First 1
+"max_path_length=$($longest.Length) $longest"
+```
+
+Also check for symlinks, which are often painful on Windows checkouts:
+
+```powershell
+git ls-files -s | Select-String '^120000'
+```
+
+Rules of thumb:
+
+- Do not introduce files whose names differ only by case. Windows checkout is
+  case-insensitive by default.
+- Avoid Windows-reserved names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
+  `LPT1`-`LPT9`) in any path segment, even with extensions.
+- Avoid characters illegal on Windows: `< > : " \ | ? *`.
+- Avoid trailing spaces or trailing dots in any path segment.
+- Keep paths reasonably short. Current longest tracked path is expected to be
+  well below Windows path limits.
+
+## Windows SSH/SCP Compatibility
+
+When changing SSH/SCP code paths (`src/scp.zig`, SSH clipboard image paste,
+remote file explorer listing/upload/download, or SSH session metadata), test
+against the existing real SSH profile in `%APPDATA%\phantty\ssh_hosts` whenever
+it is available. The profile fields are hex encoded as
+`name, host, user, password, port`; decode them locally for the test, but never
+print or commit the password. At minimum, verify:
+
+```powershell
+ssh.exe ... user@host pwd
+scp.exe ... local-file user@host:/tmp/test-file
+ssh.exe -T ... user@host "cat > '/tmp/test-file'"  # only if testing the stream fallback
+```
+
+Do **not** add OpenSSH connection sharing (`ControlMaster`, `ControlPersist`,
+`ControlPath`) to helper `ssh.exe` or `scp.exe` commands on Windows. Windows
+OpenSSH does not provide the Unix-domain socket behavior those options expect
+here; it reproduces as `getsockname failed: Not a socket`,
+`Read from remote host ...: Unknown error`, `scp.exe: Connection closed`, or
+`lost connection`. This broke SCP uploads even though the same profile and
+remote service worked without those options.
+
+Keep stderr visible for helper `ssh.exe`/`scp.exe` failures. Do not reduce
+failures to a generic "SSH image upload failed"; preserve the underlying
+OpenSSH error so regressions can be diagnosed without guessing.
 
 ## Packaging
 
