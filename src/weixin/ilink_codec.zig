@@ -94,7 +94,10 @@ pub const ParsedUpdates = struct {
 };
 
 pub fn parseGetUpdates(allocator: std.mem.Allocator, json: []const u8) !ParsedUpdates {
-    const parsed = try std.json.parseFromSlice(WireUpdates, allocator, json, .{ .ignore_unknown_fields = true });
+    const parsed = try std.json.parseFromSlice(WireUpdates, allocator, json, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
     errdefer parsed.deinit();
     const a = parsed.arena.allocator();
     const wire = parsed.value;
