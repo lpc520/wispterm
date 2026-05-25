@@ -101,5 +101,8 @@ Linux (native):
 - [ ] Keep the `build.zig` `@compileError` guards that forbid leaking target
       OS booleans / Windows-specific names into app modules, so the core/host
       boundary cannot be quietly re-broken over time.
-- [ ] Remove the remaining direct win32 reference in `src/test_main.zig` so no
+- [x] Remove the remaining direct win32 reference in `src/test_main.zig` so no
       shared/test code outside `src/platform/` depends on a platform runtime.
+      The `apprt/win32.zig` API-surface leak checks now live in
+      `src/platform/apprt_win32_guard.zig`; `test_main.zig` imports that guard
+      instead of embedding the Windows runtime source itself.

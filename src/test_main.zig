@@ -35,62 +35,9 @@ comptime {
     {
         @compileError("AppWindow.zig launch plumbing must use platform_pty_command launch types and allocators");
     }
-    const apprt_win32_source = @embedFile("apprt/win32.zig");
-    const apprt_win32_public_platform_api_leaks = .{
-        "pub extern \"shell32\" fn ShellExecuteW",
-        "pub extern \"user32\" fn OpenClipboard",
-        "pub extern \"kernel32\" fn GlobalAlloc",
-        "pub extern \"comdlg32\" fn GetSaveFileNameW",
-        "pub extern \"gdiplus\" fn GdiplusStartup",
-        "pub extern \"kernel32\" fn CreatePipe",
-        "pub extern \"kernel32\" fn CreateNamedPipeW",
-        "pub extern \"kernel32\" fn CreateFileW",
-        "pub extern \"kernel32\" fn CreatePseudoConsole",
-        "pub extern \"kernel32\" fn CreateProcessW",
-        "pub extern \"kernel32\" fn PeekNamedPipe",
-        "pub extern \"kernel32\" fn CancelIoEx",
-        "pub extern \"kernel32\" fn WaitForSingleObject",
-        "pub extern \"kernel32\" fn GetExitCodeProcess",
-        "pub const OPENFILENAME",
-        "pub const GpImage",
-        "pub const HPCON",
-        "pub const STARTUPINFOEXW",
-        "pub const EXTENDED_STARTUPINFO_PRESENT",
-        "pub const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE",
-        "pub const FILE_FLAG_OVERLAPPED",
-        "pub const PIPE_ACCESS_OUTBOUND",
-        "pub const GENERIC_READ",
-        "pub const WAIT_OBJECT_0",
-    };
-    for (apprt_win32_public_platform_api_leaks) |leak| {
-        if (std.mem.indexOf(u8, apprt_win32_source, leak) != null) {
-            @compileError("apprt/win32.zig must not publicly expose platform APIs owned by platform/* backends");
-        }
-    }
-    const apprt_win32_public_backend_detail_leaks = .{
-        "pub extern \"",
-        "pub const WM_",
-        "pub const VK_",
-        "pub const HT",
-        "pub const SW_",
-        "pub const SWP_",
-        "pub const SIZE_",
-        "pub const CFS_",
-        "pub const TME_",
-        "pub const KEY_PRESSED",
-        "pub const OFN_",
-        "pub const IDC_",
-        "pub const MOD_",
-        "pub const FLASHW_",
-        "pub const MB_",
-        "pub const SM_",
-        "pub const HWND_TOP",
-    };
-    for (apprt_win32_public_backend_detail_leaks) |leak| {
-        if (std.mem.indexOf(u8, apprt_win32_source, leak) != null) {
-            @compileError("apprt/win32.zig must keep raw Win32 message/key/window constants private to the backend");
-        }
-    }
+    // apprt/win32.zig API-surface leak checks live in
+    // platform/apprt_win32_guard.zig so this shared/test module does not embed
+    // the Windows runtime directly. It is imported below to run those guards.
 
     const update_install_source = @embedFile("update_install.zig");
     if (std.mem.indexOf(u8, update_install_source, "@import(\"builtin\").os.tag") != null) {
@@ -684,6 +631,7 @@ comptime {
     _ = @import("platform/global_hotkey.zig");
     _ = @import("platform/input_events.zig");
     _ = @import("platform/agent_prompt.zig");
+    _ = @import("platform/apprt_win32_guard.zig");
     _ = @import("platform/local_path.zig");
     _ = @import("platform/memory.zig");
     _ = @import("platform/notifications.zig");
