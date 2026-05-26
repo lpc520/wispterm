@@ -30,9 +30,7 @@ const overlay_keys = @import("overlay_keys.zig");
 const weixin_qr_panel = @import("../weixin/qr_panel.zig");
 const weixin_types = @import("../weixin/types.zig");
 
-const c = @cImport({
-    @cInclude("glad/gl.h");
-});
+const ui_pipeline = @import("ui_pipeline.zig");
 
 const TabState = tab.TabState;
 const SplitRect = split_layout.SplitRect;
@@ -1112,13 +1110,6 @@ pub fn renderBrowserUrlBar(window_width: f32, window_height: f32, top_offset: f3
     );
     const url_bar = browser_panel.urlBarBounds(bounds) orelse return;
 
-    const gl = AppWindow.gpu.glTable();
-    gl.Enable.?(c.GL_BLEND);
-    gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-    gl.UseProgram.?(gl_init.shader_program);
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(gl_init.vao);
-
     const bg = AppWindow.g_theme.background;
     const fg = AppWindow.g_theme.foreground;
     const accent = AppWindow.g_theme.cursor_color;
@@ -1134,7 +1125,7 @@ pub fn renderBrowserUrlBar(window_width: f32, window_height: f32, top_offset: f3
     const bar_bottom: f32 = @floatFromInt(url_bar.bottom);
     const bar_h = @max(1.0, bar_bottom - bar_top);
     const bar_y = @round(window_height - bar_bottom);
-    gl_init.renderQuadAlpha(panel_x, bar_y, panel_w, bar_h, panel_bg, 0.98);
+    ui_pipeline.fillQuadAlpha(panel_x, bar_y, panel_w, bar_h, panel_bg, 0.98);
 
     const margin = browser_panel.URL_BAR_MARGIN;
     const input_x = @round(@as(f32, @floatFromInt(url_bar.left)) + margin);
@@ -1158,10 +1149,10 @@ pub fn renderBrowserUrlBar(window_width: f32, window_height: f32, top_offset: f3
 
     if (browser_panel.urlBarFocused() and !browser_panel.urlBarSelectAll()) {
         const cursor_x = @min(input_x + input_w - 10, @max(text_x, text_end + 1));
-        gl_init.renderQuadAlpha(cursor_x, input_y + 6, 1.5, @max(8.0, input_h - 12), accent, 0.90);
+        ui_pipeline.fillQuadAlpha(cursor_x, input_y + 6, 1.5, @max(8.0, input_h - 12), accent, 0.90);
     }
 
-    gl_init.renderQuadAlpha(panel_x, bar_y, panel_w, 1, mixColor(bg, fg, 0.18), 0.55);
+    ui_pipeline.fillQuadAlpha(panel_x, bar_y, panel_w, 1, mixColor(bg, fg, 0.18), 0.55);
 }
 
 /// Render the command center overlay.
@@ -1169,15 +1160,8 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     if (!g_command_palette_visible) return;
     commandPaletteSyncAgentHistoryRows();
 
-    const gl = AppWindow.gpu.glTable();
     const layout = commandPaletteLayout(window_width, window_height, top_offset);
     const box_y = @round(window_height - layout.box_top_px - layout.box_h);
-
-    gl.Enable.?(c.GL_BLEND);
-    gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-    gl.UseProgram.?(gl_init.shader_program);
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(gl_init.vao);
 
     const bg = AppWindow.g_theme.background;
     const fg = AppWindow.g_theme.foreground;
@@ -1192,7 +1176,7 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     const selected_bg = mixColor(bg, accent, 0.50);
     const selected_border = mixColor(accent, fg, 0.16);
 
-    gl_init.renderQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.22);
+    ui_pipeline.fillQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.22);
     renderRoundedQuadAlpha(layout.box_x - 1, box_y - 1, layout.box_w + 2, layout.box_h + 2, 9, border_color, 0.42);
     renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 8, panel_color, 0.98);
 
@@ -3073,8 +3057,8 @@ fn renderSessionRow(layout: SessionLayout, window_height: f32, row: usize, left:
     const fg = AppWindow.g_theme.foreground;
     const accent = AppWindow.g_theme.cursor_color;
     const row_color = if (selected) mixColor(bg, accent, 0.34) else mixColor(bg, fg, 0.055);
-    gl_init.renderQuadAlpha(x, row_y + 3, w, layout.row_h - 6, row_color, if (selected) 0.82 else 0.78);
-    if (selected) gl_init.renderQuadAlpha(x, row_y + 3, 3, layout.row_h - 6, accent, 0.86);
+    ui_pipeline.fillQuadAlpha(x, row_y + 3, w, layout.row_h - 6, row_color, if (selected) 0.82 else 0.78);
+    if (selected) ui_pipeline.fillQuadAlpha(x, row_y + 3, 3, layout.row_h - 6, accent, 0.86);
     const text_y = rowTextY(row_y, layout.row_h);
     const left_color = if (selected) mixColor(fg, accent, 0.12) else mixColor(bg, fg, 0.88);
     const left_x = x + 12;
@@ -3155,15 +3139,9 @@ fn defaultAiModeLabel() []const u8 {
 pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: f32) void {
     if (!sessionLauncherVisible()) return;
 
-    const gl = AppWindow.gpu.glTable();
     const layout = sessionLayout(window_width, window_height, top_offset);
     const box_y = @round(window_height - layout.box_top_px - layout.box_h);
 
-    gl.Enable.?(c.GL_BLEND);
-    gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-    gl.UseProgram.?(gl_init.shader_program);
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(gl_init.vao);
     const bg = AppWindow.g_theme.background;
     const fg = AppWindow.g_theme.foreground;
     const accent = AppWindow.g_theme.cursor_color;
@@ -3172,7 +3150,7 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
     const title_color = mixColor(fg, accent, 0.14);
     const muted_color = mixColor(bg, fg, 0.58);
 
-    gl_init.renderQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.18);
+    ui_pipeline.fillQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.18);
     renderRoundedQuadAlpha(layout.box_x - 1, box_y - 1, layout.box_w + 2, layout.box_h + 2, 11, border_color, 0.24);
     renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 10, panel_color, 0.96);
 
@@ -3614,8 +3592,8 @@ fn renderSettingsRow(layout: SettingsLayout, window_height: f32, row: usize, tit
 
     if (clickable) {
         const row_color = if (selected) mixColor(bg, accent, 0.24) else if (active) mixColor(bg, accent, 0.18) else mixColor(bg, fg, 0.055);
-        gl_init.renderQuadAlpha(x, gl_y + 3, w, layout.row_h - 6, row_color, if (selected) 0.72 else if (active) 0.44 else 0.82);
-        if (selected) gl_init.renderQuadAlpha(x, gl_y + 3, 3, layout.row_h - 6, accent, 0.82);
+        ui_pipeline.fillQuadAlpha(x, gl_y + 3, w, layout.row_h - 6, row_color, if (selected) 0.72 else if (active) 0.44 else 0.82);
+        if (selected) ui_pipeline.fillQuadAlpha(x, gl_y + 3, 3, layout.row_h - 6, accent, 0.82);
     }
 
     const text_y = rowTextY(gl_y, layout.row_h);
@@ -3653,15 +3631,8 @@ pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32
 
     const cfg = settingsCfg(allocator);
 
-    const gl = AppWindow.gpu.glTable();
     const layout = settingsLayout(window_width, window_height, top_offset);
     const box_y = @round(window_height - layout.box_top_px - layout.box_h);
-
-    gl.Enable.?(c.GL_BLEND);
-    gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-    gl.UseProgram.?(gl_init.shader_program);
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(gl_init.vao);
 
     const bg = AppWindow.g_theme.background;
     const fg = AppWindow.g_theme.foreground;
@@ -3670,7 +3641,7 @@ pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32
     const border_color = mixColor(bg, accent, 0.24);
     const muted_color = mixColor(bg, fg, 0.58);
 
-    gl_init.renderQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.16);
+    ui_pipeline.fillQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.16);
     renderRoundedQuadAlpha(layout.box_x - 1, box_y - 1, layout.box_w + 2, layout.box_h + 2, 11, border_color, 0.24);
     renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 10, panel_color, 0.96);
 
@@ -3722,12 +3693,8 @@ threadlocal var g_fps_value: f32 = 0; // Current FPS value to display
 
 /// Render a semi-transparent overlay over an unfocused split pane.
 pub fn renderUnfocusedOverlay(rect: SplitRect, window_height: f32) void {
-    const gl = AppWindow.gpu.glTable();
     const opacity = 1.0 - g_unfocused_split_opacity;
     if (opacity < 0.01) return;
-
-    gl.UseProgram.?(gl_init.shader_program);
-    gl.BindVertexArray.?(gl_init.vao);
 
     // Draw semi-transparent background color overlay
     const px: f32 = @floatFromInt(rect.x);
@@ -3736,14 +3703,13 @@ pub fn renderUnfocusedOverlay(rect: SplitRect, window_height: f32) void {
     const ph: f32 = @floatFromInt(rect.height);
 
     // Use background color with alpha for the overlay
-    gl_init.renderQuadAlpha(px, py, pw, ph, AppWindow.g_theme.background, opacity);
+    ui_pipeline.fillQuadAlpha(px, py, pw, ph, AppWindow.g_theme.background, opacity);
 }
 
 /// Render unfocused overlay within current viewport (for split rendering).
 /// Assumes viewport is already set to the split's region.
 /// Uses true alpha blending so it blends with actual rendered content.
 pub fn renderUnfocusedOverlaySimple(width: f32, height: f32) void {
-    const gl = AppWindow.gpu.glTable();
     const alpha = 1.0 - g_unfocused_split_opacity;
     if (alpha < 0.01) return;
 
@@ -3756,44 +3722,18 @@ pub fn renderUnfocusedOverlaySimple(width: f32, height: f32) void {
         .{ width, height, 1.0, 0.0 },
     };
 
-    // Use overlay shader with true alpha blending
-    gl.UseProgram.?(gl_init.overlay_shader);
-
-    // Set overlay color (background color with alpha)
-    gl.Uniform4f.?(
-        gl.GetUniformLocation.?(gl_init.overlay_shader, "overlayColor"),
+    ui_pipeline.fillOverlay(vertices, .{
         AppWindow.g_theme.background[0],
         AppWindow.g_theme.background[1],
         AppWindow.g_theme.background[2],
         alpha,
-    );
-
-    // Set projection for current viewport
-    var viewport: [4]c.GLint = undefined;
-    gl.GetIntegerv.?(c.GL_VIEWPORT, &viewport);
-    const vp_width: f32 = @floatFromInt(viewport[2]);
-    const vp_height: f32 = @floatFromInt(viewport[3]);
-    const projection = [16]f32{
-        2.0 / vp_width, 0.0,             0.0,  0.0,
-        0.0,            2.0 / vp_height, 0.0,  0.0,
-        0.0,            0.0,             -1.0, 0.0,
-        -1.0,           -1.0,            0.0,  1.0,
-    };
-    gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(gl_init.overlay_shader, "projection"), 1, c.GL_FALSE, &projection);
-
-    gl.BindVertexArray.?(gl_init.vao);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
-    gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
-    gl_init.g_draw_call_count += 1;
+    });
 }
 
 /// Render split dividers between panes in the active tab.
 /// If split-divider-color is configured, uses that color (solid).
 /// Otherwise uses scrollbar-style rendering: black with alpha transparency.
 pub fn renderSplitDividers(active_tab: *const TabState, content_x: i32, content_y: i32, content_w: i32, content_h: i32, window_height: f32) void {
-    const gl = AppWindow.gpu.glTable();
     if (!active_tab.tree.isSplit()) return;
 
     const allocator = AppWindow.g_allocator orelse return;
@@ -3801,9 +3741,6 @@ pub fn renderSplitDividers(active_tab: *const TabState, content_x: i32, content_
     // Get spatial representation
     var spatial = active_tab.tree.spatial(allocator) catch return;
     defer spatial.deinit(allocator);
-
-    gl.UseProgram.?(gl_init.shader_program);
-    gl.BindVertexArray.?(gl_init.vao);
 
     // Check if custom color is configured
     const use_custom_color = g_split_divider_color != null;
@@ -3828,9 +3765,9 @@ pub fn renderSplitDividers(active_tab: *const TabState, content_x: i32, content_
                         const div_x = slot_x + slot_w * @as(f32, @floatCast(s.ratio)) - @as(f32, @floatFromInt(@divTrunc(SPLIT_DIVIDER_WIDTH, 2)));
                         const div_y = window_height - slot_y - slot_h;
                         if (use_custom_color) {
-                            gl_init.renderQuad(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, custom_color);
+                            ui_pipeline.fillQuad(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, custom_color);
                         } else {
-                            gl_init.renderQuadAlpha(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, .{ 0, 0, 0 }, default_alpha);
+                            ui_pipeline.fillQuadAlpha(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, .{ 0, 0, 0 }, default_alpha);
                         }
                     },
                     .vertical => {
@@ -3838,9 +3775,9 @@ pub fn renderSplitDividers(active_tab: *const TabState, content_x: i32, content_
                         const div_x = slot_x;
                         const div_y = window_height - slot_y - slot_h * @as(f32, @floatCast(s.ratio)) - @as(f32, @floatFromInt(@divTrunc(SPLIT_DIVIDER_WIDTH, 2)));
                         if (use_custom_color) {
-                            gl_init.renderQuad(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), custom_color);
+                            ui_pipeline.fillQuad(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), custom_color);
                         } else {
-                            gl_init.renderQuadAlpha(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), .{ 0, 0, 0 }, default_alpha);
+                            ui_pipeline.fillQuadAlpha(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), .{ 0, 0, 0 }, default_alpha);
                         }
                     },
                 }
@@ -4174,13 +4111,6 @@ pub fn showCloseShortcutConfirm(duration_ms: i64) void {
 pub fn renderWindowCloseConfirm(window_width: f32, window_height: f32) void {
     if (!g_window_close_confirm_visible) return;
 
-    const gl = AppWindow.gpu.glTable();
-    gl.Enable.?(c.GL_BLEND);
-    gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-    gl.UseProgram.?(gl_init.shader_program);
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(gl_init.vao);
-
     const layout = windowCloseConfirmLayout(window_width, window_height);
     const panel_y = @round(window_height - layout.panel_top_px - layout.panel_h);
     const close_y = @round(window_height - layout.close_top_px - layout.close_h);
@@ -4199,12 +4129,12 @@ pub fn renderWindowCloseConfirm(window_width: f32, window_height: f32) void {
     const danger_soft = mixColor(bg, danger, 0.20);
     const warning = .{ 0.95, 0.62, 0.18 };
 
-    gl_init.renderQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.46);
+    ui_pipeline.fillQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.46);
     renderRoundedQuadAlpha(layout.panel_x + 10, panel_y - 10, layout.panel_w, layout.panel_h, 13, .{ 0.0, 0.0, 0.0 }, 0.26);
     renderRoundedQuadAlpha(layout.panel_x - 1, panel_y - 1, layout.panel_w + 2, layout.panel_h + 2, 13, panel_border, 0.42);
     renderRoundedQuadAlpha(layout.panel_x, panel_y, layout.panel_w, layout.panel_h, 12, panel, 0.99);
     renderRoundedQuadAlpha(layout.panel_x + 1, panel_y + layout.panel_h - 76, layout.panel_w - 2, 75, 12, panel_top, 0.78);
-    gl_init.renderQuadAlpha(layout.panel_x + 1, panel_y + layout.panel_h - 76, layout.panel_w - 2, 1, quiet_border, 0.40);
+    ui_pipeline.fillQuadAlpha(layout.panel_x + 1, panel_y + layout.panel_h - 76, layout.panel_w - 2, 1, quiet_border, 0.40);
     renderRoundedQuadAlpha(layout.panel_x, panel_y, 5, layout.panel_h, 12, danger, 0.84);
 
     const pad: f32 = 34;
@@ -4227,7 +4157,7 @@ pub fn renderWindowCloseConfirm(window_width: f32, window_height: f32) void {
     renderTitlebarTextLimited("Press Esc or Cancel to keep working.", text_x, hint_y, muted, text_right - text_x);
 
     const footer_y = close_y + layout.close_h + 20;
-    gl_init.renderQuadAlpha(layout.panel_x + 5, footer_y, layout.panel_w - 5, 1, quiet_border, 0.46);
+    ui_pipeline.fillQuadAlpha(layout.panel_x + 5, footer_y, layout.panel_w - 5, 1, quiet_border, 0.46);
 
     renderRoundedQuadAlpha(layout.close_x - 1, close_y - 1, layout.close_w + 2, layout.close_h + 2, 8, danger, 0.48);
     renderRoundedQuadAlpha(layout.close_x, close_y, layout.close_w, layout.close_h, 7, danger_soft, 0.96);
@@ -4303,8 +4233,8 @@ pub fn renderCloseShortcutConfirm(window_width: f32, window_height: f32) void {
     const bg_x = @round((window_width - bg_w) / 2);
     const bg_y: f32 = 60;
 
-    gl_init.renderQuad(bg_x, bg_y, bg_w, line_h, .{ 0.18, 0.11, 0.08 });
-    gl_init.renderQuad(bg_x, bg_y + line_h - 2, bg_w, 2, .{ 0.86, 0.48, 0.20 });
+    ui_pipeline.fillQuad(bg_x, bg_y, bg_w, line_h, .{ 0.18, 0.11, 0.08 });
+    ui_pipeline.fillQuad(bg_x, bg_y + line_h - 2, bg_w, 2, .{ 0.86, 0.48, 0.20 });
     renderTitlebarText(text, bg_x + pad_h, bg_y + pad_v, .{ 1.0, 0.82, 0.56 });
 }
 
@@ -4328,7 +4258,7 @@ pub fn renderCopyToast(window_width: f32, window_height: f32) void {
     const bg_x = (window_width - bg_w) / 2;
     const bg_y: f32 = 60; // GL y=0 at bottom — float above the prompt area
 
-    gl_init.renderQuad(bg_x, bg_y, bg_w, line_h, .{ 0.10, 0.14, 0.10 });
+    ui_pipeline.fillQuad(bg_x, bg_y, bg_w, line_h, .{ 0.10, 0.14, 0.10 });
 
     var x = bg_x + pad_h;
     const y = bg_y + pad_v;
@@ -4385,10 +4315,10 @@ pub fn renderTransferToast(window_width: f32, window_height: f32) void {
         .idle => AppWindow.g_theme.foreground,
     };
     const bg = mixColor(AppWindow.g_theme.background, accent, 0.16);
-    gl_init.renderQuadAlpha(layout.x, layout.y, layout.w, layout.h, bg, 0.96);
-    gl_init.renderQuadAlpha(layout.x, layout.y, 3, layout.h, accent, 0.88);
+    ui_pipeline.fillQuadAlpha(layout.x, layout.y, layout.w, layout.h, bg, 0.96);
+    ui_pipeline.fillQuadAlpha(layout.x, layout.y, 3, layout.h, accent, 0.88);
     if (g_transfer_toast_clickable) {
-        gl_init.renderQuadAlpha(layout.x, layout.y + layout.h - 2, layout.w, 2, accent, 0.64);
+        ui_pipeline.fillQuadAlpha(layout.x, layout.y + layout.h - 2, layout.w, 2, accent, 0.64);
     }
 
     const text_x = layout.x + pad_h;
@@ -4420,9 +4350,9 @@ pub fn renderUpdatePrompt(window_width: f32, window_height: f32) void {
 
     const bg_color: [3]f32 = if (g_update_prompt_clickable) .{ 0.18, 0.14, 0.06 } else .{ 0.08, 0.13, 0.16 };
     const text_color: [3]f32 = if (g_update_prompt_clickable) .{ 1.0, 0.82, 0.38 } else .{ 0.55, 0.85, 0.95 };
-    gl_init.renderQuad(bg_x, bg_y, bg_w, line_h, bg_color);
+    ui_pipeline.fillQuad(bg_x, bg_y, bg_w, line_h, bg_color);
     if (g_update_prompt_clickable) {
-        gl_init.renderQuad(bg_x, bg_y + line_h - 2, bg_w, 2, .{ 0.86, 0.48, 0.20 });
+        ui_pipeline.fillQuad(bg_x, bg_y + line_h - 2, bg_w, 2, .{ 0.86, 0.48, 0.20 });
         g_update_prompt_rect = .{ .x = bg_x, .y = bg_y, .w = bg_w, .h = line_h };
     }
 
@@ -4533,12 +4463,7 @@ fn remoteStateColor(state: @import("../remote_client.zig").State) [3]f32 {
 }
 
 fn renderDebugLine(window_width: f32, y_pos: *f32, margin: f32, pad_h: f32, pad_v: f32, line_h: f32, text: []const u8, text_color: [3]f32) ?DebugLineRect {
-    const gl = AppWindow.gpu.glTable();
     if (text.len == 0) return null;
-
-    gl.UseProgram.?(gl_init.shader_program);
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(gl_init.vao);
 
     var text_width: f32 = 0;
     for (text) |ch| {
@@ -4549,7 +4474,7 @@ fn renderDebugLine(window_width: f32, y_pos: *f32, margin: f32, pad_h: f32, pad_
     const bg_x = window_width - bg_w - margin;
     const bg_y = y_pos.*;
 
-    gl_init.renderQuad(bg_x, bg_y, bg_w, line_h, .{ 0.0, 0.0, 0.0 });
+    ui_pipeline.fillQuad(bg_x, bg_y, bg_w, line_h, .{ 0.0, 0.0, 0.0 });
 
     var x = bg_x + pad_h;
     const y = bg_y + pad_v;
