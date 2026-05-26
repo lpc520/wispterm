@@ -50,7 +50,7 @@ pub const Client = struct {
 
     /// GET /ilink/bot/get_qrcode_status?qrcode=... — result borrows from `arena`.
     pub fn getQrcodeStatus(self: *Client, arena: std.mem.Allocator, qrcode: []const u8) !types.QrStatus {
-        const path = try std.fmt.allocPrint(arena, "/ilink/bot/get_qrcode_status?qrcode={s}", .{qrcode});
+        const path = try qrcodeStatusPath(arena, qrcode);
         const resp = try self.fetch(arena, .GET, path, null, "1");
         const W = struct {
             ret: i64 = 0,
@@ -179,9 +179,41 @@ pub const Client = struct {
     }
 };
 
+fn qrcodeStatusPath(allocator: std.mem.Allocator, qrcode: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, "/ilink/bot/get_qrcode_status?qrcode=");
+    try appendQueryEscaped(&out, allocator, qrcode);
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendQueryEscaped(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (value) |ch| {
+        if (std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.' or ch == '~') {
+            try out.append(allocator, ch);
+        } else {
+            try out.append(allocator, '%');
+            try out.append(allocator, hex[ch >> 4]);
+            try out.append(allocator, hex[ch & 0x0f]);
+        }
+    }
+}
+
 test "client init defaults the base url" {
     const c = Client.init(std.testing.allocator, "", "tok");
     try std.testing.expectEqualStrings(codec.DEFAULT_BASE_URL, c.base_url);
     const c2 = Client.init(std.testing.allocator, "https://x.test", "tok");
     try std.testing.expectEqualStrings("https://x.test", c2.base_url);
+}
+
+test "client qrcode status path percent-encodes the qrcode query value" {
+    const path = try qrcodeStatusPath(std.testing.allocator, "qr session+&=%");
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expectEqualStrings(
+        "/ilink/bot/get_qrcode_status?qrcode=qr%20session%2B%26%3D%25",
+        path,
+    );
 }

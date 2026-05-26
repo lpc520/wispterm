@@ -158,6 +158,17 @@ test "interactive underline includes plain filenames for ssh download hover" {
     );
 }
 
+test "input: WeChat QR panel consumes text input while visible" {
+    AppWindow.weixin_qr_panel.g_visible = true;
+    defer AppWindow.weixin_qr_panel.g_visible = false;
+
+    try std.testing.expect(weixinQrPanelConsumesChar());
+}
+
+fn weixinQrPanelConsumesChar() bool {
+    return AppWindow.weixin_qr_panel.visible();
+}
+
 // Selection + divider drag state (moved from AppWindow.zig)
 pub threadlocal var g_selecting: bool = false; // True while mouse button is held
 pub threadlocal var g_click_x: f64 = 0; // X position of initial click (for threshold calculation)
@@ -692,6 +703,7 @@ fn handleChar(ev: platform_input.CharEvent) void {
         if (!ev.ctrl and !ev.alt) overlays.commandPaletteInsertChar(ev.codepoint);
         return;
     }
+    if (weixinQrPanelConsumesChar()) return;
     if (browser_panel.urlBarFocused()) {
         if (!ev.ctrl and !ev.alt) {
             browser_panel.insertUrlBarChar(ev.codepoint);

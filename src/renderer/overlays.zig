@@ -600,6 +600,7 @@ pub fn weixinQrPanelHandleAction(action: weixin_qr_panel.Action) void {
     switch (action) {
         .none => {},
         .close => {
+            if (weixin_qr_panel.controller()) |controller| controller.cancelLogin();
             weixin_qr_panel.close();
             AppWindow.g_force_rebuild = true;
             AppWindow.g_cells_valid = false;

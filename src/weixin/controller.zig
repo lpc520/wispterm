@@ -58,7 +58,7 @@ pub const Controller = struct {
     }
 
     pub fn destroy(self: *Controller) void {
-        self.login_active.store(false, .release);
+        self.cancelLogin();
         if (self.login_thread) |th| {
             th.join();
             self.login_thread = null;
@@ -74,7 +74,7 @@ pub const Controller = struct {
     /// calls. If a worker cannot be joined promptly, it is detached and this
     /// Controller intentionally remains allocated until the process exits.
     pub fn destroyForProcessExit(self: *Controller, thread_control: ThreadControl) bool {
-        self.login_active.store(false, .release);
+        self.cancelLogin();
         if (!self.joinLoginThreadForProcessExit(thread_control)) return false;
         if (!self.stopForProcessExit(thread_control)) return false;
 
@@ -100,6 +100,11 @@ pub const Controller = struct {
             return err;
         };
         std.debug.print("weixin QR login started\n", .{});
+    }
+
+    pub fn cancelLogin(self: *Controller) void {
+        self.login_active.store(false, .release);
+        self.resetLoginSnapshot(.unknown);
     }
 
     pub const LoginSnapshot = struct {
@@ -153,6 +158,7 @@ pub const Controller = struct {
             self.login_active.store(false, .release);
             return;
         };
+        if (!self.login_active.load(.acquire)) return;
         self.setLoginQr(qr.qrcode, qr.qrcode_img_content);
 
         while (self.login_active.load(.acquire)) {
@@ -162,6 +168,10 @@ pub const Controller = struct {
                 std.Thread.sleep(2 * std.time.ns_per_s);
                 continue;
             };
+            if (!self.login_active.load(.acquire)) {
+                poll_arena.deinit();
+                break;
+            }
             self.setLoginStatus(status.status);
             if (status.status == .confirmed) {
                 self.confirmLogin(status) catch {}; // uses `status` before poll_arena frees
@@ -244,6 +254,7 @@ pub const Controller = struct {
 
     /// Clears the persisted owner + token and stops. Used by "Unbind".
     pub fn unbind(self: *Controller) !void {
+        self.cancelLogin();
         self.stop();
         self.clearBinding();
         try self.persistBinding(.{});
@@ -265,6 +276,7 @@ pub const Controller = struct {
 
     /// Step 3: a confirmed QR status carries the bot_token; persist and start.
     pub fn confirmLogin(self: *Controller, status: types.QrStatus) !void {
+        if (!self.login_active.load(.acquire)) return error.LoginCancelled;
         if (status.status != .confirmed or status.bot_token.len == 0) return error.NotConfirmed;
         const binding = types.Binding{
             .bot_token = status.bot_token,
@@ -455,4 +467,23 @@ test "status on a fresh controller reports disconnected idle" {
     try t.expect(!s.has_bot_id);
     try t.expect(!s.login_active);
     try t.expectEqual(types.QrStatusKind.unknown, s.login_status);
+}
+
+test "cancelled login cannot later confirm and persist a binding" {
+    const path = "zig-cache-tmp-weixin-ctrl-cancel.json";
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    const ctrl = try Controller.create(t.allocator, path, NoopControl.iface(), .{});
+    defer ctrl.destroy();
+
+    ctrl.login_active.store(true, .release);
+    ctrl.cancelLogin();
+
+    try t.expectError(error.LoginCancelled, ctrl.confirmLogin(.{
+        .status = .confirmed,
+        .bot_token = "token",
+        .base_url = "https://example.test",
+        .bot_id = "bot",
+    }));
+    try t.expect(!ctrl.statusSnapshot().has_token);
 }
