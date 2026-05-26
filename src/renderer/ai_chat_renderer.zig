@@ -25,9 +25,6 @@ const gl_init = AppWindow.gpu.gl_init;
 const titlebar = AppWindow.titlebar;
 const ui_pipeline = @import("ui_pipeline.zig");
 
-const c = @cImport({
-    @cInclude("glad/gl.h");
-});
 
 pub const LINE_PAD_X: f32 = 18;
 const HEADER_H: f32 = 54;
@@ -122,13 +119,6 @@ pub fn render(
     left_panels_w: f32,
     right_panels_w: f32,
 ) void {
-    const gl = AppWindow.gpu.glTable();
-    gl.Enable.?(c.GL_BLEND);
-    gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-    gl.UseProgram.?(gl_init.shader_program);
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(gl_init.vao);
-
     const bg = AppWindow.g_theme.background;
     const fg = AppWindow.g_theme.foreground;
     const accent = AppWindow.g_theme.cursor_color;
@@ -181,13 +171,7 @@ pub fn render(
     ui_pipeline.fillQuadAlpha(layout.field_x, layout.field_y, layout.field_w, layout.field_h, field_bg, 0.95);
     ui_pipeline.fillQuadAlpha(layout.field_x, layout.field_y, layout.field_w, 1, mixColor(bg, accent, 0.38), 0.6);
 
-    gl.Enable.?(c.GL_SCISSOR_TEST);
-    gl.Scissor.?(
-        @intFromFloat(@round(layout.field_x)),
-        @intFromFloat(@round(layout.field_y)),
-        @intFromFloat(@round(layout.field_w)),
-        @intFromFloat(@round(layout.field_h)),
-    );
+    ui_pipeline.pushClip(.{ .x = layout.field_x, .y = layout.field_y, .w = layout.field_w, .h = layout.field_h });
 
     if (input_text.len == 0) {
         session.input_scroll_row = 0;
@@ -253,7 +237,7 @@ pub fn render(
             }
         }
     }
-    gl.Disable.?(c.GL_SCISSOR_TEST);
+    ui_pipeline.popClip();
 
     const approval = session.approvalView();
     const approval_h: f32 = if (approval != null) APPROVAL_H + APPROVAL_GAP else 0;
@@ -279,13 +263,7 @@ pub fn render(
     const max_scroll = @max(0.0, content_h - transcript_h);
     session.scroll_px = @min(session.scroll_px, max_scroll);
 
-    gl.Enable.?(c.GL_SCISSOR_TEST);
-    gl.Scissor.?(
-        @intFromFloat(@round(x)),
-        @intFromFloat(@round(transcript_bottom)),
-        @intFromFloat(@round(w)),
-        @intFromFloat(@round(transcript_h)),
-    );
+    ui_pipeline.pushClip(.{ .x = x, .y = transcript_bottom, .w = w, .h = transcript_h });
 
     const gravity_offset = @max(0.0, transcript_h - content_h);
     const palette = markdownPalette(bg, fg, accent);
@@ -330,7 +308,7 @@ pub fn render(
         cursor_top += BUBBLE_GAP;
     }
 
-    gl.Disable.?(c.GL_SCISSOR_TEST);
+    ui_pipeline.popClip();
 
     renderTranscriptScrollbar(session, x, w, transcript_top, transcript_h, content_h, window_height);
 
