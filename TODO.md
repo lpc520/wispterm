@@ -106,6 +106,13 @@ mapping in guide §2 and §5.
       `cell_renderer`, `titlebar`, `overlays`, `ai_chat_renderer`,
       `image_renderer`, `post_process`, `background_image`, `fbo`,
       `markdown_preview_renderer`, `file_explorer_renderer`.
+      *Increment 1 done:* real `Buffer`/`Texture`/`Pipeline` primitives exist in
+      `gpu/opengl/`; `cell_renderer` is converted — `drawCells` routes through
+      `cell_pipeline.zig` (cell pipelines built from the primitives) and the pure
+      BG/cursor/selection + glyph-rect logic + instance types moved to std-only,
+      unit-tested `cell_geometry.zig`. *Still pending:* the other 9 files, plus
+      the shared `shader_program`/`overlay_shader`/`simple_color_shader`
+      pipelines (still in `gl_init`).
 - [ ] **A4** Route font atlas → GPU texture through the `Texture` primitive;
       drop `font/manager.zig`'s direct `@cImport("glad/gl.h")`.
 - [ ] **A5** Backend-scope shaders: GLSL under `gpu/opengl/shaders.zig`; reserve
