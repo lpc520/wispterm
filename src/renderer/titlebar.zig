@@ -5,6 +5,7 @@
 //! primitives. Depends on font module for glyph loading and tab module for state.
 
 const std = @import("std");
+const titlebar_layout = @import("titlebar_layout.zig");
 const AppWindow = @import("../AppWindow.zig");
 const ui_pipeline = AppWindow.ui_pipeline;
 const font = AppWindow.font;
@@ -59,9 +60,7 @@ fn mouseX() ?f32 {
 fn mouseInRect(left: f32, top: f32, width: f32, height: f32) bool {
     const mouse = currentMousePosition() orelse return false;
     if (mouse.x < 0 or mouse.y < 0) return false;
-    const mx: f32 = @floatFromInt(mouse.x);
-    const my: f32 = @floatFromInt(mouse.y);
-    return mx >= left and mx < left + width and my >= top and my < top + height;
+    return titlebar_layout.pointInRect(@floatFromInt(mouse.x), @floatFromInt(mouse.y), left, top, width, height);
 }
 
 fn mouseInTitlebarRange(titlebar_h: f32, left: f32, right: f32) bool {
@@ -74,11 +73,11 @@ fn currentWindowIsMaximized() bool {
 }
 
 pub fn sidebarMaxWidthForWindow(window_width: f32) f32 {
-    return @max(SIDEBAR_MIN_WIDTH, @min(SIDEBAR_MAX_WIDTH, window_width - SIDEBAR_MIN_CONTENT_WIDTH));
+    return titlebar_layout.sidebarMaxWidthForWindow(window_width, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_CONTENT_WIDTH);
 }
 
 pub fn clampSidebarWidth(width: f32, window_width: f32) f32 {
-    return @max(SIDEBAR_MIN_WIDTH, @min(sidebarMaxWidthForWindow(window_width), width));
+    return titlebar_layout.clampSidebarWidth(width, SIDEBAR_MIN_WIDTH, sidebarMaxWidthForWindow(window_width));
 }
 
 pub fn setSidebarWidth(width: f32, window_width: f32) bool {
@@ -89,12 +88,7 @@ pub fn setSidebarWidth(width: f32, window_width: f32) bool {
 }
 
 fn blend(a: [3]f32, b: [3]f32, t: f32) [3]f32 {
-    const clamped = @max(0.0, @min(1.0, t));
-    return .{
-        a[0] + (b[0] - a[0]) * clamped,
-        a[1] + (b[1] - a[1]) * clamped,
-        a[2] + (b[2] - a[2]) * clamped,
-    };
+    return titlebar_layout.blend(a, b, t);
 }
 
 fn titlebarTextWidth(text: []const u8) f32 {
@@ -140,7 +134,7 @@ fn renderAgentBadge(detection: agent_detector.Detection, x: f32, text_y: f32, ac
 }
 
 fn fallbackCodepoint(byte: u8) u32 {
-    return if (byte >= 0x20 and byte <= 0x7e) byte else '?';
+    return titlebar_layout.fallbackCodepoint(byte);
 }
 
 fn renderFallbackBytesLimited(text: []const u8, x: f32, y: f32, color: [3]f32, max_w: f32) f32 {
