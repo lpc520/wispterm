@@ -308,6 +308,7 @@ pub fn spawnAiChatTab(
     base_url: []const u8,
     api_key: []const u8,
     model: []const u8,
+    protocol: []const u8,
     system_prompt: []const u8,
     thinking: []const u8,
     reasoning_effort: []const u8,
@@ -316,12 +317,13 @@ pub fn spawnAiChatTab(
 ) bool {
     if (g_tab_count >= MAX_TABS) return false;
 
-    const session = ai_chat.Session.init(
+    const session = ai_chat.Session.initWithProtocol(
         allocator,
         name,
         base_url,
         api_key,
         model,
+        protocol,
         system_prompt,
         thinking,
         reasoning_effort,
