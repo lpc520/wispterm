@@ -103,6 +103,26 @@ pub fn setProjection(width: f32, height: f32) void {
     gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(text.program, "projection"), 1, c.GL_FALSE, &projection);
 }
 
+/// Enable scissor clipping to `rect` (window-space, same convention as the
+/// caller's existing glScissor: x/y are the lower-left corner in GL pixels).
+/// Rounds to integer pixels, matching the prior @intFromFloat(@round(...)) calls.
+pub fn pushClip(rect: Rect) void {
+    const gl = gpu.glTable();
+    gl.Enable.?(c.GL_SCISSOR_TEST);
+    gl.Scissor.?(
+        @intFromFloat(@round(rect.x)),
+        @intFromFloat(@round(rect.y)),
+        @intFromFloat(@round(rect.w)),
+        @intFromFloat(@round(rect.h)),
+    );
+}
+
+/// Disable scissor clipping (= the prior gl.Disable(GL_SCISSOR_TEST)). Flat
+/// enable/disable, not a nesting stack — ai_chat never nests clip regions.
+pub fn popClip() void {
+    gpu.glTable().Disable.?(c.GL_SCISSOR_TEST);
+}
+
 pub fn fillQuad(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
     fillQuadAlpha(x, y, w, h, color, 1.0);
 }
