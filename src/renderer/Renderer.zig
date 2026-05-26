@@ -35,50 +35,16 @@ pub const GLuint = u32;
 /// Max cells = 300 cols x 100 rows = 30000 (generous)
 pub const MAX_CELLS: usize = 30000;
 
-/// Max codepoints per grapheme cluster (covers flags, ZWJ sequences, etc.)
-const MAX_GRAPHEME: usize = 8;
 pub const MAX_KITTY_PLACEMENTS: usize = 512;
 
 // ============================================================================
-// Cell Types
+// Cell Types (re-exported from cell_geometry — std-only, runs in fast tests)
 // ============================================================================
 
-/// Background cell instance data for GPU
-pub const CellBg = extern struct {
-    grid_col: f32,
-    grid_row: f32,
-    r: f32,
-    g: f32,
-    b: f32,
-    a: f32,
-};
-
-/// Foreground (glyph) cell instance data for GPU
-pub const CellFg = extern struct {
-    grid_col: f32,
-    grid_row: f32,
-    glyph_x: f32,
-    glyph_y: f32,
-    glyph_w: f32,
-    glyph_h: f32,
-    uv_left: f32,
-    uv_top: f32,
-    uv_right: f32,
-    uv_bottom: f32,
-    r: f32,
-    g: f32,
-    b: f32,
-};
-
-/// Snapshot of a single cell's state (copied from terminal under lock)
-pub const SnapCell = struct {
-    codepoint: u21,
-    fg: [3]f32,
-    bg: ?[3]f32,
-    wide: enum(u2) { narrow = 0, wide = 1, spacer_tail = 2, spacer_head = 3 } = .narrow,
-    grapheme: [MAX_GRAPHEME]u21 = .{0} ** MAX_GRAPHEME,
-    grapheme_len: u4 = 0, // 0 = single codepoint, >0 = multi-codepoint cluster
-};
+const cell_geometry = @import("cell_geometry.zig");
+pub const CellBg = cell_geometry.CellBg;
+pub const CellFg = cell_geometry.CellFg;
+pub const SnapCell = cell_geometry.SnapCell;
 
 pub const KittyTexture = struct {
     image_id: u32,

@@ -12,8 +12,11 @@ const Renderer = @import("Renderer.zig");
 const AppWindow = @import("../AppWindow.zig");
 const font = AppWindow.font;
 const tab = AppWindow.tab;
-const gl_init = AppWindow.gpu.gl_init;
+const gpu = AppWindow.gpu;
+const gl_init = gpu.gl_init;
+const cell_pipeline = @import("cell_pipeline.zig");
 const image_renderer = @import("image_renderer.zig");
+const cell_geometry = @import("cell_geometry.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -254,36 +257,32 @@ pub fn rebuildCells(rend: *Renderer) void {
             const is_selected = isCellSelected(rend, col_idx, row_idx);
             const col_f: f32 = @floatFromInt(col_idx);
 
-            var fg_color = sc.fg;
-
-            if (is_cursor and rend.cached_cursor_visible) {
-                // Block cursor: invert fg for text under cursor (bg drawn by overlay)
-                if (rend.cached_cursor_effective) |effective_style| {
-                    if (effective_style == .block) {
-                        fg_color = g_theme.cursor_text orelse g_theme.background;
-                    }
-                }
-                // Draw cell background normally (cursor shape drawn by overlay)
-                if (sc.bg) |bg| {
-                    if (rend.bg_cell_count < rend.bg_cells.items.len) {
-                        rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2], .a = normal_bg_alpha };
-                        rend.bg_cell_count += 1;
-                    }
-                }
-            } else if (is_selected) {
+            const cursor_is_block = if (rend.cached_cursor_effective) |s| s == .block else false;
+            const decision = cell_geometry.backgroundFor(
+                sc.bg,
+                is_cursor,
+                rend.cached_cursor_visible,
+                cursor_is_block,
+                is_selected,
+                .{
+                    .background = g_theme.background,
+                    .cursor_text = g_theme.cursor_text,
+                    .selection_background = g_theme.selection_background,
+                    .selection_foreground = g_theme.selection_foreground,
+                    .foreground = g_theme.foreground,
+                },
+                col_f,
+                row_f,
+                normal_bg_alpha,
+                sc.fg,
+            );
+            if (decision.bg) |bg_inst| {
                 if (rend.bg_cell_count < rend.bg_cells.items.len) {
-                    // Match Ghostty: selected cells stay fully opaque even when
-                    // regular cell backgrounds reveal a wallpaper underneath.
-                    rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = g_theme.selection_background[0], .g = g_theme.selection_background[1], .b = g_theme.selection_background[2], .a = 1.0 };
-                    rend.bg_cell_count += 1;
-                }
-                fg_color = g_theme.selection_foreground orelse g_theme.foreground;
-            } else if (sc.bg) |bg| {
-                if (rend.bg_cell_count < rend.bg_cells.items.len) {
-                    rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2], .a = normal_bg_alpha };
+                    rend.bg_cells.items[rend.bg_cell_count] = bg_inst;
                     rend.bg_cell_count += 1;
                 }
             }
+            const fg_color = decision.fg;
 
             // Skip spacer cells — the wide character's head cell handles rendering
             // across both cells (like Ghostty).
@@ -336,15 +335,11 @@ pub fn rebuildCells(rend: *Renderer) void {
                         if (ch.is_color) {
                             // Color emoji — route to separate color cell buffer.
                             // Scale the emoji bitmap to fit within grid_width cells, preserving aspect ratio.
-                            const emoji_w = @as(f32, @floatFromInt(ch.size_x));
-                            const emoji_h = @as(f32, @floatFromInt(ch.size_y));
-                            const target_w = font.cell_width * grid_width;
-                            const scale = @min(target_w / emoji_w, font.cell_height / emoji_h);
-                            const gw = emoji_w * scale;
-                            const gh = emoji_h * scale;
-                            // Center within the grid_width cells
-                            const gx = (target_w - gw) / 2.0;
-                            const gy = (font.cell_height - gh) / 2.0;
+                            const rect = cell_geometry.colorEmojiRect(ch.size_x, ch.size_y, grid_width, font.cell_width, font.cell_height);
+                            const gx = rect.gx;
+                            const gy = rect.gy;
+                            const gw = rect.gw;
+                            const gh = rect.gh;
                             const uv_val = font.glyphUV(ch.region, color_atlas_size);
                             if (rend.color_fg_cell_count < rend.color_fg_cells.items.len) {
                                 rend.color_fg_cells.items[rend.color_fg_cell_count] = .{
@@ -367,10 +362,11 @@ pub fn rebuildCells(rend: *Renderer) void {
                         } else {
                             // Grayscale text glyph
                             const uv_val = font.glyphUV(ch.region, atlas_size);
-                            const gx = @as(f32, @floatFromInt(ch.bearing_x));
-                            const gy = font.cell_baseline - @as(f32, @floatFromInt(@as(i32, @intCast(ch.size_y)) - ch.bearing_y));
-                            const gw = @as(f32, @floatFromInt(ch.size_x));
-                            const gh = @as(f32, @floatFromInt(ch.size_y));
+                            const rect = cell_geometry.grayscaleGlyphRect(ch.bearing_x, ch.bearing_y, ch.size_x, ch.size_y, font.cell_baseline);
+                            const gx = rect.gx;
+                            const gy = rect.gy;
+                            const gw = rect.gw;
+                            const gh = rect.gh;
                             if (rend.fg_cell_count < rend.fg_cells.items.len) {
                                 rend.fg_cells.items[rend.fg_cell_count] = .{
                                     .grid_col = col_f,
@@ -406,64 +402,54 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
     image_renderer.draw(rend, window_height, offset_x, offset_y, .below_bg);
 
     // --- Draw BG cells ---
-    if (rend.bg_cell_count > 0 and gl_init.bg_shader != 0) {
-        gl.UseProgram.?(gl_init.bg_shader);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.bg_shader, "cellSize"), font.cell_width, font.cell_height);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.bg_shader, "gridOffset"), offset_x, offset_y);
-        gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.bg_shader, "windowHeight"), window_height);
-        gl_init.setProjectionForProgram(gl_init.bg_shader, window_height);
-
-        gl.BindVertexArray.?(gl_init.bg_vao);
-        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.bg_instance_vbo);
-        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellBg) * rend.bg_cell_count), rend.bg_cells.items.ptr);
-        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.bg_cell_count));
+    if (rend.bg_cell_count > 0 and cell_pipeline.bg.program != 0) {
+        const p = cell_pipeline.bg;
+        p.use();
+        p.setVec2("cellSize", font.cell_width, font.cell_height);
+        p.setVec2("gridOffset", offset_x, offset_y);
+        p.setFloat("windowHeight", window_height);
+        p.setProjection();
+        p.bindVao();
+        cell_pipeline.bg_instances.upload(std.mem.sliceAsBytes(rend.bg_cells.items[0..rend.bg_cell_count]));
+        p.drawArraysInstanced(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.bg_cell_count));
         gl_init.g_draw_call_count += 1;
     }
 
     image_renderer.draw(rend, window_height, offset_x, offset_y, .below_text);
 
     // --- Draw FG cells ---
-    if (rend.fg_cell_count > 0 and gl_init.fg_shader != 0) {
-        gl.UseProgram.?(gl_init.fg_shader);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.fg_shader, "cellSize"), font.cell_width, font.cell_height);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.fg_shader, "gridOffset"), offset_x, offset_y);
-        gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.fg_shader, "windowHeight"), window_height);
-        gl_init.setProjectionForProgram(gl_init.fg_shader, window_height);
-
-        gl.ActiveTexture.?(c.GL_TEXTURE0);
-        gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_atlas_texture);
-        gl.Uniform1i.?(gl.GetUniformLocation.?(gl_init.fg_shader, "atlas"), 0);
-
-        gl.BindVertexArray.?(gl_init.fg_vao);
-        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.fg_instance_vbo);
-        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellFg) * rend.fg_cell_count), rend.fg_cells.items.ptr);
-        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.fg_cell_count));
+    if (rend.fg_cell_count > 0 and cell_pipeline.fg.program != 0) {
+        const p = cell_pipeline.fg;
+        p.use();
+        p.setVec2("cellSize", font.cell_width, font.cell_height);
+        p.setVec2("gridOffset", offset_x, offset_y);
+        p.setFloat("windowHeight", window_height);
+        p.setProjection();
+        gpu.Texture.fromHandle(font.g_atlas_texture).bind(0);
+        p.setInt("atlas", 0);
+        p.bindVao();
+        cell_pipeline.fg_instances.upload(std.mem.sliceAsBytes(rend.fg_cells.items[0..rend.fg_cell_count]));
+        p.drawArraysInstanced(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.fg_cell_count));
         gl_init.g_draw_call_count += 1;
     }
 
-    // --- Draw color emoji cells ---
-    // Color emoji use premultiplied alpha, so we switch blend mode to (ONE, ONE_MINUS_SRC_ALPHA)
-    // for this pass, then restore the normal blend mode afterwards.
-    if (rend.color_fg_cell_count > 0 and gl_init.color_fg_shader != 0) {
+    // --- Draw color emoji cells (premultiplied alpha blend) ---
+    if (rend.color_fg_cell_count > 0 and cell_pipeline.color_fg.program != 0) {
+        // Color emoji bitmaps are premultiplied-alpha, so use (ONE, 1-SRC_ALPHA).
         gl.BlendFunc.?(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
-
-        gl.UseProgram.?(gl_init.color_fg_shader);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.color_fg_shader, "cellSize"), font.cell_width, font.cell_height);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.color_fg_shader, "gridOffset"), offset_x, offset_y);
-        gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.color_fg_shader, "windowHeight"), window_height);
-        gl_init.setProjectionForProgram(gl_init.color_fg_shader, window_height);
-
-        gl.ActiveTexture.?(c.GL_TEXTURE0);
-        gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_color_atlas_texture);
-        gl.Uniform1i.?(gl.GetUniformLocation.?(gl_init.color_fg_shader, "atlas"), 0);
-
-        gl.BindVertexArray.?(gl_init.color_fg_vao);
-        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.color_fg_instance_vbo);
-        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellFg) * rend.color_fg_cell_count), rend.color_fg_cells.items.ptr);
-        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.color_fg_cell_count));
+        const p = cell_pipeline.color_fg;
+        p.use();
+        p.setVec2("cellSize", font.cell_width, font.cell_height);
+        p.setVec2("gridOffset", offset_x, offset_y);
+        p.setFloat("windowHeight", window_height);
+        p.setProjection();
+        gpu.Texture.fromHandle(font.g_color_atlas_texture).bind(0);
+        p.setInt("atlas", 0);
+        p.bindVao();
+        cell_pipeline.color_fg_instances.upload(std.mem.sliceAsBytes(rend.color_fg_cells.items[0..rend.color_fg_cell_count]));
+        p.drawArraysInstanced(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.color_fg_cell_count));
         gl_init.g_draw_call_count += 1;
-
-        // Restore normal blend mode for subsequent draws (cursor, titlebar, etc.)
+        // Restore standard blend for the cursor/titlebar draws that follow.
         gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
     }
 

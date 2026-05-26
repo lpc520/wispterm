@@ -207,6 +207,16 @@ with **A**. **D** is deferred until a macOS SDK environment exists.
 > `glad`. Consumers reach the table via `AppWindow.gpu.glTable()` (a transition
 > handle). Next: **A3** routes the renderer files through `gpu.zig` primitives.
 
+> **Status (A3 increment 1 landed).** Real `Buffer`/`Texture`/`Pipeline`
+> primitives now live in `gpu/opengl/` (replacing the reserved stubs).
+> `cell_renderer` is the first converted file: `drawCells` issues its bg/fg/
+> color-emoji passes through `cell_pipeline.zig` (cell pipelines built from the
+> primitives, relocated out of `gl_init`), and the pure snap→instance logic +
+> instance types moved to std-only, unit-tested `cell_geometry.zig`. Pattern for
+> the rest: route draw through primitives + extract pure geometry, one file at a
+> time. Remaining: the other 9 renderer files, the shared pipelines still in
+> `gl_init`, then A4–A6.
+
 - **A1** Define `src/renderer/gpu/gpu.zig` (the `GraphicsAPI` interface:
   `Target`, `Frame`, `RenderPass`, `Pipeline`, `Buffer`, `Texture`, `Sampler`,
   `shaders`) and `src/renderer/gpu/backend.zig` (`Backend{opengl,metal}`,
