@@ -186,34 +186,91 @@ mapping in guide §2 and §5.
       `BrokenPipe`/0 + `wait` exit code, `outputAvailable` count, cancel breaks a
       blocking read. Run via `zig test src/platform/pty_posix.zig -lc`.
 
-### Phase D — Native host implementations (deferred; needs macOS/Linux SDK)
+### Phase D — Native macOS port (next port target; Linux deferred)
 
-The actual port work. Gated on Phase A. Per AGENTS.md, break each track down
-together and compare against Ghostty before starting.
+The actual port work, gated on Phase A (GPU spine) and Phase C (POSIX PTY).
+**Focus: macOS.** Per AGENTS.md, compare each track against Ghostty before
+starting. macOS reuses the platform-neutral core; it needs a Metal GPU backend,
+an AppKit host, CoreText fonts, `_macos` siblings of the `_windows` platform
+services, and `.app` packaging. Ghostty reference: `src/renderer/metal/`,
+`macos/` (AppKit app + GhosttyKit), `src/font/discovery.zig` (CoreText),
+`src/apprt/embedded.zig`.
 
-Cross-cutting:
-- [ ] Input/IME/keymap handling per platform behind the input interface.
-- [ ] Renderer backend selection wired to the host's surface/event loop.
+**D0 — Build & target plumbing**
+- [ ] `build.zig`: a macOS target path (`aarch64-macos` / `x86_64-macos`), link
+      frameworks (Metal, QuartzCore, AppKit/Cocoa, CoreText, CoreGraphics,
+      Foundation), and a `.app` artifact skeleton. Keep the comptime guards
+      (`build_guards`, `apprt_win32_guard`, `gl_backend_guard`) green for macOS.
+- [ ] Decide the ObjC interop seam: extern `objc_msgSend` from Zig vs. a thin
+      ObjC/`.m` shim compiled in (Ghostty calls into `libghostty` from a Swift/
+      ObjC app layer). Document the chosen FFI boundary.
 
-macOS (native, Metal):
-- [ ] **D1** Metal backend `src/renderer/gpu/metal/` — second backend behind the
-      Phase A interface (no OpenGL fallback). *Ghostty: `renderer/metal/`.*
-- [ ] **D2** AppKit host + `window_backend_macos.zig` (window, native menus,
-      event loop, input routing, IME, DPI).
-- [ ] **D3** CoreText font discovery and fallback.
-- [ ] WKWebView embedded browser backend.
-- [ ] Clipboard, file picker/drop, open-url, notifications, global hotkeys,
-      DPI/content-scale via AppKit; config/theme dirs under `~/Library`.
-- [ ] Packaging: `.app` bundle / `.dmg`, updater story.
+**D1 — Metal GPU backend** (`src/renderer/gpu/metal/`, mirrors `gpu/opengl/api.zig`)
+- [ ] `metal/api.zig` exporting the same surface as `opengl/api.zig`: `Context`
+      (MTLDevice + command queue + `CAMetalLayer`), `Buffer`, `Texture` (incl.
+      `upload2D`/`subImage2D`/`levelWidth` the font atlas uses), `Pipeline`
+      (`MTLRenderPipelineState`), `Framebuffer` (offscreen `MTLTexture` target),
+      `shaders`. Wire `gpu.zig`'s `impl` switch `.metal => @import("metal/api.zig")`
+      (replace the `@compileError`). *Ghostty: `renderer/metal/`.*
+- [ ] **Neutralize the GL-shaped presentation layer (prerequisite).**
+      `ui_pipeline.zig`, `cell_pipeline.zig`, and the render-coordination files
+      still call `gpu.glTable()` directly (the residue `gl_backend_guard`
+      documents) — OpenGL-only. Route their draws through the backend-dispatched
+      `gpu.Pipeline`/`Buffer`/`Texture`/`Framebuffer` methods so they compile and
+      render on Metal. Without this, the Metal backend can't draw anything.
+- [ ] Port the shader set to MSL in `gpu/metal/shaders.zig` (the A5 slot already
+      lists the symmetric set: text/glyph, instanced bg/fg cells, color-emoji,
+      simple-textured, overlay).
 
-Linux (native):
-- [ ] Host decision (GTK/libadwaita vs. another native toolkit) and impl.
-- [ ] Renderer backend behind Phase A: OpenGL backend reusable; Vulkan optional.
-- [ ] fontconfig font discovery and fallback.
-- [ ] WebKitGTK embedded browser, or keep disabled until viable.
-- [ ] Clipboard, portals/file picker, open-url, notifications, global hotkeys,
-      DPI/content-scale; config/theme dirs under XDG paths.
-- [ ] Packaging: chosen distribution format + updater story.
+**D2 — AppKit host** (`window_backend_macos.zig` + `window_macos.zig`)
+- [ ] `NSApplication`/`NSWindow` + the AppKit run loop (AppKit owns the event
+      loop and pumps the core — unlike the Win32 message pump). Add `.macos` to
+      `window_backend.zig`'s `Backend` + impl switch.
+- [ ] Surface seam: `window_backend` currently exposes `glGetProcAddress` (a GL
+      assumption). Add a Metal-drawable seam (hand the renderer a `CAMetalLayer`)
+      so the host↔renderer contract is not GL-specific.
+- [ ] Input/IME/DPI: `NSEvent` → the core's neutral `key_*` codes; mouse/scroll/
+      trackpad; IME via `NSTextInputClient`; DPI via `backingScaleFactor`/`NSScreen`.
+- [ ] Reconcile the app-drawn titlebar / caption buttons with macOS traffic-light
+      conventions.
+
+**D3 — CoreText fonts** (`font_discovery_macos.zig`, `font_backend_macos.zig`)
+- [ ] Discovery + fallback via CoreText (`CTFontCreateWithName`,
+      `CTFontCopyDefaultCascadeListForLanguages`), rasterizing into the existing
+      atlas/`gpu.Texture` path. Add `.macos` to `font_backend.zig` /
+      `font_discovery.zig` backend selection.
+
+**D4 — Platform services** (`_macos` siblings of the existing `_windows` impls)
+- [ ] clipboard (NSPasteboard), file_dialog (NSOpenPanel/NSSavePanel + drop),
+      open_url (NSWorkspace), notifications (UNUserNotificationCenter),
+      global_hotkey (Carbon `RegisterEventHotKey` or `CGEventTap`), cursor,
+      display (NSScreen), session_lock, config_watcher (FSEvents/kqueue),
+      console, text, update_package, dirs (`~/Library/Application Support`).
+- [ ] **pty/process:** reuse the Phase C POSIX backend; add the **macOS ioctl
+      request constants** (`TIOCSWINSZ`/`TIOCSCTTY`/`FIONREAD` differ from
+      `std.os.linux.T`) so `pty.zig`'s `backendForOs(.macos)` can return `.posix`.
+      (Deferred from Phase C; also revisit `O_CLOEXEC` on the master/cancel fds.)
+
+**D5 — Embedded browser**
+- [ ] WKWebView backend (`webview_macos.zig`) behind the `EmbeddedBrowserBackend`
+      gate, or keep the panel disabled on macOS until viable.
+
+**D6 — Packaging & distribution**
+- [ ] `.app` bundle + `Info.plist`; code signing + notarization; `.dmg`. Updater
+      story (adapt the existing portable updater or adopt Sparkle).
+
+Critical path to "a shell renders on screen": **D0 → D1 (Metal + presentation-
+layer neutralization) → D2 (AppKit host + drawable seam) → D3 (CoreText) → the
+macOS pty constants in D4.** Services / webview / packaging follow.
+
+### Linux — deferred
+
+Postponed in favor of the macOS port. The groundwork already exists (Phase A
+renderer abstraction, Phase C Linux PTY), so the remaining work is a Linux host
+(GTK/libadwaita or another toolkit + event loop wired to the reusable OpenGL
+backend), fontconfig discovery + fallback, XDG dirs and the `_linux`/POSIX
+platform services, WebKitGTK (or keep disabled), and packaging. Revisit once the
+macOS port lands.
 
 ### Invariants to maintain
 
