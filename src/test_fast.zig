@@ -31,6 +31,7 @@ test {
     _ = @import("scrollbar_model.zig");
     _ = @import("preview_token.zig");
     _ = @import("agent_history.zig");
+    _ = @import("render_diagnostics.zig");
     _ = @import("renderer/gpu/backend.zig");
     _ = @import("renderer/cell_geometry.zig");
     _ = @import("renderer/titlebar_layout.zig");

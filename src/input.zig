@@ -17,6 +17,7 @@ const markdown_preview_panel = AppWindow.markdown_preview_panel;
 const preview_token = @import("preview_token.zig");
 const browser_panel = AppWindow.browser_panel;
 const ui_perf = AppWindow.ui_perf;
+const render_diagnostics = @import("render_diagnostics.zig");
 const link_open = @import("link_open.zig");
 const platform_dirs = @import("platform/dirs.zig");
 const platform_local_path = @import("platform/local_path.zig");
@@ -275,6 +276,24 @@ fn syncGridFromWindowSize(width: i32, height: i32) void {
     const new_rows: u16 = @intFromFloat(@max(1, avail_height / font.cell_height));
 
     if (new_cols != AppWindow.term_cols or new_rows != AppWindow.term_rows) {
+        render_diagnostics.log(
+            "input-grid-sync source={}x{} avail={d:.1}x{d:.1} panels_l={d:.1} panels_r={d:.1} titlebar={d:.1} cell={d:.2}x{d:.2} pending={}x{} old={}x{}",
+            .{
+                width,
+                height,
+                avail_width,
+                avail_height,
+                left_panels_w,
+                right_panels_w,
+                tb_offset,
+                font.cell_width,
+                font.cell_height,
+                new_cols,
+                new_rows,
+                AppWindow.term_cols,
+                AppWindow.term_rows,
+            },
+        );
         AppWindow.g_pending_resize = true;
         AppWindow.g_pending_cols = new_cols;
         AppWindow.g_pending_rows = new_rows;
@@ -691,6 +710,10 @@ fn processSizeChange(win: anytype) void {
     if (!window_backend.consumeSizeChanged(win)) return;
     const size = window_backend.clientSize(win);
     if (window_backend.isMinimized(win) or size.width <= 0 or size.height <= 0) return;
+    render_diagnostics.log(
+        "input-size-change client={}x{} dpi={} font_dpi={} cell={d:.2}x{d:.2} term={}x{}",
+        .{ size.width, size.height, window_backend.effectiveDpi(win), font.g_dpi, font.cell_width, font.cell_height, AppWindow.term_cols, AppWindow.term_rows },
+    );
     if (titlebar.setSidebarWidth(titlebar.g_sidebar_width, @floatFromInt(size.width))) {
         syncSidebarWidthToBackend(win);
         AppWindow.g_force_rebuild = true;
@@ -3481,6 +3504,11 @@ fn toggleAiAgentPermission() void {
 
 pub fn toggleMaximize() void {
     const win = AppWindow.g_window orelse return;
+    const size = window_backend.clientSize(win);
+    render_diagnostics.log(
+        "toggle-maximize requested client={}x{} dpi={} full={} max={}",
+        .{ size.width, size.height, window_backend.effectiveDpi(win), window_backend.isFullscreen(win), window_backend.isMaximized(win) },
+    );
 
     if (window_backend.isFullscreen(win)) {
         toggleFullscreen();
@@ -3494,6 +3522,11 @@ pub fn toggleMaximize() void {
 
 pub fn toggleFullscreen() void {
     const win = AppWindow.g_window orelse return;
+    const size = window_backend.clientSize(win);
+    render_diagnostics.log(
+        "toggle-fullscreen requested client={}x{} dpi={} full={} max={}",
+        .{ size.width, size.height, window_backend.effectiveDpi(win), window_backend.isFullscreen(win), window_backend.isMaximized(win) },
+    );
 
     if (window_backend.isFullscreen(win)) {
         // Restore windowed mode

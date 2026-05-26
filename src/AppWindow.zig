@@ -34,6 +34,7 @@ const startup_tabs = @import("startup_tabs.zig");
 const quick_terminal = @import("quick_terminal.zig");
 const keybind = @import("keybind.zig");
 const thread_message = @import("appwindow/thread_message.zig");
+const render_diagnostics = @import("render_diagnostics.zig");
 pub const ai_chat = @import("ai_chat.zig");
 pub const tab = @import("appwindow/tab.zig");
 pub const font = @import("font/manager.zig");
@@ -396,6 +397,61 @@ fn clearWithBackground(fb_w: c_int, fb_h: c_int) void {
     gpu.glTable().ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
     gpu.glTable().Clear.?(gpu.c.GL_COLOR_BUFFER_BIT);
     background_image.drawFullscreen(@floatFromInt(fb_w), @floatFromInt(fb_h));
+}
+
+threadlocal var g_diag_last_fb_w: c_int = -1;
+threadlocal var g_diag_last_fb_h: c_int = -1;
+threadlocal var g_diag_last_client_w: i32 = -1;
+threadlocal var g_diag_last_client_h: i32 = -1;
+threadlocal var g_diag_last_dpi: u32 = 0;
+threadlocal var g_diag_last_cell_w: f32 = 0;
+threadlocal var g_diag_last_cell_h: f32 = 0;
+
+fn logFrameGeometryIfChanged(win: *window_backend.Window, fb_width: c_int, fb_height: c_int, titlebar_offset: f32) void {
+    if (!render_diagnostics.enabled()) return;
+
+    const client = window_backend.clientSize(win);
+    const dpi_now = window_backend.effectiveDpi(win);
+    if (fb_width == g_diag_last_fb_w and
+        fb_height == g_diag_last_fb_h and
+        client.width == g_diag_last_client_w and
+        client.height == g_diag_last_client_h and
+        dpi_now == g_diag_last_dpi and
+        font.cell_width == g_diag_last_cell_w and
+        font.cell_height == g_diag_last_cell_h)
+    {
+        return;
+    }
+
+    g_diag_last_fb_w = fb_width;
+    g_diag_last_fb_h = fb_height;
+    g_diag_last_client_w = client.width;
+    g_diag_last_client_h = client.height;
+    g_diag_last_dpi = dpi_now;
+    g_diag_last_cell_w = font.cell_width;
+    g_diag_last_cell_h = font.cell_height;
+
+    render_diagnostics.log(
+        "frame-geometry client={}x{} fb={}x{} dpi={} font_dpi={} cell={d:.2}x{d:.2} titlebar={d:.1} panels_l={d:.1} panels_r={d:.1} term={}x{} max={} full={} min={}",
+        .{
+            client.width,
+            client.height,
+            fb_width,
+            fb_height,
+            dpi_now,
+            font.g_dpi,
+            font.cell_width,
+            font.cell_height,
+            titlebar_offset,
+            leftPanelsWidth(),
+            rightPanelsWidthForWindow(fb_width),
+            term_cols,
+            term_rows,
+            window_backend.isMaximized(win),
+            window_backend.isFullscreen(win),
+            window_backend.isMinimized(win),
+        },
+    );
 }
 
 fn renderAiChatFrame(fb_width: c_int, fb_height: c_int, titlebar_offset: f32, left_panels_w: f32, right_panels_w: f32) void {
@@ -1159,6 +1215,35 @@ fn onPlatformResize(width: i32, height: i32) void {
     if (g_allocator == null) return;
     const resize_perf = ui_perf.begin("appwindow.on_platform_resize");
     defer resize_perf.end();
+    if (g_window) |w| {
+        const client = window_backend.clientSize(w);
+        const fb = window_backend.framebufferSize(w);
+        render_diagnostics.log(
+            "platform-resize begin arg={}x{} client={}x{} fb={}x{} dpi={} font_dpi={} cell={d:.2}x{d:.2} term={}x{} pending={} max={} full={}",
+            .{
+                width,
+                height,
+                client.width,
+                client.height,
+                fb.width,
+                fb.height,
+                window_backend.effectiveDpi(w),
+                font.g_dpi,
+                font.cell_width,
+                font.cell_height,
+                term_cols,
+                term_rows,
+                g_pending_resize,
+                window_backend.isMaximized(w),
+                window_backend.isFullscreen(w),
+            },
+        );
+    } else {
+        render_diagnostics.log(
+            "platform-resize begin arg={}x{} no-window font_dpi={} cell={d:.2}x{d:.2} term={}x{} pending={}",
+            .{ width, height, font.g_dpi, font.cell_width, font.cell_height, term_cols, term_rows, g_pending_resize },
+        );
+    }
 
     // Match exactly what computeSplitLayout → setScreenSize computes for a
     // root (full-window) surface, so term_cols/term_rows stay in sync and
@@ -1182,6 +1267,10 @@ fn onPlatformResize(width: i32, height: i32) void {
 
     const new_cols: u16 = @intFromFloat(@max(1, avail_w / font.cell_width));
     const new_rows: u16 = @intFromFloat(@max(1, avail_h / font.cell_height));
+    render_diagnostics.log(
+        "platform-resize grid avail={d:.1}x{d:.1} panels_l={d:.1} panels_r={d:.1} titlebar={d:.1} new={}x{} old={}x{}",
+        .{ avail_w, avail_h, left_panels_w, right_panels_w, tb, new_cols, new_rows, term_cols, term_rows },
+    );
 
     // Update root grid dimensions (used for spawning new tabs).
     // Actual terminal + PTY resize is handled by computeSplitLayout → setScreenSize
@@ -1191,6 +1280,7 @@ fn onPlatformResize(width: i32, height: i32) void {
         term_rows = new_rows;
         // Clear any pending coalesced resize — we're handling it now
         g_pending_resize = false;
+        render_diagnostics.log("platform-resize root-grid-updated {}x{}", .{ term_cols, term_rows });
     }
 
     // Sync atlas textures
@@ -1324,6 +1414,10 @@ fn onPlatformResize(width: i32, height: i32) void {
     overlays.renderUpdatePrompt(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderWindowCloseConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
 
+    render_diagnostics.log(
+        "platform-resize swap fb={}x{} term={}x{} draw_calls={}",
+        .{ fb_width, fb_height, term_cols, term_rows, gpu.gl_init.g_draw_call_count },
+    );
     if (g_window) |w| window_backend.swapBuffers(w);
 }
 
@@ -2750,19 +2844,53 @@ fn handleWindowDpiChanged(
 ) void {
     const new_dpi = window_backend.effectiveDpi(win);
     if (new_dpi == 0) return;
+    const client_before = window_backend.clientSize(win);
+    const fb_before = window_backend.framebufferSize(win);
+    render_diagnostics.log(
+        "dpi-change begin old_font_dpi={} new_dpi={} client={}x{} fb={}x{} cell={d:.2}x{d:.2} term={}x{}",
+        .{
+            font.g_dpi,
+            new_dpi,
+            client_before.width,
+            client_before.height,
+            fb_before.width,
+            fb_before.height,
+            font.cell_width,
+            font.cell_height,
+            term_cols,
+            term_rows,
+        },
+    );
     if (font.g_dpi == new_dpi) {
         const size = window_backend.clientSize(win);
+        render_diagnostics.log(
+            "dpi-change same-dpi render-refresh client={}x{} font_dpi={} cell={d:.2}x{d:.2}",
+            .{ size.width, size.height, font.g_dpi, font.cell_width, font.cell_height },
+        );
         onPlatformResize(size.width, size.height);
         return;
     }
 
-    std.debug.print("DPI changed: {} -> {}\n", .{ font.g_dpi, new_dpi });
+    const old_font_dpi = font.g_dpi;
+    std.debug.print("DPI changed: {} -> {}\n", .{ old_font_dpi, new_dpi });
     font.g_dpi = new_dpi;
     if (reloadFontFaces(allocator, family, weight, font.g_font_size, ft_lib)) {
         const size = window_backend.clientSize(win);
+        const fb_after = window_backend.framebufferSize(win);
+        render_diagnostics.log(
+            "dpi-change font-reloaded client={}x{} fb={}x{} font_dpi={} cell={d:.2}x{d:.2} term={}x{}",
+            .{ size.width, size.height, fb_after.width, fb_after.height, font.g_dpi, font.cell_width, font.cell_height, term_cols, term_rows },
+        );
         onPlatformResize(size.width, size.height);
     } else {
+        font.g_dpi = old_font_dpi;
+        const size = window_backend.clientSize(win);
+        render_diagnostics.log(
+            "dpi-change font-reload-failed new_dpi={} restored_font_dpi={} kept_cell={d:.2}x{d:.2}",
+            .{ new_dpi, old_font_dpi, font.cell_width, font.cell_height },
+        );
         std.debug.print("DPI font reload failed, keeping previous font\n", .{});
+        onPlatformResize(size.width, size.height);
     }
 }
 
@@ -3595,6 +3723,7 @@ fn runMainLoop(self: *AppWindow) !void {
         const left_panels_w = leftPanelsWidth();
         const right_panels_w = rightPanelsWidthForWindow(fb_width);
         const top_padding: f32 = padding + titlebar_offset;
+        logFrameGeometryIfChanged(win, fb_width, fb_height, titlebar_offset);
         {
             const perf = ui_perf.begin("appwindow.browser_panel_sync");
             defer perf.end();
@@ -3780,6 +3909,8 @@ fn runMainLoop(self: *AppWindow) !void {
     // and renderer resources start tearing down. The App-level controller is
     // stopped shortly after this window loop returns.
     g_weixin_ui_handle.store(0, .release);
+    render_diagnostics.log("shutdown window-loop-ended", .{});
+    render_diagnostics.close();
 
     // Clean up file explorer async state (join background thread, free job)
     file_explorer.deinit();
