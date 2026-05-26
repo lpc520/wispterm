@@ -184,6 +184,7 @@ const COMMAND_ENTRIES = command_center_state.command_entries;
 const PaletteItem = union(enum) {
     command: usize,
     ssh_profile: usize,
+    ai_profile: usize,
     theme: usize,
 };
 
@@ -720,6 +721,14 @@ fn rebuildPaletteScratch() void {
         g_palette_scratch[g_palette_scratch_len] = .{ .ssh_profile = profile_idx };
         g_palette_scratch_len += 1;
     }
+    loadAiProfiles();
+    for (0..g_ai_profile_count) |ai_idx| {
+        if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+        const profile = &g_ai_profiles[ai_idx];
+        if (!command_palette_model.aiProfileLabelMatchesFilter(aiProfileField(profile, .name), filter)) continue;
+        g_palette_scratch[g_palette_scratch_len] = .{ .ai_profile = ai_idx };
+        g_palette_scratch_len += 1;
+    }
     for (&themes_embed.entries, 0..) |th, ti| {
         if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
         if (!containsIgnoreCase(th.name, filter)) continue;
@@ -732,6 +741,7 @@ fn executePaletteItem(item: PaletteItem) void {
     switch (item) {
         .command => |cmd_idx| executeCommand(COMMAND_ENTRIES[cmd_idx].action),
         .ssh_profile => |profile_idx| connectSshProfile(profile_idx),
+        .ai_profile => |profile_idx| _ = spawnAiProfileWithAgentOverride(profile_idx, null),
         .theme => |ti| applyEmbeddedThemeFromPalette(ti),
     }
 }
@@ -1302,6 +1312,22 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
                         const target_left = @round(layout.box_x + layout.box_w - pad_x - target_max_w);
                         renderTitlebarTextLimited(target, target_left, text_y, shortcut_color, target_max_w);
                         renderTitlebarTextLimited(ssh_title, title_x, text_y, row_title_color, @max(1.0, target_left - title_x - 18));
+                    },
+                    .ai_profile => |profile_idx| {
+                        if (profile_idx >= g_ai_profile_count) continue;
+                        const profile = &g_ai_profiles[profile_idx];
+                        var title_buf: [AI_FIELD_MAX + 8]u8 = undefined;
+                        const ai_title = std.fmt.bufPrint(title_buf[0..], "AI: {s}", .{aiProfileField(profile, .name)}) catch "AI";
+                        var tag_buf: [24]u8 = undefined;
+                        const mode = aiProfileModeLabel(profile);
+                        const tag = if (profile_idx == defaultAiProfileIndex())
+                            (std.fmt.bufPrint(tag_buf[0..], "{s} · default", .{mode}) catch mode)
+                        else
+                            mode;
+                        const tag_w = measureTitlebarText(tag);
+                        const tag_left = @round(layout.box_x + layout.box_w - pad_x - tag_w);
+                        renderTitlebarText(tag, tag_left, text_y, shortcut_color);
+                        renderTitlebarTextLimited(ai_title, title_x, text_y, row_title_color, @max(1.0, tag_left - title_x - 18));
                     },
                     .theme => |ti| {
                         const name = themes_embed.entries[ti].name;
