@@ -23,6 +23,7 @@ pub const DEFAULT_THINKING = "enabled";
 pub const DEFAULT_REASONING_EFFORT = "high";
 pub const DEFAULT_STREAM = "false";
 pub const DEFAULT_AGENT = "true";
+pub const DEFAULT_PROTOCOL = "chat_completions";
 
 const TOOL_CALL_REASONING_FALLBACK = "Tool call is required before answering.";
 
@@ -31,6 +32,29 @@ const DEFAULT_AGENT_OUTPUT_LIMIT: u32 = 16 * 1024;
 const REMOTE_SNAPSHOT_MAX_BYTES: usize = 24 * 1024;
 const INPUT_PROMPT_MAX_BYTES: usize = 64 * 1024;
 const SYSTEM_PROMPT_MAX_BYTES: usize = 16 * 1024;
+
+pub const ApiProtocol = enum {
+    chat_completions,
+    responses,
+
+    pub fn parse(value: []const u8) ApiProtocol {
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (trimmed.len == 0) return .chat_completions;
+        if (std.ascii.eqlIgnoreCase(trimmed, "responses") or
+            std.ascii.eqlIgnoreCase(trimmed, "response"))
+        {
+            return .responses;
+        }
+        return .chat_completions;
+    }
+
+    pub fn name(self: ApiProtocol) []const u8 {
+        return switch (self) {
+            .chat_completions => DEFAULT_PROTOCOL,
+            .responses => "responses",
+        };
+    }
+};
 
 pub const Role = enum {
     user,
@@ -286,6 +310,7 @@ const ChatRequest = struct {
     base_url: []u8,
     api_key: []u8,
     model: []u8,
+    protocol: ApiProtocol = .chat_completions,
     system_prompt: []u8,
     messages: []RequestMessage,
     thinking_enabled: bool,
@@ -858,6 +883,7 @@ pub const Session = struct {
     api_key_len: usize = 0,
     model_buf: [128]u8 = undefined,
     model_len: usize = 0,
+    protocol: ApiProtocol = .chat_completions,
     system_prompt_buf: [SYSTEM_PROMPT_MAX_BYTES]u8 = undefined,
     system_prompt_len: usize = 0,
     thinking_enabled: bool = true,
@@ -896,6 +922,10 @@ pub const Session = struct {
         return self.reasoning_effort_buf[0..self.reasoning_effort_len];
     }
 
+    pub fn apiProtocolName(self: *const Session) []const u8 {
+        return self.protocol.name();
+    }
+
     pub fn sessionId(self: *const Session) []const u8 {
         return self.session_id_buf[0..self.session_id_len];
     }
@@ -918,6 +948,34 @@ pub const Session = struct {
         stream_val: []const u8,
         agent_val: []const u8,
     ) !*Session {
+        return initWithProtocol(
+            allocator,
+            name,
+            base_url,
+            api_key,
+            model_name,
+            DEFAULT_PROTOCOL,
+            system_prompt,
+            thinking,
+            reasoning_effort,
+            stream_val,
+            agent_val,
+        );
+    }
+
+    pub fn initWithProtocol(
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        base_url: []const u8,
+        api_key: []const u8,
+        model_name: []const u8,
+        protocol: []const u8,
+        system_prompt: []const u8,
+        thinking: []const u8,
+        reasoning_effort: []const u8,
+        stream_val: []const u8,
+        agent_val: []const u8,
+    ) !*Session {
         const session = try allocator.create(Session);
         session.* = .{
             .allocator = allocator,
@@ -928,6 +986,7 @@ pub const Session = struct {
         session.copyTitle(if (name.len > 0) name else DEFAULT_NAME);
         session.copyBaseUrl(if (base_url.len > 0) base_url else DEFAULT_BASE_URL);
         session.copyModel(if (model_name.len > 0) model_name else DEFAULT_MODEL);
+        session.protocol = ApiProtocol.parse(protocol);
         session.copySystemPrompt(if (system_prompt.len > 0) system_prompt else DEFAULT_SYSTEM_PROMPT);
         session.thinking_enabled = !std.mem.eql(u8, thinking, "disabled");
         session.copyReasoningEffort(if (reasoning_effort.len > 0) reasoning_effort else DEFAULT_REASONING_EFFORT);
@@ -945,12 +1004,13 @@ pub const Session = struct {
     }
 
     pub fn initFromHistoryRecord(allocator: std.mem.Allocator, record: agent_history.SessionRecord) !*Session {
-        const session = try init(
+        const session = try initWithProtocol(
             allocator,
             record.title,
             record.base_url,
             record.api_key,
             record.model,
+            record.protocol,
             record.system_prompt,
             if (record.thinking_enabled) "enabled" else "disabled",
             record.reasoning_effort,
@@ -2178,6 +2238,7 @@ pub const Session = struct {
             .base_url = base_url,
             .api_key = api_key,
             .model = model_name,
+            .protocol = self.protocol,
             .system_prompt = system_prompt,
             .messages = messages,
             .thinking_enabled = self.thinking_enabled,
@@ -2245,6 +2306,8 @@ pub const Session = struct {
         errdefer allocator.free(api_key);
         const model_name = try allocator.dupe(u8, self.model());
         errdefer allocator.free(model_name);
+        const protocol = try allocator.dupe(u8, self.apiProtocolName());
+        errdefer allocator.free(protocol);
         const system_prompt = try allocator.dupe(u8, self.systemPrompt());
         errdefer allocator.free(system_prompt);
         const reasoning_effort = try allocator.dupe(u8, self.reasoningEffort());
@@ -2256,6 +2319,7 @@ pub const Session = struct {
             .base_url = base_url,
             .api_key = api_key,
             .model = model_name,
+            .protocol = protocol,
             .system_prompt = system_prompt,
             .thinking_enabled = self.thinking_enabled,
             .reasoning_effort = reasoning_effort,
@@ -3205,7 +3269,7 @@ fn runChatRequest(request: *const ChatRequest) !ApiResult {
 fn runChatRequestForMessages(request: *const ChatRequest, messages: []const RequestMessage, include_tools: bool) !ApiResult {
     if (requestCancelled(request)) return error.Canceled;
     const allocator = request.allocator;
-    const endpoint = try chatEndpoint(allocator, request.base_url);
+    const endpoint = try apiEndpoint(allocator, request.base_url, request.protocol);
     defer allocator.free(endpoint);
 
     const body = try buildRequestJsonForMessages(allocator, request, messages, include_tools);
@@ -3253,7 +3317,7 @@ fn runChatRequestForMessages(request: *const ChatRequest, messages: []const Requ
 fn runChatRequestStreaming(request: *const ChatRequest) !void {
     if (requestCancelled(request)) return error.Canceled;
     const allocator = request.allocator;
-    const endpoint = try chatEndpoint(allocator, request.base_url);
+    const endpoint = try apiEndpoint(allocator, request.base_url, request.protocol);
     defer allocator.free(endpoint);
 
     const body = try buildRequestJson(allocator, request);
@@ -3321,15 +3385,31 @@ fn runChatRequestStreaming(request: *const ChatRequest) !void {
     finishAssistantStream(request.session, message_idx, request.started_ms, usage);
 }
 
+fn apiEndpoint(allocator: std.mem.Allocator, base_url_raw: []const u8, protocol: ApiProtocol) ![]u8 {
+    return switch (protocol) {
+        .chat_completions => chatEndpoint(allocator, base_url_raw),
+        .responses => responsesEndpoint(allocator, base_url_raw),
+    };
+}
+
 fn chatEndpoint(allocator: std.mem.Allocator, base_url_raw: []const u8) ![]u8 {
+    return endpointWithSuffix(allocator, base_url_raw, "/chat/completions");
+}
+
+fn responsesEndpoint(allocator: std.mem.Allocator, base_url_raw: []const u8) ![]u8 {
+    return endpointWithSuffix(allocator, base_url_raw, "/responses");
+}
+
+fn endpointWithSuffix(allocator: std.mem.Allocator, base_url_raw: []const u8, suffix: []const u8) ![]u8 {
     const trimmed = std.mem.trim(u8, base_url_raw, " \t\r\n");
     if (trimmed.len == 0) return error.MissingBaseUrl;
-    if (std.mem.endsWith(u8, trimmed, "/chat/completions")) {
-        return allocator.dupe(u8, trimmed);
-    }
     var end = trimmed.len;
     while (end > 0 and trimmed[end - 1] == '/') end -= 1;
-    return std.fmt.allocPrint(allocator, "{s}/chat/completions", .{trimmed[0..end]});
+    const normalized = trimmed[0..end];
+    if (std.mem.endsWith(u8, normalized, suffix)) {
+        return allocator.dupe(u8, normalized);
+    }
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ normalized, suffix });
 }
 
 fn buildRequestJson(allocator: std.mem.Allocator, request: *const ChatRequest) ![]u8 {
@@ -3337,6 +3417,18 @@ fn buildRequestJson(allocator: std.mem.Allocator, request: *const ChatRequest) !
 }
 
 fn buildRequestJsonForMessages(
+    allocator: std.mem.Allocator,
+    request: *const ChatRequest,
+    messages: []const RequestMessage,
+    include_tools: bool,
+) ![]u8 {
+    return switch (request.protocol) {
+        .chat_completions => buildChatCompletionsRequestJsonForMessages(allocator, request, messages, include_tools),
+        .responses => buildResponsesRequestJsonForMessages(allocator, request, messages, include_tools),
+    };
+}
+
+fn buildChatCompletionsRequestJsonForMessages(
     allocator: std.mem.Allocator,
     request: *const ChatRequest,
     messages: []const RequestMessage,
@@ -3410,6 +3502,96 @@ fn buildRequestJsonForMessages(
     return out.toOwnedSlice(allocator);
 }
 
+fn buildResponsesRequestJsonForMessages(
+    allocator: std.mem.Allocator,
+    request: *const ChatRequest,
+    messages: []const RequestMessage,
+    include_tools: bool,
+) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, "{\"model\":");
+    try appendJsonString(allocator, &out, request.model);
+    if (request.system_prompt.len > 0) {
+        try out.appendSlice(allocator, ",\"instructions\":");
+        try appendJsonString(allocator, &out, request.system_prompt);
+    }
+    try out.appendSlice(allocator, ",\"input\":[");
+    var wrote_item = false;
+    for (messages) |msg| {
+        if (msg.role == .tool) {
+            const id = msg.tool_call_id orelse continue;
+            if (id.len == 0) continue;
+            if (wrote_item) try out.append(allocator, ',');
+            try appendResponseFunctionCallOutput(allocator, &out, id, msg.content);
+            wrote_item = true;
+            continue;
+        }
+
+        if (msg.content.len > 0) {
+            if (wrote_item) try out.append(allocator, ',');
+            try appendResponseMessage(allocator, &out, msg.role, msg.content);
+            wrote_item = true;
+        }
+
+        if (msg.role == .assistant) {
+            if (msg.tool_calls) |calls| {
+                for (calls) |call| {
+                    if (wrote_item) try out.append(allocator, ',');
+                    try appendResponseFunctionCall(allocator, &out, call);
+                    wrote_item = true;
+                }
+            }
+        }
+    }
+    try out.append(allocator, ']');
+    if (request.thinking_enabled and request.reasoning_effort.len > 0) {
+        try out.appendSlice(allocator, ",\"reasoning\":{\"effort\":");
+        try appendJsonString(allocator, &out, request.reasoning_effort);
+        try out.append(allocator, '}');
+    }
+    try out.appendSlice(allocator, ",\"stream\":");
+    try out.appendSlice(allocator, if (request.stream) "true" else "false");
+    if (include_tools) {
+        try appendResponseToolSchemas(allocator, &out);
+    }
+    try out.append(allocator, '}');
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendResponseMessage(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), role: Role, content: []const u8) !void {
+    try out.appendSlice(allocator, "{\"role\":");
+    try appendJsonString(allocator, out, role.apiName());
+    try out.appendSlice(allocator, ",\"content\":");
+    try appendJsonString(allocator, out, content);
+    try out.append(allocator, '}');
+}
+
+fn appendResponseFunctionCall(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), call: ToolCall) !void {
+    try out.appendSlice(allocator, "{\"type\":\"function_call\",\"call_id\":");
+    try appendJsonString(allocator, out, call.id);
+    try out.appendSlice(allocator, ",\"name\":");
+    try appendJsonString(allocator, out, call.name);
+    try out.appendSlice(allocator, ",\"arguments\":");
+    try appendJsonString(allocator, out, call.arguments);
+    try out.append(allocator, '}');
+}
+
+fn appendResponseFunctionCallOutput(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    call_id: []const u8,
+    output: []const u8,
+) !void {
+    try out.appendSlice(allocator, "{\"type\":\"function_call_output\",\"call_id\":");
+    try appendJsonString(allocator, out, call_id);
+    try out.appendSlice(allocator, ",\"output\":");
+    try appendJsonString(allocator, out, output);
+    try out.append(allocator, '}');
+}
+
 fn appendToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
     try out.appendSlice(allocator, ",\"tools\":[");
     try out.appendSlice(allocator, toolSchema("terminal_list", "List Phantty terminal surfaces visible to the agent, including the current agent-selected write context. Before any terminal write, use terminal_select to choose the intended surface_id; use focused=true only as a default hint.", "{}"));
@@ -3465,8 +3647,67 @@ fn appendToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(
     try out.appendSlice(allocator, ",\"tool_choice\":\"auto\"");
 }
 
+fn appendResponseToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+    try out.appendSlice(allocator, ",\"tools\":[");
+    try out.appendSlice(allocator, responseToolSchema("terminal_list", "List Phantty terminal surfaces visible to the agent, including the current agent-selected write context. Before any terminal write, use terminal_select to choose the intended surface_id; use focused=true only as a default hint.", "{}"));
+    try out.append(allocator, ',');
+    try out.appendSlice(allocator, responseToolSchema("terminal_snapshot", "Read a bounded text snapshot from one terminal surface or all surfaces.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Optional surface id from terminal_list.\"}}"));
+    try out.append(allocator, ',');
+    try appendResponseToolSchema(
+        allocator,
+        out,
+        "terminal_select",
+        platform_pty_command.terminalSelectToolDescription(),
+        "{\"surface_id\":{\"type\":\"string\",\"description\":\"Surface id from terminal_list to make the current agent write context.\"}}",
+    );
+    try out.append(allocator, ',');
+    try appendResponseToolSchema(
+        allocator,
+        out,
+        platform_process.localCommandToolName(),
+        platform_process.localCommandToolDescription(),
+        "{\"command\":{\"type\":\"string\"},\"cwd\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\"}}",
+    );
+    try out.append(allocator, ',');
+    try out.appendSlice(allocator, responseToolSchema("ssh_session_exec", "Run a POSIX shell command in the selected already-open SSH terminal surface. The surface_id must match the current terminal_select context. Use only when the surface is at a shell prompt; for R, Python, Codex, Claude Code, or other REPLs use terminal_repl_exec.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Selected surface id from terminal_select.\"},\"command\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\"}}"));
+    if (platform_pty_command.wslSessionToolsEnabled()) {
+        try out.append(allocator, ',');
+        try appendResponseToolSchema(
+            allocator,
+            out,
+            platform_pty_command.wslSessionToolName(),
+            platform_pty_command.wslSessionToolDescription(),
+            platform_pty_command.wslSessionToolPropertiesJson(),
+        );
+    }
+    try out.append(allocator, ',');
+    try out.appendSlice(allocator, responseToolSchema("terminal_repl_exec", "Send code or text to the selected already-open interactive REPL/app terminal without shell syntax. The surface_id must match the current terminal_select context. Use repl=r for R, repl=python for Python, repl=codex for Codex, repl=claude_code for Claude Code, or repl=plain for raw text input.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Selected surface id from terminal_select.\"},\"repl\":{\"type\":\"string\",\"description\":\"r, python, codex, claude_code, or plain\"},\"code\":{\"type\":\"string\",\"description\":\"Code or plain text to submit.\"},\"timeout_ms\":{\"type\":\"integer\"}}"));
+    try out.append(allocator, ',');
+    try out.appendSlice(allocator, responseToolSchema("ssh_profile_save", "Create or update a saved Phantty SSH server profile. Use before ssh_profile_connect when the user provides SSH host, user, port, or password details.", "{\"name\":{\"type\":\"string\",\"description\":\"Optional profile name; defaults to host for new profiles.\"},\"host\":{\"type\":\"string\",\"description\":\"SSH host name or IP address.\"},\"user\":{\"type\":\"string\",\"description\":\"SSH username.\"},\"password\":{\"type\":\"string\",\"description\":\"Optional SSH password; omit when using keys.\"},\"port\":{\"type\":\"string\",\"description\":\"Optional SSH port; defaults to 22 for new profiles.\"}}"));
+    try out.append(allocator, ',');
+    try out.appendSlice(allocator, responseToolSchema("ssh_profile_connect", "Create a new tab connected to a saved Phantty SSH server profile by its profile name or host.", "{\"profile_name\":{\"type\":\"string\",\"description\":\"Saved SSH profile name or host to open in a new tab.\"}}"));
+    try out.append(allocator, ',');
+    try appendResponseToolSchema(
+        allocator,
+        out,
+        "tab_new",
+        platform_pty_command.tabNewToolDescription(),
+        platform_pty_command.tabNewToolPropertiesJson(),
+    );
+    try out.append(allocator, ',');
+    try out.appendSlice(allocator, responseToolSchema("tab_close", "Close a terminal tab by zero-based tab_index, surface_id, title, or the active terminal tab when no selector is provided. Cannot close the AI chat tab running the agent.", "{\"tab_index\":{\"type\":\"integer\",\"description\":\"Zero-based tab index from terminal_list.\"},\"tab_number\":{\"type\":\"integer\",\"description\":\"One-based UI tab number, accepted as a convenience.\"},\"surface_id\":{\"type\":\"string\",\"description\":\"Surface id from terminal_list.\"},\"title\":{\"type\":\"string\",\"description\":\"Terminal tab title to close, such as CPU2.\"}}"));
+    try out.append(allocator, ',');
+    try out.appendSlice(allocator, responseToolSchema("skill_info", "Load a Phantty skill by stable name. Use when the user explicitly names a skill or asks for specialized skill instructions.", "{\"skill_name\":{\"type\":\"string\",\"description\":\"Skill name or skill directory name.\"}}"));
+    try out.append(allocator, ']');
+    try out.appendSlice(allocator, ",\"tool_choice\":\"auto\"");
+}
+
 fn toolSchema(comptime name: []const u8, comptime description: []const u8, comptime properties: []const u8) []const u8 {
     return "{\"type\":\"function\",\"function\":{\"name\":\"" ++ name ++ "\",\"description\":\"" ++ description ++ "\",\"parameters\":{\"type\":\"object\",\"properties\":" ++ properties ++ ",\"additionalProperties\":false}}}";
+}
+
+fn responseToolSchema(comptime name: []const u8, comptime description: []const u8, comptime properties: []const u8) []const u8 {
+    return "{\"type\":\"function\",\"name\":\"" ++ name ++ "\",\"description\":\"" ++ description ++ "\",\"parameters\":{\"type\":\"object\",\"properties\":" ++ properties ++ ",\"additionalProperties\":false}}";
 }
 
 fn appendToolSchema(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), name: []const u8, description: []const u8, properties: []const u8) !void {
@@ -3477,6 +3718,16 @@ fn appendToolSchema(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u
     try out.appendSlice(allocator, ",\"parameters\":{\"type\":\"object\",\"properties\":");
     try out.appendSlice(allocator, properties);
     try out.appendSlice(allocator, ",\"additionalProperties\":false}}}");
+}
+
+fn appendResponseToolSchema(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), name: []const u8, description: []const u8, properties: []const u8) !void {
+    try out.appendSlice(allocator, "{\"type\":\"function\",\"name\":");
+    try appendJsonString(allocator, out, name);
+    try out.appendSlice(allocator, ",\"description\":");
+    try appendJsonString(allocator, out, description);
+    try out.appendSlice(allocator, ",\"parameters\":{\"type\":\"object\",\"properties\":");
+    try out.appendSlice(allocator, properties);
+    try out.appendSlice(allocator, ",\"additionalProperties\":false}}");
 }
 
 fn executeToolCall(request: *ChatRequest, call: ToolCall) ![]u8 {
@@ -4457,7 +4708,15 @@ fn parseApiResponse(allocator: std.mem.Allocator, body: []const u8) !ApiResult {
     if (root != .object) return error.InvalidResponse;
     const obj = root.object;
 
-    if (obj.get("error")) |err_value| {
+    if (try parseApiErrorResult(allocator, root)) |result| return result;
+    if (obj.get("choices") != null) return parseChatCompletionsResponse(allocator, root);
+    if (obj.get("output") != null or obj.get("output_text") != null) return parseResponsesResponse(allocator, root);
+    return error.MissingChoices;
+}
+
+fn parseApiErrorResult(allocator: std.mem.Allocator, root: std.json.Value) !?ApiResult {
+    if (root != .object) return null;
+    if (root.object.get("error")) |err_value| {
         if (err_value == .object) {
             if (err_value.object.get("message")) |message_value| {
                 if (message_value == .string) {
@@ -4467,7 +4726,12 @@ fn parseApiResponse(allocator: std.mem.Allocator, body: []const u8) !ApiResult {
         }
         return ApiResult{ .content = try allocator.dupe(u8, "API returned an error") };
     }
+    return null;
+}
 
+fn parseChatCompletionsResponse(allocator: std.mem.Allocator, root: std.json.Value) !ApiResult {
+    if (root != .object) return error.InvalidResponse;
+    const obj = root.object;
     const choices_value = obj.get("choices") orelse return error.MissingChoices;
     if (choices_value != .array or choices_value.array.items.len == 0) return error.MissingChoices;
     const choice = choices_value.array.items[0];
@@ -4493,10 +4757,146 @@ fn parseApiResponse(allocator: std.mem.Allocator, body: []const u8) !ApiResult {
     };
 }
 
+fn parseResponsesResponse(allocator: std.mem.Allocator, root: std.json.Value) !ApiResult {
+    var content: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer content.deinit(allocator);
+    var reasoning: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer reasoning.deinit(allocator);
+
+    try appendResponsesOutputText(allocator, &content, root);
+    try appendResponsesReasoningText(allocator, &reasoning, root);
+
+    const tool_calls = try parseResponsesToolCalls(allocator, root);
+    errdefer if (tool_calls) |calls| {
+        for (calls) |call| call.deinit(allocator);
+        allocator.free(calls);
+    };
+
+    if (content.items.len == 0 and tool_calls == null) {
+        if (root == .object) {
+            if (root.object.get("status")) |status_value| {
+                if (status_value == .string and std.mem.eql(u8, status_value.string, "failed")) {
+                    if (root.object.get("error")) |err_value| {
+                        if (err_value == .object) {
+                            if (err_value.object.get("message")) |message_value| {
+                                if (message_value == .string) {
+                                    return ApiResult{ .content = try allocator.dupe(u8, message_value.string) };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return .{
+        .content = try content.toOwnedSlice(allocator),
+        .reasoning = if (reasoning.items.len > 0) try reasoning.toOwnedSlice(allocator) else null,
+        .tool_calls = tool_calls,
+        .usage = parseApiUsage(root),
+    };
+}
+
+fn appendResponsesOutputText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), root: std.json.Value) !void {
+    if (root != .object) return;
+    if (root.object.get("output_text")) |value| {
+        if (value == .string and value.string.len > 0) try out.appendSlice(allocator, value.string);
+    }
+    const output_value = root.object.get("output") orelse return;
+    if (output_value != .array) return;
+    for (output_value.array.items) |item| {
+        if (item != .object) continue;
+        const typ = jsonStringValue(item.object.get("type")) orelse "";
+        if (std.mem.eql(u8, typ, "message") or typ.len == 0) {
+            if (item.object.get("content")) |content_value| {
+                try appendResponsesContentText(allocator, out, content_value);
+            }
+        }
+    }
+}
+
+fn appendResponsesContentText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), value: std.json.Value) !void {
+    switch (value) {
+        .string => |text| if (text.len > 0) try out.appendSlice(allocator, text),
+        .array => |array| {
+            for (array.items) |item| {
+                if (item == .string) {
+                    if (item.string.len > 0) try out.appendSlice(allocator, item.string);
+                    continue;
+                }
+                if (item != .object) continue;
+                const typ = jsonStringValue(item.object.get("type")) orelse "";
+                if (std.mem.eql(u8, typ, "output_text") or
+                    std.mem.eql(u8, typ, "text") or
+                    std.mem.eql(u8, typ, "summary_text") or
+                    std.mem.eql(u8, typ, "reasoning_text") or
+                    typ.len == 0)
+                {
+                    if (jsonStringValue(item.object.get("text"))) |text| {
+                        if (text.len > 0) try out.appendSlice(allocator, text);
+                    }
+                }
+            }
+        },
+        .object => |object| {
+            if (jsonStringValue(object.get("text"))) |text| {
+                if (text.len > 0) try out.appendSlice(allocator, text);
+            }
+        },
+        else => {},
+    }
+}
+
+fn appendResponsesReasoningText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), root: std.json.Value) !void {
+    if (root != .object) return;
+    const output_value = root.object.get("output") orelse return;
+    if (output_value != .array) return;
+    for (output_value.array.items) |item| {
+        if (item != .object) continue;
+        const typ = jsonStringValue(item.object.get("type")) orelse "";
+        if (!std.mem.eql(u8, typ, "reasoning")) continue;
+        if (item.object.get("summary")) |summary_value| {
+            try appendResponsesContentText(allocator, out, summary_value);
+        }
+        if (item.object.get("content")) |content_value| {
+            try appendResponsesContentText(allocator, out, content_value);
+        }
+        if (jsonStringValue(item.object.get("text"))) |text| {
+            if (text.len > 0) try out.appendSlice(allocator, text);
+        }
+    }
+}
+
 fn parseApiUsage(root: std.json.Value) ?ApiUsage {
     if (root != .object) return null;
+    if (root.object.get("response")) |response_value| {
+        if (response_value == .object) {
+            if (parseApiUsage(response_value)) |usage| return usage;
+        }
+    }
     const usage_value = root.object.get("usage") orelse return null;
     if (usage_value != .object) return null;
+    const input_tokens = jsonU64Value(usage_value.object.get("input_tokens"));
+    const output_tokens = jsonU64Value(usage_value.object.get("output_tokens"));
+    const cached_tokens = blk: {
+        if (usage_value.object.get("input_tokens_details")) |details| {
+            if (details == .object) break :blk jsonU64Value(details.object.get("cached_tokens"));
+        }
+        if (usage_value.object.get("prompt_tokens_details")) |details| {
+            if (details == .object) break :blk jsonU64Value(details.object.get("cached_tokens"));
+        }
+        break :blk jsonU64Value(usage_value.object.get("prompt_cache_hit_tokens"));
+    };
+    if (input_tokens > 0 or output_tokens > 0) {
+        return .{
+            .prompt_tokens = input_tokens,
+            .completion_tokens = output_tokens,
+            .prompt_cache_hit_tokens = cached_tokens,
+            .prompt_cache_miss_tokens = if (input_tokens > cached_tokens) input_tokens - cached_tokens else 0,
+            .total_tokens = jsonU64Value(usage_value.object.get("total_tokens")),
+        };
+    }
     return .{
         .prompt_tokens = jsonU64Value(usage_value.object.get("prompt_tokens")),
         .completion_tokens = jsonU64Value(usage_value.object.get("completion_tokens")),
@@ -4513,6 +4913,11 @@ fn jsonU64Value(value_opt: ?std.json.Value) u64 {
         .float => |v| if (v > 0 and v <= @as(f64, @floatFromInt(std.math.maxInt(u64)))) @intFromFloat(v) else 0,
         else => 0,
     };
+}
+
+fn jsonStringValue(value_opt: ?std.json.Value) ?[]const u8 {
+    const value = value_opt orelse return null;
+    return if (value == .string) value.string else null;
 }
 
 fn parseToolCalls(allocator: std.mem.Allocator, message_value: std.json.Value) !?[]ToolCall {
@@ -4554,6 +4959,40 @@ fn parseToolCalls(allocator: std.mem.Allocator, message_value: std.json.Value) !
     return try allocator.realloc(calls, written);
 }
 
+fn parseResponsesToolCalls(allocator: std.mem.Allocator, root: std.json.Value) !?[]ToolCall {
+    if (root != .object) return null;
+    const output_value = root.object.get("output") orelse return null;
+    if (output_value != .array or output_value.array.items.len == 0) return null;
+
+    const calls = try allocator.alloc(ToolCall, output_value.array.items.len);
+    errdefer allocator.free(calls);
+    var written: usize = 0;
+    errdefer {
+        for (calls[0..written]) |call| call.deinit(allocator);
+    }
+
+    for (output_value.array.items) |item| {
+        if (item != .object) continue;
+        const typ = jsonStringValue(item.object.get("type")) orelse continue;
+        if (!std.mem.eql(u8, typ, "function_call")) continue;
+        const call_id = jsonStringValue(item.object.get("call_id")) orelse jsonStringValue(item.object.get("id")) orelse continue;
+        const name = jsonStringValue(item.object.get("name")) orelse continue;
+        const arguments = jsonStringValue(item.object.get("arguments")) orelse "";
+        calls[written] = .{
+            .id = try allocator.dupe(u8, call_id),
+            .name = try allocator.dupe(u8, name),
+            .arguments = try allocator.dupe(u8, arguments),
+        };
+        written += 1;
+    }
+
+    if (written == 0) {
+        allocator.free(calls);
+        return null;
+    }
+    return try allocator.realloc(calls, written);
+}
+
 fn parseApiStreamResponse(allocator: std.mem.Allocator, body: []const u8) !ApiResult {
     var content: std.ArrayListUnmanaged(u8) = .empty;
     errdefer content.deinit(allocator);
@@ -4578,15 +5017,39 @@ fn parseApiStreamResponse(allocator: std.mem.Allocator, body: []const u8) !ApiRe
         const obj = root.object;
         if (parseApiUsage(root)) |u| usage = u;
 
-        if (obj.get("error")) |err_value| {
-            if (err_value == .object) {
-                if (err_value.object.get("message")) |message_value| {
-                    if (message_value == .string) {
-                        return ApiResult{ .content = try allocator.dupe(u8, message_value.string) };
+        if (try parseApiErrorResult(allocator, root)) |result| return result;
+
+        if (jsonStringValue(obj.get("type"))) |event_type| {
+            if (std.mem.eql(u8, event_type, "response.output_text.delta")) {
+                if (jsonStringValue(obj.get("delta"))) |delta| {
+                    if (delta.len > 0) try content.appendSlice(allocator, delta);
+                }
+                continue;
+            }
+            if (std.mem.eql(u8, event_type, "response.reasoning_summary_text.delta") or
+                std.mem.eql(u8, event_type, "response.reasoning_text.delta"))
+            {
+                if (jsonStringValue(obj.get("delta"))) |delta| {
+                    if (delta.len > 0) try reasoning.appendSlice(allocator, delta);
+                }
+                continue;
+            }
+            if (std.mem.eql(u8, event_type, "response.completed")) {
+                if (obj.get("response")) |response_value| {
+                    if (parseApiUsage(response_value)) |u| usage = u;
+                    if (content.items.len == 0) try appendResponsesOutputText(allocator, &content, response_value);
+                    if (reasoning.items.len == 0) try appendResponsesReasoningText(allocator, &reasoning, response_value);
+                }
+                break;
+            }
+            if (std.mem.eql(u8, event_type, "response.failed")) {
+                if (obj.get("response")) |response_value| {
+                    if (response_value == .object) {
+                        if (try parseApiErrorResult(allocator, response_value)) |result| return result;
                     }
                 }
+                return ApiResult{ .content = try allocator.dupe(u8, "API returned an error") };
             }
-            return ApiResult{ .content = try allocator.dupe(u8, "API returned an error") };
         }
 
         const choices_value = obj.get("choices") orelse continue;
@@ -4643,15 +5106,45 @@ fn applyApiStreamLineToSession(
     const obj = root.object;
     if (parseApiUsage(root)) |usage| usage_out.* = usage;
 
-    if (obj.get("error")) |err_value| {
-        if (err_value == .object) {
-            if (err_value.object.get("message")) |message_value| {
-                if (message_value == .string) {
-                    try appendAssistantStreamDelta(session, message_idx, message_value.string, "");
+    if (try parseApiErrorResult(allocator, root)) |result| {
+        defer result.deinit(allocator);
+        try appendAssistantStreamDelta(session, message_idx, result.content, "");
+        return true;
+    }
+
+    if (jsonStringValue(obj.get("type"))) |event_type| {
+        if (std.mem.eql(u8, event_type, "response.output_text.delta")) {
+            const content_delta = jsonStringValue(obj.get("delta")) orelse "";
+            try appendAssistantStreamDelta(session, message_idx, content_delta, "");
+            return false;
+        }
+        if (std.mem.eql(u8, event_type, "response.reasoning_summary_text.delta") or
+            std.mem.eql(u8, event_type, "response.reasoning_text.delta"))
+        {
+            const reasoning_delta = jsonStringValue(obj.get("delta")) orelse "";
+            try appendAssistantStreamDelta(session, message_idx, "", reasoning_delta);
+            return false;
+        }
+        if (std.mem.eql(u8, event_type, "response.completed")) {
+            if (obj.get("response")) |response_value| {
+                if (parseApiUsage(response_value)) |usage| usage_out.* = usage;
+            }
+            return true;
+        }
+        if (std.mem.eql(u8, event_type, "response.failed")) {
+            if (obj.get("response")) |response_value| {
+                if (try parseApiErrorResult(allocator, response_value)) |result| {
+                    defer result.deinit(allocator);
+                    try appendAssistantStreamDelta(session, message_idx, result.content, "");
                     return true;
                 }
             }
+            try appendAssistantStreamDelta(session, message_idx, "API returned an error", "");
+            return true;
         }
+    }
+
+    if (obj.get("error")) |_| {
         try appendAssistantStreamDelta(session, message_idx, "API returned an error", "");
         return true;
     }
@@ -4968,8 +5461,37 @@ test "ai_chat: session serializes to history record" {
     defer agent_history.freeOwnedRecord(allocator, &record);
 
     try std.testing.expect(record.agent_enabled);
+    try std.testing.expectEqualStrings(DEFAULT_PROTOCOL, record.protocol);
     try std.testing.expectEqual(@as(usize, 1), record.messages.len);
     try std.testing.expectEqualStrings("hello", record.messages[0].content);
+}
+
+test "ai_chat: response protocol survives history record round trip" {
+    const allocator = std.testing.allocator;
+    const session = try Session.initWithProtocol(
+        allocator,
+        "Responses Test",
+        "https://api.openai.com/v1",
+        "secret",
+        "gpt-5",
+        "responses",
+        "system",
+        "enabled",
+        "high",
+        "false",
+        "false",
+    );
+    defer session.deinit();
+
+    var record = try session.toHistoryRecord(allocator);
+    defer agent_history.freeOwnedRecord(allocator, &record);
+
+    try std.testing.expectEqualStrings("responses", record.protocol);
+
+    const restored = try Session.initFromHistoryRecord(allocator, record);
+    defer restored.deinit();
+
+    try std.testing.expectEqualStrings("responses", restored.apiProtocolName());
 }
 
 test "ai_chat: session loads from history record" {
@@ -5210,6 +5732,17 @@ test "ai chat endpoint normalization" {
     try std.testing.expectEqualStrings("https://api.deepseek.com/chat/completions", endpoint);
 }
 
+test "ai chat responses endpoint normalization" {
+    const allocator = std.testing.allocator;
+    const endpoint = try apiEndpoint(allocator, "https://api.openai.com/v1/", .responses);
+    defer allocator.free(endpoint);
+    try std.testing.expectEqualStrings("https://api.openai.com/v1/responses", endpoint);
+
+    const explicit = try apiEndpoint(allocator, "https://chatgpt.com/backend-api/codex/responses/", .responses);
+    defer allocator.free(explicit);
+    try std.testing.expectEqualStrings("https://chatgpt.com/backend-api/codex/responses", explicit);
+}
+
 test "ai chat default system prompt comes from platform agent prompt" {
     try std.testing.expect(DEFAULT_SYSTEM_PROMPT.len < 1600);
     try std.testing.expectEqualStrings(platform_agent_prompt.defaultSystemPrompt, DEFAULT_SYSTEM_PROMPT);
@@ -5320,6 +5853,58 @@ test "ai chat agent request json includes tool schemas" {
     try std.testing.expect(std.mem.indexOf(u8, json, platform_pty_command.tabNewToolPropertiesJson()) != null);
     try std.testing.expect(std.mem.indexOf(u8, json, platform_pty_command.tabKindUsage()) != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"tab_close\"") != null);
+}
+
+test "ai chat responses request json uses input and response tool schemas" {
+    const allocator = std.testing.allocator;
+    var calls = [_]ToolCall{.{
+        .id = @constCast("call_1"),
+        .name = @constCast("terminal_list"),
+        .arguments = @constCast("{}"),
+    }};
+    var messages = [_]RequestMessage{
+        .{
+            .role = .user,
+            .content = @constCast("List terminals"),
+        },
+        .{
+            .role = .assistant,
+            .content = @constCast(""),
+            .tool_calls = calls[0..],
+        },
+        .{
+            .role = .tool,
+            .content = @constCast("surface=1"),
+            .tool_call_id = @constCast("call_1"),
+        },
+    };
+    const request = ChatRequest{
+        .allocator = allocator,
+        .session = undefined,
+        .base_url = @constCast("https://api.openai.com/v1"),
+        .api_key = @constCast("key"),
+        .model = @constCast("gpt-5"),
+        .protocol = .responses,
+        .system_prompt = @constCast("system"),
+        .messages = messages[0..],
+        .thinking_enabled = true,
+        .reasoning_effort = @constCast("high"),
+        .stream = false,
+        .agent_enabled = true,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .started_ms = 0,
+    };
+    const json = try buildRequestJsonForMessages(allocator, &request, messages[0..], true);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"instructions\":\"system\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"input\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"messages\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"function\",\"name\":\"terminal_list\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"function_call\",\"call_id\":\"call_1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"function_call_output\",\"call_id\":\"call_1\",\"output\":\"surface=1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"reasoning\":{\"effort\":\"high\"}") != null);
 }
 
 test "ai chat agent request json includes stable skill_info tool schema" {
@@ -5596,6 +6181,29 @@ test "ai chat parses token usage from OpenAI responses" {
     try std.testing.expectEqual(@as(u64, 5), result.usage.?.prompt_cache_hit_tokens);
     try std.testing.expectEqual(@as(u64, 7), result.usage.?.prompt_cache_miss_tokens);
     try std.testing.expectEqual(@as(u64, 46), result.usage.?.total_tokens);
+}
+
+test "ai chat parses Responses API output text tool calls and usage" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"usage":{"input_tokens":20,"output_tokens":8,"total_tokens":28,"input_tokens_details":{"cached_tokens":6}},"output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"checked"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},{"type":"function_call","call_id":"call_1","name":"terminal_list","arguments":"{}"}]}
+    ;
+    const result = try parseApiResponse(allocator, body);
+    defer result.deinit(allocator);
+    try std.testing.expectEqualStrings("done", result.content);
+    try std.testing.expect(result.reasoning != null);
+    try std.testing.expectEqualStrings("checked", result.reasoning.?);
+    try std.testing.expect(result.tool_calls != null);
+    try std.testing.expectEqual(@as(usize, 1), result.tool_calls.?.len);
+    try std.testing.expectEqualStrings("call_1", result.tool_calls.?[0].id);
+    try std.testing.expectEqualStrings("terminal_list", result.tool_calls.?[0].name);
+    try std.testing.expectEqualStrings("{}", result.tool_calls.?[0].arguments);
+    try std.testing.expect(result.usage != null);
+    try std.testing.expectEqual(@as(u64, 20), result.usage.?.prompt_tokens);
+    try std.testing.expectEqual(@as(u64, 8), result.usage.?.completion_tokens);
+    try std.testing.expectEqual(@as(u64, 6), result.usage.?.prompt_cache_hit_tokens);
+    try std.testing.expectEqual(@as(u64, 14), result.usage.?.prompt_cache_miss_tokens);
+    try std.testing.expectEqual(@as(u64, 28), result.usage.?.total_tokens);
 }
 
 test "ai chat usage footer includes time token and cache fields" {
@@ -6361,6 +6969,24 @@ test "ai chat stream response aggregates content and reasoning chunks" {
     try std.testing.expect(result.usage != null);
     try std.testing.expectEqual(@as(u64, 46), result.usage.?.total_tokens);
     try std.testing.expectEqual(@as(u64, 5), result.usage.?.prompt_cache_hit_tokens);
+    try std.testing.expectEqual(@as(u64, 7), result.usage.?.prompt_cache_miss_tokens);
+}
+
+test "ai chat Responses API stream aggregates output text and usage" {
+    const allocator = std.testing.allocator;
+    const body =
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n" ++
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n" ++
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Checked\"}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":3,\"total_tokens\":12,\"input_tokens_details\":{\"cached_tokens\":2}},\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\"}]}]}}\n\n";
+    const result = try parseApiStreamResponse(allocator, body);
+    defer result.deinit(allocator);
+    try std.testing.expectEqualStrings("Hello", result.content);
+    try std.testing.expect(result.reasoning != null);
+    try std.testing.expectEqualStrings("Checked", result.reasoning.?);
+    try std.testing.expect(result.usage != null);
+    try std.testing.expectEqual(@as(u64, 12), result.usage.?.total_tokens);
+    try std.testing.expectEqual(@as(u64, 2), result.usage.?.prompt_cache_hit_tokens);
     try std.testing.expectEqual(@as(u64, 7), result.usage.?.prompt_cache_miss_tokens);
 }
 

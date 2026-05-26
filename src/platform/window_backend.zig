@@ -642,7 +642,8 @@ test "platform window backend exposes backend-neutral create options" {
     try std.testing.expectEqual(@as(usize, 2), create_info.params.len);
     try std.testing.expect(create_info.params[0].type.? == std.mem.Allocator);
     try std.testing.expect(create_info.params[1].type.? == CreateOptions);
-    try std.testing.expect(create_info.return_type.? == anyerror!Window);
+    const create_return_info = @typeInfo(create_info.return_type.?).error_union;
+    try std.testing.expect(create_return_info.payload == Window);
 
     const options = CreateOptions{
         .width = 800,

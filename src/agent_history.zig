@@ -3,6 +3,7 @@ const platform_dirs = @import("platform/dirs.zig");
 const log = std.log.scoped(.agent_history);
 
 const MAX_HISTORY_BYTES = 8 * 1024 * 1024;
+const DEFAULT_PROTOCOL = "chat_completions";
 
 pub const MessageRole = enum {
     user,
@@ -26,6 +27,7 @@ pub const SessionRecord = struct {
     base_url: []const u8,
     api_key: []const u8,
     model: []const u8,
+    protocol: []const u8 = DEFAULT_PROTOCOL,
     system_prompt: []const u8,
     thinking_enabled: bool,
     reasoning_effort: []const u8,
@@ -216,6 +218,9 @@ pub fn cloneRecord(allocator: std.mem.Allocator, input: anytype) !SessionRecord 
     errdefer allocator.free(api_key);
     const model = try allocator.dupe(u8, input.model);
     errdefer allocator.free(model);
+    const protocol_input = if (@hasField(@TypeOf(input), "protocol")) input.protocol else DEFAULT_PROTOCOL;
+    const protocol = try allocator.dupe(u8, protocol_input);
+    errdefer allocator.free(protocol);
     const system_prompt = try allocator.dupe(u8, input.system_prompt);
     errdefer allocator.free(system_prompt);
     const reasoning_effort = try allocator.dupe(u8, input.reasoning_effort);
@@ -233,6 +238,7 @@ pub fn cloneRecord(allocator: std.mem.Allocator, input: anytype) !SessionRecord 
         .base_url = base_url,
         .api_key = api_key,
         .model = model,
+        .protocol = protocol,
         .system_prompt = system_prompt,
         .thinking_enabled = input.thinking_enabled,
         .reasoning_effort = reasoning_effort,
@@ -269,6 +275,7 @@ pub fn freeOwnedRecord(allocator: std.mem.Allocator, record: *SessionRecord) voi
     allocator.free(record.base_url);
     allocator.free(record.api_key);
     allocator.free(record.model);
+    allocator.free(record.protocol);
     allocator.free(record.system_prompt);
     allocator.free(record.reasoning_effort);
     for (record.messages) |*message| freeOwnedMessage(allocator, message);
@@ -581,6 +588,18 @@ test "agent_history: malformed json falls back to empty store" {
     defer parsed.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), parsed.records.items.len);
+}
+
+test "agent_history: missing protocol defaults to chat completions" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"records":[{"session_id":"s1","title":"Chat 1","base_url":"https://api.example.com","api_key":"secret","model":"m1","system_prompt":"system","thinking_enabled":true,"reasoning_effort":"high","stream":false,"agent_enabled":true,"created_at":10,"updated_at":20,"messages":[]}]}
+    ;
+    var parsed = try Store.fromJsonString(allocator, json);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.records.items.len);
+    try std.testing.expectEqualStrings(DEFAULT_PROTOCOL, parsed.records.items[0].protocol);
 }
 
 test "agent_history: lenient parse propagates out of memory" {

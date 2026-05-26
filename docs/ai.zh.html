@@ -121,6 +121,7 @@
                 <tr><th>Base URL</th><td><code>https://api.deepseek.com</code></td></tr>
                 <tr><th>API key</th><td>你的 DeepSeek API Key；如果设置了 <code>DEEPSEEK_API_KEY</code>，可以留空</td></tr>
                 <tr><th>Model</th><td><code>deepseek-v4-pro</code></td></tr>
+                <tr><th>Protocol</th><td><code>chat_completions</code>；OpenAI Responses API Provider 使用 <code>responses</code></td></tr>
                 <tr><th>Thinking</th><td><code>enabled</code></td></tr>
                 <tr><th>Effort</th><td>重度编码 Agent 建议 <code>max</code>；Phantty 内置默认值是 <code>high</code></td></tr>
                 <tr><th>Stream</th><td><code>false</code></td></tr>
@@ -139,7 +140,7 @@
   "sk-your-deepseek-api-key",
   "User"
 )</code></pre>
-            <p class="section-foot">DeepSeek V4 模型提供 1M 上下文，并通过 <code>thinking</code> 与 <code>reasoning_effort</code> 支持思考模式。Phantty 会直接转发这些 OpenAI 兼容请求字段。</p>
+            <p class="section-foot">DeepSeek V4 模型提供 1M 上下文，并通过 <code>thinking</code> 与 <code>reasoning_effort</code> 支持思考模式。Chat Completions 仍是默认协议；Responses Profile 会使用 <code>instructions</code>、<code>input</code> 和 Responses 风格函数工具。</p>
           </div>
         </div>
       </div>

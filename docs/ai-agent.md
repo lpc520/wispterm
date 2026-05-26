@@ -8,11 +8,16 @@ model, API key, and agent mode before the first launch.
 Manage the default AI profile from Settings. Profile data is stored under
 `%APPDATA%\phantty\ai_profiles`, with fields hex encoded on disk.
 
-The first AI Chat implementation targets OpenAI-compatible chat completions.
+AI Chat can speak either OpenAI-compatible Chat Completions or the OpenAI
+Responses API. Set the profile Protocol field to `chat_completions` (default)
+or `responses`; Responses profiles should use a base URL such as
+`https://api.openai.com/v1` or a full endpoint ending in `/responses`.
+
 The built-in defaults are:
 
 - Base URL: `https://api.deepseek.com`
 - Model: `deepseek-v4-pro`
+- Protocol: `chat_completions`
 - System prompt: embedded from `src/prompt.md`
 - Request mode: DeepSeek thinking enabled, `reasoning_effort = high`, non-streaming
 

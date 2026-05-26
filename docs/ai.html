@@ -121,6 +121,7 @@
                 <tr><th>Base URL</th><td><code>https://api.deepseek.com</code></td></tr>
                 <tr><th>API key</th><td>Your DeepSeek key, or leave empty when <code>DEEPSEEK_API_KEY</code> is set</td></tr>
                 <tr><th>Model</th><td><code>deepseek-v4-pro</code></td></tr>
+                <tr><th>Protocol</th><td><code>chat_completions</code>; use <code>responses</code> for OpenAI Responses API providers</td></tr>
                 <tr><th>Thinking</th><td><code>enabled</code></td></tr>
                 <tr><th>Effort</th><td><code>max</code> for coding-heavy agent work; <code>high</code> is Phantty's built-in default</td></tr>
                 <tr><th>Stream</th><td><code>false</code></td></tr>
@@ -139,7 +140,7 @@
   "sk-your-deepseek-api-key",
   "User"
 )</code></pre>
-            <p class="section-foot">DeepSeek V4 models expose a 1M context length and support thinking mode through <code>thinking</code> plus <code>reasoning_effort</code>. Phantty forwards these OpenAI-compatible request fields directly.</p>
+            <p class="section-foot">DeepSeek V4 models expose a 1M context length and support thinking mode through <code>thinking</code> plus <code>reasoning_effort</code>. Chat Completions remains the default protocol; Responses profiles use <code>instructions</code>, <code>input</code>, and Responses-style function tools.</p>
           </div>
         </div>
       </div>
