@@ -12,6 +12,7 @@ const std = @import("std");
 const windows = std.os.windows;
 const platform_input = @import("../platform/input_events.zig");
 const platform_window = @import("../platform/window.zig");
+const render_diagnostics = @import("../render_diagnostics.zig");
 
 // ============================================================================
 // Win32 API types
@@ -1198,6 +1199,10 @@ pub const Window = struct {
         };
         // AdjustWindowRectEx to account for chrome
         adjustWindowRectEx(&rect, WS_OVERLAPPEDWINDOW, 0, WS_EX_APPWINDOW);
+        render_diagnostics.log(
+            "setSize client={}x{} outer={}x{} dpi={} zoomed={} fullscreen={}",
+            .{ w, h, rect.right - rect.left, rect.bottom - rect.top, self.dpi, IsZoomed(self.hwnd) != 0, self.is_fullscreen },
+        );
         _ = SetWindowPos(
             self.hwnd,
             null,
@@ -1210,6 +1215,10 @@ pub const Window = struct {
     }
 
     pub fn setOuterFrame(self: *Window, x: i32, y: i32, w: i32, h: i32, topmost: bool) void {
+        render_diagnostics.log(
+            "setOuterFrame outer=({},{} {}x{}) topmost={} dpi={} zoomed={} fullscreen={}",
+            .{ x, y, w, h, topmost, self.dpi, IsZoomed(self.hwnd) != 0, self.is_fullscreen },
+        );
         _ = SetWindowPos(
             self.hwnd,
             if (topmost) HWND_TOPMOST else HWND_NOTOPMOST,
@@ -1445,10 +1454,28 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 if (IsZoomed(hwnd) != 0 and !w.is_fullscreen) {
                     const params: *NCCALCSIZE_PARAMS = @ptrFromInt(@as(usize, @bitCast(lParam)));
                     const border = getResizeBorderThickness();
+                    const before = params.rgrc[0];
                     params.rgrc[0].top += border;
                     params.rgrc[0].left += border;
                     params.rgrc[0].right -= border;
                     params.rgrc[0].bottom -= border;
+                    const after = params.rgrc[0];
+                    render_diagnostics.log(
+                        "WM_NCCALCSIZE zoomed border={} dpi={} fullscreen={} before=({},{} {}x{}) after=({},{} {}x{})",
+                        .{
+                            border,
+                            w.dpi,
+                            w.is_fullscreen,
+                            before.left,
+                            before.top,
+                            before.right - before.left,
+                            before.bottom - before.top,
+                            after.left,
+                            after.top,
+                            after.right - after.left,
+                            after.bottom - after.top,
+                        },
+                    );
                 }
             }
             return 0;
@@ -1475,10 +1502,15 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             const width: i32 = @as(i16, @bitCast(@as(u16, @intCast(lParam & 0xFFFF))));
             const height: i32 = @as(i16, @bitCast(@as(u16, @intCast((lParam >> 16) & 0xFFFF))));
             const size_type: UINT = @intCast(wParam & 0xFFFF);
+            render_diagnostics.log(
+                "WM_SIZE raw={}x{} type={} dpi={} dpi_changed={} zoomed={} fullscreen={}",
+                .{ width, height, size_type, w.dpi, w.dpi_changed, IsZoomed(hwnd) != 0, w.is_fullscreen },
+            );
             if (size_type == SIZE_MINIMIZED or width <= 0 or height <= 0) {
                 w.is_minimized = true;
                 w.size_changed = false;
                 w.clearTransientInputQueues();
+                render_diagnostics.log("WM_SIZE minimized-or-empty raw={}x{} type={}", .{ width, height, size_type });
                 return 0;
             }
 
@@ -1486,6 +1518,23 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             w.width = width;
             w.height = height;
             w.size_changed = true;
+            {
+                var rect: RECT = undefined;
+                _ = GetClientRect(hwnd, &rect);
+                render_diagnostics.log(
+                    "WM_SIZE state client={}x{} stored={}x{} dpi={} dpi_changed={} zoomed={} fullscreen={}",
+                    .{
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        w.width,
+                        w.height,
+                        w.dpi,
+                        w.dpi_changed,
+                        IsZoomed(hwnd) != 0,
+                        w.is_fullscreen,
+                    },
+                );
+            }
             // Render a frame immediately so newly exposed pixels show
             // the terminal background instead of black. This runs inside
             // the Win32 modal resize loop where our main loop is blocked.
@@ -1494,10 +1543,26 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         },
         WM_DPICHANGED => {
             const new_dpi: u32 = @intCast(wParam & 0xFFFF);
+            const old_dpi = w.dpi;
+            const suggested: *const RECT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+            render_diagnostics.log(
+                "WM_DPICHANGED begin old_dpi={} new_dpi={} suggested=({},{} {}x{}) stored={}x{} zoomed={} fullscreen={}",
+                .{
+                    old_dpi,
+                    new_dpi,
+                    suggested.left,
+                    suggested.top,
+                    suggested.right - suggested.left,
+                    suggested.bottom - suggested.top,
+                    w.width,
+                    w.height,
+                    IsZoomed(hwnd) != 0,
+                    w.is_fullscreen,
+                },
+            );
             if (new_dpi != 0) w.dpi = new_dpi;
             w.dpi_changed = true;
 
-            const suggested: *const RECT = @ptrFromInt(@as(usize, @bitCast(lParam)));
             _ = SetWindowPos(
                 hwnd,
                 null,
@@ -1513,6 +1578,10 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             w.width = rect.right - rect.left;
             w.height = rect.bottom - rect.top;
             w.size_changed = true;
+            render_diagnostics.log(
+                "WM_DPICHANGED end dpi={} win_dpi={} client={}x{} stored={}x{} size_changed={}",
+                .{ w.dpi, GetDpiForWindow(hwnd), rect.right - rect.left, rect.bottom - rect.top, w.width, w.height, w.size_changed },
+            );
             return 0;
         },
         WM_ACTIVATE => {
@@ -1697,6 +1766,10 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                         return 0;
                     },
                     .maximize => {
+                        render_diagnostics.log(
+                            "caption-maximize clicked dpi={} zoomed={} fullscreen={} stored={}x{}",
+                            .{ w.dpi, IsZoomed(hwnd) != 0, w.is_fullscreen, w.width, w.height },
+                        );
                         if (w.is_fullscreen) {
                             w.key_events.push(.{ .key_code = VK_RETURN, .alt = false, .ctrl = true, .shift = false });
                         } else if (IsZoomed(hwnd) != 0) {
