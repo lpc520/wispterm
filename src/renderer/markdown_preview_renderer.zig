@@ -7,9 +7,9 @@ const markdown_preview = @import("../markdown_preview.zig");
 const ui_perf = @import("../ui_perf.zig");
 const titlebar = AppWindow.titlebar;
 const font = AppWindow.font;
-const gl_init = AppWindow.gpu.gl_init;
+const gpu = AppWindow.gpu;
+const ui_pipeline = @import("ui_pipeline.zig");
 const c = @cImport({
-    @cInclude("glad/gl.h");
     @cInclude("stb_image.h");
 });
 
@@ -24,7 +24,7 @@ const TABLE_MIN_COL_W: f32 = 64;
 const TABLE_MAX_COL_W: f32 = 220;
 const TABLE_FIT_MIN_COL_W: f32 = 28;
 
-threadlocal var g_image_texture: c.GLuint = 0;
+threadlocal var g_image_texture: gpu.c.GLuint = 0;
 threadlocal var g_image_width: c_int = 0;
 threadlocal var g_image_height: c_int = 0;
 threadlocal var g_image_generation: u64 = std.math.maxInt(u64);
@@ -55,11 +55,6 @@ pub fn render(window_width: f32, window_height: f32, titlebar_h: f32, right_offs
 
     const panel_x = window_width - right_offset - panel_w;
 
-    const gl = AppWindow.gpu.glTable();
-    gl.UseProgram.?(gl_init.shader_program);
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(gl_init.vao);
-
     const bg = AppWindow.g_theme.background;
     const fg = AppWindow.g_theme.foreground;
     const accent = AppWindow.g_theme.cursor_color;
@@ -80,8 +75,8 @@ pub fn render(window_width: f32, window_height: f32, titlebar_h: f32, right_offs
     };
     const edge_color = if (resize_hovered or AppWindow.input.g_markdown_preview_resize_dragging) blend(bg, accent, 0.38) else border;
 
-    gl_init.renderQuad(panel_x, 0, panel_w, side_h, panel_bg);
-    gl_init.renderQuad(panel_x, 0, if (resize_hovered or AppWindow.input.g_markdown_preview_resize_dragging) 2 else 1, side_h, edge_color);
+    ui_pipeline.fillQuad(panel_x, 0, panel_w, side_h, panel_bg);
+    ui_pipeline.fillQuad(panel_x, 0, if (resize_hovered or AppWindow.input.g_markdown_preview_resize_dragging) 2 else 1, side_h, edge_color);
 
     renderFooter(panel_x, panel_w, card_bg, border, muted, normal, accent);
 
@@ -97,8 +92,8 @@ fn renderFooter(
     normal: [3]f32,
     accent: [3]f32,
 ) void {
-    gl_init.renderQuad(panel_x, 0, panel_w, FOOTER_HEIGHT, card_bg);
-    gl_init.renderQuad(panel_x, FOOTER_HEIGHT - 1, panel_w, 1, border);
+    ui_pipeline.fillQuad(panel_x, 0, panel_w, FOOTER_HEIGHT, card_bg);
+    ui_pipeline.fillQuad(panel_x, FOOTER_HEIGHT - 1, panel_w, 1, border);
 
     const badge = switch (panel.g_kind) {
         .markdown => "MD",
@@ -544,9 +539,9 @@ fn renderTableHover(
 
     const popup_y = window_height - popup_top - popup_h;
     const popup_bg = blend(AppWindow.g_theme.background, code_bg, 0.82);
-    gl_init.renderQuad(popup_x - 1, popup_y - 1, popup_w + 2, popup_h + 2, border);
-    gl_init.renderQuad(popup_x, popup_y, popup_w, popup_h, popup_bg);
-    gl_init.renderQuad(popup_x, popup_y + popup_h - 2, popup_w, 2, strong);
+    ui_pipeline.fillQuad(popup_x - 1, popup_y - 1, popup_w + 2, popup_h + 2, border);
+    ui_pipeline.fillQuad(popup_x, popup_y, popup_w, popup_h, popup_bg);
+    ui_pipeline.fillQuad(popup_x, popup_y + popup_h - 2, popup_w, 2, strong);
 
     for (0..line_count) |idx| {
         const line_top = popup_top + 8 + @as(f32, @floatFromInt(idx)) * row_h;
@@ -605,24 +600,24 @@ fn renderImageDocument(
     const draw_top = body_top + (body_h - draw_h) / 2 + panel.imagePanY();
     const draw_y = window_height - draw_top - draw_h;
 
-    const gl = AppWindow.gpu.glTable();
-    const clip_x: c.GLint = @intFromFloat(@max(0, @floor(content_x)));
-    const clip_y: c.GLint = @intFromFloat(@max(0, @floor(window_height - body_top - body_h)));
-    const clip_w: c.GLsizei = @intFromFloat(@max(0, @ceil(content_w)));
-    const clip_h: c.GLsizei = @intFromFloat(@max(0, @ceil(body_h)));
+    const gl = gpu.glTable();
+    const clip_x: gpu.c.GLint = @intFromFloat(@max(0, @floor(content_x)));
+    const clip_y: gpu.c.GLint = @intFromFloat(@max(0, @floor(window_height - body_top - body_h)));
+    const clip_w: gpu.c.GLsizei = @intFromFloat(@max(0, @ceil(content_w)));
+    const clip_h: gpu.c.GLsizei = @intFromFloat(@max(0, @ceil(body_h)));
     if (clip_w <= 0 or clip_h <= 0) return;
 
-    const scissor_was_enabled = gl.IsEnabled.?(c.GL_SCISSOR_TEST) == c.GL_TRUE;
-    var previous_scissor: [4]c.GLint = undefined;
-    if (scissor_was_enabled) gl.GetIntegerv.?(c.GL_SCISSOR_BOX, &previous_scissor);
-    gl.Enable.?(c.GL_SCISSOR_TEST);
+    const scissor_was_enabled = gl.IsEnabled.?(gpu.c.GL_SCISSOR_TEST) == gpu.c.GL_TRUE;
+    var previous_scissor: [4]gpu.c.GLint = undefined;
+    if (scissor_was_enabled) gl.GetIntegerv.?(gpu.c.GL_SCISSOR_BOX, &previous_scissor);
+    gl.Enable.?(gpu.c.GL_SCISSOR_TEST);
     gl.Scissor.?(clip_x, clip_y, clip_w, clip_h);
-    gl_init.renderQuad(draw_x - 1, draw_y - 1, draw_w + 2, draw_h + 2, border);
+    ui_pipeline.fillQuad(draw_x - 1, draw_y - 1, draw_w + 2, draw_h + 2, border);
     drawImageTexture(draw_x, draw_y, draw_w, draw_h, window_height);
     if (scissor_was_enabled) {
         gl.Scissor.?(previous_scissor[0], previous_scissor[1], previous_scissor[2], previous_scissor[3]);
     } else {
-        gl.Disable.?(c.GL_SCISSOR_TEST);
+        gl.Disable.?(gpu.c.GL_SCISSOR_TEST);
     }
 }
 
@@ -659,17 +654,11 @@ fn ensureImageTexture() bool {
     if (data == null or w <= 0 or h <= 0) return false;
     defer c.stbi_image_free(data);
 
-    const gl = AppWindow.gpu.glTable();
-    gl.GenTextures.?(1, &g_image_texture);
+    const t = gpu.Texture.create();
+    g_image_texture = t.handle;
     if (g_image_texture == 0) return false;
 
-    gl.BindTexture.?(c.GL_TEXTURE_2D, g_image_texture);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
-    gl.PixelStorei.?(c.GL_UNPACK_ALIGNMENT, 1);
-    gl.TexImage2D.?(c.GL_TEXTURE_2D, 0, c.GL_RGBA8, w, h, 0, c.GL_RGBA, c.GL_UNSIGNED_BYTE, data);
+    gpu.Texture.fromHandle(g_image_texture).upload2D(w, h, @ptrCast(data), .{ .unpack_alignment = 1 });
 
     g_image_width = w;
     g_image_height = h;
@@ -678,13 +667,8 @@ fn ensureImageTexture() bool {
 }
 
 fn drawImageTexture(x: f32, y: f32, w: f32, h: f32, window_height: f32) void {
-    if (g_image_texture == 0 or gl_init.simple_color_shader == 0) return;
-    const gl = AppWindow.gpu.glTable();
-
-    gl.UseProgram.?(gl_init.simple_color_shader);
-    gl_init.setProjectionForProgram(gl_init.simple_color_shader, window_height);
-    gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.simple_color_shader, "opacity"), 1.0);
-    gl.Uniform1i.?(gl.GetUniformLocation.?(gl_init.simple_color_shader, "text"), 0);
+    _ = window_height;
+    if (g_image_texture == 0 or ui_pipeline.emoji.program == 0) return;
 
     const vertices = [6][4]f32{
         .{ x, y + h, 0, 0 },
@@ -695,20 +679,13 @@ fn drawImageTexture(x: f32, y: f32, w: f32, h: f32, window_height: f32) void {
         .{ x + w, y + h, 1, 0 },
     };
 
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindTexture.?(c.GL_TEXTURE_2D, g_image_texture);
-    gl.BindVertexArray.?(gl_init.vao);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
-    gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
-    gl_init.g_draw_call_count += 1;
+    ui_pipeline.drawTextureQuad(vertices, g_image_texture, 1.0);
 }
 
 fn unloadImageTexture() void {
     if (g_image_texture != 0) {
-        const gl = AppWindow.gpu.glTable();
-        gl.DeleteTextures.?(1, &g_image_texture);
+        var t = gpu.Texture.fromHandle(g_image_texture);
+        t.destroy();
         g_image_texture = 0;
     }
     g_image_width = 0;
@@ -744,7 +721,7 @@ fn renderMarkdownLine(
         const line_y_top = y_from_top + row_h * 0.15;
         if (line_y_top + row_h >= body_top and line_y_top <= body_top + body_h) {
             const gl_y = window_height - line_y_top - row_h * 0.75;
-            gl_init.renderQuad(x, gl_y, max_w, 1, border);
+            ui_pipeline.fillQuad(x, gl_y, max_w, 1, border);
             const lang = fenceLanguage(trimmed);
             if (lang.len > 0 and in_code.*) {
                 _ = titlebar.renderTextLimited(lang, x + 8, gl_y + 5, muted, max_w - 16);
@@ -808,7 +785,7 @@ fn renderMarkdownLine(
         const line_y_top = y_from_top + row_h * 0.5;
         if (line_y_top >= body_top and line_y_top <= body_top + body_h) {
             const gl_y = window_height - line_y_top - 1;
-            gl_init.renderQuad(x, gl_y, max_w, 1, muted);
+            ui_pipeline.fillQuad(x, gl_y, max_w, 1, muted);
         }
         return row_h;
     } else if (listBody(trimmed)) |list| {
@@ -835,7 +812,7 @@ fn renderMarkdownLine(
         const line_y_top = y_from_top + line_h - 4;
         if (line_y_top >= body_top and line_y_top <= body_top + body_h) {
             const gl_y = window_height - line_y_top - 1;
-            gl_init.renderQuad(x, gl_y, max_w, 1, blend(AppWindow.g_theme.background, accent, 0.32));
+            ui_pipeline.fillQuad(x, gl_y, max_w, 1, blend(AppWindow.g_theme.background, accent, 0.32));
         }
     }
 
@@ -894,7 +871,7 @@ fn renderTopQuad(
     const bottom = @min(y_from_top + h, body_top + body_h);
     if (bottom <= top) return;
     const gl_y = window_height - bottom;
-    gl_init.renderQuad(x, gl_y, w, bottom - top, color);
+    ui_pipeline.fillQuad(x, gl_y, w, bottom - top, color);
 }
 
 fn wrapEnd(text: []const u8, start: usize, max_chars: usize) usize {
