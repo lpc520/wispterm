@@ -3,18 +3,21 @@ const builtin = @import("builtin");
 
 pub const Backend = enum {
     windows,
+    posix,
     unsupported,
 };
 
 pub fn backendForOs(os_tag: std.Target.Os.Tag) Backend {
     return switch (os_tag) {
         .windows => .windows,
+        .linux, .macos, .freebsd, .netbsd, .openbsd, .dragonfly, .solaris, .illumos => .posix,
         else => .unsupported,
     };
 }
 
 const impl = switch (backendForOs(builtin.os.tag)) {
     .windows => @import("pty_windows.zig"),
+    .posix => @import("pty_posix.zig"),
     .unsupported => @import("pty_unsupported.zig"),
 };
 
@@ -70,6 +73,7 @@ test "platform pty owns pipe IO operations" {
 
 test "platform pty selects backend by target OS" {
     try std.testing.expectEqual(Backend.windows, backendForOs(.windows));
-    try std.testing.expectEqual(Backend.unsupported, backendForOs(.linux));
-    try std.testing.expectEqual(Backend.unsupported, backendForOs(.macos));
+    try std.testing.expectEqual(Backend.posix, backendForOs(.linux));
+    try std.testing.expectEqual(Backend.posix, backendForOs(.macos));
+    try std.testing.expectEqual(Backend.unsupported, backendForOs(.wasi));
 }
