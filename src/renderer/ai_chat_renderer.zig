@@ -21,12 +21,9 @@ const isMarkdownTableStart = md.isMarkdownTableStart;
 const tableBlockEnd = md.tableBlockEnd;
 
 const font = AppWindow.font;
-const gl_init = AppWindow.gpu.gl_init;
 const titlebar = AppWindow.titlebar;
-
-const c = @cImport({
-    @cInclude("glad/gl.h");
-});
+const ui_pipeline = @import("ui_pipeline.zig");
+const ai_chat_layout = @import("../ai_chat_layout.zig");
 
 pub const LINE_PAD_X: f32 = 18;
 const HEADER_H: f32 = 54;
@@ -121,13 +118,6 @@ pub fn render(
     left_panels_w: f32,
     right_panels_w: f32,
 ) void {
-    const gl = AppWindow.gpu.glTable();
-    gl.Enable.?(c.GL_BLEND);
-    gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-    gl.UseProgram.?(gl_init.shader_program);
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(gl_init.vao);
-
     const bg = AppWindow.g_theme.background;
     const fg = AppWindow.g_theme.foreground;
     const accent = AppWindow.g_theme.cursor_color;
@@ -141,14 +131,14 @@ pub fn render(
     const h = @round(@max(1.0, window_height - top));
     if (w <= 1 or h <= 1) return;
 
-    gl_init.renderQuad(x, 0, w, h, bg);
+    ui_pipeline.fillQuad(x, 0, w, h, bg);
 
     session.mutex.lock();
     defer session.mutex.unlock();
 
     const header_y = window_height - top - HEADER_H;
-    gl_init.renderQuadAlpha(x, header_y, w, HEADER_H, panel, 0.95);
-    gl_init.renderQuadAlpha(x, header_y, w, 1, line, 0.8);
+    ui_pipeline.fillQuadAlpha(x, header_y, w, HEADER_H, panel, 0.95);
+    ui_pipeline.fillQuadAlpha(x, header_y, w, 1, line, 0.8);
     _ = titlebar.renderTextLimited(session.model(), x + LINE_PAD_X, header_y + 10, mixColor(fg, accent, 0.12), w * 0.48);
 
     const permission = ai_chat.agentPermission();
@@ -160,7 +150,7 @@ pub fn render(
     const perm_text = permissionDisplayName(permission);
     const perm_color = if (permission == .full) mixColor(fg, accent, 0.25) else mixColor(bg, fg, 0.66);
     _ = titlebar.renderTextLimited(perm_text, chip_x, header_y + 10, perm_color, PERMISSION_CHIP_W);
-    gl_init.renderQuadAlpha(chip_x, header_y + 8, PERMISSION_CHIP_W - 8, 1, accent, if (permission == .full) 0.38 else 0.16);
+    ui_pipeline.fillQuadAlpha(chip_x, header_y + 8, PERMISSION_CHIP_W - 8, 1, accent, if (permission == .full) 0.38 else 0.16);
 
     if (session.request_inflight) {
         renderStopButton(stopButtonRect(x, w, top), window_height, session.request_stopping);
@@ -173,20 +163,14 @@ pub fn render(
     const layout = inputLayout(x, w, input_text);
     const input_h = layout.input_h;
     const input_y: f32 = 0;
-    gl_init.renderQuadAlpha(x, input_y, w, input_h, panel, 0.98);
-    gl_init.renderQuadAlpha(x, input_y + input_h - 1, w, 1, line, 0.72);
+    ui_pipeline.fillQuadAlpha(x, input_y, w, input_h, panel, 0.98);
+    ui_pipeline.fillQuadAlpha(x, input_y + input_h - 1, w, 1, line, 0.72);
 
     const field_bg = mixColor(bg, fg, 0.075);
-    gl_init.renderQuadAlpha(layout.field_x, layout.field_y, layout.field_w, layout.field_h, field_bg, 0.95);
-    gl_init.renderQuadAlpha(layout.field_x, layout.field_y, layout.field_w, 1, mixColor(bg, accent, 0.38), 0.6);
+    ui_pipeline.fillQuadAlpha(layout.field_x, layout.field_y, layout.field_w, layout.field_h, field_bg, 0.95);
+    ui_pipeline.fillQuadAlpha(layout.field_x, layout.field_y, layout.field_w, 1, mixColor(bg, accent, 0.38), 0.6);
 
-    gl.Enable.?(c.GL_SCISSOR_TEST);
-    gl.Scissor.?(
-        @intFromFloat(@round(layout.field_x)),
-        @intFromFloat(@round(layout.field_y)),
-        @intFromFloat(@round(layout.field_w)),
-        @intFromFloat(@round(layout.field_h)),
-    );
+    ui_pipeline.beginClip(.{ .x = layout.field_x, .y = layout.field_y, .w = layout.field_w, .h = layout.field_h });
 
     if (input_text.len == 0) {
         session.input_scroll_row = 0;
@@ -200,7 +184,7 @@ pub fn render(
         );
     } else {
         if (session.input_select_all) {
-            gl_init.renderQuadAlpha(
+            ui_pipeline.fillQuadAlpha(
                 layout.field_x + 8,
                 layout.field_y + 8,
                 @max(1.0, layout.field_w - 16),
@@ -248,11 +232,11 @@ pub fn render(
                 const field_top_px = window_height - layout.field_y - layout.field_h;
                 const cursor_top_px = field_top_px + composer_layout.Field.pad_top + @as(f32, @floatFromInt(row)) * lineHeight();
                 const cursor_y = window_height - cursor_top_px - font.g_titlebar_cell_height;
-                gl_init.renderQuad(cursor.x, cursor_y, 1, font.g_titlebar_cell_height, accent);
+                ui_pipeline.fillQuad(cursor.x, cursor_y, 1, font.g_titlebar_cell_height, accent);
             }
         }
     }
-    gl.Disable.?(c.GL_SCISSOR_TEST);
+    ui_pipeline.endClip();
 
     const approval = session.approvalView();
     const approval_h: f32 = if (approval != null) APPROVAL_H + APPROVAL_GAP else 0;
@@ -278,13 +262,7 @@ pub fn render(
     const max_scroll = @max(0.0, content_h - transcript_h);
     session.scroll_px = @min(session.scroll_px, max_scroll);
 
-    gl.Enable.?(c.GL_SCISSOR_TEST);
-    gl.Scissor.?(
-        @intFromFloat(@round(x)),
-        @intFromFloat(@round(transcript_bottom)),
-        @intFromFloat(@round(w)),
-        @intFromFloat(@round(transcript_h)),
-    );
+    ui_pipeline.beginClip(.{ .x = x, .y = transcript_bottom, .w = w, .h = transcript_h });
 
     const gravity_offset = @max(0.0, transcript_h - content_h);
     const palette = markdownPalette(bg, fg, accent);
@@ -329,7 +307,7 @@ pub fn render(
         cursor_top += BUBBLE_GAP;
     }
 
-    gl.Disable.?(c.GL_SCISSOR_TEST);
+    ui_pipeline.endClip();
 
     renderTranscriptScrollbar(session, x, w, transcript_top, transcript_h, content_h, window_height);
 
@@ -827,9 +805,9 @@ fn renderMessageBubble(
     else
         mixColor(bg, fg, 0.07);
 
-    gl_init.renderQuadAlpha(bubble.x, bubble_y, bubble.w, h, bubble_bg, 0.92);
-    gl_init.renderQuadAlpha(bubble.x, bubble_y + h - 1, bubble.w, 1, if (is_user) accent else mixColor(bg, fg, 0.18), 0.55);
-    if (selected) gl_init.renderQuadAlpha(bubble.x, bubble_y, 3, h, accent, 0.72);
+    ui_pipeline.fillQuadAlpha(bubble.x, bubble_y, bubble.w, h, bubble_bg, 0.92);
+    ui_pipeline.fillQuadAlpha(bubble.x, bubble_y + h - 1, bubble.w, 1, if (is_user) accent else mixColor(bg, fg, 0.18), 0.55);
+    if (selected) ui_pipeline.fillQuadAlpha(bubble.x, bubble_y, 3, h, accent, 0.72);
 
     const label_color = if (is_user) mixColor(fg, accent, 0.18) else mixColor(fg, accent, 0.05);
     _ = titlebar.renderTextLimited(role.label(), bubble.x + BUBBLE_PAD_X, bubble_y + h - BUBBLE_PAD_Y - font.g_titlebar_cell_height, label_color, bubble.w - BUBBLE_PAD_X * 2);
@@ -857,11 +835,11 @@ fn renderToolCard(msg: ai_chat.Message, x: f32, top_px: f32, w: f32, h: f32, win
     const header_bg = if (selected) mixColor(bg, accent, 0.28) else mixColor(bg, fg, 0.08);
     const header_y = y + h - header_h;
 
-    gl_init.renderQuadAlpha(x, y, w, h, card_bg, 0.94);
-    gl_init.renderQuadAlpha(x, y + h - 1, w, 1, mixColor(bg, fg, 0.20), 0.65);
-    gl_init.renderQuadAlpha(x, y + h - header_h, w, header_h, header_bg, 0.98);
-    gl_init.renderQuadAlpha(x, y, DETAIL_RULE_W, h, accent, if (selected) 0.78 else 0.52);
-    if (selected) gl_init.renderQuadAlpha(x, y, 1, h, accent, 0.90);
+    ui_pipeline.fillQuadAlpha(x, y, w, h, card_bg, 0.94);
+    ui_pipeline.fillQuadAlpha(x, y + h - 1, w, 1, mixColor(bg, fg, 0.20), 0.65);
+    ui_pipeline.fillQuadAlpha(x, y + h - header_h, w, header_h, header_bg, 0.98);
+    ui_pipeline.fillQuadAlpha(x, y, DETAIL_RULE_W, h, accent, if (selected) 0.78 else 0.52);
+    if (selected) ui_pipeline.fillQuadAlpha(x, y, 1, h, accent, 0.90);
 
     const arrow_x = x + DETAIL_PAD_X;
     const arrow_y = header_y + @round((header_h - font.g_titlebar_cell_height) / 2);
@@ -905,9 +883,9 @@ fn renderReasoningCard(text: []const u8, collapsed: bool, x: f32, top_px: f32, w
     const header_bg = if (selected) mixColor(bg, accent, 0.22) else mixColor(bg, fg, 0.06);
     const header_y = y + h - header_h;
 
-    gl_init.renderQuadAlpha(x, y, w, h, card_bg, 0.88);
-    gl_init.renderQuadAlpha(x, header_y, w, header_h, header_bg, 0.96);
-    gl_init.renderQuadAlpha(x, y, DETAIL_RULE_W, h, accent, if (selected) 0.76 else 0.34);
+    ui_pipeline.fillQuadAlpha(x, y, w, h, card_bg, 0.88);
+    ui_pipeline.fillQuadAlpha(x, header_y, w, header_h, header_bg, 0.96);
+    ui_pipeline.fillQuadAlpha(x, y, DETAIL_RULE_W, h, accent, if (selected) 0.76 else 0.34);
 
     const arrow_x = x + DETAIL_PAD_X;
     const arrow_y = header_y + @round((header_h - font.g_titlebar_cell_height) / 2);
@@ -953,7 +931,7 @@ fn renderUsageFooter(text: []const u8, x: f32, top_px: f32, w: f32, h: f32, wind
         window_height,
     );
     const y = window_height - top_px - h;
-    gl_init.renderQuadAlpha(body_x, y + h - 1, @max(1.0, @min(body_w, measureText(text))), 1, mixColor(bg, accent, 0.28), 0.34);
+    ui_pipeline.fillQuadAlpha(body_x, y + h - 1, @max(1.0, @min(body_w, measureText(text))), 1, mixColor(bg, accent, 0.28), 0.34);
 }
 
 fn renderInputScrollbar(layout: InputLayout, total_rows: usize, visible_rows_raw: usize, first_row: usize) void {
@@ -965,8 +943,8 @@ fn renderInputScrollbar(layout: InputLayout, total_rows: usize, visible_rows_raw
     const track_y = @round(layout.field_y + INPUT_SCROLLBAR_PAD);
     const thumb_y = track_y + (geo.track_h - geo.thumb_h) * (1.0 - @as(f32, @floatFromInt(@min(first_row, geo.max_scroll_row))) / @as(f32, @floatFromInt(geo.max_scroll_row)));
 
-    gl_init.renderQuadAlpha(geo.track_x, track_y, INPUT_SCROLLBAR_W, geo.track_h, mixColor(bg, fg, 0.24), 0.35);
-    gl_init.renderQuadAlpha(geo.track_x, @round(thumb_y), INPUT_SCROLLBAR_W, geo.thumb_h, mixColor(fg, accent, 0.18), 0.72);
+    ui_pipeline.fillQuadAlpha(geo.track_x, track_y, INPUT_SCROLLBAR_W, geo.track_h, mixColor(bg, fg, 0.24), 0.35);
+    ui_pipeline.fillQuadAlpha(geo.track_x, @round(thumb_y), INPUT_SCROLLBAR_W, geo.thumb_h, mixColor(fg, accent, 0.18), 0.72);
 }
 
 fn renderTranscriptScrollbar(
@@ -989,8 +967,8 @@ fn renderTranscriptScrollbar(
     const track_y = window_height - geo.track_top_px - geo.track_h;
     const thumb_y = window_height - geo.thumb_top_px - geo.thumb_h;
 
-    gl_init.renderQuadAlpha(geo.track_x, track_y, scrollbar_model.WIDTH, geo.track_h, mixColor(bg, fg, 0.18), opacity * 0.20);
-    gl_init.renderQuadAlpha(geo.track_x, thumb_y, scrollbar_model.WIDTH, geo.thumb_h, mixColor(bg, fg, 0.46), opacity * 0.62);
+    ui_pipeline.fillQuadAlpha(geo.track_x, track_y, scrollbar_model.WIDTH, geo.track_h, mixColor(bg, fg, 0.18), opacity * 0.20);
+    ui_pipeline.fillQuadAlpha(geo.track_x, thumb_y, scrollbar_model.WIDTH, geo.thumb_h, mixColor(bg, fg, 0.46), opacity * 0.62);
 }
 
 fn inputScrollbarGeometry(layout: InputLayout, window_height: f32, total_rows: usize, visible_rows_raw: usize, first_row_raw: usize) ?InputScrollbarGeometry {
@@ -1024,51 +1002,27 @@ fn sectionVisible(top_px: f32, h: f32, viewport_top: f32, viewport_bottom_top_px
 }
 
 fn bubbleGeometry(role: ai_chat.Role, x: f32, w: f32) BubbleGeometry {
-    const is_user = role == .user;
-    const bubble_w = @min(w, if (is_user) w * 0.82 else w);
-    return .{
-        .x = if (is_user) x + w - bubble_w else x,
-        .w = bubble_w,
-    };
+    return ai_chat_layout.bubbleGeometry(role == .user, x, w);
 }
 
-const BubbleGeometry = struct {
-    x: f32,
-    w: f32,
-};
+const BubbleGeometry = ai_chat_layout.BubbleGeometry;
 
-const Rect = struct {
-    x: f32,
-    top_px: f32,
-    w: f32,
-    h: f32,
-};
+const Rect = ai_chat_layout.Rect;
 
 const CopyButtonRect = Rect;
 
 const HeaderButtonRect = Rect;
 
 fn pointInRect(px: f32, py: f32, rect: Rect) bool {
-    return px >= rect.x and px <= rect.x + rect.w and py >= rect.top_px and py <= rect.top_px + rect.h;
+    return ai_chat_layout.pointInRect(px, py, rect);
 }
 
 fn detailHeaderRect(x: f32, top_px: f32, w: f32) Rect {
-    return .{
-        .x = x,
-        .top_px = top_px,
-        .w = w,
-        .h = detailHeaderHeight(),
-    };
+    return ai_chat_layout.detailHeaderRect(x, top_px, w, detailHeaderHeight());
 }
 
 fn detailCopyButtonRect(x: f32, top_px: f32, w: f32) CopyButtonRect {
-    const header_h = detailHeaderHeight();
-    return .{
-        .x = x + w - DETAIL_PAD_X - COPY_BUTTON_SIZE,
-        .top_px = top_px + @round((header_h - COPY_BUTTON_SIZE) / 2),
-        .w = COPY_BUTTON_SIZE,
-        .h = COPY_BUTTON_SIZE,
-    };
+    return ai_chat_layout.detailCopyButtonRect(x, top_px, w, detailHeaderHeight(), DETAIL_PAD_X, COPY_BUTTON_SIZE);
 }
 
 fn copyButtonRect(role: ai_chat.Role, x: f32, top_px: f32, w: f32) CopyButtonRect {
@@ -1077,25 +1031,15 @@ fn copyButtonRect(role: ai_chat.Role, x: f32, top_px: f32, w: f32) CopyButtonRec
 }
 
 fn copyButtonRectForBubble(bubble_x: f32, top_px: f32, bubble_w: f32) CopyButtonRect {
-    return .{
-        .x = bubble_x + bubble_w - BUBBLE_PAD_X - COPY_BUTTON_SIZE,
-        .top_px = top_px + COPY_BUTTON_PAD,
-        .w = COPY_BUTTON_SIZE,
-        .h = COPY_BUTTON_SIZE,
-    };
+    return ai_chat_layout.copyButtonRectForBubble(bubble_x, top_px, bubble_w, BUBBLE_PAD_X, COPY_BUTTON_SIZE, COPY_BUTTON_PAD);
 }
 
 fn permissionChipX(x: f32, w: f32) f32 {
-    return x + w - LINE_PAD_X - STATUS_SLOT_W - 12 - PERMISSION_CHIP_W;
+    return ai_chat_layout.permissionChipX(x, w, LINE_PAD_X, STATUS_SLOT_W, 12, PERMISSION_CHIP_W);
 }
 
 fn stopButtonRect(x: f32, w: f32, titlebar_offset: f32) HeaderButtonRect {
-    return .{
-        .x = x + w - LINE_PAD_X - STOP_BUTTON_W,
-        .top_px = titlebar_offset + @round((HEADER_H - STOP_BUTTON_H) / 2),
-        .w = STOP_BUTTON_W,
-        .h = STOP_BUTTON_H,
-    };
+    return ai_chat_layout.stopButtonRect(x, w, titlebar_offset, LINE_PAD_X, STOP_BUTTON_W, STOP_BUTTON_H, HEADER_H);
 }
 
 fn renderStopButton(rect: HeaderButtonRect, window_height: f32, stopping: bool) void {
@@ -1105,14 +1049,14 @@ fn renderStopButton(rect: HeaderButtonRect, window_height: f32, stopping: bool) 
     const y = window_height - rect.top_px - rect.h;
     const fill = if (stopping) mixColor(bg, fg, 0.12) else mixColor(bg, accent, 0.20);
     const stroke = if (stopping) mixColor(bg, fg, 0.42) else accent;
-    gl_init.renderQuadAlpha(rect.x, y, rect.w, rect.h, fill, 0.92);
-    gl_init.renderQuadAlpha(rect.x, y + rect.h - 1, rect.w, 1, stroke, 0.70);
-    gl_init.renderQuadAlpha(rect.x, y, rect.w, 1, mixColor(bg, fg, 0.20), 0.70);
+    ui_pipeline.fillQuadAlpha(rect.x, y, rect.w, rect.h, fill, 0.92);
+    ui_pipeline.fillQuadAlpha(rect.x, y + rect.h - 1, rect.w, 1, stroke, 0.70);
+    ui_pipeline.fillQuadAlpha(rect.x, y, rect.w, 1, mixColor(bg, fg, 0.20), 0.70);
 
     const icon_size: f32 = 8;
     const icon_x = rect.x + 12;
     const icon_y = y + @round((rect.h - icon_size) / 2);
-    gl_init.renderQuad(icon_x, icon_y, icon_size, icon_size, if (stopping) mixColor(bg, fg, 0.62) else mixColor(fg, accent, 0.10));
+    ui_pipeline.fillQuad(icon_x, icon_y, icon_size, icon_size, if (stopping) mixColor(bg, fg, 0.62) else mixColor(fg, accent, 0.10));
 
     const label = if (stopping) "Stopping" else "Esc Stop";
     _ = titlebar.renderTextLimited(label, rect.x + 28, y + @round((rect.h - font.g_titlebar_cell_height) / 2), if (stopping) mixColor(bg, fg, 0.72) else fg, rect.w - 34);
@@ -1141,18 +1085,18 @@ fn renderComposerSuggestions(session: *ai_chat.Session, layout: InputLayout) voi
     const border = mixColor(bg, accent, 0.36);
     const selected = @min(session.suggestion_selected, count - 1);
 
-    gl_init.renderQuadAlpha(popup_x, popup_y, popup_w, popup_h, popup_bg, 0.98);
-    gl_init.renderQuadAlpha(popup_x, popup_y + popup_h - 1, popup_w, 1, border, 0.78);
-    gl_init.renderQuadAlpha(popup_x, popup_y, popup_w, 1, mixColor(bg, fg, 0.20), 0.82);
-    gl_init.renderQuadAlpha(popup_x, popup_y, 1, popup_h, mixColor(bg, fg, 0.16), 0.72);
-    gl_init.renderQuadAlpha(popup_x + popup_w - 1, popup_y, 1, popup_h, mixColor(bg, fg, 0.16), 0.72);
+    ui_pipeline.fillQuadAlpha(popup_x, popup_y, popup_w, popup_h, popup_bg, 0.98);
+    ui_pipeline.fillQuadAlpha(popup_x, popup_y + popup_h - 1, popup_w, 1, border, 0.78);
+    ui_pipeline.fillQuadAlpha(popup_x, popup_y, popup_w, 1, mixColor(bg, fg, 0.20), 0.82);
+    ui_pipeline.fillQuadAlpha(popup_x, popup_y, 1, popup_h, mixColor(bg, fg, 0.16), 0.72);
+    ui_pipeline.fillQuadAlpha(popup_x + popup_w - 1, popup_y, 1, popup_h, mixColor(bg, fg, 0.16), 0.72);
 
     const top = popup_y + popup_h - SUGGESTION_PAD_Y;
     for (0..count) |i| {
         const row_y = top - @as(f32, @floatFromInt(i + 1)) * SUGGESTION_ROW_H;
         if (i == selected) {
-            gl_init.renderQuadAlpha(popup_x + 4, row_y + 2, popup_w - 8, SUGGESTION_ROW_H - 4, mixColor(bg, accent, 0.18), 0.90);
-            gl_init.renderQuadAlpha(popup_x + 4, row_y + 2, 3, SUGGESTION_ROW_H - 4, accent, 0.82);
+            ui_pipeline.fillQuadAlpha(popup_x + 4, row_y + 2, popup_w - 8, SUGGESTION_ROW_H - 4, mixColor(bg, accent, 0.18), 0.90);
+            ui_pipeline.fillQuadAlpha(popup_x + 4, row_y + 2, 3, SUGGESTION_ROW_H - 4, accent, 0.82);
         }
         const suggestion = ai_chat.composerSuggestionAtForInput(input_text, session.input_cursor, session.skill_suggestions, i) orelse continue;
         const text_y = row_y + @round((SUGGESTION_ROW_H - font.g_titlebar_cell_height) / 2);
@@ -1189,10 +1133,10 @@ fn renderApprovalCard(view: ai_chat.ApprovalView, x: f32, y: f32, w: f32, h: f32
     const fg = AppWindow.g_theme.foreground;
     const accent = AppWindow.g_theme.cursor_color;
     const card_bg = mixColor(bg, accent, 0.08);
-    gl_init.renderQuadAlpha(x, y, w, h, card_bg, 0.98);
-    gl_init.renderQuadAlpha(x, y + h - 1, w, 1, accent, 0.65);
-    gl_init.renderQuadAlpha(x, y, w, 1, mixColor(bg, fg, 0.18), 0.8);
-    gl_init.renderQuadAlpha(x, y, 4, h, accent, 0.85);
+    ui_pipeline.fillQuadAlpha(x, y, w, h, card_bg, 0.98);
+    ui_pipeline.fillQuadAlpha(x, y + h - 1, w, 1, accent, 0.65);
+    ui_pipeline.fillQuadAlpha(x, y, w, 1, mixColor(bg, fg, 0.18), 0.8);
+    ui_pipeline.fillQuadAlpha(x, y, 4, h, accent, 0.85);
 
     var title_buf: [256]u8 = undefined;
     const title = std.fmt.bufPrint(&title_buf, "Approve {s}?", .{view.tool}) catch "Approve tool?";
@@ -1202,7 +1146,7 @@ fn renderApprovalCard(view: ai_chat.ApprovalView, x: f32, y: f32, w: f32, h: f32
         _ = titlebar.renderTextLimited(view.reason, x + 16, y + h - 74, mixColor(bg, fg, 0.70), w - 32);
     }
     const command_bg = mixColor(bg, fg, 0.065);
-    gl_init.renderQuadAlpha(x + 12, y + 10, w - 24, 34, command_bg, 0.95);
+    ui_pipeline.fillQuadAlpha(x + 12, y + 10, w - 24, 34, command_bg, 0.95);
     _ = titlebar.renderTextLimited(view.command, x + 20, y + 18, fg, w - 40);
 }
 
@@ -1213,7 +1157,7 @@ fn renderCopyButton(rect: CopyButtonRect, window_height: f32, selected: bool) vo
     const button_bg = if (selected) mixColor(bg, accent, 0.24) else mixColor(bg, fg, 0.10);
     const icon = if (selected) mixColor(fg, accent, 0.14) else mixColor(bg, fg, 0.72);
     const y = window_height - rect.top_px - rect.h;
-    gl_init.renderQuadAlpha(rect.x, y, rect.w, rect.h, button_bg, 0.72);
+    ui_pipeline.fillQuadAlpha(rect.x, y, rect.w, rect.h, button_bg, 0.72);
 
     const t: f32 = 1.3;
     const back_x = rect.x + 7;
@@ -1227,10 +1171,10 @@ fn renderCopyButton(rect: CopyButtonRect, window_height: f32, selected: bool) vo
 }
 
 fn drawOutlineRect(x: f32, y: f32, w: f32, h: f32, t: f32, color: [3]f32) void {
-    gl_init.renderQuad(x, y + h - t, w, t, color);
-    gl_init.renderQuad(x, y, w, t, color);
-    gl_init.renderQuad(x, y, t, h, color);
-    gl_init.renderQuad(x + w - t, y, t, h, color);
+    ui_pipeline.fillQuad(x, y + h - t, w, t, color);
+    ui_pipeline.fillQuad(x, y, w, t, color);
+    ui_pipeline.fillQuad(x, y, t, h, color);
+    ui_pipeline.fillQuad(x + w - t, y, t, h, color);
 }
 
 const ToolSectionMeta = struct {
@@ -1613,11 +1557,11 @@ fn renderTableBlock(
     const total_h = tableBlockHeight(text, start, end);
     const table_y = window_height - top_px - total_h;
 
-    gl_init.renderQuadAlpha(x, table_y, table_w, total_h, palette.table_bg, 0.94);
-    gl_init.renderQuadAlpha(x, table_y, DETAIL_RULE_W, total_h, palette.table_border, 0.85);
-    gl_init.renderQuadAlpha(x, table_y, table_w, 1, palette.table_border, 0.85);
-    gl_init.renderQuadAlpha(x, table_y + total_h - 1, table_w, 1, palette.table_border, 0.85);
-    gl_init.renderQuadAlpha(x + table_w - 1, table_y, 1, total_h, palette.table_border, 0.85);
+    ui_pipeline.fillQuadAlpha(x, table_y, table_w, total_h, palette.table_bg, 0.94);
+    ui_pipeline.fillQuadAlpha(x, table_y, DETAIL_RULE_W, total_h, palette.table_border, 0.85);
+    ui_pipeline.fillQuadAlpha(x, table_y, table_w, 1, palette.table_border, 0.85);
+    ui_pipeline.fillQuadAlpha(x, table_y + total_h - 1, table_w, 1, palette.table_border, 0.85);
+    ui_pipeline.fillQuadAlpha(x + table_w - 1, table_y, 1, total_h, palette.table_border, 0.85);
 
     var cursor = start;
     var row_index: usize = 0;
@@ -1636,12 +1580,12 @@ fn renderTableBlock(
             palette.table_bg
         else
             palette.table_alt;
-        gl_init.renderQuadAlpha(x, row_y, table_w, row_h, row_bg, if (row_index == 0) 0.98 else 0.92);
-        gl_init.renderQuadAlpha(x, row_y, table_w, 1, palette.table_border, 0.85);
+        ui_pipeline.fillQuadAlpha(x, row_y, table_w, row_h, row_bg, if (row_index == 0) 0.98 else 0.92);
+        ui_pipeline.fillQuadAlpha(x, row_y, table_w, 1, palette.table_border, 0.85);
 
         var cell_x = x + 1;
         for (0..col_count) |col| {
-            if (col > 0) gl_init.renderQuadAlpha(cell_x - 1, row_y, 1, row_h, palette.table_border, 0.85);
+            if (col > 0) ui_pipeline.fillQuadAlpha(cell_x - 1, row_y, 1, row_h, palette.table_border, 0.85);
             const text_w = widths[col];
             const cell_w = text_w + TABLE_CELL_PAD_X * 2 + 1;
             var clean_buf: [256]u8 = undefined;
@@ -1813,7 +1757,7 @@ fn renderTextLine(text: []const u8, x: f32, top_px: f32, max_w: f32, color: [3]f
 
 fn renderTopQuad(x: f32, w: f32, window_height: f32, top_px: f32, h: f32, color: [3]f32) void {
     const y = window_height - top_px - h;
-    gl_init.renderQuadAlpha(x, y, w, h, color, 0.96);
+    ui_pipeline.fillQuadAlpha(x, y, w, h, color, 0.96);
 }
 
 const CodepointItem = struct {
