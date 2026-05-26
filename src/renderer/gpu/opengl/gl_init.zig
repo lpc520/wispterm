@@ -4,12 +4,14 @@
 //! buffers, and shared drawing helpers (renderQuad, setProjection).
 
 const std = @import("std");
-const AppWindow = @import("../AppWindow.zig");
-const Renderer = @import("Renderer.zig");
+const AppWindow = @import("../../../AppWindow.zig");
+const Renderer = @import("../../Renderer.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
 });
+
+const shaders = @import("shaders.zig");
 
 // ============================================================================
 // GL object handles
@@ -45,151 +47,11 @@ pub threadlocal var g_draw_call_count: u32 = 0;
 pub threadlocal var g_bg_opacity: f32 = 1.0;
 
 // ============================================================================
-// Shader sources
-// ============================================================================
-
-const vertex_shader_source: [*c]const u8 =
-    \\#version 330 core
-    \\layout (location = 0) in vec4 vertex;
-    \\out vec2 TexCoords;
-    \\uniform mat4 projection;
-    \\void main() {
-    \\    gl_Position = projection * vec4(vertex.xy, 0.0, 1.0);
-    \\    TexCoords = vertex.zw;
-    \\}
-;
-
-const fragment_shader_source: [*c]const u8 =
-    \\#version 330 core
-    \\in vec2 TexCoords;
-    \\out vec4 color;
-    \\uniform sampler2D text;
-    \\uniform vec3 textColor;
-    \\void main() {
-    \\    vec4 sampled = vec4(1.0, 1.0, 1.0, texture(text, TexCoords).r);
-    \\    color = vec4(textColor, 1.0) * sampled;
-    \\}
-;
-
-const bg_vertex_source: [*c]const u8 =
-    \\#version 330 core
-    \\// Unit quad (0,0)-(1,1)
-    \\layout (location = 0) in vec2 aQuad;
-    \\// Per-instance
-    \\layout (location = 1) in vec2 aGridPos;
-    \\layout (location = 2) in vec3 aColor;
-    \\uniform mat4 projection;
-    \\uniform vec2 cellSize;
-    \\uniform vec2 gridOffset;
-    \\uniform float windowHeight;
-    \\layout (location = 3) in float aAlpha;
-    \\flat out vec3 vColor;
-    \\flat out float vAlpha;
-    \\void main() {
-    \\    // Cell top-left in screen coords
-    \\    float cx = gridOffset.x + aGridPos.x * cellSize.x;
-    \\    float cy = windowHeight - gridOffset.y - (aGridPos.y + 1.0) * cellSize.y;
-    \\    vec2 pos = vec2(cx, cy) + aQuad * cellSize;
-    \\    gl_Position = projection * vec4(pos, 0.0, 1.0);
-    \\    vColor = aColor;
-    \\    vAlpha = aAlpha;
-    \\}
-;
-
-const bg_fragment_source: [*c]const u8 =
-    \\#version 330 core
-    \\flat in vec3 vColor;
-    \\flat in float vAlpha;
-    \\out vec4 fragColor;
-    \\void main() {
-    \\    // The pipeline blend func is (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA),
-    \\    // so per-cell alpha controls whether wallpaper shows through.
-    \\    fragColor = vec4(vColor, vAlpha);
-    \\}
-;
-
-const fg_vertex_source: [*c]const u8 =
-    \\#version 330 core
-    \\layout (location = 0) in vec2 aQuad;
-    \\// Per-instance
-    \\layout (location = 1) in vec2 aGridPos;
-    \\layout (location = 2) in vec4 aGlyphRect;  // x, y, w, h in pixels
-    \\layout (location = 3) in vec4 aUV;          // left, top, right, bottom
-    \\layout (location = 4) in vec3 aColor;
-    \\uniform mat4 projection;
-    \\uniform vec2 cellSize;
-    \\uniform vec2 gridOffset;
-    \\uniform float windowHeight;
-    \\out vec2 vTexCoord;
-    \\flat out vec3 vColor;
-    \\void main() {
-    \\    float cx = gridOffset.x + aGridPos.x * cellSize.x;
-    \\    float cy = windowHeight - gridOffset.y - (aGridPos.y + 1.0) * cellSize.y;
-    \\    // Glyph quad within cell
-    \\    vec2 pos = vec2(cx + aGlyphRect.x, cy + aGlyphRect.y) + aQuad * aGlyphRect.zw;
-    \\    gl_Position = projection * vec4(pos, 0.0, 1.0);
-    \\    // UV interpolation — V is flipped because atlas Y=0 is top but GL quad Y=0 is bottom
-    \\    vTexCoord = vec2(mix(aUV.x, aUV.z, aQuad.x), mix(aUV.w, aUV.y, aQuad.y));
-    \\    vColor = aColor;
-    \\}
-;
-
-const fg_fragment_source: [*c]const u8 =
-    \\#version 330 core
-    \\in vec2 vTexCoord;
-    \\flat in vec3 vColor;
-    \\uniform sampler2D atlas;
-    \\out vec4 fragColor;
-    \\void main() {
-    \\    float a = texture(atlas, vTexCoord).r;
-    \\    fragColor = vec4(vColor, 1.0) * vec4(1.0, 1.0, 1.0, a);
-    \\}
-;
-
-// Color emoji fragment shader — samples RGBA directly from the color atlas.
-// FreeType's color emoji bitmaps (CBDT/CBLC) use premultiplied alpha,
-// so we output them directly and use premultiplied blend mode (GL_ONE, GL_ONE_MINUS_SRC_ALPHA).
-const color_fg_fragment_source: [*c]const u8 =
-    \\#version 330 core
-    \\in vec2 vTexCoord;
-    \\flat in vec3 vColor;
-    \\uniform sampler2D atlas;
-    \\out vec4 fragColor;
-    \\void main() {
-    \\    fragColor = texture(atlas, vTexCoord);
-    \\}
-;
-
-// Simple (non-instanced) color emoji fragment shader for titlebar/overlay use.
-// Uses the same vertex layout as the text shader (vec4: xy=pos, zw=texcoord).
-const simple_color_fragment_source: [*c]const u8 =
-    \\#version 330 core
-    \\in vec2 TexCoords;
-    \\out vec4 color;
-    \\uniform sampler2D text;
-    \\uniform float opacity;
-    \\void main() {
-    \\    vec4 texColor = texture(text, TexCoords);
-    \\    color = texColor * opacity;
-    \\}
-;
-
-// Solid color overlay shader - outputs a solid color with alpha for true blending.
-const overlay_fragment_source: [*c]const u8 =
-    \\#version 330 core
-    \\out vec4 color;
-    \\uniform vec4 overlayColor;
-    \\void main() {
-    \\    color = overlayColor;
-    \\}
-;
-
-// ============================================================================
 // Shader compilation and linking
 // ============================================================================
 
 pub fn compileShader(shader_type: c.GLenum, source: [*c]const u8) ?c.GLuint {
-    const gl = AppWindow.gl;
+    const gl = AppWindow.gpu.glTable();
     const shader = gl.CreateShader.?(shader_type);
     if (shader == 0) {
         const gl_err = if (gl.GetError) |getErr| getErr() else 0;
@@ -219,7 +81,7 @@ pub fn compileShader(shader_type: c.GLenum, source: [*c]const u8) ?c.GLuint {
 }
 
 fn linkProgram(vs_src: [*c]const u8, fs_src: [*c]const u8) c.GLuint {
-    const gl = AppWindow.gl;
+    const gl = AppWindow.gpu.glTable();
     const vs = compileShader(c.GL_VERTEX_SHADER, vs_src) orelse return 0;
     defer gl.DeleteShader.?(vs);
     const fs = compileShader(c.GL_FRAGMENT_SHADER, fs_src) orelse return 0;
@@ -247,11 +109,11 @@ fn linkProgram(vs_src: [*c]const u8, fs_src: [*c]const u8) c.GLuint {
 // ============================================================================
 
 pub fn initShaders() bool {
-    const gl = AppWindow.gl;
-    const vertex_shader = compileShader(c.GL_VERTEX_SHADER, vertex_shader_source) orelse return false;
+    const gl = AppWindow.gpu.glTable();
+    const vertex_shader = compileShader(c.GL_VERTEX_SHADER, shaders.vertex_shader_source) orelse return false;
     defer gl.DeleteShader.?(vertex_shader);
 
-    const fragment_shader = compileShader(c.GL_FRAGMENT_SHADER, fragment_shader_source) orelse return false;
+    const fragment_shader = compileShader(c.GL_FRAGMENT_SHADER, shaders.fragment_shader_source) orelse return false;
     defer gl.DeleteShader.?(fragment_shader);
 
     shader_program = gl.CreateProgram.?();
@@ -280,7 +142,7 @@ pub fn initShaders() bool {
 }
 
 pub fn initBuffers() void {
-    const gl = AppWindow.gl;
+    const gl = AppWindow.gpu.glTable();
     gl.GenVertexArrays.?(1, &vao);
     gl.GenBuffers.?(1, &vbo);
     gl.BindVertexArray.?(vao);
@@ -293,7 +155,7 @@ pub fn initBuffers() void {
 }
 
 pub fn initInstancedBuffers() void {
-    const gl = AppWindow.gl;
+    const gl = AppWindow.gpu.glTable();
 
     // Shared unit quad (triangle strip: 4 verts)
     const quad_verts = [4][2]f32{
@@ -395,24 +257,24 @@ pub fn initInstancedBuffers() void {
     gl.BindVertexArray.?(0);
 
     // --- Compile instanced shaders ---
-    bg_shader = linkProgram(bg_vertex_source, bg_fragment_source);
-    fg_shader = linkProgram(fg_vertex_source, fg_fragment_source);
-    color_fg_shader = linkProgram(fg_vertex_source, color_fg_fragment_source);
+    bg_shader = linkProgram(shaders.bg_vertex_source, shaders.bg_fragment_source);
+    fg_shader = linkProgram(shaders.fg_vertex_source, shaders.fg_fragment_source);
+    color_fg_shader = linkProgram(shaders.fg_vertex_source, shaders.color_fg_fragment_source);
     if (bg_shader == 0) std.debug.print("BG instanced shader failed\n", .{});
     if (fg_shader == 0) std.debug.print("FG instanced shader failed\n", .{});
     if (color_fg_shader == 0) std.debug.print("Color FG instanced shader failed\n", .{});
 
     // Simple color shader for titlebar emoji (uses same vertex layout as text shader)
-    simple_color_shader = linkProgram(vertex_shader_source, simple_color_fragment_source);
+    simple_color_shader = linkProgram(shaders.vertex_shader_source, shaders.simple_color_fragment_source);
     if (simple_color_shader == 0) std.debug.print("Simple color shader failed\n", .{});
 
     // Overlay shader for unfocused split dimming (solid color with alpha)
-    overlay_shader = linkProgram(vertex_shader_source, overlay_fragment_source);
+    overlay_shader = linkProgram(shaders.vertex_shader_source, shaders.overlay_fragment_source);
     if (overlay_shader == 0) std.debug.print("Overlay shader failed\n", .{});
 }
 
 pub fn initSolidTexture() void {
-    const gl = &AppWindow.gl;
+    const gl = AppWindow.gpu.glTable();
     const white_pixel = [_]u8{255};
     gl.GenTextures.?(1, &solid_texture);
     gl.BindTexture.?(c.GL_TEXTURE_2D, solid_texture);
@@ -426,7 +288,7 @@ pub fn initSolidTexture() void {
 // ============================================================================
 
 pub fn deinitInstancedResources() void {
-    const gl = &AppWindow.gl;
+    const gl = AppWindow.gpu.glTable();
     if (bg_shader != 0) gl.DeleteProgram.?(bg_shader);
     if (fg_shader != 0) gl.DeleteProgram.?(fg_shader);
     if (color_fg_shader != 0) gl.DeleteProgram.?(color_fg_shader);
@@ -448,7 +310,7 @@ pub fn renderQuad(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
 }
 
 pub fn renderQuadAlpha(x: f32, y: f32, w: f32, h: f32, color: [3]f32, alpha: f32) void {
-    const gl = AppWindow.gl;
+    const gl = AppWindow.gpu.glTable();
     const vertices = [6][4]f32{
         .{ x, y + h, 0.0, 0.0 },
         .{ x, y, 0.0, 1.0 },
@@ -481,7 +343,7 @@ pub fn renderQuadAlpha(x: f32, y: f32, w: f32, h: f32, color: [3]f32, alpha: f32
 }
 
 pub fn setProjection(width: f32, height: f32) void {
-    const gl = AppWindow.gl;
+    const gl = AppWindow.gpu.glTable();
     const projection = [16]f32{
         2.0 / width, 0.0,          0.0,  0.0,
         0.0,         2.0 / height, 0.0,  0.0,
@@ -495,7 +357,7 @@ pub fn setProjection(width: f32, height: f32) void {
 
 /// Set the orthographic projection matrix on a specific shader program.
 pub fn setProjectionForProgram(program: c.GLuint, window_height: f32) void {
-    const gl = AppWindow.gl;
+    const gl = AppWindow.gpu.glTable();
     var viewport: [4]c.GLint = undefined;
     gl.GetIntegerv.?(c.GL_VIEWPORT, &viewport);
     const width: f32 = @floatFromInt(viewport[2]);
