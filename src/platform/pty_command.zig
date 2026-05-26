@@ -450,6 +450,9 @@ test "platform pty command copies UTF-8 cwd into native cwd buffers" {
 }
 
 test "platform pty command detects configured local shell flavor" {
+    // Asserts Windows shell-command parsing (powershell/pwsh/cmd); the default
+    // shell differs on other hosts, so this only applies to the Windows backend.
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
 
     const powershell = try allocCommandLineFromUtf8(allocator, "powershell.exe");

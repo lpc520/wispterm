@@ -372,8 +372,26 @@ pub fn build(b: *std.Build) void {
         .install_subdir = "plugins",
     });
 
-    const test_step = b.step("test", "Run unit tests");
+    const test_step = b.step("test", "Run fast native logic unit tests");
+    const test_full_step = b.step("test-full", "Run the complete suite (shared compile checks + app test binary)");
     const test_shared_step = b.step("test-shared", "Compile shared modules for the selected target");
+
+    // Fast inner loop: build and RUN platform-independent logic tests against
+    // the native host, independent of the heavy app/ghostty/xev binary.
+    const fast_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_fast.zig"),
+        .target = b.resolveTargetQuery(.{}),
+        .optimize = optimize,
+    });
+    const fast_test_options = b.addOptions();
+    fast_test_options.addOption([]const u8, "app_version", app_version);
+    fast_test_mod.addOptions("build_options", fast_test_options);
+    const fast_tests = b.addTest(.{
+        .name = "phantty-fast-test",
+        .root_module = fast_test_mod,
+    });
+    test_step.dependOn(&b.addRunArtifact(fast_tests).step);
+
     const shared_test_mod = b.createModule(.{
         .root_source_file = b.path("src/shared_compile_test.zig"),
         .target = target,
@@ -389,7 +407,7 @@ pub fn build(b: *std.Build) void {
     });
     test_shared_step.dependOn(&shared_tests.step);
     if (emit_shared_compile_checks) {
-        test_step.dependOn(&shared_tests.step);
+        test_full_step.dependOn(&shared_tests.step);
     }
 
     if (platform.supports_desktop_exe) {
@@ -428,7 +446,7 @@ pub fn build(b: *std.Build) void {
             target.result.os.tag,
             run_foreign_tests,
         );
-        test_step.dependOn(&run_tests.step);
+        test_full_step.dependOn(&run_tests.step);
     }
 }
 
