@@ -111,10 +111,6 @@ pub const Pty = struct {
             std.posix.close(self.cancel_pipe[1]);
         }
 
-        // Apply the initial window size to the master.
-        var os_ws = osWinsize(size);
-        _ = ioctl(master, T.IOCSWINSZ, &os_ws);
-
         return self;
     }
 
@@ -138,10 +134,7 @@ pub const Pty = struct {
     }
 
     pub fn setSize(self: *Pty, s: winsize) !void {
-        var os_ws = osWinsize(s);
-        if (ioctl(self.master, T.IOCSWINSZ, &os_ws) != 0) {
-            return error.SetSizeFailed;
-        }
+        try setWindowSize(self.master, self.slavePathSlice(), s);
         self.size = s;
     }
 
@@ -149,7 +142,7 @@ pub const Pty = struct {
         const pid = std.posix.fork() catch return error.ForkFailed;
         if (pid == 0) {
             // Child: set up the slave as the controlling tty, then exec.
-            childExec(self.master, self.slave_path[0..], self.cancel_pipe, command_line, cwd);
+            childExec(self.master, self.slave_path[0..], self.cancel_pipe, self.size, command_line, cwd);
             // childExec never returns; if it somehow does, bail out.
             _exit(127);
         }
@@ -214,8 +207,13 @@ pub const Pty = struct {
 
     pub fn outputAvailable(self: *Pty) ?usize {
         var n: c_int = 0;
-        if (ioctl(self.master, T.FIONREAD, &n) != 0) return null;
+        if (ioctl(self.master, T.FIONREAD, &n) != 0) {
+            return readableFallback(self.master);
+        }
         if (n < 0) return null;
+        if (n == 0 and builtin.os.tag == .macos) {
+            return readableFallback(self.master) orelse 0;
+        }
         return @intCast(n);
     }
 
@@ -223,7 +221,39 @@ pub const Pty = struct {
         const byte = [1]u8{0};
         _ = c.write(self.cancel_pipe[1], &byte, 1);
     }
+
+    fn slavePathSlice(self: *const Pty) []const u8 {
+        return std.mem.sliceTo(self.slave_path[0..], 0);
+    }
 };
+
+fn setWindowSize(master: fd_t, slave_path: []const u8, size: winsize) !void {
+    var os_ws = osWinsize(size);
+    if (builtin.os.tag == .macos) {
+        var path_buf: [SLAVE_PATH_MAX]u8 = undefined;
+        if (slave_path.len >= path_buf.len) return error.SetSizeFailed;
+        @memcpy(path_buf[0..slave_path.len], slave_path);
+        path_buf[slave_path.len] = 0;
+
+        const open_flags = std.posix.O{ .ACCMODE = .RDWR, .NOCTTY = true };
+        const slave = c.open(@ptrCast(&path_buf), open_flags, @as(c.mode_t, 0));
+        if (slave < 0) return error.SetSizeFailed;
+        defer _ = c.close(slave);
+        if (ioctl(slave, T.IOCSWINSZ, &os_ws) != 0) return error.SetSizeFailed;
+        return;
+    }
+
+    if (ioctl(master, T.IOCSWINSZ, &os_ws) != 0) return error.SetSizeFailed;
+}
+
+fn readableFallback(fd: fd_t) ?usize {
+    var fds = [1]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+    const ready = c.poll(&fds, 1, 0);
+    if (ready < 0) return null;
+    if (ready == 0) return 0;
+    if (fds[0].revents & std.posix.POLL.IN != 0) return 1;
+    return 0;
+}
 
 /// Runs entirely in the forked child. Sets up the controlling terminal on the
 /// slave device, wires stdio to it, optionally changes directory, then execs
@@ -233,6 +263,7 @@ fn childExec(
     master: fd_t,
     slave_path: []const u8,
     cancel_pipe: [2]fd_t,
+    size: winsize,
     command_line: pty_command.CommandLine,
     cwd: pty_command.Cwd,
 ) void {
@@ -251,6 +282,9 @@ fn childExec(
     const open_flags = std.posix.O{ .ACCMODE = .RDWR };
     const slave = c.open(@ptrCast(&path_buf), open_flags, @as(c.mode_t, 0));
     if (slave < 0) _exit(127);
+
+    var os_ws = osWinsize(size);
+    _ = ioctl(slave, T.IOCSWINSZ, &os_ws);
 
     // Claim the slave as the controlling terminal for this session.
     _ = ioctl(slave, T.IOCSCTTY, @as(c_int, 0));

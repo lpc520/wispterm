@@ -3,20 +3,23 @@ const builtin = @import("builtin");
 
 pub const Backend = enum {
     windows,
+    macos,
     posix,
     unsupported,
 };
 
-pub fn backendForOs(os_tag: std.Target.Os.Tag) Backend {
+pub fn backendForOs(comptime os_tag: std.Target.Os.Tag) Backend {
     return switch (os_tag) {
         .windows => .windows,
-        .linux, .freebsd, .macos => .posix,
+        .macos => .macos,
+        .linux, .freebsd => .posix,
         else => .unsupported,
     };
 }
 
 const impl = switch (backendForOs(builtin.os.tag)) {
     .windows => @import("open_url_windows.zig"),
+    .macos => @import("open_url_macos.zig"),
     .posix => @import("open_url_posix.zig"),
     .unsupported => @import("open_url_unsupported.zig"),
 };
@@ -57,5 +60,5 @@ test "platform open url API accepts a typed request without a native window hand
 test "platform open url selects backend by target OS" {
     try std.testing.expectEqual(Backend.windows, backendForOs(.windows));
     try std.testing.expectEqual(Backend.posix, backendForOs(.linux));
-    try std.testing.expectEqual(Backend.posix, backendForOs(.macos));
+    try std.testing.expectEqual(Backend.macos, backendForOs(.macos));
 }

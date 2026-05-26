@@ -3,18 +3,21 @@ const builtin = @import("builtin");
 
 pub const Backend = enum {
     windows,
+    macos,
     unsupported,
 };
 
-pub fn backendForOs(os_tag: std.Target.Os.Tag) Backend {
+pub fn backendForOs(comptime os_tag: std.Target.Os.Tag) Backend {
     return switch (os_tag) {
         .windows => .windows,
+        .macos => .macos,
         else => .unsupported,
     };
 }
 
 const impl = switch (backendForOs(builtin.os.tag)) {
     .windows => @import("font_backend_windows.zig"),
+    .macos => @import("font_backend_macos.zig"),
     .unsupported => @import("font_backend_unsupported.zig"),
 };
 
@@ -101,5 +104,5 @@ test "platform font backend owns titlebar icon glyph mapping" {
 test "platform font backend selects backend by target OS" {
     try std.testing.expectEqual(Backend.windows, backendForOs(.windows));
     try std.testing.expectEqual(Backend.unsupported, backendForOs(.linux));
-    try std.testing.expectEqual(Backend.unsupported, backendForOs(.macos));
+    try std.testing.expectEqual(Backend.macos, backendForOs(.macos));
 }

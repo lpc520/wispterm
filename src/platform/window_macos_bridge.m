@@ -1,0 +1,1014 @@
+#import <AppKit/AppKit.h>
+#import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct PhanttyMacRect {
+    int32_t left;
+    int32_t top;
+    int32_t right;
+    int32_t bottom;
+} PhanttyMacRect;
+
+typedef struct PhanttyMacKeyEvent {
+    uintptr_t key_code;
+    bool ctrl;
+    bool shift;
+    bool alt;
+} PhanttyMacKeyEvent;
+
+typedef struct PhanttyMacCharEvent {
+    uint32_t codepoint;
+    bool ctrl;
+    bool shift;
+    bool alt;
+} PhanttyMacCharEvent;
+
+typedef struct PhanttyMacMouseButtonEvent {
+    uint8_t button;
+    uint8_t action;
+    int32_t x;
+    int32_t y;
+    bool ctrl;
+    bool shift;
+    bool alt;
+} PhanttyMacMouseButtonEvent;
+
+typedef struct PhanttyMacMouseMoveEvent {
+    int32_t x;
+    int32_t y;
+    bool ctrl;
+    bool shift;
+    bool alt;
+} PhanttyMacMouseMoveEvent;
+
+typedef struct PhanttyMacMouseWheelEvent {
+    int16_t delta;
+    int32_t xpos;
+    int32_t ypos;
+    bool ctrl;
+    bool shift;
+    bool alt;
+} PhanttyMacMouseWheelEvent;
+
+typedef struct PhanttyMacMessageEvent {
+    uint32_t message;
+    uintptr_t wparam;
+    intptr_t lparam;
+} PhanttyMacMessageEvent;
+
+typedef struct PhanttyMacFileDropEvent {
+    char path[4096];
+    size_t path_len;
+    int32_t x;
+    int32_t y;
+} PhanttyMacFileDropEvent;
+
+typedef struct PhanttyMacWindowState PhanttyMacWindowState;
+
+@interface PhanttyMacContentView : NSView <NSTextInputClient>
+@property(nonatomic, assign) PhanttyMacWindowState *state;
+@end
+
+@interface PhanttyMacWindowDelegate : NSObject <NSWindowDelegate>
+@property(nonatomic, assign) PhanttyMacWindowState *state;
+@end
+
+struct PhanttyMacWindowState {
+    NSWindow *window;
+    PhanttyMacContentView *view;
+    CAMetalLayer *layer;
+    PhanttyMacWindowDelegate *delegate;
+    bool close_requested;
+    int32_t ime_caret_x;
+    int32_t ime_caret_y;
+    int32_t ime_caret_height;
+    char ime_preedit[1024];
+    size_t ime_preedit_len;
+    PhanttyMacKeyEvent key_events[64];
+    size_t key_head;
+    size_t key_count;
+    PhanttyMacCharEvent char_events[64];
+    size_t char_head;
+    size_t char_count;
+    PhanttyMacMouseButtonEvent mouse_button_events[32];
+    size_t mouse_button_head;
+    size_t mouse_button_count;
+    PhanttyMacMouseMoveEvent mouse_move_events[64];
+    size_t mouse_move_head;
+    size_t mouse_move_count;
+    PhanttyMacMouseWheelEvent mouse_wheel_events[16];
+    size_t mouse_wheel_head;
+    size_t mouse_wheel_count;
+    PhanttyMacMessageEvent message_events[32];
+    size_t message_head;
+    size_t message_count;
+    PhanttyMacFileDropEvent file_drop_events[16];
+    size_t file_drop_head;
+    size_t file_drop_count;
+};
+
+@implementation PhanttyMacWindowDelegate
+- (BOOL)windowShouldClose:(id)sender {
+    (void)sender;
+    if (self.state != NULL) self.state->close_requested = true;
+    return YES;
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+    (void)notification;
+    if (self.state != NULL) self.state->close_requested = true;
+}
+@end
+
+static void phantty_macos_app_ensure(void) {
+    @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [app finishLaunching];
+    }
+}
+
+static NSString *phantty_macos_title_from_utf16(const uint16_t *title) {
+    if (title == NULL) return [@"Phantty" retain];
+
+    NSUInteger len = 0;
+    while (title[len] != 0) len += 1;
+    if (len == 0) return [@"Phantty" retain];
+
+    return [[NSString alloc] initWithCharacters:(const unichar *)title length:len];
+}
+
+static PhanttyMacWindowState *phantty_macos_state(void *handle) {
+    return (PhanttyMacWindowState *)handle;
+}
+
+static int32_t phantty_macos_round_double(double value) {
+    return (int32_t)(value + (value >= 0 ? 0.5 : -0.5));
+}
+
+static void phantty_macos_rect_from_nsrect(NSRect rect, PhanttyMacRect *out) {
+    if (out == NULL) return;
+    out->left = phantty_macos_round_double(NSMinX(rect));
+    out->top = phantty_macos_round_double(NSMinY(rect));
+    out->right = phantty_macos_round_double(NSMaxX(rect));
+    out->bottom = phantty_macos_round_double(NSMaxY(rect));
+}
+
+static double phantty_macos_scale(PhanttyMacWindowState *state) {
+    if (state == NULL || state->window == nil) return 1.0;
+    double scale = [state->window backingScaleFactor];
+    return scale > 0.0 ? scale : 1.0;
+}
+
+static void phantty_macos_push_key_event(PhanttyMacWindowState *state, PhanttyMacKeyEvent event) {
+    if (state == NULL) return;
+    const size_t capacity = sizeof(state->key_events) / sizeof(state->key_events[0]);
+    const size_t idx = (state->key_head + state->key_count) % capacity;
+    state->key_events[idx] = event;
+    if (state->key_count < capacity) {
+        state->key_count += 1;
+    } else {
+        state->key_head = (state->key_head + 1) % capacity;
+    }
+}
+
+static bool phantty_macos_pop_key_event(PhanttyMacWindowState *state, PhanttyMacKeyEvent *out) {
+    if (state == NULL || out == NULL || state->key_count == 0) return false;
+    const size_t capacity = sizeof(state->key_events) / sizeof(state->key_events[0]);
+    *out = state->key_events[state->key_head];
+    state->key_head = (state->key_head + 1) % capacity;
+    state->key_count -= 1;
+    return true;
+}
+
+static void phantty_macos_push_char_event(PhanttyMacWindowState *state, PhanttyMacCharEvent event) {
+    if (state == NULL) return;
+    const size_t capacity = sizeof(state->char_events) / sizeof(state->char_events[0]);
+    const size_t idx = (state->char_head + state->char_count) % capacity;
+    state->char_events[idx] = event;
+    if (state->char_count < capacity) {
+        state->char_count += 1;
+    } else {
+        state->char_head = (state->char_head + 1) % capacity;
+    }
+}
+
+static bool phantty_macos_pop_char_event(PhanttyMacWindowState *state, PhanttyMacCharEvent *out) {
+    if (state == NULL || out == NULL || state->char_count == 0) return false;
+    const size_t capacity = sizeof(state->char_events) / sizeof(state->char_events[0]);
+    *out = state->char_events[state->char_head];
+    state->char_head = (state->char_head + 1) % capacity;
+    state->char_count -= 1;
+    return true;
+}
+
+static void phantty_macos_push_mouse_button_event(PhanttyMacWindowState *state, PhanttyMacMouseButtonEvent event) {
+    if (state == NULL) return;
+    const size_t capacity = sizeof(state->mouse_button_events) / sizeof(state->mouse_button_events[0]);
+    const size_t idx = (state->mouse_button_head + state->mouse_button_count) % capacity;
+    state->mouse_button_events[idx] = event;
+    if (state->mouse_button_count < capacity) {
+        state->mouse_button_count += 1;
+    } else {
+        state->mouse_button_head = (state->mouse_button_head + 1) % capacity;
+    }
+}
+
+static bool phantty_macos_pop_mouse_button_event(PhanttyMacWindowState *state, PhanttyMacMouseButtonEvent *out) {
+    if (state == NULL || out == NULL || state->mouse_button_count == 0) return false;
+    const size_t capacity = sizeof(state->mouse_button_events) / sizeof(state->mouse_button_events[0]);
+    *out = state->mouse_button_events[state->mouse_button_head];
+    state->mouse_button_head = (state->mouse_button_head + 1) % capacity;
+    state->mouse_button_count -= 1;
+    return true;
+}
+
+static void phantty_macos_push_mouse_move_event(PhanttyMacWindowState *state, PhanttyMacMouseMoveEvent event) {
+    if (state == NULL) return;
+    const size_t capacity = sizeof(state->mouse_move_events) / sizeof(state->mouse_move_events[0]);
+    const size_t idx = (state->mouse_move_head + state->mouse_move_count) % capacity;
+    state->mouse_move_events[idx] = event;
+    if (state->mouse_move_count < capacity) {
+        state->mouse_move_count += 1;
+    } else {
+        state->mouse_move_head = (state->mouse_move_head + 1) % capacity;
+    }
+}
+
+static bool phantty_macos_pop_mouse_move_event(PhanttyMacWindowState *state, PhanttyMacMouseMoveEvent *out) {
+    if (state == NULL || out == NULL || state->mouse_move_count == 0) return false;
+    const size_t capacity = sizeof(state->mouse_move_events) / sizeof(state->mouse_move_events[0]);
+    *out = state->mouse_move_events[state->mouse_move_head];
+    state->mouse_move_head = (state->mouse_move_head + 1) % capacity;
+    state->mouse_move_count -= 1;
+    return true;
+}
+
+static void phantty_macos_push_mouse_wheel_event(PhanttyMacWindowState *state, PhanttyMacMouseWheelEvent event) {
+    if (state == NULL) return;
+    const size_t capacity = sizeof(state->mouse_wheel_events) / sizeof(state->mouse_wheel_events[0]);
+    const size_t idx = (state->mouse_wheel_head + state->mouse_wheel_count) % capacity;
+    state->mouse_wheel_events[idx] = event;
+    if (state->mouse_wheel_count < capacity) {
+        state->mouse_wheel_count += 1;
+    } else {
+        state->mouse_wheel_head = (state->mouse_wheel_head + 1) % capacity;
+    }
+}
+
+static bool phantty_macos_pop_mouse_wheel_event(PhanttyMacWindowState *state, PhanttyMacMouseWheelEvent *out) {
+    if (state == NULL || out == NULL || state->mouse_wheel_count == 0) return false;
+    const size_t capacity = sizeof(state->mouse_wheel_events) / sizeof(state->mouse_wheel_events[0]);
+    *out = state->mouse_wheel_events[state->mouse_wheel_head];
+    state->mouse_wheel_head = (state->mouse_wheel_head + 1) % capacity;
+    state->mouse_wheel_count -= 1;
+    return true;
+}
+
+static void phantty_macos_push_message_event(PhanttyMacWindowState *state, PhanttyMacMessageEvent event) {
+    if (state == NULL) return;
+    const size_t capacity = sizeof(state->message_events) / sizeof(state->message_events[0]);
+    const size_t idx = (state->message_head + state->message_count) % capacity;
+    state->message_events[idx] = event;
+    if (state->message_count < capacity) {
+        state->message_count += 1;
+    } else {
+        state->message_head = (state->message_head + 1) % capacity;
+    }
+}
+
+static bool phantty_macos_pop_message_event(PhanttyMacWindowState *state, PhanttyMacMessageEvent *out) {
+    if (state == NULL || out == NULL || state->message_count == 0) return false;
+    const size_t capacity = sizeof(state->message_events) / sizeof(state->message_events[0]);
+    *out = state->message_events[state->message_head];
+    state->message_head = (state->message_head + 1) % capacity;
+    state->message_count -= 1;
+    return true;
+}
+
+static bool phantty_macos_push_file_drop_event(PhanttyMacWindowState *state, const char *path, int32_t x, int32_t y) {
+    if (state == NULL || path == NULL) return false;
+    const size_t capacity = sizeof(state->file_drop_events) / sizeof(state->file_drop_events[0]);
+    const size_t idx = (state->file_drop_head + state->file_drop_count) % capacity;
+    PhanttyMacFileDropEvent *event = &state->file_drop_events[idx];
+    const size_t source_len = strlen(path);
+    const size_t len = source_len < sizeof(event->path) ? source_len : sizeof(event->path) - 1;
+    memcpy(event->path, path, len);
+    event->path[len] = 0;
+    event->path_len = len;
+    event->x = x;
+    event->y = y;
+    if (state->file_drop_count < capacity) {
+        state->file_drop_count += 1;
+    } else {
+        state->file_drop_head = (state->file_drop_head + 1) % capacity;
+    }
+    return true;
+}
+
+static bool phantty_macos_pop_file_drop_event(PhanttyMacWindowState *state, PhanttyMacFileDropEvent *out) {
+    if (state == NULL || out == NULL || state->file_drop_count == 0) return false;
+    const size_t capacity = sizeof(state->file_drop_events) / sizeof(state->file_drop_events[0]);
+    *out = state->file_drop_events[state->file_drop_head];
+    state->file_drop_head = (state->file_drop_head + 1) % capacity;
+    state->file_drop_count -= 1;
+    return true;
+}
+
+static void phantty_macos_mods(NSEventModifierFlags flags, bool *ctrl, bool *shift, bool *alt) {
+    if (ctrl != NULL) *ctrl = (flags & NSEventModifierFlagControl) != 0;
+    if (shift != NULL) *shift = (flags & NSEventModifierFlagShift) != 0;
+    if (alt != NULL) *alt = (flags & NSEventModifierFlagOption) != 0;
+}
+
+static PhanttyMacKeyEvent phantty_macos_key_event(uintptr_t key_code, NSEventModifierFlags flags) {
+    return (PhanttyMacKeyEvent){
+        .key_code = key_code,
+        .ctrl = (flags & NSEventModifierFlagControl) != 0,
+        .shift = (flags & NSEventModifierFlagShift) != 0,
+        .alt = (flags & NSEventModifierFlagOption) != 0,
+    };
+}
+
+static PhanttyMacCharEvent phantty_macos_char_event(uint32_t codepoint, NSEventModifierFlags flags) {
+    PhanttyMacCharEvent event = { .codepoint = codepoint, .ctrl = false, .shift = false, .alt = false };
+    phantty_macos_mods(flags, &event.ctrl, &event.shift, &event.alt);
+    return event;
+}
+
+static uintptr_t phantty_macos_map_key_code(unsigned short key_code, NSString *characters) {
+    switch (key_code) {
+        case 36: return 0x0D;  // Return
+        case 48: return 0x09;  // Tab
+        case 51: return 0x08;  // Backspace
+        case 53: return 0x1B;  // Escape
+        case 115: return 0x24; // Home
+        case 116: return 0x21; // Page Up
+        case 117: return 0x2E; // Forward Delete
+        case 119: return 0x23; // End
+        case 121: return 0x22; // Page Down
+        case 123: return 0x25; // Left
+        case 124: return 0x27; // Right
+        case 125: return 0x28; // Down
+        case 126: return 0x26; // Up
+        default: break;
+    }
+
+    if (characters.length > 0) {
+        unichar ch = [characters characterAtIndex:0];
+        if (ch >= 'a' && ch <= 'z') return (uintptr_t)(ch - ('a' - 'A'));
+        return (uintptr_t)ch;
+    }
+    return (uintptr_t)key_code;
+}
+
+static void phantty_macos_handle_event(PhanttyMacWindowState *state, NSEvent *event) {
+    if (state == NULL || event == nil) return;
+    switch (event.type) {
+        case NSEventTypeKeyDown: {
+            NSString *characters = event.charactersIgnoringModifiers ?: event.characters;
+            uintptr_t key_code = phantty_macos_map_key_code(event.keyCode, characters);
+            phantty_macos_push_key_event(state, phantty_macos_key_event(key_code, event.modifierFlags));
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+static int16_t phantty_macos_scroll_delta(NSEvent *event) {
+    double value = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY * 10.0 : event.scrollingDeltaY * 120.0;
+    if (value > 32767.0) value = 32767.0;
+    if (value < -32768.0) value = -32768.0;
+    if (value > -1.0 && value < 1.0 && event.scrollingDeltaY != 0.0) {
+        value = event.scrollingDeltaY > 0.0 ? 1.0 : -1.0;
+    }
+    return (int16_t)phantty_macos_round_double(value);
+}
+
+static NSPoint phantty_macos_event_point(PhanttyMacWindowState *state, NSEvent *event) {
+    if (state == NULL || state->view == nil || event == nil) return NSMakePoint(0, 0);
+    NSPoint point = [state->view convertPoint:event.locationInWindow fromView:nil];
+    NSRect bounds = [state->view bounds];
+    const double scale = phantty_macos_scale(state);
+    return NSMakePoint(point.x * scale, (bounds.size.height - point.y) * scale);
+}
+
+static void phantty_macos_push_string(PhanttyMacWindowState *state, id string_or_attributed, NSEventModifierFlags flags) {
+    if (state == NULL || string_or_attributed == nil) return;
+    NSString *string = [string_or_attributed isKindOfClass:[NSAttributedString class]]
+        ? [(NSAttributedString *)string_or_attributed string]
+        : (NSString *)string_or_attributed;
+    for (NSUInteger i = 0; i < string.length; i++) {
+        unichar first = [string characterAtIndex:i];
+        uint32_t codepoint = first;
+        if (first >= 0xD800 && first <= 0xDBFF && i + 1 < string.length) {
+            unichar second = [string characterAtIndex:i + 1];
+            if (second >= 0xDC00 && second <= 0xDFFF) {
+                i += 1;
+                codepoint = 0x10000 + (((uint32_t)first - 0xD800) << 10) + ((uint32_t)second - 0xDC00);
+            }
+        }
+        if (codepoint >= 32) {
+            phantty_macos_push_char_event(state, phantty_macos_char_event(codepoint, flags));
+        }
+    }
+}
+
+static void phantty_macos_set_preedit(PhanttyMacWindowState *state, id string_or_attributed) {
+    if (state == NULL) return;
+    NSString *string = nil;
+    if (string_or_attributed != nil) {
+        string = [string_or_attributed isKindOfClass:[NSAttributedString class]]
+            ? [(NSAttributedString *)string_or_attributed string]
+            : (NSString *)string_or_attributed;
+    }
+    if (string == nil || string.length == 0) {
+        state->ime_preedit_len = 0;
+        state->ime_preedit[0] = 0;
+        return;
+    }
+
+    NSData *data = [string dataUsingEncoding:NSUTF8StringEncoding];
+    NSUInteger len = data.length < sizeof(state->ime_preedit) ? data.length : sizeof(state->ime_preedit) - 1;
+    memcpy(state->ime_preedit, data.bytes, len);
+    state->ime_preedit[len] = 0;
+    state->ime_preedit_len = len;
+}
+
+@implementation PhanttyMacContentView
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    [self.window makeFirstResponder:self];
+}
+
+- (void)keyDown:(NSEvent *)event {
+    if (self.state != NULL) {
+        NSString *characters = event.charactersIgnoringModifiers != nil ? event.charactersIgnoringModifiers : event.characters;
+        uintptr_t key_code = phantty_macos_map_key_code(event.keyCode, characters);
+        phantty_macos_push_key_event(self.state, phantty_macos_key_event(key_code, event.modifierFlags));
+    }
+    [self interpretKeyEvents:@[event]];
+}
+
+- (void)insertText:(id)string replacementRange:(NSRange)replacementRange {
+    (void)replacementRange;
+    phantty_macos_push_string(self.state, string, 0);
+    phantty_macos_set_preedit(self.state, nil);
+}
+
+- (void)setMarkedText:(id)string selectedRange:(NSRange)selectedRange replacementRange:(NSRange)replacementRange {
+    (void)selectedRange;
+    (void)replacementRange;
+    phantty_macos_set_preedit(self.state, string);
+}
+
+- (void)unmarkText {
+    phantty_macos_set_preedit(self.state, nil);
+}
+
+- (BOOL)hasMarkedText {
+    return self.state != NULL && self.state->ime_preedit_len > 0;
+}
+
+- (NSRange)markedRange {
+    if (![self hasMarkedText]) return NSMakeRange(NSNotFound, 0);
+    return NSMakeRange(0, self.state->ime_preedit_len);
+}
+
+- (NSRange)selectedRange {
+    return NSMakeRange(NSNotFound, 0);
+}
+
+- (NSArray<NSAttributedStringKey> *)validAttributesForMarkedText {
+    return @[];
+}
+
+- (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
+    if (actualRange != NULL) *actualRange = NSMakeRange(NSNotFound, 0);
+    (void)range;
+    return nil;
+}
+
+- (NSUInteger)characterIndexForPoint:(NSPoint)point {
+    (void)point;
+    return 0;
+}
+
+- (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
+    if (actualRange != NULL) *actualRange = range;
+    PhanttyMacWindowState *state = self.state;
+    if (state == NULL || self.window == nil) return NSZeroRect;
+    const double scale = phantty_macos_scale(state);
+    NSRect bounds = [self bounds];
+    NSRect local = NSMakeRect(
+        state->ime_caret_x / scale,
+        bounds.size.height - ((state->ime_caret_y + state->ime_caret_height) / scale),
+        1,
+        state->ime_caret_height / scale
+    );
+    NSRect window_rect = [self convertRect:local toView:nil];
+    return [self.window convertRectToScreen:window_rect];
+}
+
+- (PhanttyMacMouseButtonEvent)mouseButtonEvent:(NSEvent *)event button:(uint8_t)button action:(uint8_t)action {
+    NSPoint point = phantty_macos_event_point(self.state, event);
+    PhanttyMacMouseButtonEvent out = {
+        .button = button,
+        .action = action,
+        .x = phantty_macos_round_double(point.x),
+        .y = phantty_macos_round_double(point.y),
+        .ctrl = false,
+        .shift = false,
+        .alt = false,
+    };
+    phantty_macos_mods(event.modifierFlags, &out.ctrl, &out.shift, &out.alt);
+    return out;
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    phantty_macos_push_mouse_button_event(self.state, [self mouseButtonEvent:event button:0 action:(event.clickCount > 1 ? 2 : 0)]);
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    phantty_macos_push_mouse_button_event(self.state, [self mouseButtonEvent:event button:0 action:1]);
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    phantty_macos_push_mouse_button_event(self.state, [self mouseButtonEvent:event button:1 action:(event.clickCount > 1 ? 2 : 0)]);
+}
+
+- (void)rightMouseUp:(NSEvent *)event {
+    phantty_macos_push_mouse_button_event(self.state, [self mouseButtonEvent:event button:1 action:1]);
+}
+
+- (void)otherMouseDown:(NSEvent *)event {
+    phantty_macos_push_mouse_button_event(self.state, [self mouseButtonEvent:event button:2 action:(event.clickCount > 1 ? 2 : 0)]);
+}
+
+- (void)otherMouseUp:(NSEvent *)event {
+    phantty_macos_push_mouse_button_event(self.state, [self mouseButtonEvent:event button:2 action:1]);
+}
+
+- (void)pushMouseMove:(NSEvent *)event {
+    NSPoint point = phantty_macos_event_point(self.state, event);
+    PhanttyMacMouseMoveEvent out = {
+        .x = phantty_macos_round_double(point.x),
+        .y = phantty_macos_round_double(point.y),
+        .ctrl = false,
+        .shift = false,
+        .alt = false,
+    };
+    phantty_macos_mods(event.modifierFlags, &out.ctrl, &out.shift, &out.alt);
+    phantty_macos_push_mouse_move_event(self.state, out);
+}
+
+- (void)mouseMoved:(NSEvent *)event { [self pushMouseMove:event]; }
+- (void)mouseDragged:(NSEvent *)event { [self pushMouseMove:event]; }
+- (void)rightMouseDragged:(NSEvent *)event { [self pushMouseMove:event]; }
+- (void)otherMouseDragged:(NSEvent *)event { [self pushMouseMove:event]; }
+
+- (void)scrollWheel:(NSEvent *)event {
+    NSPoint point = phantty_macos_event_point(self.state, event);
+    PhanttyMacMouseWheelEvent out = {
+        .delta = phantty_macos_scroll_delta(event),
+        .xpos = phantty_macos_round_double(point.x),
+        .ypos = phantty_macos_round_double(point.y),
+        .ctrl = false,
+        .shift = false,
+        .alt = false,
+    };
+    phantty_macos_mods(event.modifierFlags, &out.ctrl, &out.shift, &out.alt);
+    phantty_macos_push_mouse_wheel_event(self.state, out);
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    (void)sender;
+    return NSDragOperationCopy;
+}
+
+- (BOOL)prepareForDragOperation:(id<NSDraggingInfo>)sender {
+    (void)sender;
+    return YES;
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    if (self.state == NULL) return NO;
+
+    NSPasteboard *pasteboard = [sender draggingPasteboard];
+    NSDictionary *options = @{ NSPasteboardURLReadingFileURLsOnlyKey: @YES };
+    NSArray<NSURL *> *urls = [pasteboard readObjectsForClasses:@[[NSURL class]] options:options];
+    if (urls.count == 0) return NO;
+
+    NSPoint point = [self convertPoint:[sender draggingLocation] fromView:nil];
+    NSRect bounds = [self bounds];
+    const double scale = phantty_macos_scale(self.state);
+    int32_t x = phantty_macos_round_double(point.x * scale);
+    int32_t y = phantty_macos_round_double((bounds.size.height - point.y) * scale);
+    BOOL accepted = NO;
+    for (NSURL *url in urls) {
+        if (!url.isFileURL) continue;
+        const char *path = url.path.UTF8String;
+        if (phantty_macos_push_file_drop_event(self.state, path, x, y)) accepted = YES;
+    }
+    return accepted;
+}
+@end
+
+static void phantty_macos_sync_layer(PhanttyMacWindowState *state) {
+    if (state == NULL || state->view == nil || state->layer == nil) return;
+    const double scale = phantty_macos_scale(state);
+    NSRect bounds = [state->view bounds];
+    state->layer.contentsScale = scale;
+    state->layer.drawableSize = CGSizeMake(bounds.size.width * scale, bounds.size.height * scale);
+    state->layer.frame = bounds;
+}
+
+void *phantty_macos_window_create(
+    int32_t width,
+    int32_t height,
+    const uint16_t *title,
+    int32_t x,
+    int32_t y,
+    bool has_position,
+    bool maximize
+) {
+    @autoreleasepool {
+        phantty_macos_app_ensure();
+
+        PhanttyMacWindowState *state = calloc(1, sizeof(PhanttyMacWindowState));
+        if (state == NULL) return NULL;
+
+        NSRect content_rect = NSMakeRect(
+            has_position ? (CGFloat)x : 120.0,
+            has_position ? (CGFloat)y : 120.0,
+            width > 0 ? (CGFloat)width : 800.0,
+            height > 0 ? (CGFloat)height : 600.0
+        );
+        NSUInteger style =
+            NSWindowStyleMaskTitled |
+            NSWindowStyleMaskClosable |
+            NSWindowStyleMaskMiniaturizable |
+            NSWindowStyleMaskResizable;
+        NSWindow *window = [[NSWindow alloc]
+            initWithContentRect:content_rect
+                      styleMask:style
+                        backing:NSBackingStoreBuffered
+                          defer:NO];
+        if (window == nil) {
+            free(state);
+            return NULL;
+        }
+
+        NSString *window_title = phantty_macos_title_from_utf16(title);
+        [window setTitle:window_title];
+        [window_title release];
+        [window setReleasedWhenClosed:NO];
+
+        PhanttyMacContentView *view = [[PhanttyMacContentView alloc] initWithFrame:NSMakeRect(0, 0, content_rect.size.width, content_rect.size.height)];
+        CAMetalLayer *layer = [CAMetalLayer layer];
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        layer.device = device;
+        layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        layer.framebufferOnly = YES;
+        if (device != nil) [device release];
+        [view setWantsLayer:YES];
+        [view setLayer:layer];
+        [view registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
+        [window setContentView:view];
+
+        PhanttyMacWindowDelegate *delegate = [[PhanttyMacWindowDelegate alloc] init];
+        delegate.state = state;
+        [window setDelegate:delegate];
+
+        state->window = window;
+        state->view = view;
+        state->layer = [layer retain];
+        state->delegate = delegate;
+        state->close_requested = false;
+        state->ime_caret_x = 0;
+        state->ime_caret_y = 0;
+        state->ime_caret_height = 16;
+        state->ime_preedit[0] = 0;
+        state->ime_preedit_len = 0;
+        view.state = state;
+        phantty_macos_sync_layer(state);
+
+        [window setAcceptsMouseMovedEvents:YES];
+        [window makeKeyAndOrderFront:nil];
+        [window makeFirstResponder:view];
+        [NSApp activateIgnoringOtherApps:NO];
+        if (maximize) [window zoom:nil];
+        return state;
+    }
+}
+
+void phantty_macos_window_destroy(void *handle) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        if (state == NULL) return;
+        [state->window setDelegate:nil];
+        [state->window orderOut:nil];
+        [state->layer release];
+        [state->view release];
+        [state->delegate release];
+        [state->window close];
+        [state->window release];
+        free(state);
+    }
+}
+
+void phantty_macos_window_poll(void *handle) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        if (state == NULL) return;
+        for (;;) {
+            NSEvent *event = [NSApp
+                nextEventMatchingMask:NSEventMaskAny
+                             untilDate:[NSDate distantPast]
+                                inMode:NSDefaultRunLoopMode
+                               dequeue:YES];
+            if (event == nil) break;
+            [NSApp sendEvent:event];
+        }
+        [NSApp updateWindows];
+        phantty_macos_sync_layer(state);
+    }
+}
+
+bool phantty_macos_window_close_requested(void *handle) {
+    PhanttyMacWindowState *state = phantty_macos_state(handle);
+    return state != NULL && state->close_requested;
+}
+
+bool phantty_macos_window_pop_key_event(void *handle, PhanttyMacKeyEvent *out) {
+    return phantty_macos_pop_key_event(phantty_macos_state(handle), out);
+}
+
+bool phantty_macos_window_pop_char_event(void *handle, PhanttyMacCharEvent *out) {
+    return phantty_macos_pop_char_event(phantty_macos_state(handle), out);
+}
+
+bool phantty_macos_window_pop_mouse_button_event(void *handle, PhanttyMacMouseButtonEvent *out) {
+    return phantty_macos_pop_mouse_button_event(phantty_macos_state(handle), out);
+}
+
+bool phantty_macos_window_pop_mouse_move_event(void *handle, PhanttyMacMouseMoveEvent *out) {
+    return phantty_macos_pop_mouse_move_event(phantty_macos_state(handle), out);
+}
+
+bool phantty_macos_window_pop_mouse_wheel_event(void *handle, PhanttyMacMouseWheelEvent *out) {
+    return phantty_macos_pop_mouse_wheel_event(phantty_macos_state(handle), out);
+}
+
+bool phantty_macos_window_pop_message_event(void *handle, PhanttyMacMessageEvent *out) {
+    return phantty_macos_pop_message_event(phantty_macos_state(handle), out);
+}
+
+bool phantty_macos_window_pop_file_drop_event(void *handle, PhanttyMacFileDropEvent *out) {
+    return phantty_macos_pop_file_drop_event(phantty_macos_state(handle), out);
+}
+
+size_t phantty_macos_window_copy_ime_preedit(void *handle, char *out, size_t out_len) {
+    PhanttyMacWindowState *state = phantty_macos_state(handle);
+    if (state == NULL || out == NULL || out_len == 0) return 0;
+    size_t len = state->ime_preedit_len < out_len ? state->ime_preedit_len : out_len;
+    memcpy(out, state->ime_preedit, len);
+    return len;
+}
+
+void phantty_macos_window_set_ime_caret(void *handle, int32_t x, int32_t y, int32_t height) {
+    PhanttyMacWindowState *state = phantty_macos_state(handle);
+    if (state == NULL) return;
+    state->ime_caret_x = x > 0 ? x : 0;
+    state->ime_caret_y = y > 0 ? y : 0;
+    state->ime_caret_height = height > 1 ? height : 1;
+}
+
+void phantty_macos_window_test_push_key(void *handle, uintptr_t key_code, bool ctrl, bool shift, bool alt) {
+    phantty_macos_push_key_event(phantty_macos_state(handle), (PhanttyMacKeyEvent){
+        .key_code = key_code,
+        .ctrl = ctrl,
+        .shift = shift,
+        .alt = alt,
+    });
+}
+
+void phantty_macos_window_test_push_char(void *handle, uint32_t codepoint, bool ctrl, bool shift, bool alt) {
+    phantty_macos_push_char_event(phantty_macos_state(handle), (PhanttyMacCharEvent){
+        .codepoint = codepoint,
+        .ctrl = ctrl,
+        .shift = shift,
+        .alt = alt,
+    });
+}
+
+void phantty_macos_window_test_push_mouse_button(
+    void *handle,
+    uint8_t button,
+    uint8_t action,
+    int32_t x,
+    int32_t y,
+    bool ctrl,
+    bool shift,
+    bool alt
+) {
+    phantty_macos_push_mouse_button_event(phantty_macos_state(handle), (PhanttyMacMouseButtonEvent){
+        .button = button,
+        .action = action,
+        .x = x,
+        .y = y,
+        .ctrl = ctrl,
+        .shift = shift,
+        .alt = alt,
+    });
+}
+
+void phantty_macos_window_test_push_mouse_move(void *handle, int32_t x, int32_t y, bool ctrl, bool shift, bool alt) {
+    phantty_macos_push_mouse_move_event(phantty_macos_state(handle), (PhanttyMacMouseMoveEvent){
+        .x = x,
+        .y = y,
+        .ctrl = ctrl,
+        .shift = shift,
+        .alt = alt,
+    });
+}
+
+void phantty_macos_window_test_push_mouse_wheel(
+    void *handle,
+    int16_t delta,
+    int32_t xpos,
+    int32_t ypos,
+    bool ctrl,
+    bool shift,
+    bool alt
+) {
+    phantty_macos_push_mouse_wheel_event(phantty_macos_state(handle), (PhanttyMacMouseWheelEvent){
+        .delta = delta,
+        .xpos = xpos,
+        .ypos = ypos,
+        .ctrl = ctrl,
+        .shift = shift,
+        .alt = alt,
+    });
+}
+
+void phantty_macos_window_test_set_ime_preedit(void *handle, const char *text) {
+    PhanttyMacWindowState *state = phantty_macos_state(handle);
+    if (state == NULL || text == NULL) return;
+    phantty_macos_set_preedit(state, [NSString stringWithUTF8String:text]);
+}
+
+void phantty_macos_window_test_push_file_drop(void *handle, const char *path, int32_t x, int32_t y) {
+    phantty_macos_push_file_drop_event(phantty_macos_state(handle), path, x, y);
+}
+
+void phantty_macos_window_request_close(void *handle) {
+    PhanttyMacWindowState *state = phantty_macos_state(handle);
+    if (state == NULL) return;
+    state->close_requested = true;
+}
+
+bool phantty_macos_window_post_message(void *handle, uint32_t message, uintptr_t wparam, intptr_t lparam) {
+    PhanttyMacWindowState *state = phantty_macos_state(handle);
+    if (state == NULL) return false;
+    phantty_macos_push_message_event(state, (PhanttyMacMessageEvent){
+        .message = message,
+        .wparam = wparam,
+        .lparam = lparam,
+    });
+    return true;
+}
+
+void phantty_macos_window_get_framebuffer_size(void *handle, int32_t *width, int32_t *height, uint32_t *dpi) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        if (state == NULL || state->view == nil) {
+            if (width != NULL) *width = 0;
+            if (height != NULL) *height = 0;
+            if (dpi != NULL) *dpi = 96;
+            return;
+        }
+        phantty_macos_sync_layer(state);
+        const double scale = phantty_macos_scale(state);
+        NSRect bounds = [state->view bounds];
+        if (width != NULL) *width = phantty_macos_round_double(bounds.size.width * scale);
+        if (height != NULL) *height = phantty_macos_round_double(bounds.size.height * scale);
+        if (dpi != NULL) *dpi = (uint32_t)phantty_macos_round_double(96.0 * scale);
+    }
+}
+
+void phantty_macos_window_set_content_size(void *handle, int32_t width, int32_t height) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        if (state == NULL || state->window == nil) return;
+        [state->window setContentSize:NSMakeSize(width > 0 ? width : 1, height > 0 ? height : 1)];
+        phantty_macos_sync_layer(state);
+    }
+}
+
+void *phantty_macos_window_metal_layer(void *handle) {
+    PhanttyMacWindowState *state = phantty_macos_state(handle);
+    if (state == NULL) return NULL;
+    return state->layer;
+}
+
+bool phantty_macos_window_get_frame(void *handle, PhanttyMacRect *out) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        if (state == NULL || state->window == nil || out == NULL) return false;
+        phantty_macos_rect_from_nsrect([state->window frame], out);
+        return true;
+    }
+}
+
+bool phantty_macos_window_get_content_frame(void *handle, PhanttyMacRect *out) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        if (state == NULL || state->view == nil || out == NULL) return false;
+        phantty_macos_rect_from_nsrect([state->view bounds], out);
+        return true;
+    }
+}
+
+uint32_t phantty_macos_window_dpi(void *handle) {
+    const double scale = phantty_macos_scale(phantty_macos_state(handle));
+    return (uint32_t)phantty_macos_round_double(96.0 * scale);
+}
+
+void phantty_macos_window_show(void *handle) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        if (state == NULL || state->window == nil) return;
+        [state->window makeKeyAndOrderFront:nil];
+    }
+}
+
+void phantty_macos_window_hide(void *handle) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        if (state == NULL || state->window == nil) return;
+        [state->window orderOut:nil];
+    }
+}
+
+void phantty_macos_window_make_key(void *handle) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        if (state == NULL || state->window == nil) return;
+        [state->window makeKeyWindow];
+        [NSApp activateIgnoringOtherApps:NO];
+    }
+}
+
+bool phantty_macos_window_is_zoomed(void *handle) {
+    PhanttyMacWindowState *state = phantty_macos_state(handle);
+    return state != NULL && state->window != nil && [state->window isZoomed];
+}
+
+void phantty_macos_window_zoom(void *handle) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        if (state == NULL || state->window == nil) return;
+        [state->window zoom:nil];
+    }
+}
+
+bool phantty_macos_window_set_frame(void *handle, int32_t x, int32_t y, int32_t width, int32_t height) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        if (state == NULL || state->window == nil) return false;
+        NSRect frame = NSMakeRect(x, y, width > 0 ? width : 1, height > 0 ? height : 1);
+        [state->window setFrame:frame display:YES];
+        phantty_macos_sync_layer(state);
+        return true;
+    }
+}
+
+bool phantty_macos_window_nearest_monitor_frame(void *handle, PhanttyMacRect *out) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        NSScreen *screen = (state != NULL && state->window != nil) ? [state->window screen] : [NSScreen mainScreen];
+        if (screen == nil || out == NULL) return false;
+        phantty_macos_rect_from_nsrect([screen frame], out);
+        return true;
+    }
+}
+
+bool phantty_macos_window_nearest_monitor_work_area(void *handle, PhanttyMacRect *out) {
+    @autoreleasepool {
+        PhanttyMacWindowState *state = phantty_macos_state(handle);
+        NSScreen *screen = (state != NULL && state->window != nil) ? [state->window screen] : [NSScreen mainScreen];
+        if (screen == nil || out == NULL) return false;
+        phantty_macos_rect_from_nsrect([screen visibleFrame], out);
+        return true;
+    }
+}

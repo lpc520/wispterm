@@ -3,18 +3,21 @@ const builtin = @import("builtin");
 
 pub const Backend = enum {
     windows,
+    macos,
     unsupported,
 };
 
-pub fn backendForOs(os_tag: std.Target.Os.Tag) Backend {
+pub fn backendForOs(comptime os_tag: std.Target.Os.Tag) Backend {
     return switch (os_tag) {
         .windows => .windows,
+        .macos => .macos,
         else => .unsupported,
     };
 }
 
 const impl = switch (backendForOs(builtin.os.tag)) {
     .windows => @import("window_windows.zig"),
+    .macos => @import("window_macos.zig"),
     .unsupported => @import("window_unsupported.zig"),
 };
 
@@ -84,7 +87,10 @@ test "platform window exposes native handle helpers" {
     try std.testing.expectEqual(@as(usize, 1), maximized_info.params.len);
     try std.testing.expect(maximized_info.params[0].type.? == NativeHandle);
     try std.testing.expect(maximized_info.return_type.? == bool);
-    try std.testing.expectEqual(@as(i32, 34), titlebar_height);
+    try std.testing.expectEqual(switch (backendForOs(builtin.os.tag)) {
+        .macos => @as(i32, 0),
+        else => @as(i32, 34),
+    }, titlebar_height);
 }
 
 test "platform window exposes native frame and style helpers" {
@@ -98,11 +104,19 @@ test "platform window exposes native frame and style helpers" {
 }
 
 test "platform window exposes caption button visual style" {
-    try std.testing.expectEqual(@as(f32, 46), caption_button_visual_style.width);
-    try std.testing.expectEqual(@as(f32, 0.75), caption_button_visual_style.icon_color[0]);
-    try std.testing.expectEqual(@as(f32, 1.0), caption_button_visual_style.hover_icon_color[0]);
-    try std.testing.expect(caption_button_visual_style.hover_background_delta > 0);
-    try std.testing.expect(caption_button_visual_style.close_hover_background[0] > caption_button_visual_style.close_hover_background[1]);
+    switch (backendForOs(builtin.os.tag)) {
+        .macos => {
+            try std.testing.expectEqual(@as(f32, 0), caption_button_visual_style.width);
+            try std.testing.expectEqual(@as(f32, 0), caption_button_visual_style.hover_background_delta);
+        },
+        else => {
+            try std.testing.expectEqual(@as(f32, 46), caption_button_visual_style.width);
+            try std.testing.expectEqual(@as(f32, 0.75), caption_button_visual_style.icon_color[0]);
+            try std.testing.expectEqual(@as(f32, 1.0), caption_button_visual_style.hover_icon_color[0]);
+            try std.testing.expect(caption_button_visual_style.hover_background_delta > 0);
+            try std.testing.expect(caption_button_visual_style.close_hover_background[0] > caption_button_visual_style.close_hover_background[1]);
+        },
+    }
 }
 
 test "platform window exposes quake window helpers" {
@@ -127,5 +141,5 @@ test "platform window exposes message and dpi helpers" {
 test "platform window selects backend by target OS" {
     try std.testing.expectEqual(Backend.windows, backendForOs(.windows));
     try std.testing.expectEqual(Backend.unsupported, backendForOs(.linux));
-    try std.testing.expectEqual(Backend.unsupported, backendForOs(.macos));
+    try std.testing.expectEqual(Backend.macos, backendForOs(.macos));
 }

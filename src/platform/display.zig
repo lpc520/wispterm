@@ -3,18 +3,21 @@ const builtin = @import("builtin");
 
 pub const Backend = enum {
     windows,
+    macos,
     portable,
 };
 
-pub fn backendForOs(os_tag: std.Target.Os.Tag) Backend {
+pub fn backendForOs(comptime os_tag: std.Target.Os.Tag) Backend {
     return switch (os_tag) {
         .windows => .windows,
+        .macos => .macos,
         else => .portable,
     };
 }
 
 const impl = switch (backendForOs(builtin.os.tag)) {
     .windows => @import("display_windows.zig"),
+    .macos => @import("display_macos.zig"),
     .portable => @import("display_portable.zig"),
 };
 
@@ -42,7 +45,7 @@ test "platform display exposes point visibility check" {
 test "platform display selects backend by target OS" {
     try std.testing.expectEqual(Backend.windows, backendForOs(.windows));
     try std.testing.expectEqual(Backend.portable, backendForOs(.linux));
-    try std.testing.expectEqual(Backend.portable, backendForOs(.macos));
+    try std.testing.expectEqual(Backend.macos, backendForOs(.macos));
 }
 
 test "platform display exposes baseline DPI scaling helpers" {

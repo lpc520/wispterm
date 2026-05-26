@@ -3379,8 +3379,11 @@ fn runMainLoop(self: *AppWindow) !void {
     installRemoteControlHandlers(self);
     font.g_dpi = window_backend.dpi(&backend_window);
 
-    // --- Load OpenGL via the GPU backend ---
-    try gpu.Context.init(@ptrCast(&window_backend.glGetProcAddress));
+    // --- Initialize the active GPU backend through the host surface seam ---
+    switch (gpu.active) {
+        .metal => try gpu.Context.initWithLayer(window_backend.metalLayer(&backend_window)),
+        .opengl => try gpu.Context.init(@ptrCast(&window_backend.glGetProcAddress)),
+    }
 
     // Initialize FreeType
     const ft_lib = freetype.Library.init() catch |err| {

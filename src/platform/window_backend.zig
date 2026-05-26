@@ -5,18 +5,21 @@ const platform_window = @import("window.zig");
 
 pub const Backend = enum {
     windows,
+    macos,
     unsupported,
 };
 
-pub fn backendForOs(os_tag: std.Target.Os.Tag) Backend {
+pub fn backendForOs(comptime os_tag: std.Target.Os.Tag) Backend {
     return switch (os_tag) {
         .windows => .windows,
+        .macos => .macos,
         else => .unsupported,
     };
 }
 
 const impl = switch (backendForOs(builtin.os.tag)) {
     .windows => @import("window_backend_windows.zig"),
+    .macos => @import("window_backend_macos.zig"),
     .unsupported => @import("window_backend_unsupported.zig"),
 };
 
@@ -136,14 +139,18 @@ pub fn nativeHandleFromBits(bits: usize) ?NativeHandle {
 }
 
 pub fn nativeHandle(window: *Window) NativeHandle {
-    return switch (builtin.os.tag) {
-        .windows => window.hwnd,
+    return switch (backendForOs(builtin.os.tag)) {
+        .windows, .macos => window.hwnd,
         else => nativeHandleBits(window),
     };
 }
 
 pub fn nativeHandleBits(window: *Window) usize {
     return @intFromPtr(window.hwnd);
+}
+
+pub fn metalLayer(window: *Window) ?*anyopaque {
+    return if (@hasDecl(impl, "metalLayer")) impl.metalLayer(window) else null;
 }
 
 pub fn destroy(window: *Window) void {
@@ -697,6 +704,37 @@ test "platform window backend exposes current backend window hooks" {
     try std.testing.expect(gl_loader_info.return_type.? == ?*const anyopaque);
 }
 
+test "platform window backend exposes Metal layer surface seam" {
+    const seam_info = @typeInfo(@TypeOf(metalLayer)).@"fn";
+    try std.testing.expectEqual(@as(usize, 1), seam_info.params.len);
+    try std.testing.expect(seam_info.params[0].type.? == *Window);
+    try std.testing.expect(seam_info.return_type.? == ?*anyopaque);
+}
+
+test "macOS AppKit backend creates a Metal-backed native window" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    var window = try create(std.testing.allocator, .{
+        .width = 320,
+        .height = 180,
+        .title = "Phantty Window Smoke",
+    });
+    defer destroy(&window);
+
+    try std.testing.expect(nativeHandleBits(&window) != 0);
+    try std.testing.expect(metalLayer(&window) != null);
+    try std.testing.expect(dpi(&window) >= 96);
+    const size = framebufferSize(&window);
+    try std.testing.expect(size.width > 0);
+    try std.testing.expect(size.height > 0);
+
+    resizeClientArea(&window, 360, 200);
+    _ = pollEvents(&window);
+    const resized = framebufferSize(&window);
+    try std.testing.expect(resized.width > 0);
+    try std.testing.expect(resized.height > 0);
+}
+
 test "platform window backend exposes native handle accessors" {
     const native_handle_info = @typeInfo(@TypeOf(nativeHandle)).@"fn";
     try std.testing.expectEqual(@as(usize, 1), native_handle_info.params.len);
@@ -718,5 +756,5 @@ test "platform window backend exposes native handle accessors" {
 test "platform window backend selects backend by target OS" {
     try std.testing.expectEqual(Backend.windows, backendForOs(.windows));
     try std.testing.expectEqual(Backend.unsupported, backendForOs(.linux));
-    try std.testing.expectEqual(Backend.unsupported, backendForOs(.macos));
+    try std.testing.expectEqual(Backend.macos, backendForOs(.macos));
 }

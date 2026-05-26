@@ -13,18 +13,21 @@ const platform_window = @import("window.zig");
 
 pub const Backend = enum {
     windows,
+    macos,
     unsupported,
 };
 
-pub fn backendForOs(os_tag: std.Target.Os.Tag) Backend {
+pub fn backendForOs(comptime os_tag: std.Target.Os.Tag) Backend {
     return switch (os_tag) {
         .windows => .windows,
+        .macos => .macos,
         else => .unsupported,
     };
 }
 
 const impl = switch (backendForOs(builtin.os.tag)) {
     .windows => @import("notifications_windows.zig"),
+    .macos => @import("notifications_macos.zig"),
     .unsupported => @import("notifications_unsupported.zig"),
 };
 
@@ -47,7 +50,7 @@ pub fn requestAttention(handle: NativeHandle) void {
 test "notifications selects backend by target OS" {
     try std.testing.expectEqual(Backend.windows, backendForOs(.windows));
     try std.testing.expectEqual(Backend.unsupported, backendForOs(.linux));
-    try std.testing.expectEqual(Backend.unsupported, backendForOs(.macos));
+    try std.testing.expectEqual(Backend.macos, backendForOs(.macos));
 }
 
 test "notifications exposes bell and attention API shape" {

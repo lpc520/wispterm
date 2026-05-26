@@ -145,8 +145,8 @@ mapping in guide §2 and §5.
       (atlas create/upload/sub-update/teardown via `gpu.Texture`, constants via
       `gpu.c`).
 - [x] **A5** Backend-scope shaders: GLSL under `gpu/opengl/shaders.zig`; the
-      symmetric MSL slot is reserved at `gpu/metal/shaders.zig` (documented
-      placeholder, filled by the Metal backend in D1). *Ghostty: `renderer/shaders/`.*
+      symmetric MSL shader set lives at `gpu/metal/shaders.zig` (reserved in A5,
+      filled by the Metal backend in D1). *Ghostty: `renderer/shaders/`.*
 - [x] **A6** Guard `src/renderer/gpu/gl_backend_guard.zig` (comptime source
       scans, imported by `test_main.zig`): (1) `@cInclude("glad/gl.h")` only
       under `src/renderer/gpu/opengl/` — every other renderer/font/`AppWindow`
@@ -194,10 +194,16 @@ starting.
 
 > **D-prep landed** (see `docs/superpowers/plans/2026-05-26-d-prep-gpu-neutralize.md`):
 > the rendering layer is fully backend-neutral (no raw `gl.*`, guard-enforced), a
-> `gpu/metal/` stub skeleton mirrors `gpu/opengl/api.zig` (`@panic` bodies), the
-> project cross-compiles to `aarch64-macos`, and the macOS pty constants are in.
-> Starting macOS = fill in the `metal: TODO D1` stubs + the AppKit host + CoreText
-> against a building skeleton — no core/OpenGL refactoring needed on the Mac.
+> `gpu/metal/` skeleton mirrors `gpu/opengl/api.zig`, the project cross-compiles
+> to `aarch64-macos`, and the macOS pty constants are in. Starting macOS =
+> fill in Metal/AppKit/CoreText bodies against a building skeleton — no
+> core/OpenGL refactoring needed on the Mac.
+>
+> **D1 Metal interface landed:** the `gpu/metal/` skeleton now owns a real
+> `MTLDevice`/command queue/`CAMetalLayer` context, retained `MTLBuffer` and
+> `MTLTexture` registries, `MTLRenderPipelineState` compilation, offscreen color
+> texture targets, MSL shader sources, and a native `zig build test-metal` smoke
+> path that encodes and commits a simple Metal draw.
 
 macOS reuses the platform-neutral core; it needs a Metal GPU backend,
 an AppKit host, CoreText fonts, `_macos` siblings of the `_windows` platform
@@ -206,67 +212,136 @@ services, and `.app` packaging. Ghostty reference: `src/renderer/metal/`,
 `src/apprt/embedded.zig`.
 
 **D0 — Build & target plumbing**
-- [ ] `build.zig`: a macOS target path (`aarch64-macos` / `x86_64-macos`), link
+- [x] `build.zig`: a macOS target path (`aarch64-macos` / `x86_64-macos`), link
       frameworks (Metal, QuartzCore, AppKit/Cocoa, CoreText, CoreGraphics,
       Foundation), and a `.app` artifact skeleton. Keep the comptime guards
       (`build_guards`, `apprt_win32_guard`, `gl_backend_guard`) green for macOS.
-- [ ] Decide the ObjC interop seam: extern `objc_msgSend` from Zig vs. a thin
+      Native proof: `zig test build.zig`, `zig build macos-app -Dtarget=aarch64-macos`,
+      `zig build macos-app -Dtarget=x86_64-macos`, `zig build test-metal`,
+      `zig build test-full -Dtarget=aarch64-macos`, and
+      `zig build test-full -Dtarget=x86_64-macos`.
+- [x] Decide the ObjC interop seam: extern `objc_msgSend` from Zig vs. a thin
       ObjC/`.m` shim compiled in (Ghostty calls into `libghostty` from a Swift/
-      ObjC app layer). Document the chosen FFI boundary.
+      ObjC app layer). Chosen boundary: a thin Objective-C shim at
+      `src/renderer/gpu/metal/bridge.m` owns Objective-C/Metal message sends and
+      exports C ABI functions to Zig; Zig keeps the backend API surface and
+      stores opaque registry handles.
 
 **D1 — Metal GPU backend** (`src/renderer/gpu/metal/`, mirrors `gpu/opengl/api.zig`)
-- [ ] `metal/api.zig` exporting the same surface as `opengl/api.zig`: `Context`
+- [x] `metal/api.zig` exporting the same surface as `opengl/api.zig`: `Context`
       (MTLDevice + command queue + `CAMetalLayer`), `Buffer`, `Texture` (incl.
       `upload2D`/`subImage2D`/`levelWidth` the font atlas uses), `Pipeline`
       (`MTLRenderPipelineState`), `Framebuffer` (offscreen `MTLTexture` target),
       `shaders`. Wire `gpu.zig`'s `impl` switch `.metal => @import("metal/api.zig")`
-      (replace the `@compileError`). *Ghostty: `renderer/metal/`.*
-- [ ] **Neutralize the GL-shaped presentation layer (prerequisite).**
+      (replace the `@compileError`). Native proof: `zig build test-metal`
+      covers context, buffers, textures, framebuffers, pipelines, vertex layout
+      handles, compatibility helpers, and a committed simple draw. *Ghostty:
+      `renderer/metal/`.*
+- [x] **Neutralize the GL-shaped presentation layer (prerequisite).**
       `ui_pipeline.zig`, `cell_pipeline.zig`, and the render-coordination files
       still call `gpu.glTable()` directly (the residue `gl_backend_guard`
       documents) — OpenGL-only. Route their draws through the backend-dispatched
       `gpu.Pipeline`/`Buffer`/`Texture`/`Framebuffer` methods so they compile and
-      render on Metal. Without this, the Metal backend can't draw anything.
-- [ ] Port the shader set to MSL in `gpu/metal/shaders.zig` (the A5 slot already
+      render on Metal. This is guard-enforced by `gl_backend_guard`; only the
+      documented AppWindow diagnostics/context residue still touches
+      `gpu.glTable()`.
+- [x] Port the shader set to MSL in `gpu/metal/shaders.zig` (the A5 slot already
       lists the symmetric set: text/glyph, instanced bg/fg cells, color-emoji,
-      simple-textured, overlay).
+      simple-textured, overlay). Native proof: `zig build test-metal` compiles
+      every bundled MSL shader pair into `MTLRenderPipelineState`.
 
 **D2 — AppKit host** (`window_backend_macos.zig` + `window_macos.zig`)
-- [ ] `NSApplication`/`NSWindow` + the AppKit run loop (AppKit owns the event
+- [x] `NSApplication`/`NSWindow` + the AppKit run loop (AppKit owns the event
       loop and pumps the core — unlike the Win32 message pump). Add `.macos` to
-      `window_backend.zig`'s `Backend` + impl switch.
-- [ ] Surface seam: `window_backend` currently exposes `glGetProcAddress` (a GL
+      `window_backend.zig`'s `Backend` + impl switch. Native proof:
+      `zig build test-macos-window`, `zig build test-full`, and
+      `zig build test-full -Dtarget=aarch64-macos`.
+- [x] Surface seam: `window_backend` currently exposes `glGetProcAddress` (a GL
       assumption). Add a Metal-drawable seam (hand the renderer a `CAMetalLayer`)
-      so the host↔renderer contract is not GL-specific.
-- [ ] Input/IME/DPI: `NSEvent` → the core's neutral `key_*` codes; mouse/scroll/
+      so the host↔renderer contract is not GL-specific. Implemented as
+      `window_backend.metalLayer()` with `AppWindow` dispatching Metal context
+      init through the layer while OpenGL keeps `glGetProcAddress`.
+- [x] Input/IME/DPI: `NSEvent` → the core's neutral `key_*` codes; mouse/scroll/
       trackpad; IME via `NSTextInputClient`; DPI via `backingScaleFactor`/`NSScreen`.
-- [ ] Reconcile the app-drawn titlebar / caption buttons with macOS traffic-light
-      conventions.
+      Native proof: `zig build test-macos-window` covers key, text, mouse button,
+      mouse move, wheel, IME preedit, Metal layer creation, and DPI.
+- [x] Reconcile the app-drawn titlebar / caption buttons with macOS traffic-light
+      conventions. macOS uses AppKit's titlebar/traffic lights (`titlebar_height`
+      and caption button width are zero), so Phantty's app-drawn titlebar path
+      skips itself while Windows keeps the custom caption metrics.
 
 **D3 — CoreText fonts** (`font_discovery_macos.zig`, `font_backend_macos.zig`)
-- [ ] Discovery + fallback via CoreText (`CTFontCreateWithName`,
+- [x] Discovery + fallback via CoreText (`CTFontCreateWithName`,
       `CTFontCopyDefaultCascadeListForLanguages`), rasterizing into the existing
       atlas/`gpu.Texture` path. Add `.macos` to `font_backend.zig` /
-      `font_discovery.zig` backend selection.
+      `font_discovery.zig` backend selection. Implemented with a thin CoreText
+      bridge for family lookup, file paths for FreeType atlas loading, glyph
+      checks, cascade-list fallback, and Ghostty-style `CTFontCreateForString`
+      fallback. Native proof: `zig build test-macos-font`, `zig test build.zig`,
+      `zig build test`, `zig build test-full`, and
+      `zig build test-full -Dtarget=aarch64-macos`.
 
 **D4 — Platform services** (`_macos` siblings of the existing `_windows` impls)
-- [ ] clipboard (NSPasteboard), file_dialog (NSOpenPanel/NSSavePanel + drop),
+- [x] clipboard (NSPasteboard), file_dialog (NSOpenPanel/NSSavePanel + drop),
       open_url (NSWorkspace), notifications (UNUserNotificationCenter),
       global_hotkey (Carbon `RegisterEventHotKey` or `CGEventTap`), cursor,
       display (NSScreen), session_lock, config_watcher (FSEvents/kqueue),
       console, text, update_package, dirs (`~/Library/Application Support`).
-- [ ] **pty/process:** reuse the Phase C POSIX backend; add the **macOS ioctl
+      Implemented as `_macos` siblings for clipboard, file dialogs/open URL,
+      cursor, display, text, global hotkeys (Carbon `RegisterEventHotKey`),
+      AppKit file drops, and update-package current-package detection; existing
+      portable/no-op seams cover session_lock and console on macOS; dirs already
+      resolve to `~/Library/Application Support/phantty`; config watching now
+      uses kqueue `EVFILT_VNODE`. Phantty's current notification seam is bell +
+      window attention (`NSBeep`/`requestUserAttention`); Ghostty's broader
+      desktop-notification path uses `UNUserNotificationCenter` in its AppKit
+      layer. Native proof: `zig build test-macos-services`,
+      `zig build test-macos-window`, `zig test build.zig`, `zig build test`,
+      `zig build test-full`, `zig build test-full -Dtarget=aarch64-macos`,
+      `zig build test-metal`, and `zig build test-macos-font`.
+- [x] **pty/process:** reuse the Phase C POSIX backend; add the **macOS ioctl
       request constants** (`TIOCSWINSZ`/`TIOCSCTTY`/`FIONREAD` differ from
       `std.os.linux.T`) so `pty.zig`'s `backendForOs(.macos)` can return `.posix`.
       (Deferred from Phase C; also revisit `O_CLOEXEC` on the master/cancel fds.)
+      Native proof: `zig test src/platform/pty_posix.zig -lc`,
+      `zig build test`, `zig build test-full`, and
+      `zig build test-full -Dtarget=aarch64-macos`. macOS uses the BSD IOC
+      constants, applies child startup sizing on the slave PTY, uses the slave
+      side for explicit resize, and falls back to nonblocking `poll` when
+      `FIONREAD` reports zero on a readable PTY master.
 
 **D5 — Embedded browser**
-- [ ] WKWebView backend (`webview_macos.zig`) behind the `EmbeddedBrowserBackend`
+- [x] WKWebView backend (`webview_macos.zig`) behind the `EmbeddedBrowserBackend`
       gate, or keep the panel disabled on macOS until viable.
+      Chosen for this port slice: keep disabled on macOS until a real WKWebView
+      backend is designed. `build.zig` maps macOS to
+      `EmbeddedBrowserBackend.none`, rejects `-Dwebview` without a supported
+      backend, and does not compile the WebView2 bridge for macOS; `webview.zig`
+      selects `.unsupported` for macOS. Ghostty has no equivalent embedded
+      browser panel (`gh search code 'WKWebView repo:ghostty-org/ghostty'`
+      returned no matches). Proof: `zig test build.zig` and
+      `zig build test-full -Dtarget=aarch64-macos`.
 
 **D6 — Packaging & distribution**
-- [ ] `.app` bundle + `Info.plist`; code signing + notarization; `.dmg`. Updater
+- [x] `.app` bundle + `Info.plist`; code signing + notarization; `.dmg`. Updater
       story (adapt the existing portable updater or adopt Sparkle).
+      Implemented a `macos-dist` build step, `packaging/macos/package.sh`, and
+      `packaging/macos/Phantty.entitlements`. Local builds ad-hoc sign with
+      hardened runtime and create `zig-out/dist/macos/phantty-macos-vX.Y.Z.dmg`;
+      release builds set `PHANTTY_MACOS_SIGN_IDENTITY` and
+      `PHANTTY_MACOS_NOTARY_PROFILE` to enable Developer ID signing,
+      `notarytool submit --wait`, and stapling. The macOS updater story is:
+      initial macOS releases publish a matching DMG asset selected by the
+      existing update checker (`phantty-macos-{tag}.dmg`) and saved to
+      Downloads; a full automatic updater should follow Ghostty's Sparkle
+      approach once the macOS app shell is no longer a skeleton. Ghostty
+      reference: its release workflow signs nested code and app with hardened
+      runtime, creates a DMG, notarizes/staples app + DMG, and generates Sparkle
+      appcast metadata. Proof: `zig build macos-dist -Dtarget=aarch64-macos`,
+      `codesign -dvvv --entitlements :- zig-out/bin/Phantty.app`,
+      `hdiutil verify zig-out/dist/macos/phantty-macos-v0.32.0.dmg`,
+      `zig test build.zig`, `zig build test`, `zig build test-macos-services`,
+      `zig build test-full`, and `zig build test-full -Dtarget=aarch64-macos`.
 
 Critical path to "a shell renders on screen": **D0 → D1 (Metal + presentation-
 layer neutralization) → D2 (AppKit host + drawable seam) → D3 (CoreText) → the

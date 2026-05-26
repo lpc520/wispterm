@@ -1,41 +1,57 @@
 //! Metal backend GPU buffer. Mirrors `gpu/opengl/Buffer.zig`'s public surface.
-//! D-prep STUB: same public fields (`handle`, `target`) + same method
-//! signatures; bodies are `@panic("metal: TODO D1")`. A real backend will back
-//! `handle` with an `MTLBuffer` (or an index into a buffer pool).
+//! `handle` is a registry id for an Objective-C-retained `MTLBuffer`.
+const std = @import("std");
+
+const Context = @import("Context.zig");
 const c = @import("c.zig");
 const Buffer = @This();
 
 handle: c.GLuint = 0,
 target: c.GLenum,
 
+extern fn phantty_metal_buffer_create(target: c.GLenum) c.GLuint;
+extern fn phantty_metal_buffer_allocate(handle: c.GLuint, device: ?*anyopaque, len: usize, error_buf: [*]u8, error_buf_len: usize) bool;
+extern fn phantty_metal_buffer_upload_data(handle: c.GLuint, device: ?*anyopaque, bytes: ?*const anyopaque, len: usize, error_buf: [*]u8, error_buf_len: usize) bool;
+extern fn phantty_metal_buffer_upload(handle: c.GLuint, device: ?*anyopaque, bytes: ?*const anyopaque, len: usize, error_buf: [*]u8, error_buf_len: usize) bool;
+extern fn phantty_metal_buffer_length(handle: c.GLuint) usize;
+extern fn phantty_metal_buffer_destroy(handle: c.GLuint) void;
+
 pub fn init(target: c.GLenum) Buffer {
-    _ = target;
-    @panic("metal: TODO D1 — Buffer.init (allocate MTLBuffer)");
+    return .{ .handle = phantty_metal_buffer_create(target), .target = target };
 }
 pub fn bind(self: Buffer) void {
     _ = self;
-    @panic("metal: TODO D1 — Buffer.bind");
+    // Metal binds buffers on the render command encoder, not globally.
 }
 /// Allocate `size` bytes of uninitialized storage with the given usage hint.
 pub fn allocate(self: Buffer, size: usize, usage: c.GLenum) void {
-    _ = self;
-    _ = size;
     _ = usage;
-    @panic("metal: TODO D1 — Buffer.allocate");
+    _ = runBool("Metal buffer allocate failed", phantty_metal_buffer_allocate(self.handle, Context.deviceHandle(), size, &scratch_error, scratch_error.len));
 }
 /// Allocate + fill with `bytes`.
 pub fn uploadData(self: Buffer, bytes: []const u8, usage: c.GLenum) void {
-    _ = self;
-    _ = bytes;
     _ = usage;
-    @panic("metal: TODO D1 — Buffer.uploadData");
+    _ = runBool("Metal buffer uploadData failed", phantty_metal_buffer_upload_data(self.handle, Context.deviceHandle(), bytes.ptr, bytes.len, &scratch_error, scratch_error.len));
 }
 /// Overwrite from offset 0.
 pub fn upload(self: Buffer, bytes: []const u8) void {
-    _ = self;
-    _ = bytes;
-    @panic("metal: TODO D1 — Buffer.upload");
+    _ = runBool("Metal buffer upload failed", phantty_metal_buffer_upload(self.handle, Context.deviceHandle(), bytes.ptr, bytes.len, &scratch_error, scratch_error.len));
+}
+pub fn byteLength(self: Buffer) usize {
+    return phantty_metal_buffer_length(self.handle);
 }
 pub fn deinit(self: *Buffer) void {
-    self.handle = 0;
+    if (self.handle != 0) {
+        phantty_metal_buffer_destroy(self.handle);
+        self.handle = 0;
+    }
+}
+
+threadlocal var scratch_error: [256]u8 = @splat(0);
+
+fn runBool(prefix: []const u8, ok: bool) bool {
+    if (ok) return true;
+    const end = std.mem.indexOfScalar(u8, &scratch_error, 0) orelse scratch_error.len;
+    std.debug.print("{s}: {s}\n", .{ prefix, scratch_error[0..end] });
+    return false;
 }

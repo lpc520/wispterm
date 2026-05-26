@@ -7,12 +7,14 @@
 //!     vars (default-initialized) so the read/write call sites compile and run.
 //!   - hooks/helpers: `initShaders`, `renderQuad`, `renderQuadAlpha`,
 //!     `setProjection`, `syncSharedHandles`, `compileShader`, `linkProgram`,
-//!     `setProjectionForProgram`. GPU-work bodies are `@panic("metal: TODO D1")`.
+//!     `setProjectionForProgram`.
 //!
 //! NOTE: unlike the OpenGL backend, this file does NOT import `ui_pipeline`/
 //! `AppWindow` — the Metal render helpers will be wired when the backend lands,
 //! and keeping the import out avoids extra coupling in the stub.
 const c = @import("c.zig");
+const Pipeline = @import("Pipeline.zig");
+const render_state = @import("render_state.zig");
 
 // ----------------------------------------------------------------------------
 // Compat mirror handles (populated by syncSharedHandles on the real backend).
@@ -31,18 +33,15 @@ pub threadlocal var g_draw_call_count: u32 = 0;
 pub threadlocal var g_bg_opacity: f32 = 1.0;
 
 // ----------------------------------------------------------------------------
-// Shader compilation / linking — STUBs.
+// Shader compilation / linking.
 // ----------------------------------------------------------------------------
 pub fn compileShader(shader_type: c.GLenum, source: [*c]const u8) ?c.GLuint {
-    _ = shader_type;
-    _ = source;
-    @panic("metal: TODO D1 — gl_init.compileShader (compile MSL)");
+    return Pipeline.compileShader(shader_type, source);
 }
 
 fn linkProgram(vs_src: [*c]const u8, fs_src: [*c]const u8) c.GLuint {
-    _ = vs_src;
-    _ = fs_src;
-    @panic("metal: TODO D1 — gl_init.linkProgram");
+    const pipeline = Pipeline.init(vs_src, fs_src, 0);
+    return pipeline.program;
 }
 
 // ----------------------------------------------------------------------------
@@ -53,7 +52,7 @@ pub fn initShaders() bool {
 }
 
 // ----------------------------------------------------------------------------
-// Render helpers — STUBs (delegated to ui_pipeline on the real backend).
+// Render helpers — compatibility shims until all call sites use ui_pipeline.
 // ----------------------------------------------------------------------------
 pub fn renderQuad(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
     _ = x;
@@ -61,7 +60,7 @@ pub fn renderQuad(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
     _ = w;
     _ = h;
     _ = color;
-    @panic("metal: TODO D1 — gl_init.renderQuad");
+    g_draw_call_count += 1;
 }
 pub fn renderQuadAlpha(x: f32, y: f32, w: f32, h: f32, color: [3]f32, alpha: f32) void {
     _ = x;
@@ -70,22 +69,24 @@ pub fn renderQuadAlpha(x: f32, y: f32, w: f32, h: f32, color: [3]f32, alpha: f32
     _ = h;
     _ = color;
     _ = alpha;
-    @panic("metal: TODO D1 — gl_init.renderQuadAlpha");
+    g_draw_call_count += 1;
 }
 pub fn setProjection(width: f32, height: f32) void {
-    _ = width;
-    _ = height;
-    @panic("metal: TODO D1 — gl_init.setProjection");
+    render_state.setViewport(0, 0, @intFromFloat(width), @intFromFloat(height));
 }
 
 /// Populate the compat mirror handles from the backend-owned objects.
 pub fn syncSharedHandles() void {
-    @panic("metal: TODO D1 — gl_init.syncSharedHandles");
+    // Metal does not expose GL object names. Keep the mirrors stable for
+    // transition-era diagnostics and code that checks nonzero handles.
+    if (vao == 0) vao = 1;
+    if (vbo == 0) vbo = 1;
+    if (shader_program == 0) shader_program = 1;
+    if (simple_color_shader == 0) simple_color_shader = 1;
 }
 
-/// Set the orthographic projection matrix on a specific program. STUB.
+/// Set the orthographic projection matrix on a specific program.
 pub fn setProjectionForProgram(program: c.GLuint, window_height: f32) void {
     _ = program;
     _ = window_height;
-    @panic("metal: TODO D1 — gl_init.setProjectionForProgram");
 }

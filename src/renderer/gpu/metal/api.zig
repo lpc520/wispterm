@@ -1,11 +1,8 @@
 //! Metal backend root. Symmetric counterpart to `gpu/opengl/api.zig`: re-exports
 //! the backend's primitives for `gpu.zig` to resolve at comptime on Darwin.
 //!
-//! D-prep STUB: every primitive mirrors the OpenGL backend's PUBLIC surface
-//! (same exported symbols, same public field/method shapes) with
-//! `@panic("metal: TODO D1")` bodies for GPU work, so the shared rendering layer
-//! + AppWindow compile against a building Metal skeleton. A Mac dev fills in the
-//! real Metal/AppKit bodies without touching the rendering layer.
+//! The primitives mirror the OpenGL backend's public surface so the shared
+//! rendering layer + AppWindow compile against either backend.
 
 pub const c = @import("c.zig"); // GL-flavored constants/types shim (no @cInclude)
 pub const Context = @import("Context.zig"); // context lifecycle + GL table

@@ -491,6 +491,31 @@ test "update_check: selects portable asset for runtime flavor" {
     try std.testing.expectEqualStrings(no_embedded_browser_name, no_embedded_browser.name);
 }
 
+test "update_check: selects macOS DMG asset for macOS package" {
+    const package = ReleasePackage{ .platform = .macos };
+    var asset_name_buf: [asset_name_buffer_len]u8 = undefined;
+    const asset_name = try platform_update_package.assetName("v0.32.0", package, &asset_name_buf);
+
+    const release = ReleaseInfo{
+        .tag_name = "v0.32.0",
+        .html_url = "https://github.com/xuzhougeng/phantty/releases/tag/v0.32.0",
+        .draft = false,
+        .prerelease = false,
+        .assets = &.{
+            .{
+                .name = asset_name,
+                .download_url = "https://example.test/phantty-macos-v0.32.0.dmg",
+                .size = 1234,
+            },
+        },
+        .owned = false,
+    };
+
+    const result = evaluateReleaseForPackage("0.31.0", release, package);
+    try std.testing.expectEqual(State.update_available, result.state);
+    try std.testing.expectEqualStrings("phantty-macos-v0.32.0.dmg", result.asset_name);
+}
+
 test "update_check: update result includes selected asset fields" {
     const package = platform_update_package.packageForScenario(.with_required_embedded_browser_payload);
     var asset_name_buf: [asset_name_buffer_len]u8 = undefined;
