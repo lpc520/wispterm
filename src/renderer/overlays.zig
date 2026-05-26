@@ -434,6 +434,7 @@ fn executeCommand(action: CommandAction) void {
     switch (action) {
         .new_tab => sessionLauncherOpen(),
         .new_agent => openDefaultAgentSessionFromCommandCenter(),
+        .manage_ai_profiles => openAiList(),
         .select_agent_history => commandPaletteOpenAgentHistory(),
         .split_right => AppWindow.splitFocused(.right),
         .split_down => AppWindow.splitFocused(.down),
@@ -2247,14 +2248,14 @@ fn openDefaultAiSession() void {
         openAiFormNewWithMode(.session_setup);
         return;
     }
-    connectAiProfile(0);
+    connectAiProfile(defaultAiProfileIndex());
 }
 
 fn openDefaultAgentSessionFromCommandCenter() void {
     loadAiProfiles();
     switch (command_center_state.resolveNewAgentLaunch(g_ai_profile_count != 0)) {
         .open_form => openAiFormNewWithMode(.session_setup),
-        .connect_default_profile_as_agent => connectAiProfileWithAgentOverride(0, "true"),
+        .connect_default_profile_as_agent => connectAiProfileWithAgentOverride(defaultAiProfileIndex(), "true"),
     }
 }
 
@@ -2269,13 +2270,13 @@ pub fn openDefaultAgentSessionForStartup() DefaultAgentOpenResult {
         openAiFormNewWithMode(.session_setup);
         return .form_opened;
     }
-    return if (spawnAiProfileWithAgentOverride(0, "true")) .opened else .failed;
+    return if (spawnAiProfileWithAgentOverride(defaultAiProfileIndex(), "true")) .opened else .failed;
 }
 
 pub fn openDefaultAgentSessionForRemote() RemoteAgentOpenResult {
     loadAiProfiles();
     if (g_ai_profile_count == 0) return .no_profile;
-    return if (spawnAiProfileWithAgentOverride(0, "true")) .opened else .failed;
+    return if (spawnAiProfileWithAgentOverride(defaultAiProfileIndex(), "true")) .opened else .failed;
 }
 
 fn openAiSettings() void {
@@ -2576,6 +2577,43 @@ fn spawnAiProfileWithAgentOverride(idx: usize, agent_override: ?[]const u8) bool
 
     sessionLauncherClose();
     return AppWindow.spawnAiChatTab(name, base_url, api_key, model, system_prompt, thinking, reasoning_effort, stream_val, agent_val);
+}
+
+threadlocal var g_ai_default_name_buf: [256]u8 = undefined;
+threadlocal var g_ai_default_name_len: usize = 0;
+threadlocal var g_ai_default_loaded: bool = false;
+
+/// Cached value of the `ai-default-profile` config key. Cached to avoid file
+/// IO on every render frame; invalidated on in-app writes.
+fn aiDefaultProfileName() []const u8 {
+    if (!g_ai_default_loaded) {
+        g_ai_default_loaded = true;
+        g_ai_default_name_len = 0;
+        const allocator = AppWindow.g_allocator orelse return "";
+        var cfg = Config.load(allocator) catch return "";
+        defer cfg.deinit(allocator);
+        const name = cfg.@"ai-default-profile";
+        const len = @min(name.len, g_ai_default_name_buf.len);
+        @memcpy(g_ai_default_name_buf[0..len], name[0..len]);
+        g_ai_default_name_len = len;
+    }
+    return g_ai_default_name_buf[0..g_ai_default_name_len];
+}
+
+fn invalidateAiDefaultName() void {
+    g_ai_default_loaded = false;
+}
+
+/// Index of the default AI profile, resolved by name from config. Falls back
+/// to the first profile. Returns 0 when no profiles exist (callers guard).
+fn defaultAiProfileIndex() usize {
+    loadAiProfiles();
+    if (g_ai_profile_count == 0) return 0;
+    var names: [AI_PROFILE_MAX][]const u8 = undefined;
+    for (0..g_ai_profile_count) |i| {
+        names[i] = aiProfileField(&g_ai_profiles[i], .name);
+    }
+    return command_palette_model.resolveDefaultIndex(names[0..g_ai_profile_count], aiDefaultProfileName());
 }
 
 fn isHttpUrlish(value: []const u8) bool {

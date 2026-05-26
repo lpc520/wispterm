@@ -5,6 +5,7 @@ const std = @import("std");
 pub const CommandAction = enum {
     new_tab,
     new_agent,
+    manage_ai_profiles,
     select_agent_history,
     split_right,
     split_down,
@@ -47,6 +48,7 @@ pub const CommandEntry = struct {
 pub const command_entries = [_]CommandEntry{
     .{ .title = "New Session", .detail = platform_pty_command.session_launcher_detail, .shortcut = "", .action = .new_tab },
     .{ .title = "New Agent", .detail = "Open a new Agent tab with the default AI config", .shortcut = "", .action = .new_agent },
+    .{ .title = "Manage AI Profiles", .detail = "Create, edit, or delete saved AI profiles", .shortcut = "", .action = .manage_ai_profiles },
     .{ .title = "Select Agent History", .detail = "Open the command-center agent history picker", .shortcut = "", .action = .select_agent_history },
     .{ .title = "Split Right", .detail = "Create a panel to the right", .shortcut = "", .action = .split_right },
     .{ .title = "Split Down", .detail = "Create a panel below", .shortcut = "", .action = .split_down },
@@ -243,6 +245,10 @@ pub fn resolveNewAgentLaunch(has_profiles: bool) NewAgentLaunchAction {
 
 test "command center includes New Agent action" {
     try std.testing.expectEqual(CommandAction.new_agent, findCommandAction("New Agent"));
+}
+
+test "command center includes Manage AI Profiles action" {
+    try std.testing.expectEqual(CommandAction.manage_ai_profiles, findCommandAction("Manage AI Profiles"));
 }
 
 test "command center includes Select Agent History action" {
