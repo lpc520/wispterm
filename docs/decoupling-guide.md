@@ -199,6 +199,14 @@ with **A**. **D** is deferred until a macOS SDK environment exists.
 ### Phase A — GPU interface spine
 *Verifiable on Windows; OpenGL keeps working behind the new interface.*
 
+> **Status (A1+A2 landed).** `src/renderer/gpu/gpu.zig` (comptime backend
+> resolver) and `gpu/backend.zig` (`Backend{opengl,metal}`, `default→metal` on
+> Darwin) exist. OpenGL is the first backend under `gpu/opengl/`
+> (`c.zig`, `Context.zig`, `api.zig`, `gl_init.zig`, `shaders.zig`); the GL
+> table + context load moved out of `AppWindow.zig`, which no longer `@cImport`s
+> `glad`. Consumers reach the table via `AppWindow.gpu.glTable()` (a transition
+> handle). Next: **A3** routes the renderer files through `gpu.zig` primitives.
+
 - **A1** Define `src/renderer/gpu/gpu.zig` (the `GraphicsAPI` interface:
   `Target`, `Frame`, `RenderPass`, `Pipeline`, `Buffer`, `Texture`, `Sampler`,
   `shaders`) and `src/renderer/gpu/backend.zig` (`Backend{opengl,metal}`,

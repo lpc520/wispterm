@@ -45,10 +45,13 @@ code only — not the `remote/` web console or packaged `plugins/`.
 - **Axis A platform-runtime seam — done and enforced.** App logic routes through
   `src/platform/`; no `std.os.windows` / `apprt/win32.zig` leakage; comptime
   guards fail the build on violations; input uses neutral `key_*` codes.
-- **GPU graphics API — NOT decoupled.** ~700 raw `gl.*` sites across 16 renderer
-  files; GL handles are global state in `gl_init.zig`; `AppWindow.zig`
-  `@cImport`s `glad/gl.h` and owns the GL context; shaders are GLSL-only. This
-  is the top blocker for macOS (Metal-only). → **Phase A**. See guide §1.
+- **GPU graphics API — interface landed (A1/A2); renderer routing pending
+  (A3+).** The `GraphicsAPI` spine exists under `src/renderer/gpu/`; OpenGL is
+  the first backend under `gpu/opengl/` and now owns the GL context (table +
+  load in `Context.zig`, helpers/shaders under the backend, `AppWindow.zig` no
+  longer `@cImport`s `glad`). Still pending: route the ~700 raw `gl.*` sites
+  through `gpu.zig` (A3), font atlas via `Texture` (A4), MSL slot (A5), and the
+  `gl.*`-outside-backend guard (A6). → **Phase A**. See guide §1.
 - **Giant files conflate presentation + logic.** `ai_chat.zig` (248 KB),
   `input.zig` (3,462 ln), `AppWindow.zig` (3,742 ln), `overlays.zig` (171 KB).
   → **Phase B**.
@@ -86,14 +89,18 @@ These extracted platform-*runtime* coupling behind interfaces so a port is
 OpenGL stays working behind the new interface at every step. Detail + Ghostty
 mapping in guide §2 and §5.
 
-- [ ] **A1** Define `src/renderer/gpu/gpu.zig` (the `GraphicsAPI` interface:
+- [x] **A1** Define `src/renderer/gpu/gpu.zig` (the `GraphicsAPI` interface:
       `Target`/`Frame`/`RenderPass`/`Pipeline`/`Buffer`/`Texture`/`Sampler`/
       `shaders`) and `src/renderer/gpu/backend.zig` (`Backend{opengl,metal}`,
       `default(target)` → Metal on Darwin). *Ghostty: `renderer/generic.zig`,
       `renderer/backend.zig`.*
-- [ ] **A2** Move current OpenGL into `src/renderer/gpu/opengl/` as the first
+- [x] **A2** Move current OpenGL into `src/renderer/gpu/opengl/` as the first
       backend; move GL-context ownership out of `AppWindow.zig` to the
-      backend/host seam. *Ghostty: `renderer/opengl/`.*
+      backend/host seam. *Ghostty: `renderer/opengl/`.* The GL table + context
+      load now live in `gpu/opengl/Context.zig`, `gl_init` and GLSL shaders
+      under `gpu/opengl/`, and `AppWindow.zig` no longer `@cImport`s `glad`
+      (consumers reach the table via `AppWindow.gpu.glTable()`). Renderer files
+      keep their own `glad` includes until A6.
 - [ ] **A3** Route renderer files from raw `gl.*` to `gpu.zig`, splitting each
       file's presentation/logic in the same pass (one touch each):
       `cell_renderer`, `titlebar`, `overlays`, `ai_chat_renderer`,
@@ -165,3 +172,6 @@ Linux (native):
 - [ ] **(Phase A6)** No raw GPU API outside its backend: `gl.*` and
       `@cInclude("glad/gl.h")` only under `src/renderer/gpu/opengl/`; the host
       owns the GPU context, so `AppWindow.zig` must not `@cImport` `glad`.
+      (Partially holds as of A2: `AppWindow.zig` no longer `@cImport`s `glad`
+      and the backend owns the context; the general `gl.*`/`glad`-outside-backend
+      guard still waits on the A3 renderer routing.)
