@@ -5,7 +5,7 @@ const builtin = @import("builtin");
 const opengl = @import("opengl/api.zig");
 
 pub const Backend = @import("backend.zig").Backend;
-pub const active: Backend = Backend.default(builtin.target.os.tag);
+pub const active: Backend = Backend.default(builtin.os.tag);
 
 const impl = switch (active) {
     .opengl => opengl,
@@ -16,7 +16,7 @@ const impl = switch (active) {
 // of AppWindow in A2); the app reaches it through the decls below.
 pub const Context = impl.Context; // context lifecycle (owns the GL table)
 pub const c = impl.c; // GL constants/types (transition: removed from app code by A6)
-pub const gl_init = impl.gl_init; // shared GL helpers + buffers + shaders
+pub const gl_init = impl.gl_init; // GL helpers + buffers (GLSL in shaders.zig)
 
 /// Pointer to the active backend's GL function table. Transition handle used by
 /// renderer files until they route through the primitives (A3); removed in A6.

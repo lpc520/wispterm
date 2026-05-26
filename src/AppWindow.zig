@@ -1106,7 +1106,8 @@ const CURSOR_BLINK_INTERVAL_MS: i64 = 600; // Blink interval in ms (same as Ghos
 
 const ConfigWatcher = @import("config_watcher.zig");
 
-// GL init, shader sources, render helpers — see renderer/gl_init.zig (exposed via AppWindow.gpu.gl_init)
+// GL init, render helpers — see renderer/gpu/opengl/gl_init.zig (GLSL sources
+// in renderer/gpu/opengl/shaders.zig); exposed via AppWindow.gpu.gl_init.
 
 /// Focus follows mouse - when true, moving mouse into a split pane focuses it
 pub threadlocal var g_focus_follows_mouse: bool = false;
