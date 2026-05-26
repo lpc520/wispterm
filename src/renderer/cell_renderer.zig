@@ -14,6 +14,7 @@ const font = AppWindow.font;
 const tab = AppWindow.tab;
 const gl_init = AppWindow.gpu.gl_init;
 const image_renderer = @import("image_renderer.zig");
+const cell_geometry = @import("cell_geometry.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -254,36 +255,32 @@ pub fn rebuildCells(rend: *Renderer) void {
             const is_selected = isCellSelected(rend, col_idx, row_idx);
             const col_f: f32 = @floatFromInt(col_idx);
 
-            var fg_color = sc.fg;
-
-            if (is_cursor and rend.cached_cursor_visible) {
-                // Block cursor: invert fg for text under cursor (bg drawn by overlay)
-                if (rend.cached_cursor_effective) |effective_style| {
-                    if (effective_style == .block) {
-                        fg_color = g_theme.cursor_text orelse g_theme.background;
-                    }
-                }
-                // Draw cell background normally (cursor shape drawn by overlay)
-                if (sc.bg) |bg| {
-                    if (rend.bg_cell_count < rend.bg_cells.items.len) {
-                        rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2], .a = normal_bg_alpha };
-                        rend.bg_cell_count += 1;
-                    }
-                }
-            } else if (is_selected) {
+            const cursor_is_block = if (rend.cached_cursor_effective) |s| s == .block else false;
+            const decision = cell_geometry.backgroundFor(
+                sc.bg,
+                is_cursor,
+                rend.cached_cursor_visible,
+                cursor_is_block,
+                is_selected,
+                .{
+                    .background = g_theme.background,
+                    .cursor_text = g_theme.cursor_text,
+                    .selection_background = g_theme.selection_background,
+                    .selection_foreground = g_theme.selection_foreground,
+                    .foreground = g_theme.foreground,
+                },
+                col_f,
+                row_f,
+                normal_bg_alpha,
+                sc.fg,
+            );
+            if (decision.bg) |bg_inst| {
                 if (rend.bg_cell_count < rend.bg_cells.items.len) {
-                    // Match Ghostty: selected cells stay fully opaque even when
-                    // regular cell backgrounds reveal a wallpaper underneath.
-                    rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = g_theme.selection_background[0], .g = g_theme.selection_background[1], .b = g_theme.selection_background[2], .a = 1.0 };
-                    rend.bg_cell_count += 1;
-                }
-                fg_color = g_theme.selection_foreground orelse g_theme.foreground;
-            } else if (sc.bg) |bg| {
-                if (rend.bg_cell_count < rend.bg_cells.items.len) {
-                    rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2], .a = normal_bg_alpha };
+                    rend.bg_cells.items[rend.bg_cell_count] = bg_inst;
                     rend.bg_cell_count += 1;
                 }
             }
+            const fg_color = decision.fg;
 
             // Skip spacer cells — the wide character's head cell handles rendering
             // across both cells (like Ghostty).
@@ -336,15 +333,11 @@ pub fn rebuildCells(rend: *Renderer) void {
                         if (ch.is_color) {
                             // Color emoji — route to separate color cell buffer.
                             // Scale the emoji bitmap to fit within grid_width cells, preserving aspect ratio.
-                            const emoji_w = @as(f32, @floatFromInt(ch.size_x));
-                            const emoji_h = @as(f32, @floatFromInt(ch.size_y));
-                            const target_w = font.cell_width * grid_width;
-                            const scale = @min(target_w / emoji_w, font.cell_height / emoji_h);
-                            const gw = emoji_w * scale;
-                            const gh = emoji_h * scale;
-                            // Center within the grid_width cells
-                            const gx = (target_w - gw) / 2.0;
-                            const gy = (font.cell_height - gh) / 2.0;
+                            const rect = cell_geometry.colorEmojiRect(@intCast(ch.size_x), @intCast(ch.size_y), grid_width, font.cell_width, font.cell_height);
+                            const gx = rect.gx;
+                            const gy = rect.gy;
+                            const gw = rect.gw;
+                            const gh = rect.gh;
                             const uv_val = font.glyphUV(ch.region, color_atlas_size);
                             if (rend.color_fg_cell_count < rend.color_fg_cells.items.len) {
                                 rend.color_fg_cells.items[rend.color_fg_cell_count] = .{
@@ -367,10 +360,11 @@ pub fn rebuildCells(rend: *Renderer) void {
                         } else {
                             // Grayscale text glyph
                             const uv_val = font.glyphUV(ch.region, atlas_size);
-                            const gx = @as(f32, @floatFromInt(ch.bearing_x));
-                            const gy = font.cell_baseline - @as(f32, @floatFromInt(@as(i32, @intCast(ch.size_y)) - ch.bearing_y));
-                            const gw = @as(f32, @floatFromInt(ch.size_x));
-                            const gh = @as(f32, @floatFromInt(ch.size_y));
+                            const rect = cell_geometry.grayscaleGlyphRect(ch.bearing_x, ch.bearing_y, @intCast(ch.size_x), @intCast(ch.size_y), font.cell_baseline);
+                            const gx = rect.gx;
+                            const gy = rect.gy;
+                            const gw = rect.gw;
+                            const gh = rect.gh;
                             if (rend.fg_cell_count < rend.fg_cells.items.len) {
                                 rend.fg_cells.items[rend.fg_cell_count] = .{
                                     .grid_col = col_f,
