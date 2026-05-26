@@ -2,10 +2,9 @@
 //! shared UI pipelines.
 //!
 //! Owns: `compileShader`/`linkProgram`, `setProjectionForProgram`.
-//! Compat mirrors: `vao`/`vbo`/`shader_program`/`simple_color_shader`/`overlay_shader`
+//! Compat mirrors: `vao`/`vbo`/`shader_program`/`simple_color_shader`
 //!   are populated by `syncSharedHandles()` after `ui_pipeline.init()`; not-yet-converted
 //!   renderer files still read them directly. They dissolve as each file converts.
-//!   `overlay_shader` is a compat mirror of ui_pipeline.overlay.program.
 //! Re-exports: `renderQuad`/`renderQuadAlpha`/`setProjection` delegate to ui_pipeline.
 //! The shared UI rendering lives in renderer/ui_pipeline.zig; the cell-grid
 //! instanced pipelines in renderer/cell_pipeline.zig.
@@ -31,8 +30,6 @@ pub threadlocal var vao: c.GLuint = 0; // compat mirror — from ui_pipeline.tex
 pub threadlocal var vbo: c.GLuint = 0; // compat mirror — from ui_pipeline.quad.handle
 pub threadlocal var shader_program: c.GLuint = 0; // compat mirror — from ui_pipeline.text.program
 pub threadlocal var simple_color_shader: c.GLuint = 0; // compat mirror — from ui_pipeline.emoji.program
-
-pub threadlocal var overlay_shader: c.GLuint = 0; // compat mirror — from ui_pipeline.overlay.program (set by syncSharedHandles)
 
 // Draw call counter (reset each frame)
 pub threadlocal var g_draw_call_count: u32 = 0;
@@ -104,8 +101,8 @@ fn linkProgram(vs_src: [*c]const u8, fs_src: [*c]const u8) c.GLuint {
 // ============================================================================
 
 pub fn initShaders() bool {
-    // overlay_shader is now owned by ui_pipeline (synced into the mirror below
-    // via syncSharedHandles); nothing to build here yet.
+    // All shared pipelines (text/emoji/overlay) are built by ui_pipeline.init();
+    // nothing to compile here. Kept as a stable init hook.
     return true;
 }
 
@@ -134,7 +131,6 @@ pub fn syncSharedHandles() void {
     simple_color_shader = ui_pipeline.emoji.program;
     vao = ui_pipeline.text.vao;
     vbo = ui_pipeline.quad.handle;
-    overlay_shader = ui_pipeline.overlay.program;
 }
 
 /// Set the orthographic projection matrix on a specific shader program.
