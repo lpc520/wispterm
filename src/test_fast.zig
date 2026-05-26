@@ -32,4 +32,5 @@ test {
     _ = @import("preview_token.zig");
     _ = @import("agent_history.zig");
     _ = @import("renderer/gpu/backend.zig");
+    _ = @import("renderer/cell_geometry.zig");
 }
