@@ -77,7 +77,6 @@ fn buildPostFragmentSource(allocator: std.mem.Allocator, user_shader: []const u8
 
 /// Load and compile a custom post-processing shader from a file
 fn initPostShader(allocator: std.mem.Allocator, shader_path: []const u8) bool {
-    const gl = &gpu.Context.gl;
     // Read shader source file
     const file = std.fs.cwd().openFile(shader_path, .{}) catch |err| {
         std.debug.print("Failed to open shader file '{s}': {}\n", .{ shader_path, err });
@@ -114,24 +113,20 @@ fn initPostShader(allocator: std.mem.Allocator, shader_path: []const u8) bool {
     g_post_vbo_buf = gpu.Buffer.init(c.GL_ARRAY_BUFFER);
     g_post_vbo_buf.uploadData(std.mem.sliceAsBytes(quad_verts[0..]), c.GL_STATIC_DRAW);
 
-    var vao: c.GLuint = 0;
-    gl.GenVertexArrays.?(1, &vao);
-    gl.BindVertexArray.?(vao);
-    g_post_vbo_buf.bind();
-    // position (location 0)
-    gl.EnableVertexAttribArray.?(0);
-    gl.VertexAttribPointer.?(0, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), null);
-    // texcoord (location 1)
-    gl.EnableVertexAttribArray.?(1);
-    gl.VertexAttribPointer.?(1, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), @ptrFromInt(2 * @sizeOf(f32)));
-    gl.BindVertexArray.?(0);
+    // Fullscreen quad VAO: vec2 position (loc 0) + vec2 texcoord (loc 1), interleaved.
+    const vao = gpu.vertex.buildVertexArray(&.{
+        .{ .buffer = g_post_vbo_buf, .attrs = &.{
+            .{ .loc = 0, .count = 2, .stride = 4 * @sizeOf(f32), .offset = 0 },
+            .{ .loc = 1, .count = 2, .stride = 4 * @sizeOf(f32), .offset = 2 * @sizeOf(f32) },
+        } },
+    });
 
     // Compile and link via Pipeline.init (logs errors itself)
     g_post_pipeline = gpu.Pipeline.init(post_vertex_source, frag_source.ptr, vao);
     if (g_post_pipeline.program == 0) {
         // Pipeline.init already logged the failure; clean up vbo and vao
         g_post_vbo_buf.deinit();
-        gl.DeleteVertexArrays.?(1, &vao);
+        gpu.vertex.deleteVertexArray(vao);
         return false;
     }
 
