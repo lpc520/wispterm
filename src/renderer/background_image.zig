@@ -8,9 +8,10 @@ const std = @import("std");
 const Config = @import("../config.zig");
 const AppWindow = @import("../AppWindow.zig");
 const gl_init = AppWindow.gpu.gl_init;
+const gpu = AppWindow.gpu;
+const ui_pipeline = @import("ui_pipeline.zig");
 
 const c = @cImport({
-    @cInclude("glad/gl.h");
     @cInclude("stb_image.h");
 });
 
@@ -19,7 +20,7 @@ pub const Mode = Config.BackgroundImageMode;
 pub threadlocal var g_enabled: bool = false;
 pub threadlocal var g_mode: Mode = .fill;
 
-threadlocal var g_texture: c.GLuint = 0;
+threadlocal var g_texture: gpu.c.GLuint = 0;
 threadlocal var g_width: c_int = 0;
 threadlocal var g_height: c_int = 0;
 /// Owned copy of the currently-loaded image path. The module owns this slice
@@ -51,11 +52,10 @@ fn freeLoadedPath() void {
 pub fn load(allocator: std.mem.Allocator, path: ?[]const u8) void {
     if (isLoaded(path)) return;
 
-    const gl = AppWindow.gpu.glTable();
-
     // Reset existing state
     if (g_texture != 0) {
-        gl.DeleteTextures.?(1, &g_texture);
+        var tex = gpu.Texture.fromHandle(g_texture);
+        tex.destroy();
         g_texture = 0;
     }
     g_enabled = false;
@@ -84,15 +84,12 @@ pub fn load(allocator: std.mem.Allocator, path: ?[]const u8) void {
     }
     defer c.stbi_image_free(data);
 
-    gl.GenTextures.?(1, &g_texture);
-    gl.BindTexture.?(c.GL_TEXTURE_2D, g_texture);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
-    const wrap: c.GLint = if (g_mode == .tile) c.GL_REPEAT else c.GL_CLAMP_TO_EDGE;
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, wrap);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, wrap);
-    gl.PixelStorei.?(c.GL_UNPACK_ALIGNMENT, 1);
-    gl.TexImage2D.?(c.GL_TEXTURE_2D, 0, c.GL_RGBA8, w, h, 0, c.GL_RGBA, c.GL_UNSIGNED_BYTE, data);
+    const tex = gpu.Texture.create();
+    g_texture = tex.handle;
+    tex.upload2D(w, h, data, .{
+        .wrap = if (g_mode == .tile) .repeat else .clamp_to_edge,
+        .unpack_alignment = 1,
+    });
 
     g_width = w;
     g_height = h;
@@ -110,17 +107,13 @@ pub fn load(allocator: std.mem.Allocator, path: ?[]const u8) void {
 /// Update the wrap mode after `g_mode` changes (without reloading the image).
 pub fn refreshWrapMode() void {
     if (g_texture == 0) return;
-    const gl = AppWindow.gpu.glTable();
-    const wrap: c.GLint = if (g_mode == .tile) c.GL_REPEAT else c.GL_CLAMP_TO_EDGE;
-    gl.BindTexture.?(c.GL_TEXTURE_2D, g_texture);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, wrap);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, wrap);
+    gpu.Texture.fromHandle(g_texture).setWrap(if (g_mode == .tile) .repeat else .clamp_to_edge);
 }
 
 pub fn deinit() void {
     if (g_texture != 0) {
-        const gl = AppWindow.gpu.glTable();
-        gl.DeleteTextures.?(1, &g_texture);
+        var tex = gpu.Texture.fromHandle(g_texture);
+        tex.destroy();
         g_texture = 0;
     }
     g_enabled = false;
@@ -198,21 +191,12 @@ fn computeUv(fb_w: f32, fb_h: f32, mode: Mode) Uv {
 /// (used to flip Y in the projection matrix used by the simple shader).
 pub fn drawFullscreen(viewport_width: f32, viewport_height: f32) void {
     if (!g_enabled or g_texture == 0) return;
-    const gl = AppWindow.gpu.glTable();
-    if (gl_init.simple_color_shader == 0) return;
+    if (ui_pipeline.emoji.program == 0) return;
 
     const uv = computeUv(viewport_width, viewport_height, g_mode);
 
-    // The simple_color_shader uses gl_init.shader_program's vertex layout
-    // (vec4: xy=pos, zw=texcoord) and gl_init.setProjection's projection
-    // matrix. We bind the simple_color_shader and set its uniforms.
-    gl.UseProgram.?(gl_init.simple_color_shader);
-    gl_init.setProjectionForProgram(gl_init.simple_color_shader, viewport_height);
-    gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.simple_color_shader, "opacity"), 1.0);
-    gl.Uniform1i.?(gl.GetUniformLocation.?(gl_init.simple_color_shader, "text"), 0);
-
     // Two triangles covering the whole viewport in pixel coords.
-    // setProjectionForProgram maps [0..w] x [0..h] to NDC.
+    // drawTextureQuad's setProjection maps [0..w] x [0..h] to NDC.
     const x_lo: f32 = 0;
     const y_lo: f32 = 0;
     const x_hi: f32 = viewport_width;
@@ -226,38 +210,19 @@ pub fn drawFullscreen(viewport_width: f32, viewport_height: f32) void {
         .{ x_hi, y_hi, uv.u_max, uv.v_min }, // top-right
     };
 
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindTexture.?(c.GL_TEXTURE_2D, g_texture);
-    gl.BindVertexArray.?(gl_init.vao);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
-    gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-
     // The image is opaque RGBA; we want to write it directly without blending
     // against whatever ClearColor wrote. Disable blending for this single draw.
-    gl.Disable.?(c.GL_BLEND);
-    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
-    gl.Enable.?(c.GL_BLEND);
-    gl_init.g_draw_call_count += 1;
+    ui_pipeline.setBlendEnabled(false);
+    ui_pipeline.drawTextureQuad(vertices, g_texture, 1.0);
+    ui_pipeline.setBlendEnabled(true);
 
     // Tint pass: blend the theme background color over the image at
     // `g_bg_opacity`. Without this, default-bg cells (which emit no per-cell
     // bg quad) would show the image at 100% regardless of opacity. With it,
     // default cells end up as `(1-opacity)*image + opacity*theme_bg`, which
     // matches the documented intent. Skip only at opacity == 0 (no-op).
-    if (gl_init.g_bg_opacity > 0.0 and gl_init.overlay_shader != 0) {
+    if (gl_init.g_bg_opacity > 0.0 and ui_pipeline.overlay.program != 0) {
         const theme = AppWindow.g_theme.background;
-        gl.UseProgram.?(gl_init.overlay_shader);
-        gl_init.setProjectionForProgram(gl_init.overlay_shader, viewport_height);
-        gl.Uniform4f.?(
-            gl.GetUniformLocation.?(gl_init.overlay_shader, "overlayColor"),
-            theme[0],
-            theme[1],
-            theme[2],
-            gl_init.g_bg_opacity,
-        );
-        // Reuse the same fullscreen vertices (overlay shader ignores texcoords).
-        gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
-        gl_init.g_draw_call_count += 1;
+        ui_pipeline.fillOverlay(vertices, .{ theme[0], theme[1], theme[2], gl_init.g_bg_opacity });
     }
 }

@@ -20,6 +20,7 @@ pub const Uv = struct { u0: f32, v0: f32, u1: f32, v1: f32 };
 
 pub threadlocal var text: Pipeline = .{ .program = 0, .vao = 0 };
 pub threadlocal var emoji: Pipeline = .{ .program = 0, .vao = 0 };
+pub threadlocal var overlay: Pipeline = .{ .program = 0, .vao = 0 }; // flat-color tint (was gl_init.overlay_shader)
 pub threadlocal var quad: Buffer = .{ .handle = 0, .target = 0 };
 pub threadlocal var solid: Texture = .{ .handle = 0 };
 
@@ -57,6 +58,10 @@ pub fn init() void {
     if (text.program == 0) std.debug.print("UI text pipeline failed\n", .{});
     if (emoji.program == 0) std.debug.print("UI emoji pipeline failed\n", .{});
 
+    const overlay_vao = buildQuadVao();
+    overlay = Pipeline.init(shaders.vertex_shader_source, shaders.overlay_fragment_source, overlay_vao);
+    if (overlay.program == 0) std.debug.print("UI overlay pipeline failed\n", .{});
+
     var solid_handle: c.GLuint = 0;
     gl.GenTextures.?(1, &solid_handle);
     gl.BindTexture.?(c.GL_TEXTURE_2D, solid_handle);
@@ -70,6 +75,7 @@ pub fn init() void {
 pub fn deinit() void {
     text.deinit();
     emoji.deinit();
+    overlay.deinit();
     quad.deinit();
     if (solid.handle != 0) {
         gpu.glTable().DeleteTextures.?(1, &solid.handle);
@@ -121,6 +127,14 @@ pub fn beginClip(rect: Rect) void {
 /// enable/disable — clip regions are not nested.
 pub fn endClip() void {
     gpu.glTable().Disable.?(c.GL_SCISSOR_TEST);
+}
+
+/// Toggle GL_BLEND. Lets callers that draw opaque content (e.g. a background
+/// image or post-process pass) disable blending for a draw and restore it,
+/// without touching raw GL (= the prior gl.Disable/Enable(GL_BLEND) bookends).
+pub fn setBlendEnabled(enabled: bool) void {
+    const gl = gpu.glTable();
+    if (enabled) gl.Enable.?(c.GL_BLEND) else gl.Disable.?(c.GL_BLEND);
 }
 
 pub fn fillQuad(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
@@ -175,4 +189,34 @@ pub fn drawColorGlyph(rect: Rect, uv: Uv, tex: c.GLuint, opacity: f32) void {
     gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
     drawCallTick();
     gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
+}
+
+/// Draw a textured RGBA quad through the emoji/color pipeline (the old
+/// gl_init.simple_color_shader path). `verts` is 6 vertices of (x, y, u, v).
+/// `opacity` modulates alpha; the texture is sampled on unit 0. Does NOT change
+/// blend state — the caller sets blend as needed.
+pub fn drawTextureQuad(verts: [6][4]f32, tex: c.GLuint, opacity: f32) void {
+    emoji.use();
+    emoji.bindVao();
+    emoji.setProjection();
+    emoji.setFloat("opacity", opacity);
+    emoji.setInt("text", 0);
+    Texture.fromHandle(tex).bind(0);
+    quad.upload(std.mem.sliceAsBytes(verts[0..]));
+    emoji.drawArrays(c.GL_TRIANGLES, 0, 6);
+    drawCallTick();
+}
+
+/// Draw a flat-color quad through the overlay pipeline (the old
+/// gl_init.overlay_shader path). `verts` is 6 vertices of (x, y, u, v) — the
+/// overlay shader ignores the uv. `color` is RGBA (alpha = tint strength).
+/// Does NOT change blend state.
+pub fn fillOverlay(verts: [6][4]f32, color: [4]f32) void {
+    overlay.use();
+    overlay.bindVao();
+    overlay.setProjection();
+    overlay.setVec4("overlayColor", color[0], color[1], color[2], color[3]);
+    quad.upload(std.mem.sliceAsBytes(verts[0..]));
+    overlay.drawArrays(c.GL_TRIANGLES, 0, 6);
+    drawCallTick();
 }

@@ -101,11 +101,11 @@ mapping in guide §2 and §5.
       under `gpu/opengl/`, and `AppWindow.zig` no longer `@cImport`s `glad`
       (consumers reach the table via `AppWindow.gpu.glTable()`). Renderer files
       keep their own `glad` includes until A6.
-- [ ] **A3** Route renderer files from raw `gl.*` to `gpu.zig`, splitting each
+- [x] **A3** Route renderer files from raw `gl.*` to `gpu.zig`, splitting each
       file's presentation/logic in the same pass (one touch each):
       `cell_renderer`, `titlebar`, `overlays`, `ai_chat_renderer`,
       `image_renderer`, `post_process`, `background_image`, `fbo`,
-      `markdown_preview_renderer`, `file_explorer_renderer`.
+      `markdown_preview_renderer`, `file_explorer_renderer` — **all converted**.
       *Increment 1 done:* real `Buffer`/`Texture`/`Pipeline` primitives exist in
       `gpu/opengl/`; `cell_renderer` is converted — `drawCells` routes through
       `cell_pipeline.zig` (cell pipelines built from the primitives) and the pure
@@ -125,10 +125,17 @@ mapping in guide §2 and §5.
       `glad` cImport + `gl_init` import are gone (the file is now raw-`gl.*`-free,
       like `titlebar`). Its pure rect geometry moved to std-only, unit-tested
       `ai_chat_layout.zig`.
-      *Still pending:* `overlays`, `image_renderer`, `post_process`,
-      `background_image`, `fbo`, `markdown_preview_renderer`,
-      `file_explorer_renderer` (each converts to `ui_pipeline`, dissolving the
-      compat mirrors as they go).
+      *Increment 4 done (remaining 7 files):* `file_explorer_renderer` (quads →
+      `ui_pipeline.fillQuad`). Added GPU primitives — `Texture.create/upload2D/
+      setWrap/destroy`, new `Framebuffer`, `Pipeline.setVec3/setVec4/drawArrays`
+      — plus `ui_pipeline.drawTextureQuad`/`fillOverlay`/`setBlendEnabled` and a
+      `ui_pipeline`-owned `overlay` pipeline (so `overlay_shader` left `gl_init`).
+      `fbo`/`post_process` → `gpu.Framebuffer`; `image_renderer`/`background_image`/
+      `markdown_preview_renderer` image uploads → `gpu.Texture` + `drawTextureQuad`;
+      `overlays`/`background_image` tint → `fillOverlay`; `markdown_preview` +
+      `overlays` quads → `fillQuad`. None carries its own `@cInclude("glad/gl.h")`;
+      `markdown_preview`/`post_process` keep `gpu.glTable()` plumbing for VAO
+      build / scissor save-restore / Clear-Viewport (the `cell_pipeline` bar).
 - [ ] **A4** Route font atlas → GPU texture through the `Texture` primitive;
       drop `font/manager.zig`'s direct `@cImport("glad/gl.h")`.
 - [ ] **A5** Backend-scope shaders: GLSL under `gpu/opengl/shaders.zig`; reserve
