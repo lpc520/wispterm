@@ -10,7 +10,11 @@ pub const Backend = enum {
 pub fn backendForOs(os_tag: std.Target.Os.Tag) Backend {
     return switch (os_tag) {
         .windows => .windows,
-        .linux, .macos, .freebsd, .netbsd, .openbsd, .dragonfly, .solaris, .illumos => .posix,
+        // Only Linux is implemented + verified. The POSIX backend uses
+        // std.os.linux ioctl request numbers (TIOCSWINSZ/TIOCSCTTY/FIONREAD),
+        // which differ on macOS and the BSDs — those stay unsupported until
+        // their request codes are added (Phase D, on a machine that can run them).
+        .linux => .posix,
         else => .unsupported,
     };
 }
@@ -74,6 +78,7 @@ test "platform pty owns pipe IO operations" {
 test "platform pty selects backend by target OS" {
     try std.testing.expectEqual(Backend.windows, backendForOs(.windows));
     try std.testing.expectEqual(Backend.posix, backendForOs(.linux));
-    try std.testing.expectEqual(Backend.posix, backendForOs(.macos));
+    // macOS/BSD use different ioctl request codes; unsupported until Phase D.
+    try std.testing.expectEqual(Backend.unsupported, backendForOs(.macos));
     try std.testing.expectEqual(Backend.unsupported, backendForOs(.wasi));
 }

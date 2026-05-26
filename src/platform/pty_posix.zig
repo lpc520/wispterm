@@ -1,4 +1,8 @@
-//! POSIX PTY backend (Linux first; macOS shares the code).
+//! POSIX PTY backend (Linux only for now).
+//!
+//! The ioctl request numbers come from `std.os.linux.T`, so macOS and the BSDs
+//! (which use different request codes) are routed to `.unsupported` by
+//! `pty.zig`'s `backendForOs` until those constants are added in Phase D.
 //!
 //! Mirrors the `Pty` API of `pty_windows.zig`. Uses libc (link with `-lc`):
 //! `posix_openpt`/`grantpt`/`unlockpt`/`ptsname_r` to allocate a master fd plus
@@ -12,8 +16,8 @@ const pty_command = @import("pty_command.zig");
 
 const fd_t = c.fd_t;
 
-/// ioctl request numbers. `std.os.linux.T` carries the per-arch Linux values.
-/// On macOS these differ; that path is unverified here (Linux-only box).
+/// ioctl request numbers (per-arch Linux values). macOS/BSD differ, hence the
+/// Linux-only `backendForOs` mapping in pty.zig.
 const T = std.os.linux.T;
 
 extern "c" fn posix_openpt(oflag: c_int) c_int;
@@ -21,6 +25,9 @@ extern "c" fn grantpt(fd: c_int) c_int;
 extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname_r(fd: c_int, buf: [*]u8, buflen: usize) c_int;
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+/// Raw `_exit(2)` — used in the forked child so we never run libc `atexit`
+/// handlers or flush stdio buffers inherited from the parent.
+extern "c" fn _exit(code: c_int) noreturn;
 
 const SLAVE_PATH_MAX = 128;
 const MAX_ARGV = 64;
@@ -130,7 +137,7 @@ pub const Pty = struct {
             // Child: set up the slave as the controlling tty, then exec.
             childExec(self.master, self.slave_path[0..], self.cancel_pipe, command_line, cwd);
             // childExec never returns; if it somehow does, bail out.
-            std.posix.exit(127);
+            _exit(127);
         }
         // Parent: keep the master open; record the child pid.
         command.pid = pid;
@@ -224,12 +231,12 @@ fn childExec(
     while (path_len < slave_path.len and slave_path[path_len] != 0) : (path_len += 1) {
         path_buf[path_len] = slave_path[path_len];
     }
-    if (path_len >= path_buf.len) std.posix.exit(127);
+    if (path_len >= path_buf.len) _exit(127);
     path_buf[path_len] = 0;
 
     const open_flags = std.posix.O{ .ACCMODE = .RDWR };
     const slave = c.open(@ptrCast(&path_buf), open_flags, @as(c.mode_t, 0));
-    if (slave < 0) std.posix.exit(127);
+    if (slave < 0) _exit(127);
 
     // Claim the slave as the controlling terminal for this session.
     _ = c.ioctl(slave, T.IOCSCTTY, @as(c_int, 0));
@@ -251,12 +258,12 @@ fn childExec(
     var arg_storage: [ARG_BUF]u8 = undefined;
     var argv: [MAX_ARGV + 1]?[*:0]const u8 = undefined;
     const argc = parseArgv(command_line, &arg_storage, &argv);
-    if (argc == 0) std.posix.exit(127);
+    if (argc == 0) _exit(127);
     argv[argc] = null;
 
     _ = execvp(argv[0].?, @ptrCast(&argv));
     // execvp only returns on failure.
-    std.posix.exit(127);
+    _exit(127);
 }
 
 /// Splits `command_line` on ASCII whitespace into NUL-terminated argv entries
@@ -294,10 +301,11 @@ fn parseArgv(
 
 const backend_facade = @import("pty.zig");
 
-test "posix backend selected for unix targets" {
+test "posix backend selected for linux; macos/bsd unsupported until Phase D" {
     try std.testing.expectEqual(backend_facade.Backend.posix, backend_facade.backendForOs(.linux));
-    try std.testing.expectEqual(backend_facade.Backend.posix, backend_facade.backendForOs(.macos));
     try std.testing.expectEqual(backend_facade.Backend.windows, backend_facade.backendForOs(.windows));
+    // macOS/BSD ioctl request codes differ from std.os.linux.T — see backendForOs.
+    try std.testing.expectEqual(backend_facade.Backend.unsupported, backend_facade.backendForOs(.macos));
     try std.testing.expectEqual(backend_facade.Backend.unsupported, backend_facade.backendForOs(.wasi));
 }
 
