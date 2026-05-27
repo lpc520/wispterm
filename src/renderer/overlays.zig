@@ -2320,6 +2320,58 @@ fn openAiFormEdit(index: usize) void {
     openAiForm();
 }
 
+pub fn openAiConfigForSession(session: *AppWindow.ai_chat.Session) void {
+    loadAiProfiles();
+
+    session.mutex.lock();
+    const profile_idx = findAiProfileForSession(session.title(), session.baseUrl(), session.model());
+    session.mutex.unlock();
+
+    if (profile_idx) |idx| {
+        openAiFormEdit(idx);
+        g_ai_focus = @intFromEnum(AiField.api_key);
+        return;
+    }
+
+    clearAiForm();
+    session.mutex.lock();
+    setAiDefault(.name, if (session.title().len > 0) session.title() else AppWindow.ai_chat.DEFAULT_NAME);
+    setAiDefault(.base_url, session.baseUrl());
+    setAiDefault(.api_key, session.apiKey());
+    setAiDefault(.model, session.model());
+    setAiDefault(.system_prompt, session.systemPrompt());
+    setAiDefault(.thinking, session.thinkingConfigValue());
+    setAiDefault(.reasoning_effort, session.reasoningEffort());
+    setAiDefault(.stream, session.streamConfigValue());
+    setAiDefault(.agent, session.agentConfigValue());
+    setAiDefault(.protocol, session.apiProtocolName());
+    session.mutex.unlock();
+
+    g_ai_edit_index = AI_PROFILE_NONE;
+    openAiForm();
+    g_ai_focus = @intFromEnum(AiField.api_key);
+}
+
+fn findAiProfileForSession(name: []const u8, base_url: []const u8, model: []const u8) ?usize {
+    if (name.len > 0) {
+        for (0..g_ai_profile_count) |idx| {
+            if (std.mem.eql(u8, aiProfileField(&g_ai_profiles[idx], .name), name)) return idx;
+        }
+    }
+
+    if (base_url.len > 0 and model.len > 0) {
+        for (0..g_ai_profile_count) |idx| {
+            if (std.mem.eql(u8, aiProfileField(&g_ai_profiles[idx], .base_url), base_url) and
+                std.mem.eql(u8, aiProfileField(&g_ai_profiles[idx], .model), model))
+            {
+                return idx;
+            }
+        }
+    }
+
+    return null;
+}
+
 fn openAiForm() void {
     g_ssh_list_visible = false;
     g_ssh_form_visible = false;

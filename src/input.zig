@@ -2623,6 +2623,20 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                     AppWindow.g_cells_valid = false;
                     return;
                 }
+                if (AppWindow.ai_chat_renderer.missingApiKeyStatusHitTest(
+                    chat,
+                    xpos,
+                    ypos,
+                    @floatFromInt(fb.width),
+                    @floatCast(titlebarHeight()),
+                    AppWindow.leftPanelsWidth(),
+                    AppWindow.rightPanelsWidthForWindow(fb.width),
+                )) {
+                    overlays.openAiConfigForSession(chat);
+                    AppWindow.g_force_rebuild = true;
+                    AppWindow.g_cells_valid = false;
+                    return;
+                }
                 if (AppWindow.ai_chat_renderer.interactionHitTest(
                     chat,
                     xpos,

@@ -1081,6 +1081,22 @@ pub const Session = struct {
         return self.api_key_buf[0..self.api_key_len];
     }
 
+    pub fn missingApiKey(self: *const Session) bool {
+        return self.api_key_len == 0;
+    }
+
+    pub fn thinkingConfigValue(self: *const Session) []const u8 {
+        return if (self.thinking_enabled) "enabled" else "disabled";
+    }
+
+    pub fn streamConfigValue(self: *const Session) []const u8 {
+        return if (self.stream) "true" else "false";
+    }
+
+    pub fn agentConfigValue(self: *const Session) []const u8 {
+        return if (self.agent_enabled) "true" else "false";
+    }
+
     pub fn input(self: *const Session) []const u8 {
         return self.input_buf[0..self.input_len];
     }
