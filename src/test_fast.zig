@@ -40,4 +40,5 @@ test {
     _ = @import("renderer/cell_geometry.zig");
     _ = @import("renderer/titlebar_layout.zig");
     _ = @import("ai_chat_layout.zig");
+    _ = @import("ai_chat_protocol.zig");
 }
