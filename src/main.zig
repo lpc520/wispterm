@@ -21,6 +21,19 @@ fn prepareCliConsole() void {
     platform_console.prepareCliConsole();
 }
 
+/// .app bundles launched by launchd inherit cwd "/", which then leaks into
+/// every new shell session (initial_cwd, getActiveCwd, PTY inherited cwd).
+/// Reroot to $HOME so newly spawned tabs/splits land where the user expects,
+/// while leaving phantty alone when it was invoked from a real shell with a
+/// meaningful cwd.
+fn rerootCwdFromBundleRootIfNeeded() void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = std.process.getCwd(&buf) catch return;
+    if (!std.mem.eql(u8, cwd, "/")) return;
+    const home = std.posix.getenv("HOME") orelse return;
+    std.posix.chdir(home) catch {};
+}
+
 fn listSystemFonts(allocator: std.mem.Allocator, writer: anytype) !void {
     try writer.print("Listing system fonts...\nBackend: {s}\n\n", .{font_backend.discoveryDisplayName()});
 
@@ -124,6 +137,7 @@ pub fn main() !void {
     }
 
     std.debug.print("Phantty starting...\n", .{});
+    rerootCwdFromBundleRootIfNeeded();
     image_decoder.install();
 
     // Load configuration: defaults → config file → CLI flags
