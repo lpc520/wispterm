@@ -3041,17 +3041,9 @@ pub fn resetCursorBlink() void {
 // emit cursor save/restore sequences many times per second to animate a
 // status line; the render-loop sampler would otherwise catch the cursor
 // mid-animation and re-anchor the IME popup / inline preedit on the wrong row.
-threadlocal var g_ime_caret_last_sample_x: i64 = -1;
-threadlocal var g_ime_caret_last_sample_y: i64 = -1;
-threadlocal var g_ime_caret_last_sample_source: ImeCaretSource = .terminal_cursor;
-threadlocal var g_ime_caret_committed_x: i64 = -1;
-threadlocal var g_ime_caret_committed_y: i64 = -1;
-threadlocal var g_ime_caret_committed_source: ImeCaretSource = .terminal_cursor;
+threadlocal var g_ime_caret_tracker: ime_caret.StabilityTracker = .{};
 
-const ImeCaretSource = enum {
-    terminal_cursor,
-    visual_inverse,
-};
+const ImeCaretSource = ime_caret.Source;
 
 const ImeCaret = struct {
     x: usize,
@@ -3088,53 +3080,33 @@ fn syncImeCaretPosition(win: *window_backend.Window, split_count: usize) void {
     // animations are skipped. Visual inverse carets are app-drawn stable cells
     // (some TUIs hide the terminal cursor and draw one this way), so accept
     // them immediately.
-    const sx: i64 = @intCast(caret.x);
-    const sy: i64 = @intCast(caret.y);
-    if (caret.source == .terminal_cursor) {
-        if (sx != g_ime_caret_last_sample_x or
-            sy != g_ime_caret_last_sample_y or
-            caret.source != g_ime_caret_last_sample_source)
-        {
-            g_ime_caret_last_sample_x = sx;
-            g_ime_caret_last_sample_y = sy;
-            g_ime_caret_last_sample_source = caret.source;
-            return;
-        }
-    } else {
-        g_ime_caret_last_sample_x = sx;
-        g_ime_caret_last_sample_y = sy;
-        g_ime_caret_last_sample_source = caret.source;
-    }
-
-    if (sx == g_ime_caret_committed_x and
-        sy == g_ime_caret_committed_y and
-        caret.source == g_ime_caret_committed_source) return;
-    g_ime_caret_committed_x = sx;
-    g_ime_caret_committed_y = sy;
-    g_ime_caret_committed_source = caret.source;
+    if (g_ime_caret_tracker.commit(.{
+        .x = @intCast(caret.x),
+        .y = @intCast(caret.y),
+        .source = caret.source,
+    }) == null) return;
 
     const pad = surface.getPadding();
     const cell_w = font.cell_width;
     const cell_h = font.cell_height;
 
-    var x: f32 = titlebar.sidebarWidth() + @as(f32, @floatFromInt(pad.left)) + @as(f32, @floatFromInt(caret.x)) * cell_w;
-    var y: f32 = currentTitlebarHeight() + @as(f32, @floatFromInt(pad.top)) + @as(f32, @floatFromInt(caret.y)) * cell_h;
-
+    var origin_x: f32 = titlebar.sidebarWidth();
+    var origin_y: f32 = currentTitlebarHeight();
     if (split_count > 1) {
         for (0..split_layout.g_split_rect_count) |i| {
             const rect = split_layout.g_split_rects[i];
             if (rect.surface == surface) {
-                x = @as(f32, @floatFromInt(rect.x)) + @as(f32, @floatFromInt(pad.left)) + @as(f32, @floatFromInt(caret.x)) * cell_w;
-                y = @as(f32, @floatFromInt(rect.y)) + @as(f32, @floatFromInt(pad.top)) + @as(f32, @floatFromInt(caret.y)) * cell_h;
+                origin_x = @floatFromInt(rect.x);
+                origin_y = @floatFromInt(rect.y);
                 break;
             }
         }
     }
-
+    const px = ime_caret.pixelPosition(caret.x, caret.y, origin_x, origin_y, pad.left, pad.top, cell_w, cell_h);
     window_backend.setImeCaret(
         win,
-        @intFromFloat(@round(x)),
-        @intFromFloat(@round(y)),
+        @intFromFloat(@round(px.x)),
+        @intFromFloat(@round(px.y)),
         @intFromFloat(@max(1.0, @round(cell_h))),
     );
 }
