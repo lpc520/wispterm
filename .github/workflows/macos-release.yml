@@ -210,15 +210,13 @@ jobs:
             exit 1
           fi
 
-          asset_notes=$(cat <<'EOF'
-macOS assets included in this release:
-
-- aarch64 DMG: native build for Apple Silicon Macs
-- x86_64 DMG: native build for Intel Macs
-
-Both DMGs are signed with a Developer ID Application certificate and notarized by Apple.
-EOF
-)
+          asset_notes=$(printf '%s\n' \
+            'macOS assets included in this release:' \
+            '' \
+            '- aarch64 DMG: native build for Apple Silicon Macs' \
+            '- x86_64 DMG: native build for Intel Macs' \
+            '' \
+            'Both DMGs are signed with a Developer ID Application certificate and notarized by Apple.')
 
           release_notes_path="release-notes/${tag}.md"
           if [[ -f "${release_notes_path}" ]]; then
