@@ -59,6 +59,7 @@ const SUGGESTION_PAD_Y: f32 = 6;
 const SUGGESTION_GAP: f32 = 6;
 const SUGGESTION_MAX_W: f32 = 560;
 const SUGGESTION_COMMAND_W: f32 = 148;
+const MISSING_API_KEY_ACTION_TEXT = "Missing API key. Click to configure";
 
 pub const HitTarget = union(enum) {
     copy_message: usize,
@@ -155,8 +156,14 @@ pub fn render(
     if (session.request_inflight) {
         renderStopButton(stopButtonRect(x, w, top), window_height, session.request_stopping);
     } else {
-        const status_w = measureText(session.status());
-        _ = titlebar.renderTextLimited(session.status(), x + w - LINE_PAD_X - @min(status_w, STATUS_SLOT_W), header_y + 10, muted, STATUS_SLOT_W);
+        const missing_api_key = session.missingApiKey();
+        const status_text = if (missing_api_key) MISSING_API_KEY_ACTION_TEXT else session.status();
+        const status_color = if (missing_api_key) mixColor(fg, accent, 0.22) else muted;
+        const status_rect = statusActionRect(x, w, top, status_text);
+        _ = titlebar.renderTextLimited(status_text, status_rect.x, header_y + 10, status_color, STATUS_SLOT_W);
+        if (missing_api_key) {
+            ui_pipeline.fillQuadAlpha(status_rect.x, header_y + 8, status_rect.w, 1, accent, 0.34);
+        }
     }
 
     const input_text = session.input();
@@ -508,6 +515,26 @@ pub fn permissionChipHitTest(
         .w = PERMISSION_CHIP_W,
         .h = PERMISSION_CHIP_H,
     });
+}
+
+pub fn missingApiKeyStatusHitTest(
+    session: *ai_chat.Session,
+    xpos: f64,
+    ypos: f64,
+    window_width: f32,
+    titlebar_offset: f32,
+    left_panels_w: f32,
+    right_panels_w: f32,
+) bool {
+    session.mutex.lock();
+    const clickable = !session.request_inflight and session.missingApiKey();
+    session.mutex.unlock();
+    if (!clickable) return false;
+
+    const x = @round(left_panels_w);
+    const w = @round(@max(1.0, window_width - left_panels_w - right_panels_w));
+    const rect = statusActionRect(x, w, titlebar_offset, MISSING_API_KEY_ACTION_TEXT);
+    return pointInRect(@floatCast(xpos), @floatCast(ypos), rect);
 }
 
 pub fn inputFieldMetricsAt(
@@ -1042,6 +1069,16 @@ fn stopButtonRect(x: f32, w: f32, titlebar_offset: f32) HeaderButtonRect {
     return ai_chat_layout.stopButtonRect(x, w, titlebar_offset, LINE_PAD_X, STOP_BUTTON_W, STOP_BUTTON_H, HEADER_H);
 }
 
+fn statusActionRect(x: f32, w: f32, titlebar_offset: f32, text: []const u8) Rect {
+    const status_w = @min(measureText(text), STATUS_SLOT_W);
+    return .{
+        .x = x + w - LINE_PAD_X - status_w,
+        .top_px = titlebar_offset + 8,
+        .w = @max(1.0, status_w),
+        .h = 32,
+    };
+}
+
 fn renderStopButton(rect: HeaderButtonRect, window_height: f32, stopping: bool) void {
     const bg = AppWindow.g_theme.background;
     const fg = AppWindow.g_theme.foreground;
@@ -1463,7 +1500,6 @@ fn byteOffsetForMarkdownPoint(
 
     return display_cursor;
 }
-
 
 fn byteOffsetForWrappedPoint(
     text: []const u8,
@@ -1925,4 +1961,3 @@ fn mixColor(a: [3]f32, b: [3]f32, t: f32) [3]f32 {
         a[2] + (b[2] - a[2]) * clamped,
     };
 }
-
