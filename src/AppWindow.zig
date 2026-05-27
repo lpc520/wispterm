@@ -48,6 +48,7 @@ pub const overlays = @import("renderer/overlays.zig");
 pub const post_process = @import("renderer/post_process.zig");
 pub const gpu = @import("renderer/gpu/gpu.zig");
 pub const split_layout = @import("appwindow/split_layout.zig");
+const flush_scheduler = @import("appwindow/flush_scheduler.zig");
 pub const fbo = @import("renderer/fbo.zig");
 pub const background_image = @import("renderer/background_image.zig");
 pub const file_explorer = @import("file_explorer.zig");
@@ -286,10 +287,8 @@ test "AppWindow: platform window callbacks use backend-neutral names" {
 pub threadlocal var g_app: ?*App = null;
 var g_agent_history_mutex: std.Thread.Mutex = .{};
 pub var g_agent_history: ?*agent_history.Store = null;
-var g_agent_history_dirty: bool = false;
-var g_agent_history_next_flush_ms: i64 = 0;
+var g_flush_scheduler: flush_scheduler.FlushScheduler = .{};
 var g_agent_history_revision: u64 = 0;
-const AGENT_HISTORY_FLUSH_DEBOUNCE_MS: i64 = 350;
 
 // Initial CWD for this window (used when spawning the first tab)
 threadlocal var g_initial_cwd_buf: platform_pty_command.CwdBuffer = undefined;
@@ -786,8 +785,7 @@ fn ensureGlobalAgentHistoryStore(allocator: std.mem.Allocator) !void {
     errdefer allocator.destroy(store);
     store.* = try agent_history.loadDefault(allocator);
     g_agent_history = store;
-    g_agent_history_dirty = false;
-    g_agent_history_next_flush_ms = 0;
+    g_flush_scheduler.reset();
     g_agent_history_revision = 0;
 }
 
@@ -802,8 +800,7 @@ fn deinitGlobalAgentHistoryStore(allocator: std.mem.Allocator) void {
         allocator.destroy(store);
         g_agent_history = null;
     }
-    g_agent_history_dirty = false;
-    g_agent_history_next_flush_ms = 0;
+    g_flush_scheduler.reset();
     g_agent_history_revision = 0;
 }
 
@@ -823,10 +820,7 @@ fn saveAiHistoryChangeEvent(event: ai_chat.HistoryChangeEvent) void {
 }
 
 fn markAgentHistoryDirtyLocked() void {
-    if (!g_agent_history_dirty) {
-        g_agent_history_dirty = true;
-        g_agent_history_next_flush_ms = std.time.milliTimestamp() + AGENT_HISTORY_FLUSH_DEBOUNCE_MS;
-    }
+    g_flush_scheduler.markDirty(std.time.milliTimestamp());
     g_agent_history_revision +%= 1;
 }
 
@@ -837,11 +831,7 @@ fn flushAgentHistoryStoreIfDirty(force: bool) void {
     var snapshot_allocator: ?std.mem.Allocator = null;
 
     g_agent_history_mutex.lock();
-    if (!g_agent_history_dirty) {
-        g_agent_history_mutex.unlock();
-        return;
-    }
-    if (!force and now < g_agent_history_next_flush_ms) {
+    if (!g_flush_scheduler.shouldFlush(force, now)) {
         g_agent_history_mutex.unlock();
         return;
     }
@@ -853,28 +843,24 @@ fn flushAgentHistoryStoreIfDirty(force: bool) void {
     snapshot_allocator = store.allocator;
     json = store.toJsonString(store.allocator) catch |err| {
         log.warn("failed to snapshot agent history store for flush: {}", .{err});
-        g_agent_history_next_flush_ms = now + AGENT_HISTORY_FLUSH_DEBOUNCE_MS;
+        g_flush_scheduler.deferFlush(now);
         g_agent_history_mutex.unlock();
         return;
     };
     path = agent_history.defaultPath(store.allocator) catch |err| {
         log.warn("failed to resolve agent history path for flush: {}", .{err});
         store.allocator.free(json.?);
-        g_agent_history_next_flush_ms = now + AGENT_HISTORY_FLUSH_DEBOUNCE_MS;
+        g_flush_scheduler.deferFlush(now);
         g_agent_history_mutex.unlock();
         return;
     };
-    g_agent_history_dirty = false;
-    g_agent_history_next_flush_ms = 0;
+    g_flush_scheduler.beginFlush();
     g_agent_history_mutex.unlock();
 
     agent_history.saveJsonToPath(path.?, json.?) catch |err| {
         log.warn("failed to flush agent history store: {}", .{err});
         g_agent_history_mutex.lock();
-        if (!g_agent_history_dirty) {
-            g_agent_history_dirty = true;
-            g_agent_history_next_flush_ms = std.time.milliTimestamp() + AGENT_HISTORY_FLUSH_DEBOUNCE_MS;
-        }
+        g_flush_scheduler.failFlush(std.time.milliTimestamp());
         snapshot_allocator.?.free(path.?);
         snapshot_allocator.?.free(json.?);
         g_agent_history_mutex.unlock();
@@ -3055,17 +3041,9 @@ pub fn resetCursorBlink() void {
 // emit cursor save/restore sequences many times per second to animate a
 // status line; the render-loop sampler would otherwise catch the cursor
 // mid-animation and re-anchor the IME popup / inline preedit on the wrong row.
-threadlocal var g_ime_caret_last_sample_x: i64 = -1;
-threadlocal var g_ime_caret_last_sample_y: i64 = -1;
-threadlocal var g_ime_caret_last_sample_source: ImeCaretSource = .terminal_cursor;
-threadlocal var g_ime_caret_committed_x: i64 = -1;
-threadlocal var g_ime_caret_committed_y: i64 = -1;
-threadlocal var g_ime_caret_committed_source: ImeCaretSource = .terminal_cursor;
+threadlocal var g_ime_caret_tracker: ime_caret.StabilityTracker = .{};
 
-const ImeCaretSource = enum {
-    terminal_cursor,
-    visual_inverse,
-};
+const ImeCaretSource = ime_caret.Source;
 
 const ImeCaret = struct {
     x: usize,
@@ -3102,53 +3080,33 @@ fn syncImeCaretPosition(win: *window_backend.Window, split_count: usize) void {
     // animations are skipped. Visual inverse carets are app-drawn stable cells
     // (some TUIs hide the terminal cursor and draw one this way), so accept
     // them immediately.
-    const sx: i64 = @intCast(caret.x);
-    const sy: i64 = @intCast(caret.y);
-    if (caret.source == .terminal_cursor) {
-        if (sx != g_ime_caret_last_sample_x or
-            sy != g_ime_caret_last_sample_y or
-            caret.source != g_ime_caret_last_sample_source)
-        {
-            g_ime_caret_last_sample_x = sx;
-            g_ime_caret_last_sample_y = sy;
-            g_ime_caret_last_sample_source = caret.source;
-            return;
-        }
-    } else {
-        g_ime_caret_last_sample_x = sx;
-        g_ime_caret_last_sample_y = sy;
-        g_ime_caret_last_sample_source = caret.source;
-    }
-
-    if (sx == g_ime_caret_committed_x and
-        sy == g_ime_caret_committed_y and
-        caret.source == g_ime_caret_committed_source) return;
-    g_ime_caret_committed_x = sx;
-    g_ime_caret_committed_y = sy;
-    g_ime_caret_committed_source = caret.source;
+    if (g_ime_caret_tracker.commit(.{
+        .x = @intCast(caret.x),
+        .y = @intCast(caret.y),
+        .source = caret.source,
+    }) == null) return;
 
     const pad = surface.getPadding();
     const cell_w = font.cell_width;
     const cell_h = font.cell_height;
 
-    var x: f32 = titlebar.sidebarWidth() + @as(f32, @floatFromInt(pad.left)) + @as(f32, @floatFromInt(caret.x)) * cell_w;
-    var y: f32 = currentTitlebarHeight() + @as(f32, @floatFromInt(pad.top)) + @as(f32, @floatFromInt(caret.y)) * cell_h;
-
+    var origin_x: f32 = titlebar.sidebarWidth();
+    var origin_y: f32 = currentTitlebarHeight();
     if (split_count > 1) {
         for (0..split_layout.g_split_rect_count) |i| {
             const rect = split_layout.g_split_rects[i];
             if (rect.surface == surface) {
-                x = @as(f32, @floatFromInt(rect.x)) + @as(f32, @floatFromInt(pad.left)) + @as(f32, @floatFromInt(caret.x)) * cell_w;
-                y = @as(f32, @floatFromInt(rect.y)) + @as(f32, @floatFromInt(pad.top)) + @as(f32, @floatFromInt(caret.y)) * cell_h;
+                origin_x = @floatFromInt(rect.x);
+                origin_y = @floatFromInt(rect.y);
                 break;
             }
         }
     }
-
+    const px = ime_caret.pixelPosition(caret.x, caret.y, origin_x, origin_y, pad.left, pad.top, cell_w, cell_h);
     window_backend.setImeCaret(
         win,
-        @intFromFloat(@round(x)),
-        @intFromFloat(@round(y)),
+        @intFromFloat(@round(px.x)),
+        @intFromFloat(@round(px.y)),
         @intFromFloat(@max(1.0, @round(cell_h))),
     );
 }
