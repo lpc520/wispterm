@@ -388,6 +388,13 @@ test "macOS platform services smoke test step is declared" {
     try expectSourceContains(source, "src/platform/services_macos_bridge.m");
 }
 
+test "macOS UI smoke test step is declared" {
+    const source = @embedFile("build.zig");
+
+    try expectSourceContains(source, "b.step(\"test-macos-ui\"");
+    try expectSourceContains(source, "src/test_macos_ui.zig");
+}
+
 test "macOS Info.plist renders app bundle metadata and package type" {
     const metadata = macosBundleMetadata();
     try std.testing.expectEqualStrings("Phantty.app", metadata.bundle_dir);
@@ -500,6 +507,7 @@ pub fn build(b: *std.Build) void {
     const test_macos_window_step = b.step("test-macos-window", "Run native macOS AppKit window backend smoke tests");
     const test_macos_font_step = b.step("test-macos-font", "Run native macOS CoreText font backend smoke tests");
     const test_macos_services_step = b.step("test-macos-services", "Run native macOS platform service smoke tests");
+    const test_macos_ui_step = b.step("test-macos-ui", "Run native macOS UI smoke tests");
     const macos_app_step = b.step("macos-app", "Build and install the native macOS .app bundle");
     const macos_dist_step = b.step("macos-dist", "Build, sign, and package the native macOS .app into a DMG");
 
@@ -643,11 +651,28 @@ pub fn build(b: *std.Build) void {
         });
         apple_sdk.addPaths(b, macos_services_tests) catch @panic("failed to locate native Apple SDK for macOS service tests");
         test_macos_services_step.dependOn(&b.addRunArtifact(macos_services_tests).step);
+
+        const macos_ui_test_mod = createAppModuleWithRoot(
+            b,
+            "src/test_macos_ui.zig",
+            b.resolveTargetQuery(.{}),
+            optimize,
+            app_version,
+            PlatformFeatures.forOs(.macos),
+            false,
+        );
+        const macos_ui_tests = b.addTest(.{
+            .name = "phantty-macos-ui-test",
+            .root_module = macos_ui_test_mod,
+        });
+        apple_sdk.addPaths(b, macos_ui_tests) catch @panic("failed to locate native Apple SDK for macOS UI tests");
+        test_macos_ui_step.dependOn(&b.addRunArtifact(macos_ui_tests).step);
     } else {
         test_metal_step.dependOn(&b.addFail("test-metal requires a macOS host with Metal").step);
         test_macos_window_step.dependOn(&b.addFail("test-macos-window requires a macOS host with AppKit").step);
         test_macos_font_step.dependOn(&b.addFail("test-macos-font requires a macOS host with CoreText").step);
         test_macos_services_step.dependOn(&b.addFail("test-macos-services requires a macOS host with AppKit").step);
+        test_macos_ui_step.dependOn(&b.addFail("test-macos-ui requires a macOS host with AppKit").step);
     }
 
     if (platform.supports_desktop_exe) {

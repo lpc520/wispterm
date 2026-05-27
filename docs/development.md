@@ -107,6 +107,21 @@ When adding more UI automation, follow the same pattern:
 - Always clean up test windows with `CloseMainWindow()`, then `Stop-Process
   -Force` if the process remains.
 
+## macOS UI Smoke Tests
+
+macOS UI debugging is native-target first. Unless a task explicitly asks for
+Intel validation, run the native host tests rather than `x86_64-macos`:
+
+```bash
+zig build test-macos-ui
+```
+
+The step runs in-process AppKit/overlay smoke tests for macOS-only debugging:
+`Ctrl+Shift+B` toggles the tab sidebar, the Command Center filters and executes
+the `Settings` command, and the Settings page writes to an isolated test config
+file. The test intentionally avoids external keyboard/screenshot automation so
+it does not depend on macOS Accessibility or Screen Recording permissions.
+
 ## Windows Checkout Safety
 
 This repository must remain safe to check out and develop on Windows. Before

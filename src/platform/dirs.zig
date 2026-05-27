@@ -15,6 +15,18 @@ pub const Env = struct {
     userprofile: ?[]const u8 = null,
 };
 
+threadlocal var test_config_dir_override: ?[]const u8 = null;
+
+pub fn setTestConfigDirForCurrentThread(path: []const u8) void {
+    if (!builtin.is_test) return;
+    test_config_dir_override = path;
+}
+
+pub fn clearTestConfigDirForCurrentThread() void {
+    if (!builtin.is_test) return;
+    test_config_dir_override = null;
+}
+
 pub fn configDirFromEnvForOs(
     allocator: std.mem.Allocator,
     os_tag: std.Target.Os.Tag,
@@ -39,6 +51,12 @@ pub fn configDirFromEnvForOs(
 }
 
 pub fn configDir(allocator: std.mem.Allocator) ![]const u8 {
+    if (builtin.is_test) {
+        if (test_config_dir_override) |path| {
+            return allocator.dupe(u8, path);
+        }
+    }
+
     const appdata = envVarOwned(allocator, "APPDATA");
     defer if (appdata) |value| allocator.free(value);
     const xdg = envVarOwned(allocator, "XDG_CONFIG_HOME");
@@ -276,6 +294,19 @@ fn nonEmpty(value: ?[]const u8) ?[]const u8 {
     const actual = value orelse return null;
     if (actual.len == 0) return null;
     return actual;
+}
+
+test "configDir uses test override in Zig test processes" {
+    const allocator = std.testing.allocator;
+    const override = "/tmp/phantty-test-config";
+
+    setTestConfigDirForCurrentThread(override);
+    defer clearTestConfigDirForCurrentThread();
+
+    const path = try configDir(allocator);
+    defer allocator.free(path);
+
+    try std.testing.expectEqualStrings(override, path);
 }
 
 test "platform dirs resolve app config root per OS" {

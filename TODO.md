@@ -218,9 +218,8 @@ services, and `.app` packaging. Ghostty reference: `src/renderer/metal/`,
       desktop entrypoint. Keep the comptime guards
       (`build_guards`, `apprt_win32_guard`, `gl_backend_guard`) green for macOS.
       Native proof: `zig test build.zig`, `zig build macos-app -Dtarget=aarch64-macos`,
-      `zig build macos-app -Dtarget=x86_64-macos`, `zig build test-metal`,
-      `zig build test-full -Dtarget=aarch64-macos`, and
-      `zig build test-full -Dtarget=x86_64-macos`.
+      `zig build test-metal`, `zig build test-macos-ui`, and
+      `zig build test-full -Dtarget=aarch64-macos`.
 - [x] Decide the ObjC interop seam: extern `objc_msgSend` from Zig vs. a thin
       ObjC/`.m` shim compiled in (Ghostty calls into `libghostty` from a Swift/
       ObjC app layer). Chosen boundary: a thin Objective-C shim at
@@ -265,7 +264,9 @@ services, and `.app` packaging. Ghostty reference: `src/renderer/metal/`,
 - [x] Input/IME/DPI: `NSEvent` → the core's neutral `key_*` codes; mouse/scroll/
       trackpad; IME via `NSTextInputClient`; DPI via `backingScaleFactor`/`NSScreen`.
       Native proof: `zig build test-macos-window` covers key, text, mouse button,
-      mouse move, wheel, IME preedit, Metal layer creation, and DPI.
+      mouse move, wheel, IME preedit, Metal layer creation, and DPI; `zig build
+      test-macos-ui` covers sidebar, command center, and settings/config UI
+      smoke paths.
 - [x] Reconcile the app-drawn titlebar / caption buttons with macOS traffic-light
       conventions. macOS uses AppKit's titlebar/traffic lights (`titlebar_height`
       and caption button width are zero), so Phantty's app-drawn titlebar path

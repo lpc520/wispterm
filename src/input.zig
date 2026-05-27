@@ -5,6 +5,7 @@
 //! split divider dragging, and fullscreen toggle.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const AppWindow = @import("AppWindow.zig");
 const tab = AppWindow.tab;
 const titlebar = AppWindow.titlebar;
@@ -179,6 +180,24 @@ test "input: Ctrl+Shift+P toggles command center" {
 
     handleKey(.{ .key_code = 'P', .ctrl = true, .shift = true, .alt = false });
     try std.testing.expect(!overlays.commandPaletteVisible());
+}
+
+test "macOS UI smoke: Ctrl+Shift+B toggles the tab sidebar" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const previous_keybinds = AppWindow.g_keybinds;
+    const previous_sidebar = tab.g_sidebar_visible;
+    defer AppWindow.g_keybinds = previous_keybinds;
+    defer tab.g_sidebar_visible = previous_sidebar;
+
+    AppWindow.g_keybinds = keybind.Set.defaults();
+    tab.g_sidebar_visible = false;
+
+    handleKey(.{ .key_code = 'B', .ctrl = true, .shift = true, .alt = false });
+    try std.testing.expect(tab.g_sidebar_visible);
+
+    handleKey(.{ .key_code = 'B', .ctrl = true, .shift = true, .alt = false });
+    try std.testing.expect(!tab.g_sidebar_visible);
 }
 
 fn weixinQrPanelConsumesChar() bool {

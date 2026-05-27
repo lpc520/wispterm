@@ -3941,6 +3941,58 @@ test "overlays: command center Settings command opens settings page" {
     try std.testing.expect(!commandPaletteVisible());
 }
 
+test "macOS UI smoke: command center opens settings and settings writes config" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_root);
+    const config_dir = try std.fs.path.join(allocator, &.{ tmp_root, "config" });
+    defer allocator.free(config_dir);
+
+    platform_dirs.setTestConfigDirForCurrentThread(config_dir);
+    defer platform_dirs.clearTestConfigDirForCurrentThread();
+
+    try tmp.dir.makePath("config");
+    {
+        const file = try tmp.dir.createFile("config/config", .{});
+        defer file.close();
+        try file.writeAll(
+            \\font-size = 13
+            \\cursor-style-blink = true
+            \\
+        );
+    }
+
+    const previous_allocator = AppWindow.g_allocator;
+    defer AppWindow.g_allocator = previous_allocator;
+    AppWindow.g_allocator = allocator;
+
+    commandPaletteOpen();
+    defer commandPaletteClose();
+    defer settingsPageClose();
+
+    for ("settings") |c| commandPaletteInsertChar(c);
+    try std.testing.expect(commandPaletteVisible());
+
+    commandPaletteExecuteSelected();
+    try std.testing.expect(!commandPaletteVisible());
+    try std.testing.expect(settingsPageVisible());
+
+    settingsPageHandleKey(.{ .key = .arrow_up });
+    settingsPageHandleKey(.{ .key = .arrow_right });
+
+    const config_path = try std.fs.path.join(allocator, &.{ config_dir, "config" });
+    defer allocator.free(config_path);
+    const content = try std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024);
+    defer allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "font-size = 14") != null);
+}
+
 test "overlays: active download toast can be clicked for interruption" {
     showTransferToast(.download, .in_progress, "file.txt - 1.5 MB/s");
     try std.testing.expect(transferToastHitTestForTest(780, 534, 800, 600));
