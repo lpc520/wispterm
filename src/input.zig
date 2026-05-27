@@ -40,6 +40,7 @@ const Selection = Surface.Selection;
 const CellPos = struct { col: usize, row: usize };
 
 const clipboard = @import("input/clipboard.zig");
+const click_tracker = @import("input/click_tracker.zig");
 const preview_source = @import("input/preview_source.zig");
 const writeToPty = clipboard.writeToPty;
 pub const copyTextToClipboard = clipboard.copyTextToClipboard;
@@ -209,10 +210,7 @@ pub threadlocal var g_selecting: bool = false; // True while mouse button is hel
 pub threadlocal var g_click_x: f64 = 0; // X position of initial click (for threshold calculation)
 pub threadlocal var g_click_y: f64 = 0; // Y position of initial click
 var g_selection_changed_for_copy: bool = false;
-threadlocal var g_left_click_count: u8 = 0;
-threadlocal var g_left_click_time_ms: i64 = 0;
-threadlocal var g_left_click_x: f64 = 0;
-threadlocal var g_left_click_y: f64 = 0;
+threadlocal var g_left_click_tracker: click_tracker.ClickTracker = .{};
 const MULTI_CLICK_INTERVAL_MS: i64 = 500;
 const MAX_SELECTION_COLS: usize = 4096;
 
@@ -1854,27 +1852,11 @@ fn markSelectionChanged() void {
 fn nextLeftClickCount(xpos: f64, ypos: f64) u8 {
     const now = std.time.milliTimestamp();
     const max_distance: f64 = @floatCast(@max(font.cell_width, font.cell_height));
-    const dx = xpos - g_left_click_x;
-    const dy = ypos - g_left_click_y;
-    const distance = @sqrt(dx * dx + dy * dy);
-    const within_interval = g_left_click_count > 0 and now - g_left_click_time_ms <= MULTI_CLICK_INTERVAL_MS;
-    const within_distance = g_left_click_count > 0 and distance <= max_distance;
-
-    if (!within_interval or !within_distance) g_left_click_count = 0;
-
-    g_left_click_count += 1;
-    if (g_left_click_count > 4) g_left_click_count = 1;
-    g_left_click_time_ms = now;
-    g_left_click_x = xpos;
-    g_left_click_y = ypos;
-    return g_left_click_count;
+    return g_left_click_tracker.register(xpos, ypos, now, max_distance, MULTI_CLICK_INTERVAL_MS);
 }
 
 fn resetLeftClickCount() void {
-    g_left_click_count = 0;
-    g_left_click_time_ms = 0;
-    g_left_click_x = 0;
-    g_left_click_y = 0;
+    g_left_click_tracker.reset();
 }
 
 fn readViewportRowLocked(surface: *Surface, row: usize, buf: *[MAX_SELECTION_COLS]u21) []const u21 {

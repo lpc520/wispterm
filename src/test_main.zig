@@ -570,6 +570,7 @@ comptime {
     _ = @import("file_explorer.zig");
     _ = @import("input.zig");
     _ = @import("input/clipboard.zig");
+    _ = @import("input/click_tracker.zig");
     _ = @import("input/key.zig");
     _ = @import("input/preview_source.zig");
     _ = @import("input_shortcuts.zig");
