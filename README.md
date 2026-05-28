@@ -1,6 +1,6 @@
 # Phantty
 
-A terminal written in Zig, powered by [libghostty-vt](https://github.com/ghostty-org/ghostty) for terminal emulation. It ships for Windows today, with macOS and Linux ports in progress.
+A terminal written in Zig, powered by [libghostty-vt](https://github.com/ghostty-org/ghostty) for terminal emulation. It ships for Windows and, as of v0.35.0, macOS (Apple Silicon and Intel) — macOS support is new and may still have bugs (see the note below). A Linux port is in progress.
 
 > [!NOTE]
 > This repository is a fork of [arya-s/phantty](https://github.com/arya-s/phantty),
@@ -26,9 +26,12 @@ A terminal written in Zig, powered by [libghostty-vt](https://github.com/ghostty
 - **Opt-in remote access** - share a session key over a Cloudflare-hosted relay (disabled by default)
 
 > [!NOTE]
-> Phantty currently ships for **Windows only**. macOS and Linux ports are in
-> progress (see [TODO.md](TODO.md)); until they land, use
-> [Ghostty](https://ghostty.org/) on those platforms.
+> Phantty ships for **Windows** and, as of v0.35.0, **macOS** (Apple Silicon and
+> Intel). **macOS support is new and may still have bugs** — the AppKit/Metal,
+> multi-window, and rendering paths are young and can misbehave in scenarios we
+> haven't covered yet. If you need rock-solid daily stability on macOS, prefer
+> [Ghostty](https://ghostty.org/) for now and please report any issues you hit.
+> The **Linux** port is still in progress (see [TODO.md](TODO.md)).
 
 ## Documentation
 
@@ -41,10 +44,19 @@ A terminal written in Zig, powered by [libghostty-vt](https://github.com/ghostty
 
 ## Building
 
+Windows (PowerShell):
+
 ```powershell
 zig build                         # Debug build for development
 zig build -Doptimize=ReleaseFast  # ReleaseFast build for distribution
 Remove-Item -Recurse -Force .\zig-out, .\.zig-cache -ErrorAction SilentlyContinue
+```
+
+macOS (requires macOS 13+ and Zig 0.15.2):
+
+```bash
+zig build macos-app -Dtarget=aarch64-macos   # Apple Silicon .app bundle (use x86_64-macos on Intel)
+open zig-out/bin/Phantty.app                  # launch the built app
 ```
 
 The `Makefile` may still exist as a convenience wrapper, but normal Windows
