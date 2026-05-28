@@ -6,7 +6,7 @@
   <title>Phantty AI Agent：DeepSeek 优先的终端工作流</title>
   <meta name="description" content="在 Phantty 中配置 DeepSeek V4 AI Agent：本地终端工具、WSL/SSH 支持、Skills 和带确认的命令执行。">
   <meta property="og:title" content="Phantty AI Agent">
-  <meta property="og:description" content="内置在 Windows 原生终端里的 DeepSeek 优先 AI Agent 会话。">
+  <meta property="og:description" content="内置在 Windows 与 macOS 原生终端里的 DeepSeek 优先 AI Agent 会话。">
   <meta property="og:image" content="assets/phantty.png">
   <meta property="og:type" content="website">
   <meta name="theme-color" content="#1b1e28">
@@ -102,7 +102,7 @@
           </div>
           <div class="feature">
             <h3>Markdown 导出</h3>
-            <p>运行 <code>Export AI Chat Markdown</code> 可保存完整对话；运行 <code>Export AI Chat Markdown Clean</code> 会只保存用户输入和最后结果，不包含 thinking 或工具细节。Phantty 会弹出 Windows 保存窗口，并复制保存路径。</p>
+            <p>运行 <code>Export AI Chat Markdown</code> 可保存完整对话；运行 <code>Export AI Chat Markdown Clean</code> 会只保存用户输入和最后结果，不包含 thinking 或工具细节。Phantty 会弹出保存对话框，并复制保存路径。</p>
           </div>
         </div>
       </div>
@@ -132,14 +132,14 @@
           <div class="setup-panel">
             <h3>环境变量 API Key</h3>
             <p>当 Profile 的 Base URL 指向 DeepSeek，并且 Profile 内没有保存 API Key 时，Phantty 会从进程环境中读取 <code>DEEPSEEK_API_KEY</code>。</p>
-<pre class="code-block"><code>$env:DEEPSEEK_API_KEY = "sk-your-deepseek-api-key"
+<pre class="code-block"><code># Windows（PowerShell）
+$env:DEEPSEEK_API_KEY = "sk-your-deepseek-api-key"
+# 持久保存：
+[Environment]::SetEnvironmentVariable("DEEPSEEK_API_KEY","sk-your-deepseek-api-key","User")
 
-# 可选：持久保存到后续 PowerShell 会话
-[Environment]::SetEnvironmentVariable(
-  "DEEPSEEK_API_KEY",
-  "sk-your-deepseek-api-key",
-  "User"
-)</code></pre>
+# macOS / Linux（Shell）
+export DEEPSEEK_API_KEY="sk-your-deepseek-api-key"
+# 持久保存：将上面一行加入 ~/.zshrc 或 ~/.bashrc</code></pre>
             <p class="section-foot">DeepSeek V4 模型提供 1M 上下文，并通过 <code>thinking</code> 与 <code>reasoning_effort</code> 支持思考模式。Chat Completions 仍是默认协议；Responses Profile 会使用 <code>instructions</code>、<code>input</code> 和 Responses 风格函数工具。</p>
           </div>
         </div>
@@ -153,7 +153,7 @@
         <div class="feature-grid">
           <div class="feature">
             <h3>本地命令</h3>
-            <p>PowerShell 和 cmd 工具命令会尽量作为隐藏的后台子进程运行，因此执行工具时不会弹出额外控制台窗口。</p>
+            <p>Shell 命令会尽量作为隐藏的后台子进程运行，因此执行工具时不会弹出额外控制台窗口。Windows 上使用 <code>powershell_exec</code>，macOS/Linux 上使用 <code>shell_exec</code>。</p>
           </div>
           <div class="feature">
             <h3>WSL 与 SSH 路由</h3>
@@ -183,7 +183,7 @@ ai-agent-output-limit       = 16384</code></pre>
         <div class="feature-grid">
           <div class="feature">
             <h3>Skill 搜索位置</h3>
-            <p>Phantty 会在 <code>%APPDATA%\phantty\skills</code>、<code>%APPDATA%\phantty\plugins\skills</code>、当前工作目录的 <code>.\skills</code> 和 <code>.\plugins\skills</code>，以及 <code>phantty.exe</code> 同级的这两个位置下发现 <code>SKILL.md</code>。</p>
+            <p>Phantty 会在平台配置目录（Windows：<code>%APPDATA%\phantty</code>，macOS：<code>~/Library/Application Support/phantty</code>）的 <code>skills/</code> 和 <code>plugins/skills/</code> 子目录，以及可执行文件同级和当前工作目录下发现 <code>SKILL.md</code>。</p>
           </div>
           <div class="feature">
             <h3>加载 Skill</h3>

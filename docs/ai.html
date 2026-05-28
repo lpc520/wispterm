@@ -6,7 +6,7 @@
   <title>Phantty AI Agent: DeepSeek-first terminal workflows</title>
   <meta name="description" content="Configure Phantty AI Agent sessions with DeepSeek V4, local terminal tools, WSL/SSH support, skills, and approval-based command execution.">
   <meta property="og:title" content="Phantty AI Agent">
-  <meta property="og:description" content="DeepSeek-first AI Agent sessions inside a native Windows terminal.">
+  <meta property="og:description" content="DeepSeek-first AI Agent sessions inside a native terminal for Windows and macOS.">
   <meta property="og:image" content="assets/phantty.png">
   <meta property="og:type" content="website">
   <meta name="theme-color" content="#1b1e28">
@@ -102,7 +102,7 @@
           </div>
           <div class="feature">
             <h3>Markdown exports</h3>
-            <p>Run <code>Export AI Chat Markdown</code> to save the full transcript, or <code>Export AI Chat Markdown Clean</code> to save only user prompts and the final answer without thinking or tool details. Phantty opens a Windows save dialog and copies the saved path.</p>
+            <p>Run <code>Export AI Chat Markdown</code> to save the full transcript, or <code>Export AI Chat Markdown Clean</code> to save only user prompts and the final answer without thinking or tool details. Phantty opens a save dialog and copies the saved path.</p>
           </div>
         </div>
       </div>
@@ -132,14 +132,14 @@
           <div class="setup-panel">
             <h3>Environment key</h3>
             <p>When the profile base URL points to DeepSeek and the profile key is empty, Phantty reads <code>DEEPSEEK_API_KEY</code> from the process environment.</p>
-<pre class="code-block"><code>$env:DEEPSEEK_API_KEY = "sk-your-deepseek-api-key"
+<pre class="code-block"><code># Windows (PowerShell)
+$env:DEEPSEEK_API_KEY = "sk-your-deepseek-api-key"
+# Persist for future sessions:
+[Environment]::SetEnvironmentVariable("DEEPSEEK_API_KEY","sk-your-deepseek-api-key","User")
 
-# Optional: persist for future PowerShell sessions
-[Environment]::SetEnvironmentVariable(
-  "DEEPSEEK_API_KEY",
-  "sk-your-deepseek-api-key",
-  "User"
-)</code></pre>
+# macOS / Linux (shell)
+export DEEPSEEK_API_KEY="sk-your-deepseek-api-key"
+# Persist: add the export line to ~/.zshrc or ~/.bashrc</code></pre>
             <p class="section-foot">DeepSeek V4 models expose a 1M context length and support thinking mode through <code>thinking</code> plus <code>reasoning_effort</code>. Chat Completions remains the default protocol; Responses profiles use <code>instructions</code>, <code>input</code>, and Responses-style function tools.</p>
           </div>
         </div>
@@ -153,7 +153,7 @@
         <div class="feature-grid">
           <div class="feature">
             <h3>Local commands</h3>
-            <p>PowerShell and cmd commands run as background child processes where possible, so tool execution does not flash a separate console window.</p>
+            <p>Shell commands run as background child processes where possible, so tool execution does not flash a separate console window. The agent uses <code>powershell_exec</code> on Windows and <code>shell_exec</code> on macOS/Linux.</p>
           </div>
           <div class="feature">
             <h3>WSL and SSH routing</h3>
@@ -183,7 +183,7 @@ ai-agent-output-limit       = 16384</code></pre>
         <div class="feature-grid">
           <div class="feature">
             <h3>Skill locations</h3>
-            <p>Phantty discovers <code>SKILL.md</code> files under <code>%APPDATA%\phantty\skills</code>, <code>%APPDATA%\phantty\plugins\skills</code>, <code>.\skills</code>, <code>.\plugins\skills</code>, and the same two locations next to <code>phantty.exe</code>.</p>
+            <p>Phantty discovers <code>SKILL.md</code> files under the platform config directory (<code>%APPDATA%\phantty</code> on Windows, <code>~/Library/Application Support/phantty</code> on macOS) in <code>skills/</code> and <code>plugins/skills/</code>, plus the same two sub-paths next to the executable and in the current working directory.</p>
           </div>
           <div class="feature">
             <h3>Load a skill</h3>
