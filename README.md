@@ -66,8 +66,10 @@ For architecture, packaging, and release details, see [Development, architecture
 
 ## Usage
 
+On Windows run `phantty.exe`; on macOS run `Phantty.app/Contents/MacOS/phantty` (or launch `Phantty.app` directly — passing CLI flags requires the binary path).
+
 ```bash
-phantty.exe [options]
+phantty [options]
 
 Options:
   --font, -f <name>            Set font (default: embedded fallback)
@@ -123,7 +125,7 @@ Use `keybind = clear` before custom bindings if you want to remove all defaults 
 | **Ctrl+Shift+O**                                                               | Split to the right                                                                 |
 | **Ctrl+Shift+Alt+E**                                                           | Toggle file explorer sidebar                                                       |
 | Ctrl-click `.md` / `.txt` / `.csv` / `.tsv` / image files in terminal output, or double-click in File Explorer | Preview local, WSL, or SSH Markdown/text/table/images in the right preview panel |
-| Ctrl+Shift-click file path in SSH terminal output                              | Download the SSH remote file to `%USERPROFILE%\Downloads`                         |
+| Ctrl+Shift-click file path in SSH terminal output                              | Download the SSH remote file to `%USERPROFILE%\Downloads` (Windows) or `~/Downloads` (macOS/Linux) |
 | **Ctrl+Shift+W**                                                               | Close focused panel, tab, or window; press again to confirm closing the last panel |
 | **Alt+Enter**                                                                  | Maximize or restore window                                                         |
 | **Ctrl++** / **Ctrl+-**                                                        | Increase / decrease font size                                                      |
@@ -158,7 +160,7 @@ and run:
 - `Export AI Chat Markdown Clean` to save a publishing-friendly Markdown file
   with only the user inputs and the final AI answer.
 
-Phantty opens a Windows save dialog with a `.md` filename. After saving, the
+Phantty opens a save dialog with a `.md` filename. After saving, the
 saved path is copied to the clipboard.
 
 ## SSH current directory for downloads and uploads

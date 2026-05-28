@@ -4,11 +4,14 @@ Phantty uses a Ghostty-compatible config file format (`key = value` pairs). The
 main config path is resolved in this order:
 
 1. `--config <path>` or `--config-path <path>`
-2. `phantty.conf` next to `phantty.exe` (portable profile)
-3. `%APPDATA%\phantty\config`
+2. `phantty.conf` next to the executable (portable profile, Windows only)
+3. Platform config directory:
+   - **Windows:** `%APPDATA%\phantty\config`
+   - **macOS:** `~/Library/Application Support/phantty/config`
+   - **Linux:** `$XDG_CONFIG_HOME/phantty/config` (fallback: `~/.config/phantty/config`)
 
-Press the configured `open_config` shortcut (default `Ctrl+,`) to open the
-config file in your default editor, or run `phantty.exe --show-config-path` to
+Press the configured `open_config` shortcut (default `Ctrl+,`, `Cmd+,` on macOS) to open the
+config file in your default editor, or run `phantty --show-config-path` to
 print the resolved path.
 
 CLI flags override config file values (last wins). `config-file = extra.conf`
@@ -32,7 +35,7 @@ keybind = ctrl+shift+p=toggle_command_palette
 scrollback-limit = 10000000
 url-open-mode = embedded
 custom-shader = path/to/shader.glsl
-background-image = C:\Users\me\Pictures\wallpaper.png
+background-image = C:\Users\me\Pictures\wallpaper.png   # Windows example; use /Users/me/Pictures/wallpaper.png on macOS
 background-opacity = 0.85
 background-image-mode = fill
 config-file = extra.conf
@@ -63,8 +66,8 @@ remote-session-key = Workstation
 | `quake-mode`                | `true`     | Start as a Quake-style drop-down terminal. The `toggle_quake` keybind hides or shows the same window while preserving terminal state.                                                                                    |
 | `keybind`                   | defaults   | Configure an app-level shortcut. Can be repeated. Syntax: `keybind = [global:]modifier+key=action`; use `keybind = clear` before custom bindings to remove all defaults.                                                 |
 | `scrollback-limit`          | `10000000` | Scrollback buffer limit in bytes                                                                                                                                                                                        |
-| `url-open-mode`             | `embedded` | Where web URLs open: `embedded` uses the right-side browser panel when available, while `system-browser` always opens the Windows default browser. SSH loopback URLs keep local port forwards alive for either mode.       |
-| `restore-tabs-on-startup`   | `false`    | Persist tab/split layout to `%APPDATA%\phantty\session.json` on close and rebuild it on next launch. SSH passwords are never persisted; reconnects re-prompt. CLI overrides (`--cwd`) take precedence and skip restore. |
+| `url-open-mode`             | `embedded` | Where web URLs open: `embedded` uses the right-side browser panel when available (Windows only), while `system-browser` always opens the system default browser. SSH loopback URLs keep local port forwards alive for either mode. |
+| `restore-tabs-on-startup`   | `false`    | Persist tab/split layout to the platform config directory (`session.json`) on close and rebuild it on next launch. SSH passwords are never persisted; reconnects re-prompt. CLI overrides (`--cwd`) take precedence and skip restore. |
 | `auto-update-check`         | `true`     | Check GitHub Releases after startup and show a clickable prompt when a newer version is available. Set to `false` to disable startup checks.                                                                             |
 | `config-file`               | *(none)*   | Include another config file (prefix with `?` to make optional)                                                                                                                                                          |
 | `remote-enabled`            | `false`    | Start the shared outbound RemoteClient for this Phantty instance                                                                                                                                                        |
@@ -90,7 +93,8 @@ login password configured on the relay server.
 
 Phantty follows Ghostty's `keybind = trigger=action` style for app-level
 shortcuts. Prefix a binding with `global:` when the shortcut should be
-registered with Windows; the first global use case is Quake mode.
+registered system-wide (Win32 hotkey on Windows, CGEventTap on macOS); the
+first global use case is Quake mode.
 
 ```text
 keybind = alt+f10=toggle_command_palette
@@ -98,7 +102,7 @@ keybind = ctrl+shift+t=new_session
 keybind = global:ctrl+backquote=toggle_quake
 ```
 
-Supported modifiers are `ctrl`, `shift`, `alt`, and `win`. Common key names
+Supported modifiers are `ctrl`, `shift`, `alt`, and `win` (Windows) / `cmd` (macOS). Common key names
 include letters, digits, `f1`-`f24`, `backquote`, `comma`, `plus`, `minus`,
 `bracket_left`, `bracket_right`, `enter`, `tab`, `escape`, and arrow keys.
 

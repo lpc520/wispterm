@@ -5,8 +5,10 @@ opens the default AI profile directly in Agent mode. If no AI profile exists
 yet, it opens the AI settings form first so you can configure the provider,
 model, API key, and agent mode before the first launch.
 
-Manage the default AI profile from Settings. Profile data is stored under
-`%APPDATA%\phantty\ai_profiles`, with fields hex encoded on disk.
+Manage the default AI profile from Settings. Profile data is stored under the
+platform config directory (`ai_profiles/`) — `%APPDATA%\phantty\ai_profiles` on
+Windows, `~/Library/Application Support/phantty/ai_profiles` on macOS — with
+fields hex encoded on disk.
 
 AI Chat can speak either OpenAI-compatible Chat Completions or the OpenAI
 Responses API. Set the profile Protocol field to `chat_completions` (default)
@@ -21,9 +23,10 @@ The built-in defaults are:
 - System prompt: embedded from `src/prompt.md`
 - Request mode: DeepSeek thinking enabled, `reasoning_effort = high`, non-streaming
 
-The default agent prompt assumes Windows PowerShell for local commands, routes
-open SSH/WSL terminals through Phantty's terminal tools, avoids pasting shell
-commands into Codex/Claude Code REPLs, and keeps Python environment management
+The default agent prompt is platform-aware: on Windows it uses `powershell_exec`
+for local commands; on macOS and Linux it uses `shell_exec`. All variants route
+open SSH/WSL terminals through Phantty's terminal tools, avoid pasting shell
+commands into Codex/Claude Code REPLs, and keep Python environment management
 on `uv`. For existing AI profiles, clear the System field to use the current
 embedded default prompt on the next launch.
 
@@ -45,7 +48,7 @@ it writes only user prompts and the final AI answer, without thinking blocks,
 tool output, or usage metadata. This is useful for notes, blog drafts, and
 WeChat public account posts.
 
-Phantty opens a Windows save dialog with a Markdown filename so you can choose
+Phantty opens a save dialog with a Markdown filename so you can choose
 the destination path. After saving, the saved path is copied to the clipboard.
 
 Agent tool commands run as hidden background child processes where possible, so
@@ -54,8 +57,10 @@ local PowerShell/cmd tool calls do not flash a separate console window.
 ## Agent Skills
 
 Agent chats can load local skills from `skills/<skill-name>/SKILL.md` or
-`plugins/skills/<skill-name>/SKILL.md` under `%APPDATA%\phantty`, the current
-working directory, or the directory containing `phantty.exe`.
+`plugins/skills/<skill-name>/SKILL.md` under the platform config directory
+(`%APPDATA%\phantty` on Windows, `~/Library/Application Support/phantty` on
+macOS), the current working directory, or the directory containing the
+`phantty` executable.
 Use `$skill-name your request` to explicitly load a skill for the next request.
 The loaded skill is stored as a replayable tool result in the chat history, so
 existing conversations stay reproducible even if the skill file changes later.

@@ -2,6 +2,8 @@
 
 ## Building
 
+### Windows (PowerShell)
+
 ```powershell
 zig build                         # Debug build for development
 zig build -Doptimize=ReleaseFast  # ReleaseFast build for distribution
@@ -13,19 +15,33 @@ development should use PowerShell and direct `zig` commands. Always use
 `zig build` for development; only use `zig build -Doptimize=ReleaseFast` for
 final/shipping builds.
 
+### macOS
+
+```bash
+zig build macos-app -Dtarget=aarch64-macos   # Apple Silicon .app bundle
+zig build macos-app -Dtarget=x86_64-macos    # Intel .app bundle
+open zig-out/bin/Phantty.app                 # launch the built app
+```
+
+Requires macOS 13+ and Zig 0.15.2. The build produces a `.app` bundle at
+`zig-out/bin/Phantty.app`. For distribution, run the packaging script
+(`packaging/macos/package.sh`) which signs and creates a `.dmg`.
+
 ### Zig Toolchain
 
-Use Zig 0.15.2 on Windows and make sure `zig.exe` is available on `PATH`. Check
-the active version from PowerShell:
+Use Zig 0.15.2 and make sure `zig` (or `zig.exe` on Windows) is available on
+`PATH`. Check the active version:
 
-```powershell
+```bash
 zig version
 ```
 
-`build.zig` already defaults to `x86_64-windows-gnu`, so a normal development
-build should not need an explicit `-Dtarget`.
+On Windows, `build.zig` defaults to `x86_64-windows-gnu`, so a normal
+development build does not need an explicit `-Dtarget`. On macOS, pass
+`-Dtarget=aarch64-macos` (Apple Silicon) or `-Dtarget=x86_64-macos` (Intel)
+explicitly.
 
-After a successful debug build, the expected artifact is:
+After a successful Windows debug build, the expected artifact is:
 
 ```powershell
 Test-Path .\zig-out\bin\phantty.exe
@@ -216,6 +232,8 @@ OpenSSH error so regressions can be diagnosed without guessing.
 
 ## Packaging
 
+### Windows
+
 Phantty supports three portable Windows packages plus the local installer build:
 
 - `portable` - lightweight portable build, run directly without installation
@@ -249,23 +267,55 @@ The installer does not require administrator rights. It installs Phantty to
 `%LOCALAPPDATA%\Programs\Phantty`, adds a Start menu entry, and registers an
 uninstall entry for the current user.
 
+### macOS
+
+Build a signed `.dmg` image locally (ad-hoc signing) with:
+
+```bash
+zig build macos-dist -Dtarget=aarch64-macos   # Apple Silicon
+zig build macos-dist -Dtarget=x86_64-macos    # Intel
+```
+
+Key output:
+
+```text
+zig-out/dist/macos/phantty-macos-vX.Y.Z.dmg
+```
+
+For release signing and notarization, set `PHANTTY_MACOS_SIGN_IDENTITY` and
+`PHANTTY_MACOS_NOTARY_PROFILE` before running the same command. See
+`packaging/macos/README.md` for full signing and notarization instructions.
+
 ## GitHub Releases
 
-The GitHub Actions workflow at `.github/workflows/windows-release.yml`
-publishes Windows release assets whenever a tag matching `vX.Y.Z` is pushed.
+Two GitHub Actions workflows publish release assets whenever a tag matching
+`vX.Y.Z` is pushed:
 
-Each tagged release uploads:
+- `.github/workflows/windows-release.yml` — Windows packages
+- `.github/workflows/macos-release.yml` — macOS DMG images (signed and notarized)
+
+**Windows assets** (per tagged release):
 
 - `phantty-windows-portable-vX.Y.Z.zip`
 - `phantty-windows-portable-webview2-vX.Y.Z.zip`
 - `phantty-windows-portable-no-webview-vX.Y.Z.zip`
 
-When Phantty detects a newer release, it downloads the matching portable zip to your Downloads folder and reveals it in Explorer; unzip it over your existing install to update.
+When Phantty detects a newer release on Windows, it downloads the matching
+portable zip to the Downloads folder and reveals it in Explorer; unzip it over
+your existing install to update.
 
 The unsigned IExpress installer is not published for now because Windows
 Defender can quarantine it as a false positive. Use the portable zip release
 asset, the `portable-webview2` zip when using the embedded browser panel, or
 the `portable-no-webview` zip when embedded WebView2 should be disabled.
+
+**macOS assets** (per tagged release):
+
+- `phantty-macos-aarch64-vX.Y.Z.dmg` — Apple Silicon
+- `phantty-macos-x86_64-vX.Y.Z.dmg` — Intel
+
+Both DMGs are signed with a Developer ID Application certificate and notarized
+by Apple. Open the DMG and drag `Phantty.app` to Applications to install.
 
 Release notes are checked in under `release-notes/vX.Y.Z.md` when a release
 needs curated notes. If a matching file is present, the workflow prepends it to
