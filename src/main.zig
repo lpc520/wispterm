@@ -5,6 +5,7 @@
 //! in AppWindow.zig.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Config = @import("config.zig");
 const App = @import("App.zig");
 const image_decoder = @import("image_decoder.zig");
@@ -21,17 +22,24 @@ fn prepareCliConsole() void {
     platform_console.prepareCliConsole();
 }
 
-/// .app bundles launched by launchd inherit cwd "/", which then leaks into
-/// every new shell session (initial_cwd, getActiveCwd, PTY inherited cwd).
-/// Reroot to $HOME so newly spawned tabs/splits land where the user expects,
-/// while leaving phantty alone when it was invoked from a real shell with a
-/// meaningful cwd.
+/// macOS-only: .app bundles launched by launchd inherit cwd "/", which then
+/// leaks into every new shell session (initial_cwd, getActiveCwd, PTY
+/// inherited cwd). Reroot to $HOME so newly spawned tabs/splits land where
+/// the user expects, while leaving phantty alone when it was invoked from a
+/// real shell with a meaningful cwd.
+///
+/// Wrapped in a comptime os.tag check so Windows builds skip the whole body
+/// — std.posix.getenv is a @compileError on Windows (env strings are
+/// WTF-16, not UTF-8), and an unguarded reference here breaks the Windows
+/// release build.
 fn rerootCwdFromBundleRootIfNeeded() void {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = std.process.getCwd(&buf) catch return;
-    if (!std.mem.eql(u8, cwd, "/")) return;
-    const home = std.posix.getenv("HOME") orelse return;
-    std.posix.chdir(home) catch {};
+    if (builtin.os.tag == .macos) {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = std.process.getCwd(&buf) catch return;
+        if (!std.mem.eql(u8, cwd, "/")) return;
+        const home = std.posix.getenv("HOME") orelse return;
+        std.posix.chdir(home) catch {};
+    }
 }
 
 fn listSystemFonts(allocator: std.mem.Allocator, writer: anytype) !void {
