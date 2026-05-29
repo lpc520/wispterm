@@ -14,9 +14,25 @@ const font_backend = @import("../platform/font_backend.zig");
 const embedded = @import("embedded.zig");
 const Config = @import("../config.zig");
 const AppWindow = @import("../AppWindow.zig");
+const render_diagnostics = @import("../render_diagnostics.zig");
 
 const gpu = AppWindow.gpu;
 const c = gpu.c;
+
+/// Hard ceiling on a single glyph bitmap dimension (in pixels).
+///
+/// Real glyphs at any sane font size and DPI stay far below this. A value
+/// above it means the face is in a degenerate state — most commonly a bogus
+/// DPI computed during a startup resize on some multi-monitor / HiDPI setups
+/// (see issue #90) — which would make the size arithmetic below
+/// (`width * height [* depth]`, all `u32`) overflow. In a ReleaseFast build
+/// that overflow silently wraps to a tiny value, the destination buffer is
+/// under-allocated, and the per-row `@memcpy` scribbles past it, corrupting
+/// the heap. The corruption later surfaces as an unrelated crash (e.g. deep
+/// inside FreeType's autofitter). Rejecting the glyph here keeps that wrapping
+/// from ever happening and turns a silent heap smash into a skipped glyph plus
+/// a diagnostic log line.
+pub const MAX_GLYPH_DIM: u32 = 4096;
 
 pub const FontAtlas = @import("Atlas.zig");
 
@@ -493,14 +509,25 @@ pub fn packBitmapIntoAtlas(
         return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
     }
 
+    // Reject degenerate bitmap sizes before any size arithmetic (see #90).
+    if (width > MAX_GLYPH_DIM or height > MAX_GLYPH_DIM) {
+        render_diagnostics.log(
+            "atlas-pack reject oversized glyph {}x{} (max={}) dpi={} font_size={}",
+            .{ width, height, MAX_GLYPH_DIM, g_dpi, g_font_size },
+        );
+        return null;
+    }
+
     // Ensure atlas exists
     if (atlas_ptr.* == null) {
         atlas_ptr.* = FontAtlas.init(alloc, 512, .grayscale) catch return null;
     }
     var atlas = &atlas_ptr.*.?;
 
-    // Copy source bitmap to tightly-packed buffer (FreeType pitch may != width)
-    const tight = alloc.alloc(u8, width * height) catch return null;
+    // Copy source bitmap to tightly-packed buffer (FreeType pitch may != width).
+    // `width`/`height` are bounded by MAX_GLYPH_DIM above, so the usize product
+    // cannot overflow.
+    const tight = alloc.alloc(u8, @as(usize, width) * height) catch return null;
     defer alloc.free(tight);
     const src = src_buffer orelse return null;
     for (0..height) |row| {
@@ -543,6 +570,15 @@ pub fn packPixelsIntoAtlas(
         return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
     }
 
+    // Reject degenerate sizes before any atlas arithmetic (see #90).
+    if (width > MAX_GLYPH_DIM or height > MAX_GLYPH_DIM) {
+        render_diagnostics.log(
+            "atlas-pack-pixels reject oversized {}x{} (max={}) dpi={} font_size={}",
+            .{ width, height, MAX_GLYPH_DIM, g_dpi, g_font_size },
+        );
+        return null;
+    }
+
     if (atlas_ptr.* == null) {
         atlas_ptr.* = FontAtlas.init(alloc, 512, .grayscale) catch return null;
     }
@@ -579,14 +615,24 @@ pub fn packColorBitmapIntoAtlas(
         return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
     }
 
+    // Reject degenerate bitmap sizes before any size arithmetic (see #90).
+    if (width > MAX_GLYPH_DIM or height > MAX_GLYPH_DIM) {
+        render_diagnostics.log(
+            "atlas-pack-color reject oversized {}x{} (max={}) dpi={} font_size={}",
+            .{ width, height, MAX_GLYPH_DIM, g_dpi, g_font_size },
+        );
+        return null;
+    }
+
     if (g_color_atlas == null) {
         g_color_atlas = FontAtlas.init(alloc, 512, .bgra) catch return null;
     }
     var atlas = &g_color_atlas.?;
 
-    // Copy source bitmap to tightly-packed BGRA buffer
+    // Copy source bitmap to tightly-packed BGRA buffer. `width`/`height` are
+    // bounded by MAX_GLYPH_DIM above, so the usize product cannot overflow.
     const depth: u32 = 4; // BGRA
-    const tight = alloc.alloc(u8, width * height * depth) catch return null;
+    const tight = alloc.alloc(u8, @as(usize, width) * height * depth) catch return null;
     defer alloc.free(tight);
     const src = src_buffer orelse return null;
     for (0..height) |row| {

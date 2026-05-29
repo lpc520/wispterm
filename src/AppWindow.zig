@@ -2963,6 +2963,23 @@ fn handleWindowDpiChanged(
 ) void {
     const new_dpi = window_backend.effectiveDpi(win);
     if (new_dpi == 0) return;
+
+    // Reject a degenerate DPI before it reaches font sizing (see #90). A bogus
+    // value (observed on some multi-monitor / HiDPI setups during the startup
+    // resize) would scale glyph bitmaps to absurd dimensions; while the atlas
+    // packer now rejects oversized glyphs, keeping the old DPI here also avoids
+    // a window full of unrenderable text. The cap is 32x the platform baseline
+    // (display.default_dpi), far above any real display.
+    const max_sane_dpi: u32 = platform_display.default_dpi * 32;
+    if (new_dpi > max_sane_dpi) {
+        render_diagnostics.log(
+            "dpi-change reject implausible new_dpi={} (max={}) keeping font_dpi={}",
+            .{ new_dpi, max_sane_dpi, font.g_dpi },
+        );
+        std.debug.print("Ignoring implausible DPI {} (keeping {})\n", .{ new_dpi, font.g_dpi });
+        return;
+    }
+
     const client_before = window_backend.clientSize(win);
     const fb_before = window_backend.framebufferSize(win);
     render_diagnostics.log(

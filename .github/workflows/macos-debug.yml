@@ -1,0 +1,151 @@
+name: Build macOS Diagnostic
+
+# Manually-triggered diagnostic build. Produces an UNSIGNED, ad-hoc-signed
+# macOS .app built with runtime safety checks on (ReleaseSafe / Debug) so that
+# integer overflow and out-of-bounds access panic at their real location with
+# a stack trace, instead of silently corrupting memory and crashing later
+# somewhere unrelated (see issue #90). Not for release — for handing to a user
+# to reproduce a crash and capture diagnostics.
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Target architecture
+        type: choice
+        default: x86_64
+        options:
+          - x86_64
+          - aarch64
+      optimize:
+        description: Optimize mode (ReleaseSafe keeps safety checks; Debug adds richer traces)
+        type: choice
+        default: ReleaseSafe
+        options:
+          - ReleaseSafe
+          - Debug
+
+permissions:
+  contents: read
+
+jobs:
+  build-debug:
+    name: Build macOS diagnostic (${{ github.event.inputs.arch }}, ${{ github.event.inputs.optimize }})
+    runs-on: macos-latest
+    env:
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-global-cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Cache Zig packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache/p
+            .zig-global-cache
+          key: ${{ runner.os }}-${{ github.event.inputs.arch }}-zig-0.15.2-${{ hashFiles('build.zig', 'build.zig.zon', 'pkg/**/build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ github.event.inputs.arch }}-zig-0.15.2-
+
+      - name: Fetch dependencies and build diagnostic .app
+        shell: bash
+        run: |
+          set -euo pipefail
+          arch="${{ github.event.inputs.arch }}"
+          opt="${{ github.event.inputs.optimize }}"
+
+          retry() {
+            local name="$1"; shift
+            local attempts=5
+            for (( attempt=1; attempt<=attempts; attempt++ )); do
+              echo "::group::${name} (attempt ${attempt}/${attempts})"
+              if "$@"; then
+                echo "::endgroup::"
+                return 0
+              fi
+              echo "::endgroup::"
+              if (( attempt < attempts )); then
+                local delay=$(( 15 * attempt ))
+                (( delay > 120 )) && delay=120
+                echo "::warning::${name} failed; retrying in ${delay}s"
+                sleep "${delay}"
+              fi
+            done
+            return 1
+          }
+
+          retry "zig dependency fetch" zig build "-Doptimize=${opt}" --fetch
+          retry "macos-app build" zig build macos-app \
+            "-Doptimize=${opt}" \
+            "-Dtarget=${arch}-macos"
+
+      - name: Ad-hoc sign the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="zig-out/bin/WispTerm.app"
+          if [[ ! -d "$app" ]]; then
+            echo "App bundle not found: $app" >&2
+            exit 1
+          fi
+          # Ad-hoc signature (identity "-") so Gatekeeper does not kill an
+          # unsigned binary on launch. Not notarized — see run instructions.
+          codesign --force --deep --sign - "$app"
+          codesign --verify --verbose=2 "$app" || true
+
+      - name: Package bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          arch="${{ github.event.inputs.arch }}"
+          opt="${{ github.event.inputs.optimize }}"
+          sha="${GITHUB_SHA::8}"
+          out="WispTerm-debug-${arch}-${opt}-${sha}.zip"
+          # ditto preserves the .app bundle structure and resource forks.
+          ditto -c -k --keepParent "zig-out/bin/WispTerm.app" "$out"
+          echo "ASSET_PATH=${out}" >> "${GITHUB_ENV}"
+          echo "ASSET_NAME=WispTerm-debug-${arch}-${opt}-${sha}" >> "${GITHUB_ENV}"
+
+      - name: Upload diagnostic artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET_NAME }}
+          path: ${{ env.ASSET_PATH }}
+          if-no-files-found: error
+
+      - name: How to run and capture diagnostics
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ================ DIAGNOSTIC BUILD — TEST INSTRUCTIONS ================
+
+          This .app is unsigned (ad-hoc only) and NOT notarized. To run it:
+
+          1. Unzip and move WispTerm.app to /Applications (or anywhere).
+          2. Strip the quarantine flag:
+                 xattr -dr com.apple.quarantine /Applications/WispTerm.app
+
+          3. RUN FROM TERMINAL so you can see the crash output directly:
+                 WISPTERM_RENDER_DIAGNOSTICS=1 \
+                   /Applications/WispTerm.app/Contents/MacOS/WispTerm
+
+             - This build has runtime safety checks ON, so any overflow or
+               out-of-bounds access prints a panic + stack trace to the
+               terminal at the REAL fault location (instead of crashing later
+               inside FreeType).
+             - DPI / glyph-size diagnostics are written to:
+                   ~/Library/Application Support/wispterm/render-diagnostic.log
+
+          4. Send back BOTH:
+             - the full terminal output (everything after the command), and
+             - the render-diagnostic.log file.
+
+          =====================================================================
+          EOF

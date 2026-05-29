@@ -86,6 +86,13 @@ pub fn deinit(self: *Atlas, allocator: std.mem.Allocator) void {
 /// Returns the region (top-left x, y, width, height) where pixels should be written.
 /// Returns `error.AtlasFull` if the glyph doesn't fit.
 pub fn reserve(self: *Atlas, allocator: std.mem.Allocator, width: u32, height: u32) !Region {
+    // Defense in depth (see #90): a glyph larger than the maximum atlas size
+    // can never fit, and a near-`maxInt` value would overflow the `+ 1`
+    // padding below (silently wrapping in ReleaseFast). Reject early so the
+    // size math here and in `set` stays well-defined.
+    const max_atlas_dim: u32 = 8192;
+    if (width > max_atlas_dim or height > max_atlas_dim) return error.AtlasFull;
+
     // Add 1px padding around each glyph to prevent GL_LINEAR from
     // sampling neighboring glyphs in the atlas.
     const padded_width = width + 1;
