@@ -614,9 +614,11 @@ if (matchCustomCommandIndex(first_tok, self.customCommandSuggestions())) |idx| {
             return;
         }
     }
-    // prompt template: replace input with the template body, then fall through to
-    // the normal user-message submit path below (do NOT return).
-    self.setInputText(cmd.body);
+    // prompt template: submit the template body as the prompt. The submit path
+    // below uses `prompt_raw` (NOT the live input), so REBIND prompt_raw to the
+    // body and fall through (do NOT return). Make `prompt_raw` a `var`. `cmd.body`
+    // is owned by self.custom_commands and stable while the mutex is held.
+    prompt_raw = cmd.body;
 }
 // 3) Legacy: a no-arg unknown slash like "/help" still shows "Unknown command".
 else if (arg.len == 0) {
