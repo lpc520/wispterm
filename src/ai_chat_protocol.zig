@@ -16,6 +16,7 @@ pub const TOOL_CALL_REASONING_FALLBACK = "Tool call is required before answering
 pub const ApiProtocol = enum {
     chat_completions,
     responses,
+    anthropic,
 
     pub fn parse(value: []const u8) ApiProtocol {
         const trimmed = std.mem.trim(u8, value, " \t\r\n");
@@ -25,6 +26,12 @@ pub const ApiProtocol = enum {
         {
             return .responses;
         }
+        if (std.ascii.eqlIgnoreCase(trimmed, "anthropic") or
+            std.ascii.eqlIgnoreCase(trimmed, "claude") or
+            std.ascii.eqlIgnoreCase(trimmed, "messages"))
+        {
+            return .anthropic;
+        }
         return .chat_completions;
     }
 
@@ -32,6 +39,7 @@ pub const ApiProtocol = enum {
         return switch (self) {
             .chat_completions => DEFAULT_PROTOCOL,
             .responses => "responses",
+            .anthropic => "anthropic",
         };
     }
 };
@@ -137,6 +145,8 @@ pub fn buildRequestJson(allocator: std.mem.Allocator, params: RequestParams, mes
     return switch (params.protocol) {
         .chat_completions => buildChatCompletionsRequestJsonForMessages(allocator, params, messages, include_tools),
         .responses => buildResponsesRequestJsonForMessages(allocator, params, messages, include_tools),
+        // TODO(Plan B Task 3): replace with buildAnthropicRequestJson
+        .anthropic => buildChatCompletionsRequestJsonForMessages(allocator, params, messages, include_tools),
     };
 }
 
@@ -192,6 +202,7 @@ pub fn apiEndpoint(allocator: std.mem.Allocator, base_url_raw: []const u8, proto
     return switch (protocol) {
         .chat_completions => chatEndpoint(allocator, base_url_raw),
         .responses => responsesEndpoint(allocator, base_url_raw),
+        .anthropic => messagesEndpoint(allocator, base_url_raw),
     };
 }
 
@@ -201,6 +212,10 @@ pub fn chatEndpoint(allocator: std.mem.Allocator, base_url_raw: []const u8) ![]u
 
 pub fn responsesEndpoint(allocator: std.mem.Allocator, base_url_raw: []const u8) ![]u8 {
     return endpointWithSuffix(allocator, base_url_raw, "/responses");
+}
+
+pub fn messagesEndpoint(allocator: std.mem.Allocator, base_url_raw: []const u8) ![]u8 {
+    return endpointWithSuffix(allocator, base_url_raw, "/v1/messages");
 }
 
 pub fn endpointWithSuffix(allocator: std.mem.Allocator, base_url_raw: []const u8, suffix: []const u8) ![]u8 {
@@ -830,6 +845,20 @@ test "ApiProtocol.parse and Role.apiName" {
     try std.testing.expectEqual(ApiProtocol.responses, ApiProtocol.parse("responses"));
     try std.testing.expectEqual(ApiProtocol.chat_completions, ApiProtocol.parse(""));
     try std.testing.expectEqualStrings("assistant", Role.assistant.apiName());
+}
+
+test "ApiProtocol parses and names anthropic + aliases" {
+    try std.testing.expectEqual(ApiProtocol.anthropic, ApiProtocol.parse("anthropic"));
+    try std.testing.expectEqual(ApiProtocol.anthropic, ApiProtocol.parse("claude"));
+    try std.testing.expectEqual(ApiProtocol.anthropic, ApiProtocol.parse("messages"));
+    try std.testing.expectEqualStrings("anthropic", ApiProtocol.anthropic.name());
+}
+
+test "apiEndpoint builds the anthropic messages endpoint" {
+    const a = std.testing.allocator;
+    const ep = try apiEndpoint(a, "https://api.anthropic.com", .anthropic);
+    defer a.free(ep);
+    try std.testing.expectEqualStrings("https://api.anthropic.com/v1/messages", ep);
 }
 
 test "buildRequestJson chat_completions emits model, roles, flags" {
