@@ -631,7 +631,7 @@ pub fn weixinQrPanelHandleAction(action: weixin_qr_panel.Action) void {
     }
 }
 
-fn commandPaletteOpenAgentHistory() void {
+pub fn commandPaletteOpenAgentHistory() void {
     var state = commandCenterStateSnapshot();
     state.commandPaletteOpenAgentHistory();
     commandCenterStateCommit(state);

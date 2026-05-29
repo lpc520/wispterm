@@ -312,15 +312,56 @@ const PendingHistoryChange = struct {
     event: HistoryChangeEvent,
 };
 
+/// A side-effect that a built-in command wants run AFTER the session mutex is
+/// released (the targets live in the app layer and re-lock the session mutex).
+const DeferredAction = union(enum) {
+    none,
+    resume_picker,
+    export_markdown: MarkdownExportMode,
+};
+
+/// Result of running a built-in command under the lock: the (optional) history
+/// change to notify and any action to fire once the caller has unlocked.
+const BuiltinResult = struct {
+    history_change: ?PendingHistoryChange = null,
+    deferred: DeferredAction = .none,
+};
+
+/// Fires a deferred built-in side-effect. Call ONLY after `self.mutex` has been
+/// unlocked: `resume_picker`/`export_markdown` re-enter the session through the
+/// app layer and would deadlock if fired while the mutex is held.
+fn fireDeferredAction(action: DeferredAction) void {
+    switch (action) {
+        .none => {},
+        .resume_picker => if (g_session_resume_trigger) |t| t(),
+        .export_markdown => |mode| if (g_markdown_export_trigger) |t| t(mode),
+    }
+}
+
 var g_agent_mutex: std.Thread.Mutex = .{};
 var g_agent_settings: AgentSettings = .{};
 var g_session_id_counter = std.atomic.Value(u64).init(1);
 var g_skill_update_trigger: ?*const fn () void = null;
+var g_session_resume_trigger: ?*const fn () void = null;
+var g_markdown_export_trigger: ?*const fn (MarkdownExportMode) void = null;
 
 /// Wire the callback that the `/update-skills` slash command fires. Set once at
 /// startup by the app layer (mirrors `configureAgent` / `setToolHost`).
 pub fn setSkillUpdateTrigger(cb: *const fn () void) void {
     g_skill_update_trigger = cb;
+}
+
+/// Wire the callback that `/resume` fires to open the agent history picker.
+/// Fired AFTER the session mutex unlocks (the picker lives in the app layer).
+pub fn setSessionResumeTrigger(cb: ?*const fn () void) void {
+    g_session_resume_trigger = cb;
+}
+
+/// Wire the callback that `/export [full|clean]` fires to write the conversation
+/// Markdown. Fired AFTER the session mutex unlocks, because the export reads the
+/// session under the SAME mutex (`allocMarkdownExport`) and would otherwise deadlock.
+pub fn setMarkdownExportTrigger(cb: ?*const fn (MarkdownExportMode) void) void {
+    g_markdown_export_trigger = cb;
 }
 threadlocal var g_tool_host: ?ToolHost = null;
 
@@ -1527,9 +1568,10 @@ pub const Session = struct {
 
         // 1) Built-in command (with optional argument), exact first-token match.
         if (ai_chat_composer.exactBuiltinCommand(first_tok)) |command| {
-            history_change = self.runBuiltinCommandLocked(command, arg);
+            const r = self.runBuiltinCommandLocked(command, arg);
             self.mutex.unlock();
-            self.notifyHistoryChange(history_change);
+            self.notifyHistoryChange(r.history_change);
+            fireDeferredAction(r.deferred);
             return;
         }
         // 2) Custom command, matched by first token.
@@ -1537,9 +1579,10 @@ pub const Session = struct {
             const cmd = self.custom_commands[idx];
             if (cmd.action) |av| {
                 if (knownActionFromName(av)) |builtin_command| {
-                    history_change = self.runBuiltinCommandLocked(builtin_command, arg);
+                    const r = self.runBuiltinCommandLocked(builtin_command, arg);
                     self.mutex.unlock();
-                    self.notifyHistoryChange(history_change);
+                    self.notifyHistoryChange(r.history_change);
+                    fireDeferredAction(r.deferred);
                     return;
                 }
             }
@@ -1549,9 +1592,10 @@ pub const Session = struct {
         } else if (arg.len == 0) {
             // legacy: a no-arg unknown slash like "/help" still shows "Unknown command".
             if (parseSlashCommand(prompt_raw)) |command| {
-                history_change = self.runBuiltinCommandLocked(command, "");
+                const r = self.runBuiltinCommandLocked(command, "");
                 self.mutex.unlock();
-                self.notifyHistoryChange(history_change);
+                self.notifyHistoryChange(r.history_change);
+                fireDeferredAction(r.deferred);
                 return;
             }
         }
@@ -1683,22 +1727,27 @@ pub const Session = struct {
     }
 
     /// Runs a built-in slash command's side-effects and appends its output as a
-    /// tool message. Assumes self.mutex is held; returns the captured history
-    /// change for the caller to notify after unlocking (non-null only for /clear).
-    fn runBuiltinCommandLocked(self: *Session, command: SlashCommand, arg: []const u8) ?PendingHistoryChange {
-        var history_change: ?PendingHistoryChange = null;
+    /// tool message. Assumes self.mutex is held. Returns the captured history
+    /// change (non-null only for /clear) plus any action the caller must fire
+    /// AFTER unlocking (`/resume`, `/export` — see fireDeferredAction).
+    fn runBuiltinCommandLocked(self: *Session, command: SlashCommand, arg: []const u8) BuiltinResult {
+        var result: BuiltinResult = .{};
         switch (command) {
-            .clear => history_change = self.clearMessagesLocked(),
+            .clear => result.history_change = self.clearMessagesLocked(),
             .reload_commands => self.reloadCustomCommands(),
             .reload_skills => self.freeSkillSuggestions(),
+            // update_skills only spawns a background thread, so it is safe inline.
             .update_skills => if (g_skill_update_trigger) |trigger| trigger(),
             .permission => applyPermissionArg(arg),
-            // TODO(Task 8): .resume_session / .export_markdown => fire triggers
+            .resume_session => result.deferred = .resume_picker,
+            .export_markdown => result.deferred = .{
+                .export_markdown = if (std.mem.eql(u8, std.mem.trim(u8, arg, " \t\r\n"), "full")) .full else .clean,
+            },
             else => {},
         }
         const output = slashCommandOutput(self.allocator, command) catch {
             self.setStatusLocked("Could not run command");
-            return history_change;
+            return result;
         };
         self.messages.append(self.allocator, .{
             .role = .tool,
@@ -1710,11 +1759,11 @@ pub const Session = struct {
         }) catch {
             self.allocator.free(output);
             self.setStatusLocked("Out of memory");
-            return history_change;
+            return result;
         };
         self.clearSubmittedInputLocked();
         self.setStatusLocked("Ready");
-        return history_change;
+        return result;
     }
 
     /// Assumes self.mutex is held. Returns the captured history change for the
@@ -4607,6 +4656,27 @@ test "/clear via submit empties the transcript and shows confirmation" {
     // /clear empties then appends a single confirmation tool message
     try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
     try std.testing.expect(std.mem.indexOf(u8, session.messages.items[0].content, "Cleared") != null);
+}
+
+var test_export_mode: ?MarkdownExportMode = null;
+fn testExportHook(mode: MarkdownExportMode) void {
+    test_export_mode = mode;
+}
+
+test "/export via submit fires the export trigger with parsed mode" {
+    const a = std.testing.allocator;
+    setMarkdownExportTrigger(testExportHook);
+    defer setMarkdownExportTrigger(null);
+    var session = try Session.init(a, "chat", "https://api.example.com", "key", "m1", "sys", "false", "", "false", "false");
+    defer session.deinit();
+    test_export_mode = null;
+    session.appendInputText("/export full");
+    session.submit();
+    try std.testing.expectEqual(MarkdownExportMode.full, test_export_mode.?);
+    test_export_mode = null;
+    session.appendInputText("/export");
+    session.submit();
+    try std.testing.expectEqual(MarkdownExportMode.clean, test_export_mode.?);
 }
 
 test "session loads custom commands from a commands directory" {

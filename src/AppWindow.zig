@@ -91,6 +91,19 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
     // Store app pointer globally for requestNewWindow
     g_app = app;
     ai_chat.setSkillUpdateTrigger(triggerSkillUpdate);
+    // `/resume` opens the existing command-center agent history picker (the same
+    // entry point the Command Palette uses for the "Select Agent History" action).
+    ai_chat.setSessionResumeTrigger(struct {
+        fn cb() void {
+            overlays.commandPaletteOpenAgentHistory();
+        }
+    }.cb);
+    // `/export [full|clean]` writes the active AI Chat transcript as Markdown.
+    ai_chat.setMarkdownExportTrigger(struct {
+        fn cb(mode: ai_chat.MarkdownExportMode) void {
+            exportActiveAiChatMarkdown(mode);
+        }
+    }.cb);
     app.maybeStartStartupUpdateCheck();
 
     try ensureGlobalAgentHistoryStore(allocator);
