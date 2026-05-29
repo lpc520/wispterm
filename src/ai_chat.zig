@@ -2270,7 +2270,7 @@ pub const Session = struct {
             .messages = messages,
             .thinking_enabled = self.thinking_enabled,
             .reasoning_effort = reasoning_effort,
-            .stream = self.stream and !agent_enabled,
+            .stream = self.stream and !agent_enabled and self.protocol != .anthropic,
             .max_tokens = self.max_tokens,
             .agent_enabled = agent_enabled,
             .tool_host = tool_host,
