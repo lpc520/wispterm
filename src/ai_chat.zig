@@ -805,6 +805,15 @@ pub const Session = struct {
         self.allocator.destroy(self);
     }
 
+    pub fn clearContext(self: *Session) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.messages.items) |msg| msg.deinit(self.allocator);
+        self.messages.clearRetainingCapacity();
+        self.scroll_px = 0;
+        self.setStatusLocked("Ready");
+    }
+
     pub fn title(self: *const Session) []const u8 {
         return self.title_buf[0..self.title_len];
     }
@@ -6124,4 +6133,33 @@ test "ai chat cut input returns text and clears when selected" {
 
     const cut_again = try session.cutInputSelection(allocator);
     try std.testing.expect(cut_again == null);
+}
+
+test "clearContext empties messages but keeps system prompt and model" {
+    const a = std.testing.allocator;
+    const session = try Session.init(
+        a,
+        "Test",
+        "https://api.example.com",
+        "key",
+        "m1",
+        "sys",
+        "disabled",
+        "high",
+        "false",
+        "false",
+    );
+    defer session.deinit();
+
+    session.mutex.lock();
+    try session.messages.append(a, .{ .role = .user, .content = try a.dupe(u8, "hi") });
+    session.mutex.unlock();
+
+    try std.testing.expect(session.messages.items.len > 0);
+
+    session.clearContext();
+
+    try std.testing.expectEqual(@as(usize, 0), session.messages.items.len);
+    try std.testing.expectEqualStrings("sys", session.systemPrompt());
+    try std.testing.expectEqualStrings("m1", session.model());
 }
