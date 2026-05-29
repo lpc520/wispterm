@@ -139,14 +139,14 @@ pub const RequestParams = struct {
     thinking_enabled: bool,
     reasoning_effort: []const u8,
     stream: bool,
+    max_tokens: u32 = 8192,
 };
 
 pub fn buildRequestJson(allocator: std.mem.Allocator, params: RequestParams, messages: []const RequestMessage, include_tools: bool) ![]u8 {
     return switch (params.protocol) {
         .chat_completions => buildChatCompletionsRequestJsonForMessages(allocator, params, messages, include_tools),
         .responses => buildResponsesRequestJsonForMessages(allocator, params, messages, include_tools),
-        // TODO(Plan B Task 3): replace with buildAnthropicRequestJson
-        .anthropic => buildChatCompletionsRequestJsonForMessages(allocator, params, messages, include_tools),
+        .anthropic => buildAnthropicRequestJsonForMessages(allocator, params, messages, include_tools),
     };
 }
 
@@ -361,6 +361,48 @@ fn buildResponsesRequestJsonForMessages(
     try out.append(allocator, '}');
 
     return out.toOwnedSlice(allocator);
+}
+
+fn buildAnthropicRequestJsonForMessages(
+    allocator: std.mem.Allocator,
+    params: RequestParams,
+    messages: []const RequestMessage,
+    include_tools: bool,
+) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, "{\"model\":");
+    try appendJsonString(allocator, &out, params.model);
+    try out.print(allocator, ",\"max_tokens\":{d}", .{params.max_tokens});
+    if (params.system_prompt.len > 0) {
+        try out.appendSlice(allocator, ",\"system\":");
+        try appendJsonString(allocator, &out, params.system_prompt);
+    }
+    try out.appendSlice(allocator, ",\"messages\":[");
+    try appendAnthropicMessages(allocator, &out, messages);
+    try out.append(allocator, ']');
+    if (include_tools) try appendAnthropicTools(allocator, &out);
+    try out.append(allocator, '}');
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendAnthropicMessages(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), messages: []const RequestMessage) !void {
+    var first = true;
+    for (messages) |msg| {
+        if (msg.role == .tool) continue; // handled in Task 4
+        if (!first) try out.append(allocator, ',');
+        first = false;
+        try out.appendSlice(allocator, "{\"role\":");
+        try appendJsonString(allocator, out, msg.role.apiName());
+        try out.appendSlice(allocator, ",\"content\":");
+        try appendJsonString(allocator, out, msg.content);
+        try out.append(allocator, '}');
+    }
+}
+
+fn appendAnthropicTools(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+    _ = allocator; _ = out; // filled in Task 4
 }
 
 fn appendResponseMessage(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), role: Role, content: []const u8) !void {
@@ -943,4 +985,19 @@ test "parseApiResponse reads responses-protocol output text" {
     var result = try parseApiResponse(a, body);
     defer result.deinit(a);
     try std.testing.expectEqualStrings("hi there", result.content);
+}
+
+test "buildRequestJson anthropic puts system top-level and includes max_tokens" {
+    const a = std.testing.allocator;
+    var msgs = [_]RequestMessage{
+        .{ .role = .user, .content = @constCast("hi") },
+    };
+    const params = RequestParams{ .model = "claude-x", .system_prompt = "be brief", .protocol = .anthropic, .thinking_enabled = false, .reasoning_effort = "", .stream = false, .max_tokens = 8192 };
+    const json = try buildRequestJson(a, params, &msgs, false);
+    defer a.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"max_tokens\":8192") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"system\":\"be brief\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"role\":\"user\"") != null);
+    // system must NOT be inside the messages array as a role
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"role\":\"system\"") == null);
 }
