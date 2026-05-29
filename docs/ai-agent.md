@@ -20,7 +20,7 @@ The built-in defaults are:
 - Base URL: `https://api.deepseek.com`
 - Model: `deepseek-v4-pro`
 - Protocol: `chat_completions`
-- System prompt: embedded from `src/prompt.md`
+- System prompt: a platform-aware default compiled into the binary (defined in `src/platform/agent_prompt.zig`)
 - Request mode: DeepSeek thinking enabled, `reasoning_effort = high`, non-streaming
 
 The default agent prompt is platform-aware: on Windows it uses `powershell_exec`
@@ -65,11 +65,40 @@ Use `$skill-name your request` to explicitly load a skill for the next request.
 The loaded skill is stored as a replayable tool result in the chat history, so
 existing conversations stay reproducible even if the skill file changes later.
 
-Local slash commands:
+Local slash commands (handled in the panel, without calling the model):
 
-- `/skills` lists discovered local skills without calling the model.
-- `/commands` lists local AI chat commands without calling the model.
+- `/skills` lists discovered local skills.
+- `/commands` lists all available slash commands.
 - `/reload-skills` confirms that future skill calls will read from disk again.
+- `/reload-commands` rescans the custom `commands/` directory.
+- `/clear` clears the current conversation context (keeps the tab and profile).
+- `/resume` opens the saved-conversation history picker.
+- `/permission` shows the agent tool permission; `/permission confirm` or
+  `/permission full` changes it at runtime.
+- `/export` writes the conversation to Markdown (clean by default; `/export full`
+  includes reasoning, tool details, and usage).
+
+## Custom Slash Commands
+
+Add your own slash commands by dropping Markdown files in a `commands/`
+directory under the platform config directory (`%APPDATA%\wispterm\commands` on
+Windows, `~/Library/Application Support/wispterm/commands` on macOS), the current
+working directory, or next to the `wispterm` executable. Each `*.md` file is one
+command, named by its `name:` frontmatter field:
+
+```markdown
+---
+name: review
+description: review the current diff
+---
+Please review the current git diff for correctness and simplifications.
+```
+
+A command with no `action:` uses its body as a prompt template (submitted to the
+model). A command may instead map to a built-in action with
+`action: clear_context` | `restore_session` | `set_permission` | `export_markdown`.
+Names that collide with a built-in command are ignored. Run `/reload-commands`
+to pick up edits without restarting.
 
 Release packages include `plugins/skills/inspect-computer-config`, which can be
 loaded with `$inspect-computer-config` to summarize local OS, CPU, memory, GPU,
