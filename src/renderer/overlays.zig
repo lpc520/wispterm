@@ -1920,9 +1920,11 @@ pub fn agentSaveSshProfile(allocator: std.mem.Allocator, args: AppWindow.ai_chat
     const name_raw = std.mem.trim(u8, args.name, " \t\r\n");
     const port_raw = std.mem.trim(u8, args.port, " \t\r\n");
     const port = if (port_raw.len > 0) port_raw else "22";
+    const proxy_jump = std.mem.trim(u8, args.proxy_jump, " \t\r\n");
     if (host.len == 0 or user.len == 0) return error.InvalidProfile;
     if (!isSshTokenSafe(host) or !isSshTokenSafe(user)) return error.InvalidProfile;
     if (!isPortTokenSafe(port)) return error.InvalidProfile;
+    if (!command_palette_model.isProxyJumpSafe(proxy_jump)) return error.InvalidProfile;
 
     const lookup = if (name_raw.len > 0) name_raw else host;
     const found_idx = findSshProfileIndex(lookup) orelse findSshProfileIndex(host);
@@ -1947,6 +1949,9 @@ pub fn agentSaveSshProfile(allocator: std.mem.Allocator, args: AppWindow.ai_chat
     copySshProfileField(profile, .user, user);
     if (args.password.len > 0 or !updated_existing) {
         copySshProfileField(profile, .password, args.password);
+    }
+    if (proxy_jump.len > 0 or !updated_existing) {
+        copySshProfileField(profile, .proxy_jump, proxy_jump);
     }
     copySshProfileField(profile, .port, port);
 
