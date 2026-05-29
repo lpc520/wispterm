@@ -252,6 +252,7 @@ const ChatRequest = struct {
     thinking_enabled: bool,
     reasoning_effort: []u8,
     stream: bool,
+    max_tokens: u32 = 8192,
     agent_enabled: bool,
     tool_host: ?ToolHost,
     tool_snapshot: ?ToolSnapshot,
@@ -279,6 +280,7 @@ const ChatRequest = struct {
             .thinking_enabled = self.thinking_enabled,
             .reasoning_effort = self.reasoning_effort,
             .stream = self.stream,
+            .max_tokens = self.max_tokens,
         };
     }
 };
@@ -735,6 +737,7 @@ pub const Session = struct {
     reasoning_effort_buf: [16]u8 = undefined,
     reasoning_effort_len: usize = 0,
     stream: bool = false,
+    max_tokens: u32 = 8192,
     agent_enabled: bool = false,
     created_at_ms: i64 = 0,
     updated_at_ms: i64 = 0,
@@ -870,6 +873,7 @@ pub const Session = struct {
         session.mutex.lock();
         defer session.mutex.unlock();
         if (record.session_id.len > 0) session.copySessionId(record.session_id);
+        session.max_tokens = record.max_tokens;
         session.created_at_ms = record.created_at;
         session.updated_at_ms = record.updated_at;
         for (record.messages) |msg| {
@@ -941,6 +945,14 @@ pub const Session = struct {
 
     pub fn streamConfigValue(self: *const Session) []const u8 {
         return if (self.stream) "true" else "false";
+    }
+
+    pub fn maxTokens(self: *const Session) u32 {
+        return self.max_tokens;
+    }
+
+    pub fn setMaxTokens(self: *Session, value: u32) void {
+        self.max_tokens = value;
     }
 
     pub fn agentConfigValue(self: *const Session) []const u8 {
@@ -2255,6 +2267,7 @@ pub const Session = struct {
             .thinking_enabled = self.thinking_enabled,
             .reasoning_effort = reasoning_effort,
             .stream = self.stream and !agent_enabled,
+            .max_tokens = self.max_tokens,
             .agent_enabled = agent_enabled,
             .tool_host = tool_host,
             .tool_snapshot = tool_snapshot,
@@ -2335,6 +2348,7 @@ pub const Session = struct {
             .thinking_enabled = self.thinking_enabled,
             .reasoning_effort = reasoning_effort,
             .stream = self.stream,
+            .max_tokens = self.max_tokens,
             .agent_enabled = self.agent_enabled,
             .created_at = self.created_at_ms,
             .updated_at = self.updated_at_ms,
@@ -4881,6 +4895,35 @@ test "ai_chat: response protocol survives history record round trip" {
     defer restored.deinit();
 
     try std.testing.expectEqualStrings("responses", restored.apiProtocolName());
+}
+
+test "ai_chat: session preserves max_tokens through a history record round trip" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "chat",
+        "https://api.anthropic.com",
+        "key",
+        "claude-x",
+        "sys",
+        "false",
+        "",
+        "false",
+        "false",
+    );
+    defer session.deinit();
+
+    try std.testing.expectEqual(@as(u32, 8192), session.max_tokens); // default
+
+    session.setMaxTokens(4096);
+
+    var record = try session.toHistoryRecord(allocator);
+    defer agent_history.freeOwnedRecord(allocator, &record);
+    try std.testing.expectEqual(@as(u32, 4096), record.max_tokens);
+
+    const restored = try Session.initFromHistoryRecord(allocator, record);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(u32, 4096), restored.max_tokens);
 }
 
 test "ai_chat: session loads from history record" {

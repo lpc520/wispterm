@@ -32,6 +32,7 @@ pub const SessionRecord = struct {
     thinking_enabled: bool,
     reasoning_effort: []const u8,
     stream: bool,
+    max_tokens: u32 = 8192,
     agent_enabled: bool,
     created_at: i64,
     updated_at: i64,
@@ -243,6 +244,7 @@ pub fn cloneRecord(allocator: std.mem.Allocator, input: anytype) !SessionRecord 
         .thinking_enabled = input.thinking_enabled,
         .reasoning_effort = reasoning_effort,
         .stream = input.stream,
+        .max_tokens = if (@hasField(@TypeOf(input), "max_tokens")) input.max_tokens else 8192,
         .agent_enabled = input.agent_enabled,
         .created_at = input.created_at,
         .updated_at = input.updated_at,
@@ -600,6 +602,50 @@ test "agent_history: missing protocol defaults to chat completions" {
 
     try std.testing.expectEqual(@as(usize, 1), parsed.records.items.len);
     try std.testing.expectEqualStrings(DEFAULT_PROTOCOL, parsed.records.items[0].protocol);
+}
+
+test "agent_history: missing max_tokens defaults to 8192" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"records":[{"session_id":"s1","title":"Chat 1","base_url":"https://api.example.com","api_key":"secret","model":"m1","system_prompt":"system","thinking_enabled":true,"reasoning_effort":"high","stream":false,"agent_enabled":true,"created_at":10,"updated_at":20,"messages":[]}]}
+    ;
+    var parsed = try Store.fromJsonString(allocator, json);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.records.items.len);
+    try std.testing.expectEqual(@as(u32, 8192), parsed.records.items[0].max_tokens);
+}
+
+test "agent_history: json round trip preserves max_tokens" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator);
+    defer store.deinit();
+
+    try store.upsertRecord(.{
+        .session_id = "s1",
+        .title = "Chat 1",
+        .base_url = "https://api.example.com",
+        .api_key = "secret",
+        .model = "m1",
+        .system_prompt = "system",
+        .thinking_enabled = true,
+        .reasoning_effort = "high",
+        .stream = false,
+        .max_tokens = 2048,
+        .agent_enabled = true,
+        .created_at = 10,
+        .updated_at = 20,
+        .messages = &.{},
+    });
+
+    const json = try store.toJsonString(allocator);
+    defer allocator.free(json);
+
+    var parsed = try Store.fromJsonString(allocator, json);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.records.items.len);
+    try std.testing.expectEqual(@as(u32, 2048), parsed.records.items[0].max_tokens);
 }
 
 test "agent_history: lenient parse propagates out of memory" {
