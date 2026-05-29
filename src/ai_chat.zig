@@ -368,6 +368,8 @@ fn slashCommandOutput(allocator: std.mem.Allocator, command: SlashCommand) ![]u8
         .update_skills => allocator.dupe(u8, "Downloading the latest skills from GitHub in the background..."),
         .unknown => allocator.dupe(u8, "Unknown command. Use /commands to list commands."),
         .skills => listSkillsForDisplay(allocator),
+        // TODO(Task 2): implement lifecycle command handlers
+        .clear, .resume_session, .permission, .export_markdown, .reload_commands => allocator.dupe(u8, "Not yet implemented."),
     };
 }
 
@@ -4302,11 +4304,11 @@ test "ai chat slash command suggestions show and filter from input" {
     var session = Session{ .allocator = allocator };
     session.appendInputText("/");
 
-    try std.testing.expectEqual(@as(usize, 4), session.slashCommandSuggestionCount());
+    try std.testing.expectEqual(@as(usize, 9), session.slashCommandSuggestionCount());
     try std.testing.expectEqualStrings("/skills", session.slashCommandSuggestionAt(0).?.command);
 
     session.appendInputText("c");
-    try std.testing.expectEqual(@as(usize, 1), session.slashCommandSuggestionCount());
+    try std.testing.expectEqual(@as(usize, 2), session.slashCommandSuggestionCount());
     try std.testing.expectEqualStrings("/commands", session.slashCommandSuggestionAt(0).?.command);
 }
 

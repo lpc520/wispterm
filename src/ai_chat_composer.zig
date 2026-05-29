@@ -3,7 +3,18 @@
 const std = @import("std");
 const skill_registry = @import("skill_registry.zig");
 
-pub const SlashCommand = enum { skills, commands, reload_skills, update_skills, unknown };
+pub const SlashCommand = enum {
+    skills,
+    commands,
+    reload_skills,
+    update_skills,
+    reload_commands,
+    clear,
+    resume_session,
+    permission,
+    export_markdown,
+    unknown,
+};
 
 pub const ComposerSuggestionKind = enum {
     slash_command,
@@ -43,6 +54,11 @@ pub const slash_command_entries = [_]SlashCommandEntry{
         .suggestion = .{ .command = "/update-skills", .description = "download latest skills from GitHub" },
         .action = .update_skills,
     },
+    .{ .suggestion = .{ .command = "/clear", .description = "clear the conversation context" }, .action = .clear },
+    .{ .suggestion = .{ .command = "/resume", .description = "resume a saved conversation" }, .action = .resume_session },
+    .{ .suggestion = .{ .command = "/permission", .description = "view or set agent permission" }, .action = .permission },
+    .{ .suggestion = .{ .command = "/export", .description = "export conversation as Markdown" }, .action = .export_markdown },
+    .{ .suggestion = .{ .command = "/reload-commands", .description = "rescan the commands directory" }, .action = .reload_commands },
 };
 
 pub const SkillInvocation = struct {
@@ -237,6 +253,14 @@ const test_skills = [_]skill_registry.SkillMeta{
     .{ .name = &test_skill_build_name, .description = &test_skill_build_desc, .dir_name = &test_skill_build_dir, .rel_dir = &test_skill_build_rel },
     .{ .name = &test_skill_review_name, .description = &test_skill_review_desc, .dir_name = &test_skill_review_dir, .rel_dir = &test_skill_review_rel },
 };
+
+test "parseSlashCommand recognizes new lifecycle commands" {
+    try std.testing.expectEqual(SlashCommand.clear, parseSlashCommand("/clear").?);
+    try std.testing.expectEqual(SlashCommand.resume_session, parseSlashCommand("/resume").?);
+    try std.testing.expectEqual(SlashCommand.permission, parseSlashCommand("/permission").?);
+    try std.testing.expectEqual(SlashCommand.export_markdown, parseSlashCommand("/export").?);
+    try std.testing.expectEqual(SlashCommand.reload_commands, parseSlashCommand("/reload-commands").?);
+}
 
 test "parseSlashCommand recognizes exact, unknown, and rejects non-slash" {
     try std.testing.expectEqual(SlashCommand.skills, parseSlashCommand("/skills").?);
