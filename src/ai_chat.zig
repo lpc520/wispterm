@@ -1505,41 +1505,47 @@ pub const Session = struct {
             self.mutex.lock();
         }
 
-        const prompt_raw = std.mem.trim(u8, self.input(), " \t\r\n");
+        var prompt_raw = std.mem.trim(u8, self.input(), " \t\r\n");
         if (prompt_raw.len == 0) {
             self.mutex.unlock();
             return;
         }
 
-        if (parseSlashCommand(prompt_raw)) |command| {
-            const output = slashCommandOutput(self.allocator, command) catch {
-                self.setStatusLocked("Could not run command");
-                self.mutex.unlock();
-                return;
-            };
-            self.messages.append(self.allocator, .{
-                .role = .tool,
-                .content = output,
-                .replay_to_model = false,
-                .persist_to_history = false,
-                .content_collapsed = false,
-                .content_auto_expand = false,
-            }) catch {
-                self.allocator.free(output);
-                self.setStatusLocked("Out of memory");
-                self.mutex.unlock();
-                return;
-            };
-            self.clearSubmittedInputLocked();
-            if (command == .reload_skills) self.freeSkillSuggestions();
-            if (command == .update_skills) {
-                if (g_skill_update_trigger) |trigger| trigger();
-            }
-            self.setStatusLocked("Ready");
-            history_change = null;
+        const tok_end = ai_chat_composer.slashCommandTokenEnd(prompt_raw);
+        const first_tok = prompt_raw[0..tok_end];
+        const arg = std.mem.trim(u8, prompt_raw[tok_end..], " \t\r\n");
+
+        // 1) Built-in command (with optional argument), exact first-token match.
+        if (ai_chat_composer.exactBuiltinCommand(first_tok)) |command| {
+            history_change = self.runBuiltinCommandLocked(command, arg);
             self.mutex.unlock();
+            self.notifyHistoryChange(history_change);
             return;
         }
+        // 2) Custom command, matched by first token.
+        if (ai_chat_composer.matchCustomCommandIndex(first_tok, self.customCommandSuggestions())) |idx| {
+            const cmd = self.custom_commands[idx];
+            if (cmd.action) |av| {
+                if (knownActionFromName(av)) |builtin_command| {
+                    history_change = self.runBuiltinCommandLocked(builtin_command, arg);
+                    self.mutex.unlock();
+                    self.notifyHistoryChange(history_change);
+                    return;
+                }
+            }
+            // prompt template: submit the body as the prompt. Submit path uses prompt_raw,
+            // so REBIND it (cmd.body is owned by custom_commands, stable under the lock).
+            prompt_raw = cmd.body;
+        } else if (arg.len == 0) {
+            // legacy: a no-arg unknown slash like "/help" still shows "Unknown command".
+            if (parseSlashCommand(prompt_raw)) |command| {
+                history_change = self.runBuiltinCommandLocked(command, "");
+                self.mutex.unlock();
+                self.notifyHistoryChange(history_change);
+                return;
+            }
+        }
+        // otherwise (e.g. "/help me", "/usr/bin path", or a rebound template body): fall through.
 
         if (self.api_key_len == 0) {
             self.setStatusLocked("Missing API key. Edit the AI Chat profile or set DEEPSEEK_API_KEY.");
@@ -1664,6 +1670,42 @@ pub const Session = struct {
         }
         self.mutex.unlock();
         if (skill_preload_appended) self.notifyHistoryChange(history_change);
+    }
+
+    /// Runs a built-in slash command's side-effects and appends its output as a
+    /// tool message. Assumes self.mutex is held; returns the captured history
+    /// change for the caller to notify after unlocking (non-null only for /clear).
+    fn runBuiltinCommandLocked(self: *Session, command: SlashCommand, arg: []const u8) ?PendingHistoryChange {
+        _ = arg; // used by Task 7/8 (permission/export args); unused here
+        var history_change: ?PendingHistoryChange = null;
+        switch (command) {
+            .clear => history_change = self.clearMessagesLocked(),
+            .reload_commands => self.reloadCustomCommands(),
+            .reload_skills => self.freeSkillSuggestions(),
+            .update_skills => if (g_skill_update_trigger) |trigger| trigger(),
+            // TODO(Task 7): .permission => applyPermissionArg(arg) before output
+            // TODO(Task 8): .resume_session / .export_markdown => fire triggers
+            else => {},
+        }
+        const output = slashCommandOutput(self.allocator, command) catch {
+            self.setStatusLocked("Could not run command");
+            return history_change;
+        };
+        self.messages.append(self.allocator, .{
+            .role = .tool,
+            .content = output,
+            .replay_to_model = false,
+            .persist_to_history = false,
+            .content_collapsed = false,
+            .content_auto_expand = false,
+        }) catch {
+            self.allocator.free(output);
+            self.setStatusLocked("Out of memory");
+            return history_change;
+        };
+        self.clearSubmittedInputLocked();
+        self.setStatusLocked("Ready");
+        return history_change;
     }
 
     /// Assumes self.mutex is held. Returns the captured history change for the
@@ -4544,6 +4586,18 @@ test "ai chat enter submits slash commands instead of completing suggestions" {
 
     for (session.messages.items) |msg| msg.deinit(allocator);
     session.messages.deinit(allocator);
+}
+
+test "/clear via submit empties the transcript and shows confirmation" {
+    const a = std.testing.allocator;
+    var session = try Session.init(a, "chat", "https://api.example.com", "key", "m1", "sys", "false", "", "false", "false");
+    defer session.deinit();
+    try session.messages.append(a, .{ .role = .user, .content = try a.dupe(u8, "old message") });
+    session.appendInputText("/clear");
+    session.submit();
+    // /clear empties then appends a single confirmation tool message
+    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, session.messages.items[0].content, "Cleared") != null);
 }
 
 test "session loads custom commands from a commands directory" {
