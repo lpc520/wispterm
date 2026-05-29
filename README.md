@@ -3,6 +3,14 @@
 **WispTerm**, formerly Phantty, is a cross-platform terminal workspace for remote development and AI agent workflows. It is written in Zig and powered by [libghostty-vt](https://github.com/ghostty-org/ghostty) for terminal emulation.
 
 > [!NOTE]
+> WispTerm ships for **Windows** and, as of v0.35.0, **macOS** (Apple Silicon and
+> Intel). **macOS support is new and may still have bugs** — the AppKit/Metal,
+> multi-window, and rendering paths are young and can misbehave in scenarios we
+> haven't covered yet. If you need rock-solid daily stability on macOS, prefer
+> [Ghostty](https://ghostty.org/) for now and please report any issues you hit.
+> The **Linux** port is still in progress (see [TODO.md](TODO.md)).
+
+> [!NOTE]
 > WispTerm is a fork of [arya-s/phantty](https://github.com/arya-s/phantty); see [Credits](#credits) below.
 
 ## Features
@@ -19,14 +27,6 @@
 - **AI Agent sessions** - launch OpenAI-compatible Agent tabs, configure profiles, restore history, and export full or clean Markdown transcripts
 - **Kitty Graphics protocol** - display inline images and PDFs from remote shells via `imgcat.py` / `pdfcat.py`
 - **Opt-in remote access** - share a session key over a Cloudflare-hosted relay (disabled by default)
-
-> [!NOTE]
-> WispTerm ships for **Windows** and, as of v0.35.0, **macOS** (Apple Silicon and
-> Intel). **macOS support is new and may still have bugs** — the AppKit/Metal,
-> multi-window, and rendering paths are young and can misbehave in scenarios we
-> haven't covered yet. If you need rock-solid daily stability on macOS, prefer
-> [Ghostty](https://ghostty.org/) for now and please report any issues you hit.
-> The **Linux** port is still in progress (see [TODO.md](TODO.md)).
 
 ## Documentation
 
