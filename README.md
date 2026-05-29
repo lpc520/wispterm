@@ -10,9 +10,6 @@
 > [Ghostty](https://ghostty.org/) for now and please report any issues you hit.
 > The **Linux** port is still in progress (see [TODO.md](TODO.md)).
 
-> [!NOTE]
-> WispTerm is a fork of [arya-s/phantty](https://github.com/arya-s/phantty); see [Credits](#credits) below.
-
 ## Features
 
 - **Ghostty's terminal emulation** - uses libghostty-vt for VT parsing and terminal state
