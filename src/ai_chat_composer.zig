@@ -54,11 +54,26 @@ pub const slash_command_entries = [_]SlashCommandEntry{
         .suggestion = .{ .command = "/update-skills", .description = "download latest skills from GitHub" },
         .action = .update_skills,
     },
-    .{ .suggestion = .{ .command = "/clear", .description = "clear the conversation context" }, .action = .clear },
-    .{ .suggestion = .{ .command = "/resume", .description = "resume a saved conversation" }, .action = .resume_session },
-    .{ .suggestion = .{ .command = "/permission", .description = "view or set agent permission" }, .action = .permission },
-    .{ .suggestion = .{ .command = "/export", .description = "export conversation as Markdown" }, .action = .export_markdown },
-    .{ .suggestion = .{ .command = "/reload-commands", .description = "rescan the commands directory" }, .action = .reload_commands },
+    .{
+        .suggestion = .{ .command = "/clear", .description = "clear the conversation context" },
+        .action = .clear,
+    },
+    .{
+        .suggestion = .{ .command = "/resume", .description = "resume a saved conversation" },
+        .action = .resume_session,
+    },
+    .{
+        .suggestion = .{ .command = "/permission", .description = "view or set agent permission" },
+        .action = .permission,
+    },
+    .{
+        .suggestion = .{ .command = "/export", .description = "export conversation as Markdown" },
+        .action = .export_markdown,
+    },
+    .{
+        .suggestion = .{ .command = "/reload-commands", .description = "rescan the commands directory" },
+        .action = .reload_commands,
+    },
 };
 
 pub const SkillInvocation = struct {
