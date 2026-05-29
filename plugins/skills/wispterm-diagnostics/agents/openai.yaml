@@ -1,0 +1,4 @@
+interface:
+  display_name: "WispTerm Diagnostics"
+  short_description: "Generate a safe WispTerm issue report"
+  default_prompt: "Use $wispterm-diagnostics to generate a Markdown diagnostic report for my WispTerm issue."
