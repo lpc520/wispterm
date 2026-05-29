@@ -340,6 +340,16 @@ fn currentAgentSettings() AgentSettings {
     return g_agent_settings;
 }
 
+fn applyPermissionArg(arg: []const u8) void {
+    const trimmed = std.mem.trim(u8, arg, " \t\r\n");
+    if (trimmed.len == 0) return; // no arg = status-only (output already emitted by slashCommandOutput)
+    if (AgentPermission.parse(trimmed)) |p| {
+        var s = currentAgentSettings();
+        s.permission = p;
+        configureAgent(s);
+    }
+}
+
 fn currentToolHost() ?ToolHost {
     return g_tool_host;
 }
@@ -1676,14 +1686,13 @@ pub const Session = struct {
     /// tool message. Assumes self.mutex is held; returns the captured history
     /// change for the caller to notify after unlocking (non-null only for /clear).
     fn runBuiltinCommandLocked(self: *Session, command: SlashCommand, arg: []const u8) ?PendingHistoryChange {
-        _ = arg; // used by Task 7/8 (permission/export args); unused here
         var history_change: ?PendingHistoryChange = null;
         switch (command) {
             .clear => history_change = self.clearMessagesLocked(),
             .reload_commands => self.reloadCustomCommands(),
             .reload_skills => self.freeSkillSuggestions(),
             .update_skills => if (g_skill_update_trigger) |trigger| trigger(),
-            // TODO(Task 7): .permission => applyPermissionArg(arg) before output
+            .permission => applyPermissionArg(arg),
             // TODO(Task 8): .resume_session / .export_markdown => fire triggers
             else => {},
         }
@@ -6375,4 +6384,16 @@ test "clearMessages empties transcript but keeps settings" {
     try std.testing.expectEqual(@as(usize, 0), session.messages.items.len);
     try std.testing.expectEqualStrings("sys", session.systemPrompt());
     try std.testing.expectEqualStrings("m1", session.model());
+}
+
+test "/permission full flips the global agent permission" {
+    const saved = currentAgentSettings();
+    defer configureAgent(saved); // restore global state for other tests
+    configureAgent(.{ .permission = .confirm });
+    applyPermissionArg("full");
+    try std.testing.expectEqual(AgentPermission.full, currentAgentSettings().permission);
+    applyPermissionArg("confirm");
+    try std.testing.expectEqual(AgentPermission.confirm, currentAgentSettings().permission);
+    applyPermissionArg("bogus"); // invalid → no change
+    try std.testing.expectEqual(AgentPermission.confirm, currentAgentSettings().permission);
 }
