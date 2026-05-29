@@ -5,13 +5,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-uint16_t phantty_coretext_font_glyph_index(void *handle, uint32_t codepoint);
+uint16_t wispterm_coretext_font_glyph_index(void *handle, uint32_t codepoint);
 
-bool phantty_coretext_is_available(void) {
+bool wispterm_coretext_is_available(void) {
     return true;
 }
 
-static char *phantty_coretext_copy_cfstring(CFStringRef string) {
+static char *wispterm_coretext_copy_cfstring(CFStringRef string) {
     if (string == NULL) return NULL;
     CFIndex length = CFStringGetLength(string);
     CFIndex max_size = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
@@ -24,12 +24,12 @@ static char *phantty_coretext_copy_cfstring(CFStringRef string) {
     return buf;
 }
 
-static CFStringRef phantty_coretext_create_string(const char *bytes) {
+static CFStringRef wispterm_coretext_create_string(const char *bytes) {
     if (bytes == NULL) return NULL;
     return CFStringCreateWithCString(kCFAllocatorDefault, bytes, kCFStringEncodingUTF8);
 }
 
-static CFStringRef phantty_coretext_create_string_for_codepoint(uint32_t codepoint, CFIndex *utf16_len) {
+static CFStringRef wispterm_coretext_create_string_for_codepoint(uint32_t codepoint, CFIndex *utf16_len) {
     UniChar chars[2] = {0, 0};
     if (codepoint > 0xFFFF) {
         uint32_t scalar = codepoint - 0x10000;
@@ -43,7 +43,7 @@ static CFStringRef phantty_coretext_create_string_for_codepoint(uint32_t codepoi
     return CFStringCreateWithCharacters(kCFAllocatorDefault, chars, 1);
 }
 
-static bool phantty_coretext_font_is_last_resort(CTFontRef font) {
+static bool wispterm_coretext_font_is_last_resort(CTFontRef font) {
     if (font == NULL) return true;
     CFStringRef name = CTFontCopyPostScriptName(font);
     if (name == NULL) return false;
@@ -52,8 +52,8 @@ static bool phantty_coretext_font_is_last_resort(CTFontRef font) {
     return result;
 }
 
-void *phantty_coretext_find_font(const char *family, uint16_t weight) {
-    CFStringRef family_name = phantty_coretext_create_string(family);
+void *wispterm_coretext_find_font(const char *family, uint16_t weight) {
+    CFStringRef family_name = wispterm_coretext_create_string(family);
     if (family_name == NULL) return NULL;
 
     CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(
@@ -97,9 +97,9 @@ void *phantty_coretext_find_font(const char *family, uint16_t weight) {
     return font;
 }
 
-void *phantty_coretext_find_fallback(uint32_t codepoint) {
+void *wispterm_coretext_find_fallback(uint32_t codepoint) {
     CFIndex len = 0;
-    CFStringRef string = phantty_coretext_create_string_for_codepoint(codepoint, &len);
+    CFStringRef string = wispterm_coretext_create_string_for_codepoint(codepoint, &len);
     if (string == NULL) return NULL;
 
     CTFontRef base = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, 12.0, NULL);
@@ -116,8 +116,8 @@ void *phantty_coretext_find_fallback(uint32_t codepoint) {
             if (descriptor == NULL) continue;
             CTFontRef candidate = CTFontCreateWithFontDescriptor(descriptor, 12.0, NULL);
             if (candidate == NULL) continue;
-            if (!phantty_coretext_font_is_last_resort(candidate) &&
-                phantty_coretext_font_glyph_index(candidate, codepoint) != 0)
+            if (!wispterm_coretext_font_is_last_resort(candidate) &&
+                wispterm_coretext_font_glyph_index(candidate, codepoint) != 0)
             {
                 CFRelease(cascade);
                 CFRelease(base);
@@ -133,31 +133,31 @@ void *phantty_coretext_find_fallback(uint32_t codepoint) {
     CFRelease(base);
     CFRelease(string);
     if (font == NULL) return NULL;
-    if (phantty_coretext_font_is_last_resort(font)) {
+    if (wispterm_coretext_font_is_last_resort(font)) {
         CFRelease(font);
         return NULL;
     }
     return font;
 }
 
-void phantty_coretext_font_retain(void *handle) {
+void wispterm_coretext_font_retain(void *handle) {
     if (handle != NULL) CFRetain(handle);
 }
 
-void phantty_coretext_font_release(void *handle) {
+void wispterm_coretext_font_release(void *handle) {
     if (handle != NULL) CFRelease(handle);
 }
 
-bool phantty_coretext_font_has_character(void *handle, uint32_t codepoint) {
-    return phantty_coretext_font_glyph_index(handle, codepoint) != 0;
+bool wispterm_coretext_font_has_character(void *handle, uint32_t codepoint) {
+    return wispterm_coretext_font_glyph_index(handle, codepoint) != 0;
 }
 
-uint16_t phantty_coretext_font_glyph_index(void *handle, uint32_t codepoint) {
+uint16_t wispterm_coretext_font_glyph_index(void *handle, uint32_t codepoint) {
     CTFontRef font = (CTFontRef)handle;
     if (font == NULL) return 0;
 
     CFIndex len = 0;
-    CFStringRef string = phantty_coretext_create_string_for_codepoint(codepoint, &len);
+    CFStringRef string = wispterm_coretext_create_string_for_codepoint(codepoint, &len);
     if (string == NULL) return 0;
 
     UniChar chars[2] = {0, 0};
@@ -168,7 +168,7 @@ uint16_t phantty_coretext_font_glyph_index(void *handle, uint32_t codepoint) {
     return ok ? glyphs[0] : 0;
 }
 
-char *phantty_coretext_font_copy_path(void *handle) {
+char *wispterm_coretext_font_copy_path(void *handle) {
     CTFontRef font = (CTFontRef)handle;
     if (font == NULL) return NULL;
 
@@ -178,12 +178,12 @@ char *phantty_coretext_font_copy_path(void *handle) {
     CFRelease(url);
     if (path == NULL) return NULL;
 
-    char *result = phantty_coretext_copy_cfstring(path);
+    char *result = wispterm_coretext_copy_cfstring(path);
     CFRelease(path);
     return result;
 }
 
-size_t phantty_coretext_family_count(void) {
+size_t wispterm_coretext_family_count(void) {
     CFArrayRef families = CTFontManagerCopyAvailableFontFamilyNames();
     if (families == NULL) return 0;
     CFIndex count = CFArrayGetCount(families);
@@ -191,7 +191,7 @@ size_t phantty_coretext_family_count(void) {
     return count > 0 ? (size_t)count : 0;
 }
 
-char *phantty_coretext_copy_family_name(size_t index) {
+char *wispterm_coretext_copy_family_name(size_t index) {
     CFArrayRef families = CTFontManagerCopyAvailableFontFamilyNames();
     if (families == NULL) return NULL;
     CFIndex count = CFArrayGetCount(families);
@@ -200,11 +200,11 @@ char *phantty_coretext_copy_family_name(size_t index) {
         return NULL;
     }
     CFStringRef family = (CFStringRef)CFArrayGetValueAtIndex(families, (CFIndex)index);
-    char *result = phantty_coretext_copy_cfstring(family);
+    char *result = wispterm_coretext_copy_cfstring(family);
     CFRelease(families);
     return result;
 }
 
-void phantty_coretext_free(void *ptr) {
+void wispterm_coretext_free(void *ptr) {
     free(ptr);
 }

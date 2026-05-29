@@ -1,8 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const app_dir_name = "phantty";
-const portable_config_basename = "phantty.conf";
+const app_dir_name = "wispterm";
+const portable_config_basename = "wispterm.conf";
 
 pub const Env = struct {
     appdata: ?[]const u8 = null,
@@ -298,7 +298,7 @@ fn nonEmpty(value: ?[]const u8) ?[]const u8 {
 
 test "configDir uses test override in Zig test processes" {
     const allocator = std.testing.allocator;
-    const override = "/tmp/phantty-test-config";
+    const override = "/tmp/wispterm-test-config";
 
     setTestConfigDirForCurrentThread(override);
     defer clearTestConfigDirForCurrentThread();
@@ -374,9 +374,9 @@ test "platform dirs build config and theme file paths" {
 test "platform dirs build portable config path from executable path" {
     const allocator = std.testing.allocator;
 
-    const path = try portableConfigFilePathFromExePath(allocator, "C:/Apps/Phantty/phantty.exe");
+    const path = try portableConfigFilePathFromExePath(allocator, "C:/Apps/WispTerm/wispterm.exe");
     defer allocator.free(path);
-    const expected = try std.fs.path.join(allocator, &.{ "C:/Apps/Phantty", "phantty.conf" });
+    const expected = try std.fs.path.join(allocator, &.{ "C:/Apps/WispTerm", "wispterm.conf" });
     defer allocator.free(expected);
     try std.testing.expectEqualStrings(expected, path);
 }

@@ -116,23 +116,23 @@ test "platform update package keeps Windows portable flavor logic in platform la
 test "platform update package builds Windows portable asset names" {
     var buf: [128]u8 = undefined;
     const normal = try assetNameForScenario("v0.28.0", .baseline, &buf);
-    try std.testing.expectEqualStrings("phantty-windows-portable-v0.28.0.zip", normal);
+    try std.testing.expectEqualStrings("wispterm-windows-portable-v0.28.0.zip", normal);
 
     const embedded_browser = try assetNameForScenario("v0.28.0", .with_required_embedded_browser_payload, &buf);
-    try std.testing.expectEqualStrings("phantty-windows-portable-webview2-v0.28.0.zip", embedded_browser);
+    try std.testing.expectEqualStrings("wispterm-windows-portable-webview2-v0.28.0.zip", embedded_browser);
 
     const no_embedded_browser = try assetNameForScenario("v0.28.0", .without_embedded_browser_payload, &buf);
-    try std.testing.expectEqualStrings("phantty-windows-portable-no-webview-v0.28.0.zip", no_embedded_browser);
+    try std.testing.expectEqualStrings("wispterm-windows-portable-no-webview-v0.28.0.zip", no_embedded_browser);
 }
 
 test "platform update package matches exact target asset names only" {
     try std.testing.expect(matchesAssetName(
-        "phantty-windows-portable-webview2-v0.28.0.zip",
+        "wispterm-windows-portable-webview2-v0.28.0.zip",
         "v0.28.0",
         packageForScenario(.with_required_embedded_browser_payload),
     ));
     try std.testing.expect(!matchesAssetName(
-        "phantty-windows-portable-v0.28.0.zip",
+        "wispterm-windows-portable-v0.28.0.zip",
         "v0.28.0",
         packageForScenario(.with_required_embedded_browser_payload),
     ));
@@ -141,9 +141,9 @@ test "platform update package matches exact target asset names only" {
 test "platform update package builds macOS DMG asset names" {
     var buf: [128]u8 = undefined;
     const name = try assetName("v0.32.0", .{ .platform = .macos }, &buf);
-    try std.testing.expectEqualStrings("phantty-macos-v0.32.0.dmg", name);
-    try std.testing.expect(matchesAssetName("phantty-macos-v0.32.0.dmg", "v0.32.0", .{ .platform = .macos }));
-    try std.testing.expect(!matchesAssetName("phantty-macos-v0.32.0.zip", "v0.32.0", .{ .platform = .macos }));
+    try std.testing.expectEqualStrings("wispterm-macos-v0.32.0.dmg", name);
+    try std.testing.expect(matchesAssetName("wispterm-macos-v0.32.0.dmg", "v0.32.0", .{ .platform = .macos }));
+    try std.testing.expect(!matchesAssetName("wispterm-macos-v0.32.0.zip", "v0.32.0", .{ .platform = .macos }));
 }
 
 test "platform update package rejects unsupported platform asset names" {
@@ -151,7 +151,7 @@ test "platform update package rejects unsupported platform asset names" {
     try std.testing.expectError(error.UnsupportedReleasePackage, assetName("v0.28.0", .{
         .platform = .linux,
     }, &buf));
-    try std.testing.expect(!matchesAssetName("phantty-linux-v0.28.0.tar.gz", "v0.28.0", .{
+    try std.testing.expect(!matchesAssetName("wispterm-linux-v0.28.0.tar.gz", "v0.28.0", .{
         .platform = .linux,
     }));
 }
@@ -162,5 +162,5 @@ test "platform update package exposes platform-neutral package scenarios" {
     const baseline = packageForScenario(.baseline);
     const baseline_name = try assetNameForScenario("v0.28.0", .baseline, &buf);
     try std.testing.expectEqual(release_package.Platform.windows, baseline.platform);
-    try std.testing.expectEqualStrings("phantty-windows-portable-v0.28.0.zip", baseline_name);
+    try std.testing.expectEqualStrings("wispterm-windows-portable-v0.28.0.zip", baseline_name);
 }

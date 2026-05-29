@@ -194,7 +194,7 @@ pub fn readTerminalPreviewSource(allocator: std.mem.Allocator, surface: *Surface
         .wsl => readWslPreviewSource(allocator, path, markdown_preview.MAX_SOURCE_BYTES),
         .ssh => blk: {
             const conn = surface.ssh_connection orelse {
-                std.debug.print("Markdown preview over SSH needs Phantty SSH connection metadata; manual ssh sessions are not supported yet\n", .{});
+                std.debug.print("Markdown preview over SSH needs WispTerm SSH connection metadata; manual ssh sessions are not supported yet\n", .{});
                 return error.PreviewFailed;
             };
             break :blk try readSshPreviewSource(allocator, &conn, path, markdown_preview.MAX_SOURCE_BYTES);

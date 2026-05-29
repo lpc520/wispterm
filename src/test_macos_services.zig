@@ -29,16 +29,16 @@ test "macOS services select native or supported platform backends" {
 
 test "macOS clipboard round-trips UTF-8 text through NSPasteboard" {
     const owner = clipboard.windowOwner(0);
-    try std.testing.expect(clipboard.writeText(std.testing.allocator, owner, "phantty mac clipboard"));
+    try std.testing.expect(clipboard.writeText(std.testing.allocator, owner, "wispterm mac clipboard"));
     const text_value = clipboard.readText(std.testing.allocator, owner) orelse return error.ExpectedClipboardText;
     defer std.testing.allocator.free(text_value);
-    try std.testing.expectEqualStrings("phantty mac clipboard", text_value);
+    try std.testing.expectEqualStrings("wispterm mac clipboard", text_value);
 }
 
 test "macOS display and text services return native answers" {
     try std.testing.expect(display.isPointOnAnyDisplay(0, 0));
-    try std.testing.expectEqual(@as(?bool, true), text.nativeOrdinalIgnoreCaseUtf8Equal("Phantty", "phantty"));
-    try std.testing.expectEqual(@as(?bool, false), text.nativeOrdinalIgnoreCaseUtf8Equal("Phantty", "Ghostty"));
+    try std.testing.expectEqual(@as(?bool, true), text.nativeOrdinalIgnoreCaseUtf8Equal("WispTerm", "wispterm"));
+    try std.testing.expectEqual(@as(?bool, false), text.nativeOrdinalIgnoreCaseUtf8Equal("WispTerm", "Ghostty"));
 }
 
 test "macOS config watcher observes directory changes" {

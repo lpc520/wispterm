@@ -703,14 +703,14 @@ test "platform window backend exposes backend-neutral create options" {
     const options = CreateOptions{
         .width = 800,
         .height = 600,
-        .title = "Phantty",
+        .title = "WispTerm",
         .x = 10,
         .y = 20,
         .maximize = true,
     };
     try std.testing.expectEqual(@as(i32, 800), options.width);
     try std.testing.expectEqual(@as(i32, 600), options.height);
-    try std.testing.expectEqualStrings("Phantty", options.title);
+    try std.testing.expectEqualStrings("WispTerm", options.title);
     try std.testing.expectEqual(@as(?i32, 10), options.x);
     try std.testing.expectEqual(@as(?i32, 20), options.y);
     try std.testing.expect(options.maximize);
@@ -760,7 +760,7 @@ test "macOS AppKit backend creates a Metal-backed native window" {
     var window = try create(std.testing.allocator, .{
         .width = 320,
         .height = 180,
-        .title = "Phantty Window Smoke",
+        .title = "WispTerm Window Smoke",
     });
     defer destroy(&window);
 

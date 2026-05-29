@@ -318,7 +318,7 @@ fn childExec(
     // matches the SGR / cursor-control set our ghostty-vt parser implements.
     _ = setenv("TERM", "xterm-256color", 1);
     _ = setenv("COLORTERM", "truecolor", 1);
-    _ = setenv("TERM_PROGRAM", "phantty", 1);
+    _ = setenv("TERM_PROGRAM", "wispterm", 1);
     // Some shells refuse to load completions when TERMINFO points at a value
     // that doesn't exist for our TERM choice. Clearing it lets ncurses fall
     // back to the system database.
@@ -442,7 +442,7 @@ test "spawn child writes output that readOutput receives" {
     var command: pty_command.Command = .{};
     defer command.deinit();
 
-    try pty.startCommand(&command, "/bin/echo phantty-marker", null);
+    try pty.startCommand(&command, "/bin/echo wispterm-marker", null);
 
     var buf: [4096]u8 = undefined;
     var collected: std.ArrayListUnmanaged(u8) = .empty;
@@ -459,7 +459,7 @@ test "spawn child writes output that readOutput receives" {
         };
         if (n == 0) break;
         try collected.appendSlice(std.testing.allocator, buf[0..n]);
-        if (std.mem.indexOf(u8, collected.items, "phantty-marker") != null) {
+        if (std.mem.indexOf(u8, collected.items, "wispterm-marker") != null) {
             saw_marker = true;
             break;
         }
@@ -519,7 +519,7 @@ test "outputAvailable returns a byte count after child writes" {
     var command: pty_command.Command = .{};
     defer command.deinit();
 
-    try pty.startCommand(&command, "/bin/echo phantty-avail", null);
+    try pty.startCommand(&command, "/bin/echo wispterm-avail", null);
 
     // Wait (bounded) until the kernel reports bytes available on the master.
     var iterations: usize = 0;

@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-const ENV_NAME = "PHANTTY_UI_PERF";
+const ENV_NAME = "WISPTERM_UI_PERF";
 
 threadlocal var g_checked: bool = false;
 threadlocal var g_enabled: bool = false;

@@ -1,4 +1,4 @@
-//! Built-in skill updater: pulls the latest skills from the phantty repo's
+//! Built-in skill updater: pulls the latest skills from the wispterm repo's
 //! `plugins/skills/` directory into the user's `<config>/plugins/skills`.
 //!
 //! Pure helpers (path/URL/JSON mapping) live here and are unit-tested. The
@@ -9,9 +9,9 @@ const platform_dirs = @import("platform/dirs.zig");
 const update_install = @import("update_install.zig");
 
 pub const skills_tree_api_url =
-    "https://api.github.com/repos/xuzhougeng/phantty/git/trees/main?recursive=1";
+    "https://api.github.com/repos/xuzhougeng/wispterm/git/trees/main?recursive=1";
 pub const raw_base =
-    "https://raw.githubusercontent.com/xuzhougeng/phantty/main/";
+    "https://raw.githubusercontent.com/xuzhougeng/wispterm/main/";
 pub const skills_prefix = "plugins/skills/";
 
 pub const State = enum { idle, downloading, done, failed };
@@ -124,7 +124,7 @@ fn fetchTreeJson(allocator: std.mem.Allocator) ![]u8 {
         .location = .{ .url = skills_tree_api_url },
         .method = .GET,
         .keep_alive = false,
-        .headers = .{ .user_agent = .{ .override = "phantty" } },
+        .headers = .{ .user_agent = .{ .override = "wispterm" } },
         .response_writer = &body.writer,
     });
     if (response.status != .ok) return error.TreeFetchFailed;
@@ -221,7 +221,7 @@ test "skill_update: rawUrlForPath joins the raw base" {
     const url = try rawUrlForPath(testing.allocator, "plugins/skills/foo/SKILL.md");
     defer testing.allocator.free(url);
     try testing.expectEqualStrings(
-        "https://raw.githubusercontent.com/xuzhougeng/phantty/main/plugins/skills/foo/SKILL.md",
+        "https://raw.githubusercontent.com/xuzhougeng/wispterm/main/plugins/skills/foo/SKILL.md",
         url,
     );
 }

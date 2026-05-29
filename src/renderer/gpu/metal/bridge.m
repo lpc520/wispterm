@@ -7,30 +7,30 @@
 #include <stdio.h>
 #include <string.h>
 
-#define PHANTTY_METAL_MAX_BUFFERS 4096
-#define PHANTTY_METAL_MAX_TEXTURES 4096
-#define PHANTTY_METAL_MAX_PIPELINES 1024
+#define WISPTERM_METAL_MAX_BUFFERS 4096
+#define WISPTERM_METAL_MAX_TEXTURES 4096
+#define WISPTERM_METAL_MAX_PIPELINES 1024
 
-#define PHANTTY_GL_RED 0x1903
-#define PHANTTY_GL_RGBA 0x1908
-#define PHANTTY_GL_BGRA 0x80E1
-#define PHANTTY_GL_UNSIGNED_BYTE 0x1401
-#define PHANTTY_GL_TRIANGLES 0x0004
-#define PHANTTY_GL_TRIANGLE_STRIP 0x0005
+#define WISPTERM_GL_RED 0x1903
+#define WISPTERM_GL_RGBA 0x1908
+#define WISPTERM_GL_BGRA 0x80E1
+#define WISPTERM_GL_UNSIGNED_BYTE 0x1401
+#define WISPTERM_GL_TRIANGLES 0x0004
+#define WISPTERM_GL_TRIANGLE_STRIP 0x0005
 
-typedef struct PhanttyMetalContext {
+typedef struct WispTermMetalContext {
     void *device;
     void *command_queue;
     void *layer;
     void *drawable;
     void *command_buffer;
     void *encoder;
-} PhanttyMetalContext;
+} WispTermMetalContext;
 
-typedef struct PhanttyMetalBufferSlot {
+typedef struct WispTermMetalBufferSlot {
     id<MTLBuffer> buffer;
     unsigned int target;
-} PhanttyMetalBufferSlot;
+} WispTermMetalBufferSlot;
 
 // These registries are _Thread_local: each AppWindow runs its render loop on
 // its own worker thread and the zig-side GPU handles (ui_pipeline, cell
@@ -39,22 +39,22 @@ typedef struct PhanttyMetalBufferSlot {
 // namespace, so two windows rendering concurrently can't clobber each other's
 // buffers/textures/pipelines or the active-texture binding. (Process-global
 // here was the multi-window "one window renders incomplete" bug.)
-static _Thread_local PhanttyMetalBufferSlot phantty_metal_buffers[PHANTTY_METAL_MAX_BUFFERS];
-static _Thread_local unsigned int phantty_metal_next_buffer = 1;
+static _Thread_local WispTermMetalBufferSlot wispterm_metal_buffers[WISPTERM_METAL_MAX_BUFFERS];
+static _Thread_local unsigned int wispterm_metal_next_buffer = 1;
 
-typedef struct PhanttyMetalTextureSlot {
+typedef struct WispTermMetalTextureSlot {
     id<MTLTexture> texture;
     unsigned int wrap;   // 0 = clamp-to-edge, 1 = repeat
     unsigned int filter; // 0 = nearest, 1 = linear
     size_t width;
     size_t height;
     size_t bpp;
-} PhanttyMetalTextureSlot;
+} WispTermMetalTextureSlot;
 
-static _Thread_local PhanttyMetalTextureSlot phantty_metal_textures[PHANTTY_METAL_MAX_TEXTURES];
-static _Thread_local unsigned int phantty_metal_next_texture = 1;
+static _Thread_local WispTermMetalTextureSlot wispterm_metal_textures[WISPTERM_METAL_MAX_TEXTURES];
+static _Thread_local unsigned int wispterm_metal_next_texture = 1;
 
-typedef struct PhanttyMetalPipelineSlot {
+typedef struct WispTermMetalPipelineSlot {
     // Metal bakes blend into the pipeline state, so each logical pipeline keeps
     // one PSO per blend mode and the encoder picks by the current blend state.
     // `pipeline` is the straight-alpha default (the `!= nil` validity check).
@@ -69,68 +69,68 @@ typedef struct PhanttyMetalPipelineSlot {
         float cell_size_grid_offset[4];
         float scalars[4];
     } uniforms;
-} PhanttyMetalPipelineSlot;
+} WispTermMetalPipelineSlot;
 
-static _Thread_local PhanttyMetalPipelineSlot phantty_metal_pipelines[PHANTTY_METAL_MAX_PIPELINES];
-static _Thread_local unsigned int phantty_metal_next_pipeline = 1;
-static _Thread_local unsigned int phantty_metal_active_textures[16];
+static _Thread_local WispTermMetalPipelineSlot wispterm_metal_pipelines[WISPTERM_METAL_MAX_PIPELINES];
+static _Thread_local unsigned int wispterm_metal_next_pipeline = 1;
+static _Thread_local unsigned int wispterm_metal_active_textures[16];
 
 // Encoder render state recorded by the Zig render_state layer (GL lower-left
 // convention) and applied on the active encoder before each draw. The drawable
 // size is captured at frame begin so we can flip y to Metal's upper-left origin.
-static _Thread_local int phantty_metal_vp_x = 0;
-static _Thread_local int phantty_metal_vp_y = 0;
-static _Thread_local int phantty_metal_vp_w = 0;
-static _Thread_local int phantty_metal_vp_h = 0;
-static _Thread_local bool phantty_metal_vp_set = false;
-static _Thread_local bool phantty_metal_scissor_enabled = false;
-static _Thread_local int phantty_metal_sc_x = 0;
-static _Thread_local int phantty_metal_sc_y = 0;
-static _Thread_local int phantty_metal_sc_w = 0;
-static _Thread_local int phantty_metal_sc_h = 0;
-static _Thread_local int phantty_metal_drawable_w = 0;
-static _Thread_local int phantty_metal_drawable_h = 0;
+static _Thread_local int wispterm_metal_vp_x = 0;
+static _Thread_local int wispterm_metal_vp_y = 0;
+static _Thread_local int wispterm_metal_vp_w = 0;
+static _Thread_local int wispterm_metal_vp_h = 0;
+static _Thread_local bool wispterm_metal_vp_set = false;
+static _Thread_local bool wispterm_metal_scissor_enabled = false;
+static _Thread_local int wispterm_metal_sc_x = 0;
+static _Thread_local int wispterm_metal_sc_y = 0;
+static _Thread_local int wispterm_metal_sc_w = 0;
+static _Thread_local int wispterm_metal_sc_h = 0;
+static _Thread_local int wispterm_metal_drawable_w = 0;
+static _Thread_local int wispterm_metal_drawable_h = 0;
 
-void phantty_metal_set_viewport(int x, int y, int w, int h) {
-    phantty_metal_vp_x = x;
-    phantty_metal_vp_y = y;
-    phantty_metal_vp_w = w;
-    phantty_metal_vp_h = h;
-    phantty_metal_vp_set = true;
+void wispterm_metal_set_viewport(int x, int y, int w, int h) {
+    wispterm_metal_vp_x = x;
+    wispterm_metal_vp_y = y;
+    wispterm_metal_vp_w = w;
+    wispterm_metal_vp_h = h;
+    wispterm_metal_vp_set = true;
 }
 
-void phantty_metal_set_scissor(bool enabled, int x, int y, int w, int h) {
-    phantty_metal_scissor_enabled = enabled;
-    phantty_metal_sc_x = x;
-    phantty_metal_sc_y = y;
-    phantty_metal_sc_w = w;
-    phantty_metal_sc_h = h;
+void wispterm_metal_set_scissor(bool enabled, int x, int y, int w, int h) {
+    wispterm_metal_scissor_enabled = enabled;
+    wispterm_metal_sc_x = x;
+    wispterm_metal_sc_y = y;
+    wispterm_metal_sc_w = w;
+    wispterm_metal_sc_h = h;
 }
 
 // Blend state recorded by the Zig render_state layer. Metal can't change blend
 // on the encoder (it is fixed in the PSO), so encode_draw selects the matching
 // per-mode PSO instead.
-static _Thread_local bool phantty_metal_blend_enabled = true;
-static _Thread_local bool phantty_metal_blend_premult = false;
+static _Thread_local bool wispterm_metal_blend_enabled = true;
+static _Thread_local bool wispterm_metal_blend_premult = false;
 
-void phantty_metal_set_blend_enabled(bool enabled) {
-    phantty_metal_blend_enabled = enabled;
+void wispterm_metal_set_blend_enabled(bool enabled) {
+    wispterm_metal_blend_enabled = enabled;
 }
 
-void phantty_metal_set_blend_mode(int premultiplied) {
-    phantty_metal_blend_premult = (premultiplied != 0);
+void wispterm_metal_set_blend_mode(int premultiplied) {
+    wispterm_metal_blend_premult = (premultiplied != 0);
 }
 
 // Lazily-built MTLSamplerState cache, indexed by (filter, wrap). Replaces the
 // per-shader `constexpr sampler` so a texture's configured filter/wrap (e.g.
 // nearest for pixel-exact bitmaps) actually applies, mirroring the GL backend's
 // sampler parameters. Threadlocal to match the per-render-thread registries.
-static _Thread_local id<MTLSamplerState> phantty_metal_samplers[4]; // idx = filter*2 + wrap
+static _Thread_local id<MTLSamplerState> wispterm_metal_samplers[4]; // idx = filter*2 + wrap
 
-static id<MTLSamplerState> phantty_metal_sampler_for(id<MTLDevice> device, unsigned int filter, unsigned int wrap) {
+static id<MTLSamplerState> wispterm_metal_sampler_for(id<MTLDevice> device, unsigned int filter, unsigned int wrap) {
     if (device == nil) return nil;
     const unsigned int idx = (filter ? 2u : 0u) + (wrap ? 1u : 0u);
-    if (phantty_metal_samplers[idx] == nil) {
+    if (wispterm_metal_samplers[idx] == nil) {
         MTLSamplerDescriptor *desc = [[MTLSamplerDescriptor alloc] init];
         const MTLSamplerMinMagFilter f = filter ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
         desc.minFilter = f;
@@ -138,10 +138,10 @@ static id<MTLSamplerState> phantty_metal_sampler_for(id<MTLDevice> device, unsig
         const MTLSamplerAddressMode mode = wrap ? MTLSamplerAddressModeRepeat : MTLSamplerAddressModeClampToEdge;
         desc.sAddressMode = mode;
         desc.tAddressMode = mode;
-        phantty_metal_samplers[idx] = [device newSamplerStateWithDescriptor:desc];
+        wispterm_metal_samplers[idx] = [device newSamplerStateWithDescriptor:desc];
         [desc release];
     }
-    return phantty_metal_samplers[idx];
+    return wispterm_metal_samplers[idx];
 }
 
 // Apply the recorded viewport + scissor to the encoder before a draw. Without a
@@ -149,28 +149,28 @@ static id<MTLSamplerState> phantty_metal_sampler_for(id<MTLDevice> device, unsig
 // the markdown preview / file explorer clip regions had no effect. Both convert
 // GL lower-left → Metal upper-left; the scissor is clamped to the drawable
 // because an out-of-bounds MTLScissorRect raises and kills the command buffer.
-static void phantty_metal_apply_viewport_scissor(id<MTLRenderCommandEncoder> encoder) {
-    int dw = phantty_metal_drawable_w;
-    int dh = phantty_metal_drawable_h;
+static void wispterm_metal_apply_viewport_scissor(id<MTLRenderCommandEncoder> encoder) {
+    int dw = wispterm_metal_drawable_w;
+    int dh = wispterm_metal_drawable_h;
     if (dw <= 0 || dh <= 0) return; // drawable size unknown — keep encoder defaults
 
     int vx, vy, vw, vh;
-    if (phantty_metal_vp_set && phantty_metal_vp_w > 0 && phantty_metal_vp_h > 0) {
-        vx = phantty_metal_vp_x;
-        vw = phantty_metal_vp_w;
-        vh = phantty_metal_vp_h;
-        vy = dh - phantty_metal_vp_y - phantty_metal_vp_h;
+    if (wispterm_metal_vp_set && wispterm_metal_vp_w > 0 && wispterm_metal_vp_h > 0) {
+        vx = wispterm_metal_vp_x;
+        vw = wispterm_metal_vp_w;
+        vh = wispterm_metal_vp_h;
+        vy = dh - wispterm_metal_vp_y - wispterm_metal_vp_h;
     } else {
         vx = 0; vy = 0; vw = dw; vh = dh;
     }
     [encoder setViewport:(MTLViewport){ (double)vx, (double)vy, (double)vw, (double)vh, 0.0, 1.0 }];
 
     int sx, sy, sw, sh;
-    if (phantty_metal_scissor_enabled) {
-        sx = phantty_metal_sc_x;
-        sw = phantty_metal_sc_w;
-        sh = phantty_metal_sc_h;
-        sy = dh - phantty_metal_sc_y - phantty_metal_sc_h;
+    if (wispterm_metal_scissor_enabled) {
+        sx = wispterm_metal_sc_x;
+        sw = wispterm_metal_sc_w;
+        sh = wispterm_metal_sc_h;
+        sy = dh - wispterm_metal_sc_y - wispterm_metal_sc_h;
     } else {
         sx = 0; sy = 0; sw = dw; sh = dh; // Metal has no scissor-off; reset to full
     }
@@ -185,13 +185,13 @@ static void phantty_metal_apply_viewport_scissor(id<MTLRenderCommandEncoder> enc
     [encoder setScissorRect:(MTLScissorRect){ (NSUInteger)sx, (NSUInteger)sy, (NSUInteger)sw, (NSUInteger)sh }];
 }
 
-static void phantty_metal_set_error(char *error_buf, size_t error_buf_len, const char *message) {
+static void wispterm_metal_set_error(char *error_buf, size_t error_buf_len, const char *message) {
     if (error_buf == NULL || error_buf_len == 0) return;
     snprintf(error_buf, error_buf_len, "%s", message);
 }
 
-bool phantty_metal_frame_begin(
-    PhanttyMetalContext *ctx,
+bool wispterm_metal_frame_begin(
+    WispTermMetalContext *ctx,
     float r,
     float g,
     float b,
@@ -199,18 +199,18 @@ bool phantty_metal_frame_begin(
     char *error_buf,
     size_t error_buf_len
 );
-bool phantty_metal_frame_end(PhanttyMetalContext *ctx, char *error_buf, size_t error_buf_len);
+bool wispterm_metal_frame_end(WispTermMetalContext *ctx, char *error_buf, size_t error_buf_len);
 
-static bool phantty_metal_buffer_valid(unsigned int handle) {
-    return handle > 0 && handle < PHANTTY_METAL_MAX_BUFFERS;
+static bool wispterm_metal_buffer_valid(unsigned int handle) {
+    return handle > 0 && handle < WISPTERM_METAL_MAX_BUFFERS;
 }
 
-static id<MTLBuffer> phantty_metal_buffer_object(unsigned int handle) {
-    if (!phantty_metal_buffer_valid(handle)) return nil;
-    return phantty_metal_buffers[handle].buffer;
+static id<MTLBuffer> wispterm_metal_buffer_object(unsigned int handle) {
+    if (!wispterm_metal_buffer_valid(handle)) return nil;
+    return wispterm_metal_buffers[handle].buffer;
 }
 
-static id<MTLBuffer> phantty_metal_new_buffer(void *device_handle, const void *bytes, size_t len) {
+static id<MTLBuffer> wispterm_metal_new_buffer(void *device_handle, const void *bytes, size_t len) {
     id<MTLDevice> device = (id<MTLDevice>)device_handle;
     if (device == nil || len == 0) return nil;
 
@@ -220,30 +220,30 @@ static id<MTLBuffer> phantty_metal_new_buffer(void *device_handle, const void *b
     return [device newBufferWithLength:len options:MTLResourceStorageModeShared];
 }
 
-static bool phantty_metal_texture_valid(unsigned int handle) {
-    return handle > 0 && handle < PHANTTY_METAL_MAX_TEXTURES;
+static bool wispterm_metal_texture_valid(unsigned int handle) {
+    return handle > 0 && handle < WISPTERM_METAL_MAX_TEXTURES;
 }
 
-static id<MTLTexture> phantty_metal_texture_object(unsigned int handle) {
-    if (!phantty_metal_texture_valid(handle)) return nil;
-    return phantty_metal_textures[handle].texture;
+static id<MTLTexture> wispterm_metal_texture_object(unsigned int handle) {
+    if (!wispterm_metal_texture_valid(handle)) return nil;
+    return wispterm_metal_textures[handle].texture;
 }
 
-static bool phantty_metal_pipeline_valid(unsigned int handle) {
-    return handle > 0 && handle < PHANTTY_METAL_MAX_PIPELINES;
+static bool wispterm_metal_pipeline_valid(unsigned int handle) {
+    return handle > 0 && handle < WISPTERM_METAL_MAX_PIPELINES;
 }
 
-static MTLPrimitiveType phantty_metal_primitive_type(unsigned int mode) {
+static MTLPrimitiveType wispterm_metal_primitive_type(unsigned int mode) {
     switch (mode) {
-        case PHANTTY_GL_TRIANGLE_STRIP:
+        case WISPTERM_GL_TRIANGLE_STRIP:
             return MTLPrimitiveTypeTriangleStrip;
-        case PHANTTY_GL_TRIANGLES:
+        case WISPTERM_GL_TRIANGLES:
         default:
             return MTLPrimitiveTypeTriangle;
     }
 }
 
-static void phantty_metal_pipeline_init_uniforms(PhanttyMetalPipelineSlot *slot) {
+static void wispterm_metal_pipeline_init_uniforms(WispTermMetalPipelineSlot *slot) {
     memset(&slot->uniforms, 0, sizeof(slot->uniforms));
     slot->uniforms.projection[0] = 1.0f;
     slot->uniforms.projection[5] = 1.0f;
@@ -257,32 +257,32 @@ static void phantty_metal_pipeline_init_uniforms(PhanttyMetalPipelineSlot *slot)
     slot->uniforms.scalars[1] = 1.0f; // opacity
 }
 
-static MTLPixelFormat phantty_metal_texture_pixel_format(unsigned int format) {
+static MTLPixelFormat wispterm_metal_texture_pixel_format(unsigned int format) {
     switch (format) {
-        case PHANTTY_GL_RED:
+        case WISPTERM_GL_RED:
             return MTLPixelFormatR8Unorm;
-        case PHANTTY_GL_BGRA:
+        case WISPTERM_GL_BGRA:
             return MTLPixelFormatBGRA8Unorm;
-        case PHANTTY_GL_RGBA:
+        case WISPTERM_GL_RGBA:
         default:
             return MTLPixelFormatRGBA8Unorm;
     }
 }
 
-static size_t phantty_metal_texture_bpp(unsigned int format) {
+static size_t wispterm_metal_texture_bpp(unsigned int format) {
     switch (format) {
-        case PHANTTY_GL_RED:
+        case WISPTERM_GL_RED:
             return 1;
-        case PHANTTY_GL_BGRA:
-        case PHANTTY_GL_RGBA:
+        case WISPTERM_GL_BGRA:
+        case WISPTERM_GL_RGBA:
         default:
             return 4;
     }
 }
 
-bool phantty_metal_context_init(void *layer, PhanttyMetalContext *out, char *error_buf, size_t error_buf_len) {
+bool wispterm_metal_context_init(void *layer, WispTermMetalContext *out, char *error_buf, size_t error_buf_len) {
     if (out == NULL) {
-        phantty_metal_set_error(error_buf, error_buf_len, "missing output context");
+        wispterm_metal_set_error(error_buf, error_buf_len, "missing output context");
         return false;
     }
 
@@ -296,14 +296,14 @@ bool phantty_metal_context_init(void *layer, PhanttyMetalContext *out, char *err
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (device == nil) {
-            phantty_metal_set_error(error_buf, error_buf_len, "MTLCreateSystemDefaultDevice returned nil");
+            wispterm_metal_set_error(error_buf, error_buf_len, "MTLCreateSystemDefaultDevice returned nil");
             return false;
         }
 
         id<MTLCommandQueue> queue = [device newCommandQueue];
         if (queue == nil) {
             [device release];
-            phantty_metal_set_error(error_buf, error_buf_len, "newCommandQueue returned nil");
+            wispterm_metal_set_error(error_buf, error_buf_len, "newCommandQueue returned nil");
             return false;
         }
 
@@ -316,7 +316,7 @@ bool phantty_metal_context_init(void *layer, PhanttyMetalContext *out, char *err
         if (metal_layer == nil) {
             [queue release];
             [device release];
-            phantty_metal_set_error(error_buf, error_buf_len, "CAMetalLayer allocation returned nil");
+            wispterm_metal_set_error(error_buf, error_buf_len, "CAMetalLayer allocation returned nil");
             return false;
         }
 
@@ -334,17 +334,17 @@ bool phantty_metal_context_init(void *layer, PhanttyMetalContext *out, char *err
         out->drawable = NULL;
         out->command_buffer = NULL;
         out->encoder = NULL;
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 }
 
-void phantty_metal_context_deinit(PhanttyMetalContext *ctx) {
+void wispterm_metal_context_deinit(WispTermMetalContext *ctx) {
     if (ctx == NULL) return;
 
     @autoreleasepool {
         char ignored[1] = {0};
-        (void)phantty_metal_frame_end(ctx, ignored, sizeof(ignored));
+        (void)wispterm_metal_frame_end(ctx, ignored, sizeof(ignored));
         if (ctx->layer != NULL) {
             [(id)ctx->layer release];
             ctx->layer = NULL;
@@ -360,91 +360,91 @@ void phantty_metal_context_deinit(PhanttyMetalContext *ctx) {
     }
 }
 
-bool phantty_metal_context_is_usable(const PhanttyMetalContext *ctx) {
+bool wispterm_metal_context_is_usable(const WispTermMetalContext *ctx) {
     return ctx != NULL && ctx->device != NULL && ctx->command_queue != NULL && ctx->layer != NULL;
 }
 
-unsigned int phantty_metal_buffer_create(unsigned int target) {
-    for (unsigned int i = 0; i < PHANTTY_METAL_MAX_BUFFERS - 1; i++) {
-        unsigned int handle = phantty_metal_next_buffer++;
-        if (phantty_metal_next_buffer >= PHANTTY_METAL_MAX_BUFFERS) {
-            phantty_metal_next_buffer = 1;
+unsigned int wispterm_metal_buffer_create(unsigned int target) {
+    for (unsigned int i = 0; i < WISPTERM_METAL_MAX_BUFFERS - 1; i++) {
+        unsigned int handle = wispterm_metal_next_buffer++;
+        if (wispterm_metal_next_buffer >= WISPTERM_METAL_MAX_BUFFERS) {
+            wispterm_metal_next_buffer = 1;
         }
-        if (phantty_metal_buffers[handle].target == 0 && phantty_metal_buffers[handle].buffer == nil) {
-            phantty_metal_buffers[handle].target = target;
+        if (wispterm_metal_buffers[handle].target == 0 && wispterm_metal_buffers[handle].buffer == nil) {
+            wispterm_metal_buffers[handle].target = target;
             return handle;
         }
     }
     return 0;
 }
 
-bool phantty_metal_buffer_allocate(unsigned int handle, void *device_handle, size_t len, char *error_buf, size_t error_buf_len) {
-    if (!phantty_metal_buffer_valid(handle)) {
-        phantty_metal_set_error(error_buf, error_buf_len, "invalid Metal buffer handle");
+bool wispterm_metal_buffer_allocate(unsigned int handle, void *device_handle, size_t len, char *error_buf, size_t error_buf_len) {
+    if (!wispterm_metal_buffer_valid(handle)) {
+        wispterm_metal_set_error(error_buf, error_buf_len, "invalid Metal buffer handle");
         return false;
     }
     if (len == 0) {
-        phantty_metal_set_error(error_buf, error_buf_len, "cannot allocate zero-length Metal buffer");
+        wispterm_metal_set_error(error_buf, error_buf_len, "cannot allocate zero-length Metal buffer");
         return false;
     }
 
     @autoreleasepool {
-        id<MTLBuffer> buffer = phantty_metal_new_buffer(device_handle, NULL, len);
+        id<MTLBuffer> buffer = wispterm_metal_new_buffer(device_handle, NULL, len);
         if (buffer == nil) {
-            phantty_metal_set_error(error_buf, error_buf_len, "newBufferWithLength returned nil");
+            wispterm_metal_set_error(error_buf, error_buf_len, "newBufferWithLength returned nil");
             return false;
         }
 
-        if (phantty_metal_buffers[handle].buffer != nil) {
-            [phantty_metal_buffers[handle].buffer release];
+        if (wispterm_metal_buffers[handle].buffer != nil) {
+            [wispterm_metal_buffers[handle].buffer release];
         }
-        phantty_metal_buffers[handle].buffer = buffer;
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_buffers[handle].buffer = buffer;
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 }
 
-bool phantty_metal_buffer_upload_data(unsigned int handle, void *device_handle, const void *bytes, size_t len, char *error_buf, size_t error_buf_len) {
-    if (!phantty_metal_buffer_valid(handle)) {
-        phantty_metal_set_error(error_buf, error_buf_len, "invalid Metal buffer handle");
+bool wispterm_metal_buffer_upload_data(unsigned int handle, void *device_handle, const void *bytes, size_t len, char *error_buf, size_t error_buf_len) {
+    if (!wispterm_metal_buffer_valid(handle)) {
+        wispterm_metal_set_error(error_buf, error_buf_len, "invalid Metal buffer handle");
         return false;
     }
     if (bytes == NULL && len > 0) {
-        phantty_metal_set_error(error_buf, error_buf_len, "missing Metal buffer upload bytes");
+        wispterm_metal_set_error(error_buf, error_buf_len, "missing Metal buffer upload bytes");
         return false;
     }
     if (len == 0) {
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 
     @autoreleasepool {
-        id<MTLBuffer> buffer = phantty_metal_new_buffer(device_handle, bytes, len);
+        id<MTLBuffer> buffer = wispterm_metal_new_buffer(device_handle, bytes, len);
         if (buffer == nil) {
-            phantty_metal_set_error(error_buf, error_buf_len, "newBufferWithBytes returned nil");
+            wispterm_metal_set_error(error_buf, error_buf_len, "newBufferWithBytes returned nil");
             return false;
         }
 
-        if (phantty_metal_buffers[handle].buffer != nil) {
-            [phantty_metal_buffers[handle].buffer release];
+        if (wispterm_metal_buffers[handle].buffer != nil) {
+            [wispterm_metal_buffers[handle].buffer release];
         }
-        phantty_metal_buffers[handle].buffer = buffer;
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_buffers[handle].buffer = buffer;
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 }
 
-bool phantty_metal_buffer_upload(unsigned int handle, void *device_handle, const void *bytes, size_t len, char *error_buf, size_t error_buf_len) {
-    if (!phantty_metal_buffer_valid(handle)) {
-        phantty_metal_set_error(error_buf, error_buf_len, "invalid Metal buffer handle");
+bool wispterm_metal_buffer_upload(unsigned int handle, void *device_handle, const void *bytes, size_t len, char *error_buf, size_t error_buf_len) {
+    if (!wispterm_metal_buffer_valid(handle)) {
+        wispterm_metal_set_error(error_buf, error_buf_len, "invalid Metal buffer handle");
         return false;
     }
     if (bytes == NULL && len > 0) {
-        phantty_metal_set_error(error_buf, error_buf_len, "missing Metal buffer update bytes");
+        wispterm_metal_set_error(error_buf, error_buf_len, "missing Metal buffer update bytes");
         return false;
     }
     if (len == 0) {
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 
@@ -458,52 +458,52 @@ bool phantty_metal_buffer_upload(unsigned int handle, void *device_handle, const
     // commit completes, then deallocates asynchronously. The per-call alloc
     // cost is negligible for the small vertex blobs ui_pipeline uses (~96B/quad).
     @autoreleasepool {
-        id<MTLBuffer> old_buffer = phantty_metal_buffers[handle].buffer;
-        id<MTLBuffer> new_buffer = phantty_metal_new_buffer(device_handle, bytes, len);
+        id<MTLBuffer> old_buffer = wispterm_metal_buffers[handle].buffer;
+        id<MTLBuffer> new_buffer = wispterm_metal_new_buffer(device_handle, bytes, len);
         if (new_buffer == nil) {
-            phantty_metal_set_error(error_buf, error_buf_len, "newBufferWithBytes returned nil");
+            wispterm_metal_set_error(error_buf, error_buf_len, "newBufferWithBytes returned nil");
             return false;
         }
-        phantty_metal_buffers[handle].buffer = new_buffer;
+        wispterm_metal_buffers[handle].buffer = new_buffer;
         if (old_buffer != nil) [old_buffer release];
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 }
 
-size_t phantty_metal_buffer_length(unsigned int handle) {
-    if (!phantty_metal_buffer_valid(handle)) return 0;
-    id<MTLBuffer> buffer = phantty_metal_buffers[handle].buffer;
+size_t wispterm_metal_buffer_length(unsigned int handle) {
+    if (!wispterm_metal_buffer_valid(handle)) return 0;
+    id<MTLBuffer> buffer = wispterm_metal_buffers[handle].buffer;
     if (buffer == nil) return 0;
     return [buffer length];
 }
 
-void phantty_metal_buffer_destroy(unsigned int handle) {
-    if (!phantty_metal_buffer_valid(handle)) return;
+void wispterm_metal_buffer_destroy(unsigned int handle) {
+    if (!wispterm_metal_buffer_valid(handle)) return;
 
     @autoreleasepool {
-        if (phantty_metal_buffers[handle].buffer != nil) {
-            [phantty_metal_buffers[handle].buffer release];
+        if (wispterm_metal_buffers[handle].buffer != nil) {
+            [wispterm_metal_buffers[handle].buffer release];
         }
-        phantty_metal_buffers[handle].buffer = nil;
-        phantty_metal_buffers[handle].target = 0;
+        wispterm_metal_buffers[handle].buffer = nil;
+        wispterm_metal_buffers[handle].target = 0;
     }
 }
 
-unsigned int phantty_metal_texture_create(void) {
-    for (unsigned int i = 0; i < PHANTTY_METAL_MAX_TEXTURES - 1; i++) {
-        unsigned int handle = phantty_metal_next_texture++;
-        if (phantty_metal_next_texture >= PHANTTY_METAL_MAX_TEXTURES) {
-            phantty_metal_next_texture = 1;
+unsigned int wispterm_metal_texture_create(void) {
+    for (unsigned int i = 0; i < WISPTERM_METAL_MAX_TEXTURES - 1; i++) {
+        unsigned int handle = wispterm_metal_next_texture++;
+        if (wispterm_metal_next_texture >= WISPTERM_METAL_MAX_TEXTURES) {
+            wispterm_metal_next_texture = 1;
         }
-        if (phantty_metal_textures[handle].texture == nil) {
+        if (wispterm_metal_textures[handle].texture == nil) {
             return handle;
         }
     }
     return 0;
 }
 
-bool phantty_metal_texture_upload_2d(
+bool wispterm_metal_texture_upload_2d(
     unsigned int handle,
     void *device_handle,
     int width,
@@ -516,20 +516,20 @@ bool phantty_metal_texture_upload_2d(
     char *error_buf,
     size_t error_buf_len
 ) {
-    if (!phantty_metal_texture_valid(handle)) {
-        phantty_metal_set_error(error_buf, error_buf_len, "invalid Metal texture handle");
+    if (!wispterm_metal_texture_valid(handle)) {
+        wispterm_metal_set_error(error_buf, error_buf_len, "invalid Metal texture handle");
         return false;
     }
     if (device_handle == NULL) {
-        phantty_metal_set_error(error_buf, error_buf_len, "missing Metal device for texture upload");
+        wispterm_metal_set_error(error_buf, error_buf_len, "missing Metal device for texture upload");
         return false;
     }
     if (width <= 0 || height <= 0) {
-        phantty_metal_set_error(error_buf, error_buf_len, "invalid Metal texture dimensions");
+        wispterm_metal_set_error(error_buf, error_buf_len, "invalid Metal texture dimensions");
         return false;
     }
-    if (data_type != PHANTTY_GL_UNSIGNED_BYTE) {
-        phantty_metal_set_error(error_buf, error_buf_len, "unsupported Metal texture data type");
+    if (data_type != WISPTERM_GL_UNSIGNED_BYTE) {
+        wispterm_metal_set_error(error_buf, error_buf_len, "unsupported Metal texture data type");
         return false;
     }
 
@@ -537,7 +537,7 @@ bool phantty_metal_texture_upload_2d(
         id<MTLDevice> device = (id<MTLDevice>)device_handle;
         MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
         desc.textureType = MTLTextureType2D;
-        desc.pixelFormat = phantty_metal_texture_pixel_format(format);
+        desc.pixelFormat = wispterm_metal_texture_pixel_format(format);
         desc.width = (NSUInteger)width;
         desc.height = (NSUInteger)height;
         desc.mipmapLevelCount = 1;
@@ -547,31 +547,31 @@ bool phantty_metal_texture_upload_2d(
         id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
         [desc release];
         if (texture == nil) {
-            phantty_metal_set_error(error_buf, error_buf_len, "newTextureWithDescriptor returned nil");
+            wispterm_metal_set_error(error_buf, error_buf_len, "newTextureWithDescriptor returned nil");
             return false;
         }
 
-        const size_t bpp = phantty_metal_texture_bpp(format);
+        const size_t bpp = wispterm_metal_texture_bpp(format);
         if (data != NULL) {
             MTLRegion region = MTLRegionMake2D(0, 0, (NSUInteger)width, (NSUInteger)height);
             [texture replaceRegion:region mipmapLevel:0 withBytes:data bytesPerRow:bpp * (size_t)width];
         }
 
-        if (phantty_metal_textures[handle].texture != nil) {
-            [phantty_metal_textures[handle].texture release];
+        if (wispterm_metal_textures[handle].texture != nil) {
+            [wispterm_metal_textures[handle].texture release];
         }
-        phantty_metal_textures[handle].texture = texture;
-        phantty_metal_textures[handle].wrap = wrap;
-        phantty_metal_textures[handle].filter = filter;
-        phantty_metal_textures[handle].width = (size_t)width;
-        phantty_metal_textures[handle].height = (size_t)height;
-        phantty_metal_textures[handle].bpp = bpp;
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_textures[handle].texture = texture;
+        wispterm_metal_textures[handle].wrap = wrap;
+        wispterm_metal_textures[handle].filter = filter;
+        wispterm_metal_textures[handle].width = (size_t)width;
+        wispterm_metal_textures[handle].height = (size_t)height;
+        wispterm_metal_textures[handle].bpp = bpp;
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 }
 
-bool phantty_metal_texture_sub_image_2d(
+bool wispterm_metal_texture_sub_image_2d(
     unsigned int handle,
     int x,
     int y,
@@ -583,68 +583,68 @@ bool phantty_metal_texture_sub_image_2d(
     char *error_buf,
     size_t error_buf_len
 ) {
-    if (!phantty_metal_texture_valid(handle) || phantty_metal_textures[handle].texture == nil) {
-        phantty_metal_set_error(error_buf, error_buf_len, "invalid Metal texture handle");
+    if (!wispterm_metal_texture_valid(handle) || wispterm_metal_textures[handle].texture == nil) {
+        wispterm_metal_set_error(error_buf, error_buf_len, "invalid Metal texture handle");
         return false;
     }
     if (data == NULL) {
-        phantty_metal_set_error(error_buf, error_buf_len, "missing Metal texture sub-image bytes");
+        wispterm_metal_set_error(error_buf, error_buf_len, "missing Metal texture sub-image bytes");
         return false;
     }
     if (x < 0 || y < 0 || width <= 0 || height <= 0) {
-        phantty_metal_set_error(error_buf, error_buf_len, "invalid Metal texture sub-image dimensions");
+        wispterm_metal_set_error(error_buf, error_buf_len, "invalid Metal texture sub-image dimensions");
         return false;
     }
-    if (data_type != PHANTTY_GL_UNSIGNED_BYTE) {
-        phantty_metal_set_error(error_buf, error_buf_len, "unsupported Metal texture data type");
+    if (data_type != WISPTERM_GL_UNSIGNED_BYTE) {
+        wispterm_metal_set_error(error_buf, error_buf_len, "unsupported Metal texture data type");
         return false;
     }
 
     @autoreleasepool {
-        id<MTLTexture> texture = phantty_metal_textures[handle].texture;
-        const size_t bpp = phantty_metal_texture_bpp(format);
+        id<MTLTexture> texture = wispterm_metal_textures[handle].texture;
+        const size_t bpp = wispterm_metal_texture_bpp(format);
         MTLRegion region = MTLRegionMake2D((NSUInteger)x, (NSUInteger)y, (NSUInteger)width, (NSUInteger)height);
         [texture replaceRegion:region mipmapLevel:0 withBytes:data bytesPerRow:bpp * (size_t)width];
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 }
 
-void phantty_metal_texture_set_wrap(unsigned int handle, unsigned int wrap) {
-    if (!phantty_metal_texture_valid(handle)) return;
-    phantty_metal_textures[handle].wrap = wrap;
+void wispterm_metal_texture_set_wrap(unsigned int handle, unsigned int wrap) {
+    if (!wispterm_metal_texture_valid(handle)) return;
+    wispterm_metal_textures[handle].wrap = wrap;
 }
 
-void phantty_metal_texture_bind(unsigned int handle, unsigned int unit) {
+void wispterm_metal_texture_bind(unsigned int handle, unsigned int unit) {
     if (unit >= 16) return;
-    phantty_metal_active_textures[unit] = handle;
+    wispterm_metal_active_textures[unit] = handle;
 }
 
-int phantty_metal_texture_level_width(unsigned int handle) {
-    if (!phantty_metal_texture_valid(handle)) return 0;
-    return (int)phantty_metal_textures[handle].width;
+int wispterm_metal_texture_level_width(unsigned int handle) {
+    if (!wispterm_metal_texture_valid(handle)) return 0;
+    return (int)wispterm_metal_textures[handle].width;
 }
 
-void phantty_metal_texture_destroy(unsigned int handle) {
-    if (!phantty_metal_texture_valid(handle)) return;
+void wispterm_metal_texture_destroy(unsigned int handle) {
+    if (!wispterm_metal_texture_valid(handle)) return;
 
     @autoreleasepool {
-        if (phantty_metal_textures[handle].texture != nil) {
-            [phantty_metal_textures[handle].texture release];
+        if (wispterm_metal_textures[handle].texture != nil) {
+            [wispterm_metal_textures[handle].texture release];
         }
-        phantty_metal_textures[handle].texture = nil;
-        phantty_metal_textures[handle].wrap = 0;
-        phantty_metal_textures[handle].width = 0;
-        phantty_metal_textures[handle].height = 0;
-        phantty_metal_textures[handle].bpp = 0;
+        wispterm_metal_textures[handle].texture = nil;
+        wispterm_metal_textures[handle].wrap = 0;
+        wispterm_metal_textures[handle].width = 0;
+        wispterm_metal_textures[handle].height = 0;
+        wispterm_metal_textures[handle].bpp = 0;
     }
 }
 
 // Build one MTLRenderPipelineState for a given blend mode. Metal fixes blend in
-// the pipeline state, so Phantty mirrors the OpenGL backend's mutable
+// the pipeline state, so WispTerm mirrors the OpenGL backend's mutable
 // glBlendFunc by pre-building a PSO per mode; encode_draw selects by the
 // recorded blend state.
-static id<MTLRenderPipelineState> phantty_metal_make_pso(
+static id<MTLRenderPipelineState> wispterm_metal_make_pso(
     id<MTLDevice> device,
     id<MTLFunction> vertex_fn,
     id<MTLFunction> fragment_fn,
@@ -674,7 +674,7 @@ static id<MTLRenderPipelineState> phantty_metal_make_pso(
     return pso;
 }
 
-unsigned int phantty_metal_pipeline_create(
+unsigned int wispterm_metal_pipeline_create(
     void *device_handle,
     const char *vertex_source,
     const char *fragment_source,
@@ -683,11 +683,11 @@ unsigned int phantty_metal_pipeline_create(
     size_t error_buf_len
 ) {
     if (device_handle == NULL) {
-        phantty_metal_set_error(error_buf, error_buf_len, "missing Metal device for pipeline");
+        wispterm_metal_set_error(error_buf, error_buf_len, "missing Metal device for pipeline");
         return 0;
     }
     if (vertex_source == NULL || fragment_source == NULL) {
-        phantty_metal_set_error(error_buf, error_buf_len, "missing MSL source");
+        wispterm_metal_set_error(error_buf, error_buf_len, "missing MSL source");
         return 0;
     }
 
@@ -698,7 +698,7 @@ unsigned int phantty_metal_pipeline_create(
         id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
         if (library == nil) {
             const char *message = error != nil ? [[error localizedDescription] UTF8String] : "newLibraryWithSource returned nil";
-            phantty_metal_set_error(error_buf, error_buf_len, message);
+            wispterm_metal_set_error(error_buf, error_buf_len, message);
             return 0;
         }
 
@@ -708,16 +708,16 @@ unsigned int phantty_metal_pipeline_create(
             if (vertex_fn != nil) [vertex_fn release];
             if (fragment_fn != nil) [fragment_fn release];
             [library release];
-            phantty_metal_set_error(error_buf, error_buf_len, "MSL must export vertex_main and fragment_main");
+            wispterm_metal_set_error(error_buf, error_buf_len, "MSL must export vertex_main and fragment_main");
             return 0;
         }
 
         error = nil;
-        id<MTLRenderPipelineState> pipeline = phantty_metal_make_pso(device, vertex_fn, fragment_fn, true, false, &error);
+        id<MTLRenderPipelineState> pipeline = wispterm_metal_make_pso(device, vertex_fn, fragment_fn, true, false, &error);
         id<MTLRenderPipelineState> pipeline_premult = (pipeline != nil)
-            ? phantty_metal_make_pso(device, vertex_fn, fragment_fn, true, true, &error) : nil;
+            ? wispterm_metal_make_pso(device, vertex_fn, fragment_fn, true, true, &error) : nil;
         id<MTLRenderPipelineState> pipeline_opaque = (pipeline_premult != nil)
-            ? phantty_metal_make_pso(device, vertex_fn, fragment_fn, false, false, &error) : nil;
+            ? wispterm_metal_make_pso(device, vertex_fn, fragment_fn, false, false, &error) : nil;
 
         [vertex_fn release];
         [fragment_fn release];
@@ -728,22 +728,22 @@ unsigned int phantty_metal_pipeline_create(
             if (pipeline_premult != nil) [pipeline_premult release];
             if (pipeline_opaque != nil) [pipeline_opaque release];
             const char *message = error != nil ? [[error localizedDescription] UTF8String] : "newRenderPipelineStateWithDescriptor returned nil";
-            phantty_metal_set_error(error_buf, error_buf_len, message);
+            wispterm_metal_set_error(error_buf, error_buf_len, message);
             return 0;
         }
 
-        for (unsigned int i = 0; i < PHANTTY_METAL_MAX_PIPELINES - 1; i++) {
-            unsigned int handle = phantty_metal_next_pipeline++;
-            if (phantty_metal_next_pipeline >= PHANTTY_METAL_MAX_PIPELINES) {
-                phantty_metal_next_pipeline = 1;
+        for (unsigned int i = 0; i < WISPTERM_METAL_MAX_PIPELINES - 1; i++) {
+            unsigned int handle = wispterm_metal_next_pipeline++;
+            if (wispterm_metal_next_pipeline >= WISPTERM_METAL_MAX_PIPELINES) {
+                wispterm_metal_next_pipeline = 1;
             }
-            if (phantty_metal_pipelines[handle].pipeline == nil) {
-                phantty_metal_pipelines[handle].pipeline = pipeline;
-                phantty_metal_pipelines[handle].pipeline_premult = pipeline_premult;
-                phantty_metal_pipelines[handle].pipeline_opaque = pipeline_opaque;
-                phantty_metal_pipelines[handle].vao = vao;
-                phantty_metal_pipeline_init_uniforms(&phantty_metal_pipelines[handle]);
-                phantty_metal_set_error(error_buf, error_buf_len, "");
+            if (wispterm_metal_pipelines[handle].pipeline == nil) {
+                wispterm_metal_pipelines[handle].pipeline = pipeline;
+                wispterm_metal_pipelines[handle].pipeline_premult = pipeline_premult;
+                wispterm_metal_pipelines[handle].pipeline_opaque = pipeline_opaque;
+                wispterm_metal_pipelines[handle].vao = vao;
+                wispterm_metal_pipeline_init_uniforms(&wispterm_metal_pipelines[handle]);
+                wispterm_metal_set_error(error_buf, error_buf_len, "");
                 return handle;
             }
         }
@@ -751,35 +751,35 @@ unsigned int phantty_metal_pipeline_create(
         [pipeline release];
         [pipeline_premult release];
         [pipeline_opaque release];
-        phantty_metal_set_error(error_buf, error_buf_len, "Metal pipeline registry is full");
+        wispterm_metal_set_error(error_buf, error_buf_len, "Metal pipeline registry is full");
         return 0;
     }
 }
 
-void phantty_metal_pipeline_destroy(unsigned int handle) {
-    if (!phantty_metal_pipeline_valid(handle)) return;
+void wispterm_metal_pipeline_destroy(unsigned int handle) {
+    if (!wispterm_metal_pipeline_valid(handle)) return;
 
     @autoreleasepool {
-        if (phantty_metal_pipelines[handle].pipeline != nil) {
-            [phantty_metal_pipelines[handle].pipeline release];
+        if (wispterm_metal_pipelines[handle].pipeline != nil) {
+            [wispterm_metal_pipelines[handle].pipeline release];
         }
-        if (phantty_metal_pipelines[handle].pipeline_premult != nil) {
-            [phantty_metal_pipelines[handle].pipeline_premult release];
+        if (wispterm_metal_pipelines[handle].pipeline_premult != nil) {
+            [wispterm_metal_pipelines[handle].pipeline_premult release];
         }
-        if (phantty_metal_pipelines[handle].pipeline_opaque != nil) {
-            [phantty_metal_pipelines[handle].pipeline_opaque release];
+        if (wispterm_metal_pipelines[handle].pipeline_opaque != nil) {
+            [wispterm_metal_pipelines[handle].pipeline_opaque release];
         }
-        phantty_metal_pipelines[handle].pipeline = nil;
-        phantty_metal_pipelines[handle].pipeline_premult = nil;
-        phantty_metal_pipelines[handle].pipeline_opaque = nil;
-        phantty_metal_pipelines[handle].vao = 0;
-        phantty_metal_pipeline_init_uniforms(&phantty_metal_pipelines[handle]);
+        wispterm_metal_pipelines[handle].pipeline = nil;
+        wispterm_metal_pipelines[handle].pipeline_premult = nil;
+        wispterm_metal_pipelines[handle].pipeline_opaque = nil;
+        wispterm_metal_pipelines[handle].vao = 0;
+        wispterm_metal_pipeline_init_uniforms(&wispterm_metal_pipelines[handle]);
     }
 }
 
-void phantty_metal_pipeline_set_float(unsigned int handle, const char *name, float value) {
-    if (!phantty_metal_pipeline_valid(handle) || name == NULL) return;
-    PhanttyMetalPipelineSlot *slot = &phantty_metal_pipelines[handle];
+void wispterm_metal_pipeline_set_float(unsigned int handle, const char *name, float value) {
+    if (!wispterm_metal_pipeline_valid(handle) || name == NULL) return;
+    WispTermMetalPipelineSlot *slot = &wispterm_metal_pipelines[handle];
     if (strcmp(name, "windowHeight") == 0) {
         slot->uniforms.scalars[0] = value;
     } else if (strcmp(name, "opacity") == 0) {
@@ -787,15 +787,15 @@ void phantty_metal_pipeline_set_float(unsigned int handle, const char *name, flo
     }
 }
 
-void phantty_metal_pipeline_set_int(unsigned int handle, const char *name, int value) {
+void wispterm_metal_pipeline_set_int(unsigned int handle, const char *name, int value) {
     (void)handle;
     (void)name;
     (void)value;
 }
 
-void phantty_metal_pipeline_set_vec2(unsigned int handle, const char *name, float x, float y) {
-    if (!phantty_metal_pipeline_valid(handle) || name == NULL) return;
-    PhanttyMetalPipelineSlot *slot = &phantty_metal_pipelines[handle];
+void wispterm_metal_pipeline_set_vec2(unsigned int handle, const char *name, float x, float y) {
+    if (!wispterm_metal_pipeline_valid(handle) || name == NULL) return;
+    WispTermMetalPipelineSlot *slot = &wispterm_metal_pipelines[handle];
     if (strcmp(name, "cellSize") == 0) {
         slot->uniforms.cell_size_grid_offset[0] = x;
         slot->uniforms.cell_size_grid_offset[1] = y;
@@ -805,9 +805,9 @@ void phantty_metal_pipeline_set_vec2(unsigned int handle, const char *name, floa
     }
 }
 
-void phantty_metal_pipeline_set_vec3(unsigned int handle, const char *name, float x, float y, float z) {
-    if (!phantty_metal_pipeline_valid(handle) || name == NULL) return;
-    PhanttyMetalPipelineSlot *slot = &phantty_metal_pipelines[handle];
+void wispterm_metal_pipeline_set_vec3(unsigned int handle, const char *name, float x, float y, float z) {
+    if (!wispterm_metal_pipeline_valid(handle) || name == NULL) return;
+    WispTermMetalPipelineSlot *slot = &wispterm_metal_pipelines[handle];
     if (strcmp(name, "textColor") == 0) {
         slot->uniforms.text_color[0] = x;
         slot->uniforms.text_color[1] = y;
@@ -816,9 +816,9 @@ void phantty_metal_pipeline_set_vec3(unsigned int handle, const char *name, floa
     }
 }
 
-void phantty_metal_pipeline_set_vec4(unsigned int handle, const char *name, float x, float y, float z, float w) {
-    if (!phantty_metal_pipeline_valid(handle) || name == NULL) return;
-    PhanttyMetalPipelineSlot *slot = &phantty_metal_pipelines[handle];
+void wispterm_metal_pipeline_set_vec4(unsigned int handle, const char *name, float x, float y, float z, float w) {
+    if (!wispterm_metal_pipeline_valid(handle) || name == NULL) return;
+    WispTermMetalPipelineSlot *slot = &wispterm_metal_pipelines[handle];
     if (strcmp(name, "overlayColor") == 0) {
         slot->uniforms.overlay_color[0] = x;
         slot->uniforms.overlay_color[1] = y;
@@ -827,16 +827,16 @@ void phantty_metal_pipeline_set_vec4(unsigned int handle, const char *name, floa
     }
 }
 
-void phantty_metal_pipeline_set_mat4(unsigned int handle, const char *name, const float *values) {
-    if (!phantty_metal_pipeline_valid(handle) || name == NULL || values == NULL) return;
-    PhanttyMetalPipelineSlot *slot = &phantty_metal_pipelines[handle];
+void wispterm_metal_pipeline_set_mat4(unsigned int handle, const char *name, const float *values) {
+    if (!wispterm_metal_pipeline_valid(handle) || name == NULL || values == NULL) return;
+    WispTermMetalPipelineSlot *slot = &wispterm_metal_pipelines[handle];
     if (strcmp(name, "projection") == 0) {
         memcpy(slot->uniforms.projection, values, sizeof(slot->uniforms.projection));
     }
 }
 
-bool phantty_metal_frame_begin(
-    PhanttyMetalContext *ctx,
+bool wispterm_metal_frame_begin(
+    WispTermMetalContext *ctx,
     float r,
     float g,
     float b,
@@ -845,11 +845,11 @@ bool phantty_metal_frame_begin(
     size_t error_buf_len
 ) {
     if (ctx == NULL || ctx->command_queue == NULL || ctx->layer == NULL) {
-        phantty_metal_set_error(error_buf, error_buf_len, "missing Metal context for frame begin");
+        wispterm_metal_set_error(error_buf, error_buf_len, "missing Metal context for frame begin");
         return false;
     }
     if (ctx->encoder != NULL) {
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 
@@ -858,20 +858,20 @@ bool phantty_metal_frame_begin(
         CAMetalLayer *layer = (CAMetalLayer *)ctx->layer;
         id<CAMetalDrawable> drawable = [layer nextDrawable];
         if (drawable == nil) {
-            phantty_metal_set_error(error_buf, error_buf_len, "CAMetalLayer nextDrawable returned nil");
+            wispterm_metal_set_error(error_buf, error_buf_len, "CAMetalLayer nextDrawable returned nil");
             return false;
         }
         [drawable retain];
 
         // Capture the drawable size so per-pane viewport/scissor can flip y to
-        // Metal's upper-left origin (see phantty_metal_apply_viewport_scissor).
-        phantty_metal_drawable_w = (int)drawable.texture.width;
-        phantty_metal_drawable_h = (int)drawable.texture.height;
+        // Metal's upper-left origin (see wispterm_metal_apply_viewport_scissor).
+        wispterm_metal_drawable_w = (int)drawable.texture.width;
+        wispterm_metal_drawable_h = (int)drawable.texture.height;
 
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
         if (command_buffer == nil) {
             [drawable release];
-            phantty_metal_set_error(error_buf, error_buf_len, "commandBuffer returned nil");
+            wispterm_metal_set_error(error_buf, error_buf_len, "commandBuffer returned nil");
             return false;
         }
         [command_buffer retain];
@@ -887,7 +887,7 @@ bool phantty_metal_frame_begin(
         if (encoder == nil) {
             [command_buffer release];
             [drawable release];
-            phantty_metal_set_error(error_buf, error_buf_len, "renderCommandEncoderWithDescriptor returned nil");
+            wispterm_metal_set_error(error_buf, error_buf_len, "renderCommandEncoderWithDescriptor returned nil");
             return false;
         }
         [encoder retain];
@@ -895,18 +895,18 @@ bool phantty_metal_frame_begin(
         ctx->drawable = drawable;
         ctx->command_buffer = command_buffer;
         ctx->encoder = encoder;
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 }
 
-bool phantty_metal_frame_end(PhanttyMetalContext *ctx, char *error_buf, size_t error_buf_len) {
+bool wispterm_metal_frame_end(WispTermMetalContext *ctx, char *error_buf, size_t error_buf_len) {
     if (ctx == NULL) {
-        phantty_metal_set_error(error_buf, error_buf_len, "missing Metal context for frame end");
+        wispterm_metal_set_error(error_buf, error_buf_len, "missing Metal context for frame end");
         return false;
     }
     if (ctx->encoder == NULL) {
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 
@@ -931,7 +931,7 @@ bool phantty_metal_frame_end(PhanttyMetalContext *ctx, char *error_buf, size_t e
             }
         }];
         [command_buffer commit];
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
 
         [encoder release];
         if (command_buffer != nil) [command_buffer release];
@@ -943,8 +943,8 @@ bool phantty_metal_frame_end(PhanttyMetalContext *ctx, char *error_buf, size_t e
     }
 }
 
-static bool phantty_metal_encode_draw(
-    PhanttyMetalContext *ctx,
+static bool wispterm_metal_encode_draw(
+    WispTermMetalContext *ctx,
     unsigned int handle,
     unsigned int mode,
     int first,
@@ -956,32 +956,32 @@ static bool phantty_metal_encode_draw(
     size_t error_buf_len
 ) {
     if (ctx == NULL || ctx->encoder == NULL) {
-        phantty_metal_set_error(error_buf, error_buf_len, "missing Metal frame encoder for draw");
+        wispterm_metal_set_error(error_buf, error_buf_len, "missing Metal frame encoder for draw");
         return false;
     }
-    if (!phantty_metal_pipeline_valid(handle) || phantty_metal_pipelines[handle].pipeline == nil) {
-        phantty_metal_set_error(error_buf, error_buf_len, "invalid Metal pipeline handle");
+    if (!wispterm_metal_pipeline_valid(handle) || wispterm_metal_pipelines[handle].pipeline == nil) {
+        wispterm_metal_set_error(error_buf, error_buf_len, "invalid Metal pipeline handle");
         return false;
     }
     if (count <= 0) {
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 
     @autoreleasepool {
         id<MTLRenderCommandEncoder> encoder = (id<MTLRenderCommandEncoder>)ctx->encoder;
-        PhanttyMetalPipelineSlot *slot = &phantty_metal_pipelines[handle];
+        WispTermMetalPipelineSlot *slot = &wispterm_metal_pipelines[handle];
         id<MTLRenderPipelineState> pso = slot->pipeline; // straight-alpha default
-        if (!phantty_metal_blend_enabled) {
+        if (!wispterm_metal_blend_enabled) {
             pso = slot->pipeline_opaque;
-        } else if (phantty_metal_blend_premult) {
+        } else if (wispterm_metal_blend_premult) {
             pso = slot->pipeline_premult;
         }
         [encoder setRenderPipelineState:pso];
-        phantty_metal_apply_viewport_scissor(encoder);
+        wispterm_metal_apply_viewport_scissor(encoder);
 
-        id<MTLBuffer> vertex0 = phantty_metal_buffer_object(buffer0);
-        id<MTLBuffer> vertex1 = phantty_metal_buffer_object(buffer1);
+        id<MTLBuffer> vertex0 = wispterm_metal_buffer_object(buffer0);
+        id<MTLBuffer> vertex1 = wispterm_metal_buffer_object(buffer1);
         if (vertex0 != nil) [encoder setVertexBuffer:vertex0 offset:0 atIndex:0];
         if (vertex1 != nil) [encoder setVertexBuffer:vertex1 offset:0 atIndex:1];
 
@@ -989,31 +989,31 @@ static bool phantty_metal_encode_draw(
         [encoder setVertexBytes:&slot->uniforms length:sizeof(slot->uniforms) atIndex:uniform_index];
         [encoder setFragmentBytes:&slot->uniforms length:sizeof(slot->uniforms) atIndex:1];
 
-        const unsigned int tex_handle0 = phantty_metal_active_textures[0];
-        id<MTLTexture> texture0 = phantty_metal_texture_object(tex_handle0);
+        const unsigned int tex_handle0 = wispterm_metal_active_textures[0];
+        id<MTLTexture> texture0 = wispterm_metal_texture_object(tex_handle0);
         if (texture0 != nil) {
             [encoder setFragmentTexture:texture0 atIndex:0];
-            id<MTLSamplerState> sampler0 = phantty_metal_sampler_for(
+            id<MTLSamplerState> sampler0 = wispterm_metal_sampler_for(
                 (id<MTLDevice>)ctx->device,
-                phantty_metal_textures[tex_handle0].filter,
-                phantty_metal_textures[tex_handle0].wrap);
+                wispterm_metal_textures[tex_handle0].filter,
+                wispterm_metal_textures[tex_handle0].wrap);
             if (sampler0 != nil) [encoder setFragmentSamplerState:sampler0 atIndex:0];
         }
 
-        MTLPrimitiveType primitive = phantty_metal_primitive_type(mode);
+        MTLPrimitiveType primitive = wispterm_metal_primitive_type(mode);
         if (instances > 1) {
             [encoder drawPrimitives:primitive vertexStart:(NSUInteger)first vertexCount:(NSUInteger)count instanceCount:(NSUInteger)instances];
         } else {
             [encoder drawPrimitives:primitive vertexStart:(NSUInteger)first vertexCount:(NSUInteger)count];
         }
 
-        phantty_metal_set_error(error_buf, error_buf_len, "");
+        wispterm_metal_set_error(error_buf, error_buf_len, "");
         return true;
     }
 }
 
-bool phantty_metal_pipeline_draw_arrays(
-    PhanttyMetalContext *ctx,
+bool wispterm_metal_pipeline_draw_arrays(
+    WispTermMetalContext *ctx,
     unsigned int handle,
     unsigned int mode,
     int first,
@@ -1025,17 +1025,17 @@ bool phantty_metal_pipeline_draw_arrays(
     size_t error_buf_len
 ) {
     if (ctx == NULL || ctx->command_queue == NULL || ctx->layer == NULL) {
-        phantty_metal_set_error(error_buf, error_buf_len, "missing Metal context for draw");
+        wispterm_metal_set_error(error_buf, error_buf_len, "missing Metal context for draw");
         return false;
     }
 
     const bool owns_frame = ctx->encoder == NULL;
-    if (owns_frame && !phantty_metal_frame_begin(ctx, 0.0f, 0.0f, 0.0f, 1.0f, error_buf, error_buf_len)) {
+    if (owns_frame && !wispterm_metal_frame_begin(ctx, 0.0f, 0.0f, 0.0f, 1.0f, error_buf, error_buf_len)) {
         return false;
     }
 
-    bool ok = phantty_metal_encode_draw(ctx, handle, mode, first, count, instances, buffer0, buffer1, error_buf, error_buf_len);
-    if (owns_frame && !phantty_metal_frame_end(ctx, error_buf, error_buf_len)) {
+    bool ok = wispterm_metal_encode_draw(ctx, handle, mode, first, count, instances, buffer0, buffer1, error_buf, error_buf_len);
+    if (owns_frame && !wispterm_metal_frame_end(ctx, error_buf, error_buf_len)) {
         ok = false;
     }
     return ok;

@@ -1,4 +1,4 @@
-//! WeChat command routing into the local Phantty surfaces. Port of agent.ts,
+//! WeChat command routing into the local WispTerm surfaces. Port of agent.ts,
 //! minus /sessions and /use (one local app).
 const std = @import("std");
 const control = @import("control.zig");
@@ -73,7 +73,7 @@ pub fn route(
         return out.set(usageText(cmd));
     }
 
-    if (!ctrl.isConnected()) return out.set("Phantty 当前离线，无法处理。");
+    if (!ctrl.isConnected()) return out.set("WispTerm 当前离线，无法处理。");
 
     if (eqIgnoreCase(cmd, "/stop")) return stopAi(ctrl, out);
     if (eqIgnoreCase(cmd, "/term")) return sendTerminal(ctrl, parts.arg, true, out);
@@ -85,9 +85,9 @@ pub fn route(
 fn sendAi(ctrl: control.Control, text: []const u8, out: *Reply) !void {
     const ai = ctrl.findAiSurface() orelse blk: {
         switch (ctrl.openAiAgent(AI_OPEN_TIMEOUT_MS)) {
-            .no_profile => return out.set("Phantty 尚未配置 AI Chat profile。"),
-            .failed => return out.set("Phantty 无法打开 AI Agent。"),
-            .offline => return out.set("Phantty 当前离线，无法打开 AI Agent。"),
+            .no_profile => return out.set("WispTerm 尚未配置 AI Chat profile。"),
+            .failed => return out.set("WispTerm 无法打开 AI Agent。"),
+            .offline => return out.set("WispTerm 当前离线，无法打开 AI Agent。"),
             .timeout => return out.set("已请求打开 AI Agent，但未等到 AI Chat tab。"),
             .opened => {},
         }
@@ -98,14 +98,14 @@ fn sendAi(ctrl: control.Control, text: []const u8, out: *Reply) !void {
     defer buf.deinit(out.allocator);
     try buf.appendSlice(out.allocator, text);
     try buf.append(out.allocator, '\r');
-    if (!ctrl.sendInput(ai.id, buf.items)) return out.set("Phantty 当前离线，无法发送给 AI Agent。");
+    if (!ctrl.sendInput(ai.id, buf.items)) return out.set("WispTerm 当前离线，无法发送给 AI Agent。");
     try out.set(AI_ACK);
     out.expect_ai_progress = true;
 }
 
 fn stopAi(ctrl: control.Control, out: *Reply) !void {
     const ai = ctrl.findAiSurface() orelse return out.set("当前没有 AI Agent 可停止。");
-    if (!ctrl.sendInput(ai.id, ESC)) return out.set("Phantty 当前离线，无法停止 AI Agent。");
+    if (!ctrl.sendInput(ai.id, ESC)) return out.set("WispTerm 当前离线，无法停止 AI Agent。");
     return out.set("已发送停止指令。");
 }
 
@@ -115,12 +115,12 @@ fn sendTerminal(ctrl: control.Control, text: []const u8, enter: bool, out: *Repl
     defer buf.deinit(out.allocator);
     try buf.appendSlice(out.allocator, text);
     if (enter) try buf.append(out.allocator, '\r');
-    if (!ctrl.sendInput(term.id, buf.items)) return out.set("Phantty 当前离线，无法发送到终端。");
+    if (!ctrl.sendInput(term.id, buf.items)) return out.set("WispTerm 当前离线，无法发送到终端。");
     return out.set("已发送到终端。");
 }
 
 const helpTextConst =
-    "Phantty 微信直连命令：\n" ++
+    "WispTerm 微信直连命令：\n" ++
     "/ping 验证连接\n/status 查看状态\n/ai <内容> 发送给 AI Agent\n" ++
     "/stop 停止当前 AI 处理\n/term <命令> 发送到终端并回车\n/keys <文本> 发送原始文本\n" ++
     "普通文本默认发送给 AI Agent。";

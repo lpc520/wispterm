@@ -205,9 +205,9 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
         .title = title,
         .quake_mode = cfg.@"quake-mode",
         .keybinds = cfg.keybinds,
-        .debug_fps = cfg.@"phantty-debug-fps",
-        .debug_draw_calls = cfg.@"phantty-debug-draw-calls",
-        .debug_memory = cfg.@"phantty-debug-memory",
+        .debug_fps = cfg.@"wispterm-debug-fps",
+        .debug_draw_calls = cfg.@"wispterm-debug-draw-calls",
+        .debug_memory = cfg.@"wispterm-debug-memory",
         .unfocused_split_opacity = cfg.@"unfocused-split-opacity",
         .split_divider_color = cfg.@"split-divider-color",
         .focus_follows_mouse = cfg.@"focus-follows-mouse",
@@ -375,9 +375,9 @@ pub fn updateConfig(self: *App, cfg: *const Config) void {
     self.replaceOptStr(&self.shader_path, cfg.@"custom-shader");
     self.initial_cols = if (cfg.@"window-width" > 0) cfg.@"window-width" else 80;
     self.initial_rows = if (cfg.@"window-height" > 0) cfg.@"window-height" else 24;
-    self.debug_fps = cfg.@"phantty-debug-fps";
-    self.debug_draw_calls = cfg.@"phantty-debug-draw-calls";
-    self.debug_memory = cfg.@"phantty-debug-memory";
+    self.debug_fps = cfg.@"wispterm-debug-fps";
+    self.debug_draw_calls = cfg.@"wispterm-debug-draw-calls";
+    self.debug_memory = cfg.@"wispterm-debug-memory";
     self.unfocused_split_opacity = cfg.@"unfocused-split-opacity";
     self.split_divider_color = cfg.@"split-divider-color";
     self.focus_follows_mouse = cfg.@"focus-follows-mouse";
@@ -838,7 +838,7 @@ fn macIdleUntilQuit(self: *App) void {
     while (true) {
         // Block (up to 250ms) waiting for the next AppKit event. The blocking
         // wait keeps the main run loop alive, which is what drains the GCD
-        // main queue used by phantty_macos_run_on_main(). Without it, worker
+        // main queue used by wispterm_macos_run_on_main(). Without it, worker
         // threads calling setContentSize/setFrame/etc would deadlock waiting
         // for the main thread to come back from std.Thread.sleep().
         window_backend.pumpAppEvents(0.25);

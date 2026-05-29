@@ -212,7 +212,7 @@ fn clipboardImagePath(allocator: std.mem.Allocator) ?[]u8 {
     defer allocator.free(dir);
 
     const ts = std.time.milliTimestamp();
-    return std.fmt.allocPrint(allocator, "{s}\\phantty-clipboard-{d}.png", .{ dir, ts }) catch null;
+    return std.fmt.allocPrint(allocator, "{s}\\wispterm-clipboard-{d}.png", .{ dir, ts }) catch null;
 }
 
 fn dibColorTableBytes(header: BitmapInfoHeader) usize {

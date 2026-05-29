@@ -1,8 +1,8 @@
 //! AI Chat session state and OpenAI-compatible API bridge.
 //!
 //! This is intentionally kept outside Surface/PTY/VT paths: Ghostty keeps
-//! terminal surfaces focused on terminal emulation, and Phantty's AI Chat is a
-//! Phantty-specific session kind rendered by the window chrome.
+//! terminal surfaces focused on terminal emulation, and WispTerm's AI Chat is a
+//! WispTerm-specific session kind rendered by the window chrome.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,7 +15,7 @@ const platform_pty_command = @import("platform/pty_command.zig");
 const agent_detector = @import("agent_detector.zig");
 const agent_history = @import("agent_history.zig");
 const skill_registry = @import("skill_registry.zig");
-const phantty_docs = @import("phantty_docs.zig");
+const wispterm_docs = @import("wispterm_docs.zig");
 const markdown_text = @import("markdown_text.zig");
 const ai_chat_protocol = @import("ai_chat_protocol.zig");
 const ai_chat_composer = @import("ai_chat_composer.zig");
@@ -1853,7 +1853,7 @@ pub const Session = struct {
             .clean => try self.appendCleanMarkdownExportLocked(allocator, &out),
         }
 
-        if (out.items.len == 0) try out.appendSlice(allocator, "# Phantty AI Chat\n\nNo messages yet.\n");
+        if (out.items.len == 0) try out.appendSlice(allocator, "# WispTerm AI Chat\n\nNo messages yet.\n");
         return out.toOwnedSlice(allocator);
     }
 
@@ -2233,7 +2233,7 @@ fn appendMarkdownDocumentHeader(
     include_metadata: bool,
 ) !void {
     try out.appendSlice(allocator, "# ");
-    try appendMarkdownInline(allocator, out, if (title.len > 0) title else "Phantty AI Chat");
+    try appendMarkdownInline(allocator, out, if (title.len > 0) title else "WispTerm AI Chat");
     try out.appendSlice(allocator, "\n\n");
     if (!include_metadata) return;
     if (model.len > 0) {
@@ -3143,11 +3143,11 @@ fn executeToolCall(request: *ChatRequest, call: ToolCall) ![]u8 {
         const skill_name = jsonStringArg(args.value, "skill_name") orelse return request.allocator.dupe(u8, "Missing skill_name");
         return skillInfoTool(request.allocator, skill_name);
     }
-    if (std.mem.eql(u8, call.name, "phantty_docs")) {
+    if (std.mem.eql(u8, call.name, "wispterm_docs")) {
         const args = parseArgs(request.allocator, call.arguments);
         defer if (args) |parsed| parsed.deinit();
         const topic = if (args) |parsed| jsonStringArg(parsed.value, "topic") else null;
-        return phanttyDocsTool(request.allocator, topic);
+        return wisptermDocsTool(request.allocator, topic);
     }
     return std.fmt.allocPrint(request.allocator, "Unknown tool: {s}", .{call.name});
 }
@@ -3203,20 +3203,20 @@ fn skillInfoToolFromRoots(allocator: std.mem.Allocator, skill_name: []const u8, 
     return allocator.dupe(u8, snapshot.content);
 }
 
-fn phanttyDocsTool(allocator: std.mem.Allocator, topic: ?[]const u8) ![]u8 {
+fn wisptermDocsTool(allocator: std.mem.Allocator, topic: ?[]const u8) ![]u8 {
     if (topic) |name| {
-        if (phantty_docs.readTopic(name)) |content| {
+        if (wispterm_docs.readTopic(name)) |content| {
             return allocator.dupe(u8, content);
         }
         var out: std.ArrayListUnmanaged(u8) = .empty;
         errdefer out.deinit(allocator);
         try out.print(allocator, "Unknown topic \"{s}\". Available topics:", .{name});
-        for (phantty_docs.topics) |t| {
+        for (wispterm_docs.topics) |t| {
             try out.print(allocator, " {s}", .{t.name});
         }
         return out.toOwnedSlice(allocator);
     }
-    return phantty_docs.listTopics(allocator);
+    return wispterm_docs.listTopics(allocator);
 }
 
 fn toolSurfaceKind(surface: ToolSurface) []const u8 {
@@ -3666,7 +3666,7 @@ fn rSessionEvalTool(request: *const ChatRequest, host: ToolHost, surface: ToolSu
 
     const wrapped = try std.fmt.allocPrint(
         request.allocator,
-        "cat(\"\\n__PHANTTY_AGENT_START_{d}__\\n\", sep=\"\")\n.phantty_agent_status <- 0L\n.phantty_agent_code <- {s}\ntryCatch({{\n  eval(parse(text=.phantty_agent_code), envir=.GlobalEnv)\n}}, error=function(e) {{\n  .phantty_agent_status <<- 1L\n  message(\"Error: \", conditionMessage(e))\n}})\ncat(\"\\n__PHANTTY_AGENT_END_{d}__:\", .phantty_agent_status, \"\\n\", sep=\"\")\nrm(.phantty_agent_status, .phantty_agent_code)\r",
+        "cat(\"\\n__WISPTERM_AGENT_START_{d}__\\n\", sep=\"\")\n.wispterm_agent_status <- 0L\n.wispterm_agent_code <- {s}\ntryCatch({{\n  eval(parse(text=.wispterm_agent_code), envir=.GlobalEnv)\n}}, error=function(e) {{\n  .wispterm_agent_status <<- 1L\n  message(\"Error: \", conditionMessage(e))\n}})\ncat(\"\\n__WISPTERM_AGENT_END_{d}__:\", .wispterm_agent_status, \"\\n\", sep=\"\")\nrm(.wispterm_agent_status, .wispterm_agent_code)\r",
         .{ nonce, code_literal, nonce },
     );
     defer request.allocator.free(wrapped);
@@ -3675,9 +3675,9 @@ fn rSessionEvalTool(request: *const ChatRequest, host: ToolHost, surface: ToolSu
         return request.allocator.dupe(u8, "Failed to write to R terminal surface.");
     }
 
-    const start_marker = try std.fmt.allocPrint(request.allocator, "__PHANTTY_AGENT_START_{d}__", .{nonce});
+    const start_marker = try std.fmt.allocPrint(request.allocator, "__WISPTERM_AGENT_START_{d}__", .{nonce});
     defer request.allocator.free(start_marker);
-    const end_marker = try std.fmt.allocPrint(request.allocator, "__PHANTTY_AGENT_END_{d}__", .{nonce});
+    const end_marker = try std.fmt.allocPrint(request.allocator, "__WISPTERM_AGENT_END_{d}__", .{nonce});
     defer request.allocator.free(end_marker);
     return waitForSentinelResult(request, host, surface, "R", start_marker, end_marker, timeout_ms);
 }
@@ -3689,7 +3689,7 @@ fn pythonSessionEvalTool(request: *const ChatRequest, host: ToolHost, surface: T
 
     const wrapper = try std.fmt.allocPrint(
         request.allocator,
-        "print(\"\\\\n__PHANTTY_AGENT_START_{d}__\")\n__phantty_agent_status = 0\n__phantty_agent_code = {s}\ntry:\n    exec(__phantty_agent_code, globals())\nexcept Exception:\n    __phantty_agent_status = 1\n    import traceback\n    traceback.print_exc()\nprint(\"\\\\n__PHANTTY_AGENT_END_{d}__:%s\" % __phantty_agent_status)\ndel __phantty_agent_status, __phantty_agent_code",
+        "print(\"\\\\n__WISPTERM_AGENT_START_{d}__\")\n__wispterm_agent_status = 0\n__wispterm_agent_code = {s}\ntry:\n    exec(__wispterm_agent_code, globals())\nexcept Exception:\n    __wispterm_agent_status = 1\n    import traceback\n    traceback.print_exc()\nprint(\"\\\\n__WISPTERM_AGENT_END_{d}__:%s\" % __wispterm_agent_status)\ndel __wispterm_agent_status, __wispterm_agent_code",
         .{ nonce, code_literal, nonce },
     );
     defer request.allocator.free(wrapper);
@@ -3703,9 +3703,9 @@ fn pythonSessionEvalTool(request: *const ChatRequest, host: ToolHost, surface: T
         return request.allocator.dupe(u8, "Failed to write to Python terminal surface.");
     }
 
-    const start_marker = try std.fmt.allocPrint(request.allocator, "__PHANTTY_AGENT_START_{d}__", .{nonce});
+    const start_marker = try std.fmt.allocPrint(request.allocator, "__WISPTERM_AGENT_START_{d}__", .{nonce});
     defer request.allocator.free(start_marker);
-    const end_marker = try std.fmt.allocPrint(request.allocator, "__PHANTTY_AGENT_END_{d}__", .{nonce});
+    const end_marker = try std.fmt.allocPrint(request.allocator, "__WISPTERM_AGENT_END_{d}__", .{nonce});
     defer request.allocator.free(end_marker);
     return waitForSentinelResult(request, host, surface, "Python", start_marker, end_marker, timeout_ms);
 }
@@ -3759,7 +3759,7 @@ fn unixSessionExecTool(request: *ChatRequest, kind: UnixSessionKind, surface_id:
     const nonce = std.time.milliTimestamp();
     const wrapped = try std.fmt.allocPrint(
         request.allocator,
-        "printf '\\n__PHANTTY_AGENT_START_{d}__\\n'; {{ {s}; }} 2>&1; __phantty_agent_status=$?; printf '\\n__PHANTTY_AGENT_END_{d}__:%s\\n' \"$__phantty_agent_status\"\r",
+        "printf '\\n__WISPTERM_AGENT_START_{d}__\\n'; {{ {s}; }} 2>&1; __wispterm_agent_status=$?; printf '\\n__WISPTERM_AGENT_END_{d}__:%s\\n' \"$__wispterm_agent_status\"\r",
         .{ nonce, command, nonce },
     );
     defer request.allocator.free(wrapped);
@@ -3768,9 +3768,9 @@ fn unixSessionExecTool(request: *ChatRequest, kind: UnixSessionKind, surface_id:
         return std.fmt.allocPrint(request.allocator, "Failed to write to {s} terminal surface.", .{kind.label()});
     }
 
-    const start_marker = try std.fmt.allocPrint(request.allocator, "__PHANTTY_AGENT_START_{d}__", .{nonce});
+    const start_marker = try std.fmt.allocPrint(request.allocator, "__WISPTERM_AGENT_START_{d}__", .{nonce});
     defer request.allocator.free(start_marker);
-    const end_marker = try std.fmt.allocPrint(request.allocator, "__PHANTTY_AGENT_END_{d}__", .{nonce});
+    const end_marker = try std.fmt.allocPrint(request.allocator, "__WISPTERM_AGENT_END_{d}__", .{nonce});
     defer request.allocator.free(end_marker);
     return waitForSentinelResult(request, host, surface, kind.label(), start_marker, end_marker, timeout_ms);
 }
@@ -4420,24 +4420,24 @@ test "ai chat lists skills from explicit root paths" {
     try std.testing.expect(std.mem.indexOf(u8, output, "- $pdf: Work with PDF files.") != null);
 }
 
-test "phantty_docs tool lists topics when no topic is given" {
+test "wispterm_docs tool lists topics when no topic is given" {
     const a = std.testing.allocator;
-    const text = try phanttyDocsTool(a, null);
+    const text = try wisptermDocsTool(a, null);
     defer a.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "faq") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "configuration") != null);
 }
 
-test "phantty_docs tool returns content for a known topic" {
+test "wispterm_docs tool returns content for a known topic" {
     const a = std.testing.allocator;
-    const text = try phanttyDocsTool(a, "faq");
+    const text = try wisptermDocsTool(a, "faq");
     defer a.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "FAQ") != null);
 }
 
-test "phantty_docs tool reports unknown topic with the topic list" {
+test "wispterm_docs tool reports unknown topic with the topic list" {
     const a = std.testing.allocator;
-    const text = try phanttyDocsTool(a, "does-not-exist");
+    const text = try wisptermDocsTool(a, "does-not-exist");
     defer a.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "Unknown topic") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "faq") != null);
@@ -4789,7 +4789,7 @@ test "ai chat responses endpoint normalization" {
 
 test "ai chat default system prompt comes from platform agent prompt" {
     try std.testing.expect(DEFAULT_SYSTEM_PROMPT.len < 1800);
-    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "phantty_docs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "wispterm_docs") != null);
     try std.testing.expectEqualStrings(platform_agent_prompt.defaultSystemPrompt, DEFAULT_SYSTEM_PROMPT);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "uv") != null);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "Python") != null);

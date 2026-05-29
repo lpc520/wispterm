@@ -1,9 +1,9 @@
-/// Config is the main configuration struct for Phantty.
+/// Config is the main configuration struct for WispTerm.
 ///
 /// Follows Ghostty's configuration format: a simple `key = value` text file.
 /// Config is loaded from the following locations (in order, later overrides earlier):
 ///
-///   1. Main config file: --config/--config-path, portable phantty.conf next to the app,
+///   1. Main config file: --config/--config-path, portable wispterm.conf next to the app,
 ///      or the platform config directory
 ///   2. CLI flags (--key value)
 ///
@@ -45,7 +45,7 @@ pub const Theme = struct {
     selection_background: Color,
     selection_foreground: ?Color,
 
-    /// Phantty's default theme: a warm, Ayu-inspired dark palette.
+    /// WispTerm's default theme: a warm, Ayu-inspired dark palette.
     pub fn default() Theme {
         return .{
             .palette = .{
@@ -318,7 +318,7 @@ shell: []const u8 = platform_pty_command.default_shell_name,
 /// Optional friendly name shown on the remote access page.
 @"remote-device-name": ?[]const u8 = null,
 
-/// Optional fixed remote session key base. When set, the first local Phantty
+/// Optional fixed remote session key base. When set, the first local WispTerm
 /// instance uses it directly and later local instances append _1, _2, ...
 @"remote-session-key": ?[]const u8 = null,
 
@@ -338,14 +338,14 @@ shell: []const u8 = platform_pty_command.default_shell_name,
 @"weixin-allowed-user": ?[]const u8 = null,
 
 /// Show a debug FPS overlay in the bottom-right corner.
-@"phantty-debug-fps": bool = false,
-@"phantty-debug-draw-calls": bool = false,
-@"phantty-debug-memory": bool = false,
+@"wispterm-debug-fps": bool = false,
+@"wispterm-debug-draw-calls": bool = false,
+@"wispterm-debug-memory": bool = false,
 /// Write rendering/window-geometry diagnostics to
-/// `%APPDATA%\phantty\render-diagnostic.log` (Windows). Equivalent to setting
-/// the `PHANTTY_RENDER_DIAGNOSTICS=1` env var, but survives restarts and needs
+/// `%APPDATA%\wispterm\render-diagnostic.log` (Windows). Equivalent to setting
+/// the `WISPTERM_RENDER_DIAGNOSTICS=1` env var, but survives restarts and needs
 /// no shell setup — intended for users helping debug resize/DPI render glitches.
-@"phantty-debug-render": bool = false,
+@"wispterm-debug-render": bool = false,
 
 // ============================================================================
 // Split pane configuration
@@ -366,7 +366,7 @@ shell: []const u8 = platform_pty_command.default_shell_name,
 /// Default false: the file is neither written nor read when this is off.
 @"restore-tabs-on-startup": bool = false,
 
-/// Check GitHub Releases for a newer Phantty version after startup.
+/// Check GitHub Releases for a newer WispTerm version after startup.
 @"auto-update-check": bool = true,
 
 /// Load an additional config file. Can be repeated. Relative paths are
@@ -513,7 +513,7 @@ pub fn defaultConfigFilePath(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 /// Active main config file path.
-/// Priority: CLI --config/--config-path, portable phantty.conf next to the app,
+/// Priority: CLI --config/--config-path, portable wispterm.conf next to the app,
 /// then the default config path.
 pub fn configFilePath(allocator: std.mem.Allocator) ![]const u8 {
     if (try mainConfigPathArgFromProcess(allocator)) |explicit_path| {
@@ -815,29 +815,29 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
         };
     } else if (std.mem.eql(u8, key, "weixin-allowed-user")) {
         self.@"weixin-allowed-user" = self.dupeString(allocator, value) orelse return;
-    } else if (std.mem.eql(u8, key, "phantty-debug-fps")) {
+    } else if (std.mem.eql(u8, key, "wispterm-debug-fps")) {
         if (std.mem.eql(u8, value, "true")) {
-            self.@"phantty-debug-fps" = true;
+            self.@"wispterm-debug-fps" = true;
         } else if (std.mem.eql(u8, value, "false")) {
-            self.@"phantty-debug-fps" = false;
+            self.@"wispterm-debug-fps" = false;
         } else {
-            log.warn("invalid phantty-debug-fps: {s}", .{value});
+            log.warn("invalid wispterm-debug-fps: {s}", .{value});
         }
-    } else if (std.mem.eql(u8, key, "phantty-debug-draw-calls")) {
+    } else if (std.mem.eql(u8, key, "wispterm-debug-draw-calls")) {
         if (std.mem.eql(u8, value, "true")) {
-            self.@"phantty-debug-draw-calls" = true;
+            self.@"wispterm-debug-draw-calls" = true;
         } else if (std.mem.eql(u8, value, "false")) {
-            self.@"phantty-debug-draw-calls" = false;
+            self.@"wispterm-debug-draw-calls" = false;
         } else {
-            log.warn("invalid phantty-debug-draw-calls: {s}", .{value});
+            log.warn("invalid wispterm-debug-draw-calls: {s}", .{value});
         }
-    } else if (std.mem.eql(u8, key, "phantty-debug-memory")) {
+    } else if (std.mem.eql(u8, key, "wispterm-debug-memory")) {
         if (std.mem.eql(u8, value, "true")) {
-            self.@"phantty-debug-memory" = true;
+            self.@"wispterm-debug-memory" = true;
         } else if (std.mem.eql(u8, value, "false")) {
-            self.@"phantty-debug-memory" = false;
+            self.@"wispterm-debug-memory" = false;
         } else {
-            log.warn("invalid phantty-debug-memory: {s}", .{value});
+            log.warn("invalid wispterm-debug-memory: {s}", .{value});
         }
     } else if (std.mem.eql(u8, key, "unfocused-split-opacity")) {
         if (std.fmt.parseFloat(f32, value)) |opacity| {
@@ -1188,9 +1188,9 @@ pub fn printHelp() void {
 
 pub fn writeHelp(writer: anytype) !void {
     try writer.writeAll(
-        \\Phantty - A terminal emulator
+        \\WispTerm - A terminal emulator
         \\
-        \\Usage: phantty [options]
+        \\Usage: wispterm [options]
         \\
         \\Options:
         \\  --config <path>              Use this file as the main config
@@ -1251,19 +1251,19 @@ pub fn writeHelp(writer: anytype) !void {
         \\  --fullscreen <bool>          Start in fullscreen (default: false)
         \\
         \\Debug:
-        \\  --phantty-debug-fps <bool>   Show FPS overlay (default: false)
-        \\  --phantty-debug-draw-calls <bool> Show draw call count overlay (default: false)
-        \\  --phantty-debug-memory <bool> Print periodic memory attribution (default: false)
+        \\  --wispterm-debug-fps <bool>   Show FPS overlay (default: false)
+        \\  --wispterm-debug-draw-calls <bool> Show draw call count overlay (default: false)
+        \\  --wispterm-debug-memory <bool> Print periodic memory attribution (default: false)
         \\
         \\Commands:
-        \\  --version, -v                Print the Phantty version and exit
+        \\  --version, -v                Print the WispTerm version and exit
         \\  --show-config-path           Print the config file path and exit
         \\  --list-fonts                 List all available system fonts
         \\  --list-themes                List all available themes
         \\  --test-font-discovery        Test font discovery for common fonts
         \\  --help, -h                   Show this help message
         \\
-        \\Config priority: --config/--config-path, portable phantty.conf next to the app, then the platform config directory
+        \\Config priority: --config/--config-path, portable wispterm.conf next to the app, then the platform config directory
         \\User themes: <config-dir>\themes\
         \\
         \\Config file uses Ghostty's key = value format. Example:
@@ -1281,14 +1281,14 @@ pub fn writeHelp(writer: anytype) !void {
         \\  keybind = global:ctrl+backquote=toggle_quake
         \\
         \\Examples:
-        \\  phantty --font-family "Cascadia Code"
-        \\  phantty --font-family "JetBrains Mono" --font-style bold
-        \\  phantty --cursor-style bar --cursor-style-blink=false
-        \\  phantty --background "#1a1b26" --foreground "#c0caf5"
-        \\  phantty --theme poimandres
-        \\  phantty --window-height 40 --window-width 120
+        \\  wispterm --font-family "Cascadia Code"
+        \\  wispterm --font-family "JetBrains Mono" --font-style bold
+        \\  wispterm --cursor-style bar --cursor-style-blink=false
+        \\  wispterm --background "#1a1b26" --foreground "#c0caf5"
+        \\  wispterm --theme poimandres
+        \\  wispterm --window-height 40 --window-width 120
     );
-    try writer.print("  phantty --config {s}\n\n", .{platform_pty_command.config_profile_example_path});
+    try writer.print("  wispterm --config {s}\n\n", .{platform_pty_command.config_profile_example_path});
 }
 
 // ============================================================================
@@ -1455,10 +1455,10 @@ fn configLineMatchesKey(line: []const u8, key: []const u8) bool {
 }
 
 const default_config_template =
-    \\# Phantty Configuration
+    \\# WispTerm Configuration
     \\# Ghostty-compatible key = value format
-    \\# See: phantty --help
-    \\# Main config path priority: --config/--config-path, portable phantty.conf next to the app,
+    \\# See: wispterm --help
+    \\# Main config path priority: --config/--config-path, portable wispterm.conf next to the app,
     \\# then the platform config directory.
     \\
     \\# Font
@@ -1545,9 +1545,9 @@ const default_config_template =
     \\# auto-update-check = true
     \\
     \\# Debug
-    \\# phantty-debug-fps = false
-    \\# phantty-debug-draw-calls = false
-    \\# phantty-debug-memory = false
+    \\# wispterm-debug-fps = false
+    \\# wispterm-debug-draw-calls = false
+    \\# wispterm-debug-memory = false
     \\
     \\# Load additional config files
     \\# config-file = ?optional/extra-config
@@ -1607,7 +1607,7 @@ test "config: sessionFilePath sits next to configFilePath" {
     const session = sessionFilePath(allocator) catch return; // skip if no env
     defer allocator.free(session);
     try std.testing.expect(std.mem.endsWith(u8, session, "session.json"));
-    try std.testing.expect(std.mem.indexOf(u8, session, "phantty") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session, "wispterm") != null);
 }
 
 test "config: explicit main config path beats portable and default paths" {
@@ -1618,14 +1618,14 @@ test "config: explicit main config path beats portable and default paths" {
 
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir_path = try tmp.dir.realpath(".", &dir_buf);
-    const portable_path = try std.fs.path.join(allocator, &.{ dir_path, "phantty.conf" });
+    const portable_path = try std.fs.path.join(allocator, &.{ dir_path, "wispterm.conf" });
     defer allocator.free(portable_path);
     const default_path = try std.fs.path.join(allocator, &.{ dir_path, "appdata", "config" });
     defer allocator.free(default_path);
     const explicit_path = try std.fs.path.join(allocator, &.{ dir_path, "profiles", "shell.conf" });
     defer allocator.free(explicit_path);
 
-    var portable_file = try tmp.dir.createFile("phantty.conf", .{});
+    var portable_file = try tmp.dir.createFile("wispterm.conf", .{});
     portable_file.close();
 
     const selected = try selectConfigFilePath(allocator, explicit_path, portable_path, default_path);
@@ -1641,12 +1641,12 @@ test "config: portable config next to exe beats default config when present" {
 
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir_path = try tmp.dir.realpath(".", &dir_buf);
-    const portable_path = try std.fs.path.join(allocator, &.{ dir_path, "phantty.conf" });
+    const portable_path = try std.fs.path.join(allocator, &.{ dir_path, "wispterm.conf" });
     defer allocator.free(portable_path);
     const default_path = try std.fs.path.join(allocator, &.{ dir_path, "appdata", "config" });
     defer allocator.free(default_path);
 
-    var portable_file = try tmp.dir.createFile("phantty.conf", .{});
+    var portable_file = try tmp.dir.createFile("wispterm.conf", .{});
     portable_file.close();
 
     const selected = try selectConfigFilePath(allocator, null, portable_path, default_path);
@@ -1662,7 +1662,7 @@ test "config: default config is used when explicit and portable paths are absent
 
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir_path = try tmp.dir.realpath(".", &dir_buf);
-    const portable_path = try std.fs.path.join(allocator, &.{ dir_path, "phantty.conf" });
+    const portable_path = try std.fs.path.join(allocator, &.{ dir_path, "wispterm.conf" });
     defer allocator.free(portable_path);
     const default_path = try std.fs.path.join(allocator, &.{ dir_path, "appdata", "config" });
     defer allocator.free(default_path);
@@ -1675,11 +1675,11 @@ test "config: default config is used when explicit and portable paths are absent
 test "config: main config path arg supports --config and --config-path" {
     const allocator = std.testing.allocator;
 
-    const config_arg = try mainConfigPathArg(allocator, &.{ "phantty", "--config", "profiles/shell.conf" });
+    const config_arg = try mainConfigPathArg(allocator, &.{ "wispterm", "--config", "profiles/shell.conf" });
     defer if (config_arg) |path| allocator.free(path);
     try std.testing.expectEqualStrings("profiles/shell.conf", config_arg.?);
 
-    const config_path_arg = try mainConfigPathArg(allocator, &.{ "phantty", "--config-path=profiles/alt-shell.conf" });
+    const config_path_arg = try mainConfigPathArg(allocator, &.{ "wispterm", "--config-path=profiles/alt-shell.conf" });
     defer if (config_path_arg) |path| allocator.free(path);
     try std.testing.expectEqualStrings("profiles/alt-shell.conf", config_path_arg.?);
 }
@@ -1691,7 +1691,7 @@ test "config: help text is writable to a caller-provided writer" {
 
     try writeHelp(out.writer(allocator));
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "Usage: phantty [options]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "Usage: wispterm [options]") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "--config <path>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "--config-file <path>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, platform_pty_command.config_profile_example_path) != null);

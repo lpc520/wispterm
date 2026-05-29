@@ -26,15 +26,15 @@ fn assetNameParts(package: release_package.Package) ?AssetNameParts {
     if (package.platform != .windows) return null;
     return switch (package.flavor) {
         .baseline => .{
-            .prefix = "phantty-windows-portable-",
+            .prefix = "wispterm-windows-portable-",
             .suffix = ".zip",
         },
         .with_required_embedded_browser_payload => .{
-            .prefix = "phantty-windows-portable-webview2-",
+            .prefix = "wispterm-windows-portable-webview2-",
             .suffix = ".zip",
         },
         .without_embedded_browser_payload => .{
-            .prefix = "phantty-windows-portable-no-webview-",
+            .prefix = "wispterm-windows-portable-no-webview-",
             .suffix = ".zip",
         },
     };

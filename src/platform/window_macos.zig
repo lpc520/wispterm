@@ -28,23 +28,23 @@ pub const hotkey_message: MessageId = 0x0312;
 const wm_close: u32 = 0x0010;
 const wm_app: u32 = 0x8000;
 
-extern fn phantty_macos_window_request_close(handle: NativeHandle) void;
-extern fn phantty_macos_window_post_message(handle: NativeHandle, message: MessageId, wparam: WordParam, lparam: LongParam) bool;
-extern fn phantty_macos_window_get_frame(handle: NativeHandle, rect: *Rect) bool;
-extern fn phantty_macos_window_get_content_frame(handle: NativeHandle, rect: *Rect) bool;
-extern fn phantty_macos_window_dpi(handle: NativeHandle) u32;
-extern fn phantty_macos_window_show(handle: NativeHandle) void;
-extern fn phantty_macos_window_hide(handle: NativeHandle) void;
-extern fn phantty_macos_window_make_key(handle: NativeHandle) void;
-extern fn phantty_macos_window_is_zoomed(handle: NativeHandle) bool;
-extern fn phantty_macos_window_zoom(handle: NativeHandle) void;
-extern fn phantty_macos_window_set_frame(handle: NativeHandle, x: i32, y: i32, width: i32, height: i32) bool;
-extern fn phantty_macos_window_nearest_monitor_frame(handle: NativeHandle, rect: *Rect) bool;
-extern fn phantty_macos_window_nearest_monitor_work_area(handle: NativeHandle, rect: *Rect) bool;
-extern fn phantty_macos_app_consume_reopen() bool;
-extern fn phantty_macos_app_consume_quit() bool;
-extern fn phantty_macos_app_request_quit() void;
-extern fn phantty_macos_app_pump_events(timeout_seconds: f64) void;
+extern fn wispterm_macos_window_request_close(handle: NativeHandle) void;
+extern fn wispterm_macos_window_post_message(handle: NativeHandle, message: MessageId, wparam: WordParam, lparam: LongParam) bool;
+extern fn wispterm_macos_window_get_frame(handle: NativeHandle, rect: *Rect) bool;
+extern fn wispterm_macos_window_get_content_frame(handle: NativeHandle, rect: *Rect) bool;
+extern fn wispterm_macos_window_dpi(handle: NativeHandle) u32;
+extern fn wispterm_macos_window_show(handle: NativeHandle) void;
+extern fn wispterm_macos_window_hide(handle: NativeHandle) void;
+extern fn wispterm_macos_window_make_key(handle: NativeHandle) void;
+extern fn wispterm_macos_window_is_zoomed(handle: NativeHandle) bool;
+extern fn wispterm_macos_window_zoom(handle: NativeHandle) void;
+extern fn wispterm_macos_window_set_frame(handle: NativeHandle, x: i32, y: i32, width: i32, height: i32) bool;
+extern fn wispterm_macos_window_nearest_monitor_frame(handle: NativeHandle, rect: *Rect) bool;
+extern fn wispterm_macos_window_nearest_monitor_work_area(handle: NativeHandle, rect: *Rect) bool;
+extern fn wispterm_macos_app_consume_reopen() bool;
+extern fn wispterm_macos_app_consume_quit() bool;
+extern fn wispterm_macos_app_request_quit() void;
+extern fn wispterm_macos_app_pump_events(timeout_seconds: f64) void;
 
 pub fn appMessage(offset: u32) MessageId {
     return wm_app + offset;
@@ -65,24 +65,24 @@ pub fn nativeHandleFromBits(bits: usize) ?NativeHandle {
 
 pub fn getWindowRect(hwnd: NativeHandle) ?Rect {
     var rect: Rect = undefined;
-    if (!phantty_macos_window_get_frame(hwnd, &rect)) return null;
+    if (!wispterm_macos_window_get_frame(hwnd, &rect)) return null;
     return rect;
 }
 
 pub fn getClientRect(hwnd: NativeHandle) ?Rect {
     var rect: Rect = undefined;
-    if (!phantty_macos_window_get_content_frame(hwnd, &rect)) return null;
+    if (!wispterm_macos_window_get_content_frame(hwnd, &rect)) return null;
     return rect;
 }
 
 pub fn postCloseMessage(hwnd: NativeHandle) bool {
-    phantty_macos_window_request_close(hwnd);
+    wispterm_macos_window_request_close(hwnd);
     return true;
 }
 
 pub fn postMessage(hwnd: NativeHandle, message: MessageId, wparam: WordParam, lparam: LongParam) bool {
     if (message == wm_close) return postCloseMessage(hwnd);
-    return phantty_macos_window_post_message(hwnd, message, wparam, lparam);
+    return wispterm_macos_window_post_message(hwnd, message, wparam, lparam);
 }
 
 pub fn sendMessage(hwnd: NativeHandle, message: MessageId, wparam: WordParam, lparam: LongParam) MessageResult {
@@ -94,36 +94,36 @@ pub fn sendMessage(hwnd: NativeHandle, message: MessageId, wparam: WordParam, lp
 }
 
 pub fn dpiForWindow(hwnd: NativeHandle) u32 {
-    return phantty_macos_window_dpi(hwnd);
+    return wispterm_macos_window_dpi(hwnd);
 }
 
 pub fn showRestored(hwnd: NativeHandle) bool {
-    phantty_macos_window_show(hwnd);
+    wispterm_macos_window_show(hwnd);
     return true;
 }
 
 pub fn showMaximized(hwnd: NativeHandle) bool {
-    if (!phantty_macos_window_is_zoomed(hwnd)) phantty_macos_window_zoom(hwnd);
+    if (!wispterm_macos_window_is_zoomed(hwnd)) wispterm_macos_window_zoom(hwnd);
     return true;
 }
 
 pub fn showVisible(hwnd: NativeHandle) bool {
-    phantty_macos_window_show(hwnd);
+    wispterm_macos_window_show(hwnd);
     return true;
 }
 
 pub fn showHidden(hwnd: NativeHandle) bool {
-    phantty_macos_window_hide(hwnd);
+    wispterm_macos_window_hide(hwnd);
     return true;
 }
 
 pub fn setForeground(hwnd: NativeHandle) bool {
-    phantty_macos_window_make_key(hwnd);
+    wispterm_macos_window_make_key(hwnd);
     return true;
 }
 
 pub fn isMaximized(hwnd: NativeHandle) bool {
-    return phantty_macos_window_is_zoomed(hwnd);
+    return wispterm_macos_window_is_zoomed(hwnd);
 }
 
 pub fn getWindowStyle(hwnd: NativeHandle) u32 {
@@ -150,7 +150,7 @@ pub fn setWindowFrame(hwnd: NativeHandle, rect: Rect, flags: u32) bool {
 
 pub fn setWindowFrameRaw(hwnd: NativeHandle, x: i32, y: i32, width: i32, height: i32, flags: u32) bool {
     _ = flags;
-    return phantty_macos_window_set_frame(hwnd, x, y, width, height);
+    return wispterm_macos_window_set_frame(hwnd, x, y, width, height);
 }
 
 pub fn setOuterFrame(hwnd: NativeHandle, rect: Rect, topmost: bool) bool {
@@ -160,33 +160,33 @@ pub fn setOuterFrame(hwnd: NativeHandle, rect: Rect, topmost: bool) bool {
 
 pub fn nearestMonitorRect(hwnd: NativeHandle) ?Rect {
     var rect: Rect = undefined;
-    if (!phantty_macos_window_nearest_monitor_frame(hwnd, &rect)) return null;
+    if (!wispterm_macos_window_nearest_monitor_frame(hwnd, &rect)) return null;
     return rect;
 }
 
 pub fn nearestMonitorWorkArea(hwnd: NativeHandle) ?Rect {
     var rect: Rect = undefined;
-    if (!phantty_macos_window_nearest_monitor_work_area(hwnd, &rect)) return null;
+    if (!wispterm_macos_window_nearest_monitor_work_area(hwnd, &rect)) return null;
     return rect;
 }
 
 pub fn consumeReopenRequest() bool {
-    return phantty_macos_app_consume_reopen();
+    return wispterm_macos_app_consume_reopen();
 }
 
 pub fn consumeQuitRequest() bool {
-    return phantty_macos_app_consume_quit();
+    return wispterm_macos_app_consume_quit();
 }
 
 pub fn requestQuit() void {
-    phantty_macos_app_request_quit();
+    wispterm_macos_app_request_quit();
 }
 
 /// Pump pending NSApp events; blocks up to `timeout_seconds` waiting for the
 /// first event so the main thread's run loop also drains the GCD main queue
 /// (needed for worker-thread dispatch_sync to the main thread).
 pub fn pumpAppEvents(timeout_seconds: f64) void {
-    phantty_macos_app_pump_events(timeout_seconds);
+    wispterm_macos_app_pump_events(timeout_seconds);
 }
 
 test "macOS window constants defer caption controls to AppKit" {

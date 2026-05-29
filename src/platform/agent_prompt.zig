@@ -16,10 +16,10 @@ const common_tools_before_wsl =
     \\- Preserve user work. Do not overwrite files, reset Git state, or delete data unless the user asks.
     \\
     \\Terminal tools:
-    \\- Use `terminal_list` to inspect open Phantty terminals before writing to one.
+    \\- Use `terminal_list` to inspect open WispTerm terminals before writing to one.
     \\- Use `terminal_select` before any selected-terminal write.
     \\- Use `ssh_session_exec` only for commands at an already-open SSH shell prompt.
-    \\- Use `ssh_profile_save` to create/update a saved Phantty SSH profile when the user gives SSH details; use `ssh_profile_connect` to open it.
+    \\- Use `ssh_profile_save` to create/update a saved WispTerm SSH profile when the user gives SSH details; use `ssh_profile_connect` to open it.
 ;
 
 const wsl_tool_guidance =
@@ -30,7 +30,7 @@ const common_tools_after_wsl =
     \\- If the target terminal is Codex, Claude Code, Python, R, or another app/REPL, use `terminal_repl_exec`.
     \\- Do not paste shell commands into Codex or Claude Code; send user-facing text there, not shell commands.
     \\- Open a new local terminal with `tab_new` only when no suitable terminal exists.
-    \\- For questions about Phantty itself (features, config, shortcuts), call `phantty_docs` to list and read the built-in docs.
+    \\- For questions about WispTerm itself (features, config, shortcuts), call `wispterm_docs` to list and read the built-in docs.
     \\
     \\Python:
     \\- Use uv for Python environments and dependencies.
@@ -46,7 +46,7 @@ const common_tools = common_tools_before_wsl ++ common_tools_after_wsl;
 const windows_tools = common_tools_before_wsl ++ wsl_tool_guidance ++ common_tools_after_wsl;
 
 const windows_prompt =
-    \\You are Phantty Agent, running in a Windows terminal.
+    \\You are WispTerm Agent, running in a Windows terminal.
     \\
     \\- Use `powershell_exec` for local Windows/PowerShell commands by default.
     \\
@@ -58,7 +58,7 @@ const windows_prompt =
 ;
 
 const posix_prompt =
-    \\You are Phantty Agent, running in a POSIX terminal.
+    \\You are WispTerm Agent, running in a POSIX terminal.
     \\
     \\- Use `shell_exec` for local shell commands by default.
     \\
@@ -70,7 +70,7 @@ const posix_prompt =
 ;
 
 const macos_prompt =
-    \\You are Phantty Agent, running in a macOS terminal.
+    \\You are WispTerm Agent, running in a macOS terminal.
     \\
     \\- Use `shell_exec` for local shell commands by default.
     \\
@@ -104,9 +104,9 @@ test "platform agent prompt has macOS-specific shell wording" {
     try std.testing.expect(std.mem.indexOf(u8, macos, "wsl_session_exec") == null);
 }
 
-test "platform agent prompt points at the phantty_docs tool on every OS" {
+test "platform agent prompt points at the wispterm_docs tool on every OS" {
     for ([_]std.Target.Os.Tag{ .windows, .linux, .macos }) |os| {
         const p = defaultSystemPromptForOs(os);
-        try std.testing.expect(std.mem.indexOf(u8, p, "phantty_docs") != null);
+        try std.testing.expect(std.mem.indexOf(u8, p, "wispterm_docs") != null);
     }
 }

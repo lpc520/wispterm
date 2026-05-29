@@ -12,7 +12,7 @@
     "skill": "browser",
     "expected_name": "web",
     "expected_source": "tests/eval/skills/browser",
-    "expected_contains": "function phanttyCompactSnapshot",
+    "expected_contains": "function wisptermCompactSnapshot",
     "tags": ["alias", "browser"]
   },
   {
@@ -20,7 +20,7 @@
     "skill": "web",
     "expected_name": "web",
     "expected_source": "tests/eval/skills/browser",
-    "expected_contains": "function phanttyCompactSnapshot",
+    "expected_contains": "function wisptermCompactSnapshot",
     "tags": ["clear-hit", "browser"]
   },
   {

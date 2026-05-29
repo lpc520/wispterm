@@ -1,4 +1,4 @@
-//! Fonts that are embedded with Phantty as fallbacks.
+//! Fonts that are embedded with WispTerm as fallbacks.
 //! These are only used if the requested font cannot be found via the system font backend.
 //!
 //! Be careful to ensure that any fonts you embed are licensed for

@@ -1,14 +1,14 @@
 //! Opt-in rendering/window geometry diagnostics.
 //!
-//! Enable with either the `PHANTTY_RENDER_DIAGNOSTICS=1` env var or the
-//! `phantty-debug-render = true` config key (see `enableFromConfig`). Logs go to
-//! `%APPDATA%\phantty\render-diagnostic.log` on Windows, matching the config
+//! Enable with either the `WISPTERM_RENDER_DIAGNOSTICS=1` env var or the
+//! `wispterm-debug-render = true` config key (see `enableFromConfig`). Logs go to
+//! `%APPDATA%\wispterm\render-diagnostic.log` on Windows, matching the config
 //! directory convention used elsewhere in the app.
 
 const std = @import("std");
 const platform_dirs = @import("platform/dirs.zig");
 
-const ENV_NAME = "PHANTTY_RENDER_DIAGNOSTICS";
+const ENV_NAME = "WISPTERM_RENDER_DIAGNOSTICS";
 const LOG_BASENAME = "render-diagnostic.log";
 
 threadlocal var g_checked: bool = false;
@@ -17,7 +17,7 @@ threadlocal var g_file_open: bool = false;
 threadlocal var g_file: std.fs.File = undefined;
 threadlocal var g_start_ms: i64 = 0;
 
-/// Process-global override flipped on by the `phantty-debug-render` config key.
+/// Process-global override flipped on by the `wispterm-debug-render` config key.
 /// Unlike the threadlocal env-var cache above, this is visible to every thread
 /// that logs, and is consulted before the (cached) env-var check so a config
 /// opt-in works even if a thread already evaluated the env var as off.
@@ -90,7 +90,7 @@ fn ensureFile() !*std.fs.File {
     var write_buf: [1024]u8 = undefined;
     var writer = g_file.writerStreaming(&write_buf);
     writer.interface.print(
-        "Phantty render diagnostics started timestamp_ms={d} env={s}\n",
+        "WispTerm render diagnostics started timestamp_ms={d} env={s}\n",
         .{ g_start_ms, ENV_NAME },
     ) catch {};
     writer.end() catch {};

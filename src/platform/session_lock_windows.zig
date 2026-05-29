@@ -34,7 +34,7 @@ fn sessionKeyMutexName(allocator: std.mem.Allocator, session_key: []const u8) ![
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(session_key, &digest, .{});
 
-    const prefix = "Local\\PhanttyRemoteSessionKey-";
+    const prefix = "Local\\WispTermRemoteSessionKey-";
     var ascii: [prefix.len + digest.len * 2]u8 = undefined;
     @memcpy(ascii[0..prefix.len], prefix);
 

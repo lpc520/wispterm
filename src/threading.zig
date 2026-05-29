@@ -1,4 +1,4 @@
-//! Thread spawn settings shared by Phantty-owned background threads.
+//! Thread spawn settings shared by WispTerm-owned background threads.
 
 const platform_threading = @import("platform/threading.zig");
 

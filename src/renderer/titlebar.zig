@@ -28,15 +28,15 @@ pub const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 8;
 pub const SIDEBAR_ROW_H: f32 = 42;
 pub const SIDEBAR_HEADER_H: f32 = 46;
 pub const TITLEBAR_TOGGLE_W: f32 = 46;
-// On macOS the native menu bar (Phantty › Settings…, command palette) replaces
+// On macOS the native menu bar (WispTerm › Settings…, command palette) replaces
 // these in-titlebar buttons, so they collapse to zero width and are not drawn.
 pub const TITLEBAR_CONFIG_W: f32 = if (builtin.os.tag == .macos) 0 else 46;
 pub const TITLEBAR_HELP_W: f32 = if (builtin.os.tag == .macos) 0 else 46;
 // macOS draws the close / minimize / zoom (red / yellow / green) controls over
 // the left edge of the titlebar via AppKit when NSWindowStyleMaskFullSizeContentView
-// is set. Reserve a strip in *framebuffer pixels* so phantty's own toggle and
+// is set. Reserve a strip in *framebuffer pixels* so wispterm's own toggle and
 // tab title don't sit underneath them. AppKit positions the traffic lights in
-// LOGICAL pixels (~80 across), whereas phantty renders/hit-tests in framebuffer
+// LOGICAL pixels (~80 across), whereas wispterm renders/hit-tests in framebuffer
 // pixels — on a 2x Retina display 80 logical = 160 fb, so we must scale by the
 // current DPI ratio. Non-macOS platforms reserve nothing.
 const TITLEBAR_LEFT_RESERVED_LOGICAL: f32 = 80;
@@ -414,7 +414,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
         const border_color_simple = blend(bg, .{ 0.0, 0.0, 0.0 }, 0.20);
         const icon_color = blend(bg, fg, 0.82);
 
-        // Phantty keeps terminal tabs in the application UI layer, matching
+        // WispTerm keeps terminal tabs in the application UI layer, matching
         // Ghostty's apprt action/tab-view split. The top bar now only hosts the
         // sidebar toggle and native caption buttons; tab navigation is rendered by
         // renderSidebar below.

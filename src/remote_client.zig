@@ -1,4 +1,4 @@
-//! Outbound remote relay client shared by one Phantty instance.
+//! Outbound remote relay client shared by one WispTerm instance.
 //!
 //! Surfaces do not own network state. They register as sinks on this shared
 //! client, then publish PTY output with their own stable surface id.
@@ -514,7 +514,7 @@ fn buildEndpoint(
             _ = object.pop();
         }
     }
-    try object.appendSlice(allocator, "/ws/phantty?session=");
+    try object.appendSlice(allocator, "/ws/wispterm?session=");
     try appendQueryEscaped(&object, allocator, session_key);
     if (device_name) |device| {
         if (device.len > 0) {
@@ -732,7 +732,7 @@ pub fn appendJsonString(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.All
     }
 }
 
-test "buildEndpoint maps relay URL to Phantty websocket route" {
+test "buildEndpoint maps relay URL to WispTerm websocket route" {
     const allocator = std.testing.allocator;
     const key = "0123456789abcdef0123456789abcdef";
 
@@ -742,7 +742,7 @@ test "buildEndpoint maps relay URL to Phantty websocket route" {
     try std.testing.expect(endpoint.secure);
     try std.testing.expectEqualStrings("remote.example.com", endpoint.host);
     try std.testing.expectEqual(@as(u16, 443), endpoint.port);
-    try std.testing.expectEqualStrings("/ws/phantty?session=0123456789abcdef0123456789abcdef&device=workstation", endpoint.object_name);
+    try std.testing.expectEqualStrings("/ws/wispterm?session=0123456789abcdef0123456789abcdef&device=workstation", endpoint.object_name);
 }
 
 test "fixed session key candidates append numeric suffixes after first instance" {
@@ -840,7 +840,7 @@ fn initTestClient(allocator: std.mem.Allocator) !Client {
             .secure = false,
             .host = try allocator.dupe(u8, "127.0.0.1"),
             .port = 80,
-            .object_name = try allocator.dupe(u8, "/ws/phantty?session=test"),
+            .object_name = try allocator.dupe(u8, "/ws/wispterm?session=test"),
         },
         .device_name = null,
         .session_key = try allocator.dupe(u8, "test"),

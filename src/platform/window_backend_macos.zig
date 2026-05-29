@@ -103,7 +103,7 @@ const RawFileDropEvent = extern struct {
     y: i32,
 };
 
-extern fn phantty_macos_window_create(
+extern fn wispterm_macos_window_create(
     width: i32,
     height: i32,
     title: [*:0]const u16,
@@ -112,29 +112,29 @@ extern fn phantty_macos_window_create(
     has_position: bool,
     maximize: bool,
 ) ?NativeHandle;
-extern fn phantty_macos_window_destroy(handle: NativeHandle) void;
-extern fn phantty_macos_window_poll(handle: NativeHandle) void;
-extern fn phantty_macos_window_close_requested(handle: NativeHandle) bool;
-extern fn phantty_macos_window_get_framebuffer_size(handle: NativeHandle, width: *i32, height: *i32, dpi: *u32) void;
-extern fn phantty_macos_window_set_content_size(handle: NativeHandle, width: i32, height: i32) void;
-extern fn phantty_macos_window_metal_layer(handle: NativeHandle) ?*anyopaque;
-extern fn phantty_macos_window_pop_key_event(handle: NativeHandle, out: *RawKeyEvent) bool;
-extern fn phantty_macos_window_pop_char_event(handle: NativeHandle, out: *RawCharEvent) bool;
-extern fn phantty_macos_window_pop_mouse_button_event(handle: NativeHandle, out: *RawMouseButtonEvent) bool;
-extern fn phantty_macos_window_pop_mouse_move_event(handle: NativeHandle, out: *RawMouseMoveEvent) bool;
-extern fn phantty_macos_window_pop_mouse_wheel_event(handle: NativeHandle, out: *RawMouseWheelEvent) bool;
-extern fn phantty_macos_window_pop_message_event(handle: NativeHandle, out: *RawMessageEvent) bool;
-extern fn phantty_macos_window_pop_file_drop_event(handle: NativeHandle, out: *RawFileDropEvent) bool;
-extern fn phantty_macos_window_copy_ime_preedit(handle: NativeHandle, out: [*]u8, out_len: usize) usize;
-extern fn phantty_macos_window_set_ime_caret(handle: NativeHandle, x: i32, y: i32, height: i32) void;
-extern fn phantty_macos_window_test_push_key(handle: NativeHandle, key_code: usize, ctrl: bool, shift: bool, alt: bool) void;
-extern fn phantty_macos_window_test_map_key_code(native_key_code: u16, characters_utf8: ?[*:0]const u8) usize;
-extern fn phantty_macos_window_test_push_char(handle: NativeHandle, codepoint: u32, ctrl: bool, shift: bool, alt: bool) void;
-extern fn phantty_macos_window_test_push_mouse_button(handle: NativeHandle, button: u8, action: u8, x: i32, y: i32, ctrl: bool, shift: bool, alt: bool) void;
-extern fn phantty_macos_window_test_push_mouse_move(handle: NativeHandle, x: i32, y: i32, ctrl: bool, shift: bool, alt: bool) void;
-extern fn phantty_macos_window_test_push_mouse_wheel(handle: NativeHandle, delta: i16, xpos: i32, ypos: i32, ctrl: bool, shift: bool, alt: bool) void;
-extern fn phantty_macos_window_test_set_ime_preedit(handle: NativeHandle, text: [*:0]const u8) void;
-extern fn phantty_macos_window_test_push_file_drop(handle: NativeHandle, path: [*:0]const u8, x: i32, y: i32) void;
+extern fn wispterm_macos_window_destroy(handle: NativeHandle) void;
+extern fn wispterm_macos_window_poll(handle: NativeHandle) void;
+extern fn wispterm_macos_window_close_requested(handle: NativeHandle) bool;
+extern fn wispterm_macos_window_get_framebuffer_size(handle: NativeHandle, width: *i32, height: *i32, dpi: *u32) void;
+extern fn wispterm_macos_window_set_content_size(handle: NativeHandle, width: i32, height: i32) void;
+extern fn wispterm_macos_window_metal_layer(handle: NativeHandle) ?*anyopaque;
+extern fn wispterm_macos_window_pop_key_event(handle: NativeHandle, out: *RawKeyEvent) bool;
+extern fn wispterm_macos_window_pop_char_event(handle: NativeHandle, out: *RawCharEvent) bool;
+extern fn wispterm_macos_window_pop_mouse_button_event(handle: NativeHandle, out: *RawMouseButtonEvent) bool;
+extern fn wispterm_macos_window_pop_mouse_move_event(handle: NativeHandle, out: *RawMouseMoveEvent) bool;
+extern fn wispterm_macos_window_pop_mouse_wheel_event(handle: NativeHandle, out: *RawMouseWheelEvent) bool;
+extern fn wispterm_macos_window_pop_message_event(handle: NativeHandle, out: *RawMessageEvent) bool;
+extern fn wispterm_macos_window_pop_file_drop_event(handle: NativeHandle, out: *RawFileDropEvent) bool;
+extern fn wispterm_macos_window_copy_ime_preedit(handle: NativeHandle, out: [*]u8, out_len: usize) usize;
+extern fn wispterm_macos_window_set_ime_caret(handle: NativeHandle, x: i32, y: i32, height: i32) void;
+extern fn wispterm_macos_window_test_push_key(handle: NativeHandle, key_code: usize, ctrl: bool, shift: bool, alt: bool) void;
+extern fn wispterm_macos_window_test_map_key_code(native_key_code: u16, characters_utf8: ?[*:0]const u8) usize;
+extern fn wispterm_macos_window_test_push_char(handle: NativeHandle, codepoint: u32, ctrl: bool, shift: bool, alt: bool) void;
+extern fn wispterm_macos_window_test_push_mouse_button(handle: NativeHandle, button: u8, action: u8, x: i32, y: i32, ctrl: bool, shift: bool, alt: bool) void;
+extern fn wispterm_macos_window_test_push_mouse_move(handle: NativeHandle, x: i32, y: i32, ctrl: bool, shift: bool, alt: bool) void;
+extern fn wispterm_macos_window_test_push_mouse_wheel(handle: NativeHandle, delta: i16, xpos: i32, ypos: i32, ctrl: bool, shift: bool, alt: bool) void;
+extern fn wispterm_macos_window_test_set_ime_preedit(handle: NativeHandle, text: [*:0]const u8) void;
+extern fn wispterm_macos_window_test_push_file_drop(handle: NativeHandle, path: [*:0]const u8, x: i32, y: i32) void;
 
 var global_window: ?*Window = null;
 var test_message_seen: bool = false;
@@ -186,7 +186,7 @@ pub const Window = struct {
 
     pub fn init(width: i32, height: i32, title: [*:0]const u16, x: ?i32, y: ?i32, maximize: bool) !Window {
         const has_position = x != null and y != null;
-        const handle = phantty_macos_window_create(
+        const handle = wispterm_macos_window_create(
             width,
             height,
             title,
@@ -203,16 +203,16 @@ pub const Window = struct {
 
     pub fn deinit(self: *Window) void {
         if (global_window == self) global_window = null;
-        phantty_macos_window_destroy(self.hwnd);
+        wispterm_macos_window_destroy(self.hwnd);
     }
 
     pub fn pollEvents(self: *Window) bool {
-        phantty_macos_window_poll(self.hwnd);
+        wispterm_macos_window_poll(self.hwnd);
         self.drainMessageEvents();
         self.drainFileDropEvents();
         self.drainInputEvents();
         self.refreshGeometry();
-        self.close_requested = self.close_requested or phantty_macos_window_close_requested(self.hwnd);
+        self.close_requested = self.close_requested or wispterm_macos_window_close_requested(self.hwnd);
         return !self.close_requested;
     }
 
@@ -226,7 +226,7 @@ pub const Window = struct {
     }
 
     pub fn setSize(self: *Window, width: i32, height: i32) void {
-        phantty_macos_window_set_content_size(self.hwnd, width, height);
+        wispterm_macos_window_set_content_size(self.hwnd, width, height);
         self.refreshGeometry();
     }
 
@@ -234,7 +234,7 @@ pub const Window = struct {
         self.ime_caret_x = @max(0, x);
         self.ime_caret_y = @max(0, y);
         self.ime_caret_height = @max(1, height);
-        phantty_macos_window_set_ime_caret(self.hwnd, x, y, height);
+        wispterm_macos_window_set_ime_caret(self.hwnd, x, y, height);
     }
 
     pub fn imePreeditText(self: *const Window) []const u8 {
@@ -254,7 +254,7 @@ pub const Window = struct {
         var width: i32 = self.width;
         var height: i32 = self.height;
         var dpi_value: u32 = self.dpi;
-        phantty_macos_window_get_framebuffer_size(self.hwnd, &width, &height, &dpi_value);
+        wispterm_macos_window_get_framebuffer_size(self.hwnd, &width, &height, &dpi_value);
 
         const size_changed = width != self.width or height != self.height;
         const dpi_changed = dpi_value != self.dpi;
@@ -270,7 +270,7 @@ pub const Window = struct {
 
     fn drainInputEvents(self: *Window) void {
         var key: RawKeyEvent = undefined;
-        while (phantty_macos_window_pop_key_event(self.hwnd, &key)) {
+        while (wispterm_macos_window_pop_key_event(self.hwnd, &key)) {
             self.key_events.push(.{
                 .key_code = key.key_code,
                 .ctrl = key.ctrl,
@@ -281,7 +281,7 @@ pub const Window = struct {
         }
 
         var char: RawCharEvent = undefined;
-        while (phantty_macos_window_pop_char_event(self.hwnd, &char)) {
+        while (wispterm_macos_window_pop_char_event(self.hwnd, &char)) {
             if (char.codepoint <= 0x10FFFF) {
                 self.char_events.push(.{
                     .codepoint = @intCast(char.codepoint),
@@ -294,7 +294,7 @@ pub const Window = struct {
         }
 
         var button: RawMouseButtonEvent = undefined;
-        while (phantty_macos_window_pop_mouse_button_event(self.hwnd, &button)) {
+        while (wispterm_macos_window_pop_mouse_button_event(self.hwnd, &button)) {
             self.mouse_x = button.x;
             self.mouse_y = button.y;
             self.mouse_button_events.push(.{
@@ -309,7 +309,7 @@ pub const Window = struct {
         }
 
         var move: RawMouseMoveEvent = undefined;
-        while (phantty_macos_window_pop_mouse_move_event(self.hwnd, &move)) {
+        while (wispterm_macos_window_pop_mouse_move_event(self.hwnd, &move)) {
             self.mouse_x = move.x;
             self.mouse_y = move.y;
             self.mouse_move_events.push(.{
@@ -322,7 +322,7 @@ pub const Window = struct {
         }
 
         var wheel: RawMouseWheelEvent = undefined;
-        while (phantty_macos_window_pop_mouse_wheel_event(self.hwnd, &wheel)) {
+        while (wispterm_macos_window_pop_mouse_wheel_event(self.hwnd, &wheel)) {
             self.mouse_wheel_events.push(.{
                 .delta = wheel.delta,
                 .xpos = wheel.xpos,
@@ -334,7 +334,7 @@ pub const Window = struct {
         }
 
         self.ime_preedit_len = @min(
-            phantty_macos_window_copy_ime_preedit(self.hwnd, self.ime_preedit_buf[0..].ptr, self.ime_preedit_buf.len),
+            wispterm_macos_window_copy_ime_preedit(self.hwnd, self.ime_preedit_buf[0..].ptr, self.ime_preedit_buf.len),
             self.ime_preedit_buf.len,
         );
         self.ime_composing = self.ime_preedit_len > 0;
@@ -342,7 +342,7 @@ pub const Window = struct {
 
     fn drainMessageEvents(self: *Window) void {
         var msg: RawMessageEvent = undefined;
-        while (phantty_macos_window_pop_message_event(self.hwnd, &msg)) {
+        while (wispterm_macos_window_pop_message_event(self.hwnd, &msg)) {
             if (self.on_message) |callback| {
                 _ = callback(msg.message, msg.wparam, msg.lparam);
             }
@@ -351,7 +351,7 @@ pub const Window = struct {
 
     fn drainFileDropEvents(self: *Window) void {
         var drop: RawFileDropEvent = undefined;
-        while (phantty_macos_window_pop_file_drop_event(self.hwnd, &drop)) {
+        while (wispterm_macos_window_pop_file_drop_event(self.hwnd, &drop)) {
             if (self.on_file_drop) |callback| {
                 const len = @min(drop.path_len, drop.path.len);
                 _ = callback(drop.path[0..len], drop.x, drop.y);
@@ -370,15 +370,15 @@ pub fn glGetProcAddress(name: [*:0]const u8) callconv(.c) ?*const anyopaque {
 }
 
 pub fn metalLayer(window: *Window) ?*anyopaque {
-    return phantty_macos_window_metal_layer(window.hwnd);
+    return wispterm_macos_window_metal_layer(window.hwnd);
 }
 
 test "macOS backend drains translated key events" {
-    const title = std.unicode.utf8ToUtf16LeStringLiteral("Phantty Input Smoke");
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("WispTerm Input Smoke");
     var window = try Window.init(320, 180, title, null, null, false);
     defer window.deinit();
 
-    phantty_macos_window_test_push_key(window.hwnd, platform_input.key_enter, true, false, true);
+    wispterm_macos_window_test_push_key(window.hwnd, platform_input.key_enter, true, false, true);
     _ = window.pollEvents();
 
     const ev = window.key_events.pop() orelse return error.ExpectedKeyEvent;
@@ -390,25 +390,25 @@ test "macOS backend drains translated key events" {
 
 test "macOS backend normalizes control-modified shortcut key codes" {
     const ctrl_p = [_:0]u8{0x10};
-    try std.testing.expectEqual(@as(usize, 'P'), phantty_macos_window_test_map_key_code(35, &ctrl_p));
-    try std.testing.expectEqual(@as(usize, 'P'), phantty_macos_window_test_map_key_code(35, "P"));
-    try std.testing.expectEqual(@as(usize, 'P'), phantty_macos_window_test_map_key_code(35, "p"));
-    try std.testing.expectEqual(@as(usize, 0xC0), phantty_macos_window_test_map_key_code(50, null));
+    try std.testing.expectEqual(@as(usize, 'P'), wispterm_macos_window_test_map_key_code(35, &ctrl_p));
+    try std.testing.expectEqual(@as(usize, 'P'), wispterm_macos_window_test_map_key_code(35, "P"));
+    try std.testing.expectEqual(@as(usize, 'P'), wispterm_macos_window_test_map_key_code(35, "p"));
+    try std.testing.expectEqual(@as(usize, 0xC0), wispterm_macos_window_test_map_key_code(50, null));
 }
 
 test "macOS backend drains text, mouse, wheel, and IME preedit events" {
-    const title = std.unicode.utf8ToUtf16LeStringLiteral("Phantty Input Smoke");
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("WispTerm Input Smoke");
     var window = try Window.init(320, 180, title, null, null, false);
     defer window.deinit();
 
-    phantty_macos_window_test_push_char(window.hwnd, 'A', false, true, false);
-    phantty_macos_window_test_push_mouse_button(window.hwnd, 0, 2, 10, 20, false, false, true);
-    phantty_macos_window_test_push_mouse_move(window.hwnd, 30, 40, true, false, false);
-    phantty_macos_window_test_push_mouse_wheel(window.hwnd, 120, 30, 40, false, true, false);
+    wispterm_macos_window_test_push_char(window.hwnd, 'A', false, true, false);
+    wispterm_macos_window_test_push_mouse_button(window.hwnd, 0, 2, 10, 20, false, false, true);
+    wispterm_macos_window_test_push_mouse_move(window.hwnd, 30, 40, true, false, false);
+    wispterm_macos_window_test_push_mouse_wheel(window.hwnd, 120, 30, 40, false, true, false);
     _ = window.pollEvents();
-    phantty_macos_window_test_set_ime_preedit(window.hwnd, "zhong");
+    wispterm_macos_window_test_set_ime_preedit(window.hwnd, "zhong");
     window.ime_preedit_len = @min(
-        phantty_macos_window_copy_ime_preedit(window.hwnd, window.ime_preedit_buf[0..].ptr, window.ime_preedit_buf.len),
+        wispterm_macos_window_copy_ime_preedit(window.hwnd, window.ime_preedit_buf[0..].ptr, window.ime_preedit_buf.len),
         window.ime_preedit_buf.len,
     );
     window.ime_composing = window.ime_preedit_len > 0;
@@ -447,7 +447,7 @@ fn testMessageCallback(
 }
 
 test "macOS backend drains posted platform messages" {
-    const title = std.unicode.utf8ToUtf16LeStringLiteral("Phantty Message Smoke");
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("WispTerm Message Smoke");
     var window = try Window.init(320, 180, title, null, null, false);
     defer window.deinit();
 
@@ -463,14 +463,14 @@ test "macOS backend drains posted platform messages" {
 }
 
 fn testFileDropCallback(path: []const u8, x: i32, y: i32) bool {
-    test_drop_seen = std.mem.eql(u8, path, "/tmp/phantty-drop.txt");
+    test_drop_seen = std.mem.eql(u8, path, "/tmp/wispterm-drop.txt");
     test_drop_x = x;
     test_drop_y = y;
     return true;
 }
 
 test "macOS backend drains file drop events" {
-    const title = std.unicode.utf8ToUtf16LeStringLiteral("Phantty Drop Smoke");
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("WispTerm Drop Smoke");
     var window = try Window.init(320, 180, title, null, null, false);
     defer window.deinit();
 
@@ -479,7 +479,7 @@ test "macOS backend drains file drop events" {
     test_drop_y = 0;
     window.on_file_drop = testFileDropCallback;
 
-    phantty_macos_window_test_push_file_drop(window.hwnd, "/tmp/phantty-drop.txt", 11, 22);
+    wispterm_macos_window_test_push_file_drop(window.hwnd, "/tmp/wispterm-drop.txt", 11, 22);
     _ = window.pollEvents();
 
     try std.testing.expect(test_drop_seen);

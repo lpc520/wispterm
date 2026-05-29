@@ -24,9 +24,9 @@ pub const SaveRequest = struct {
     filters: []const Filter,
 };
 
-extern fn phantty_macos_open_file_dialog(title: [*:0]const u8) ?[*:0]u8;
-extern fn phantty_macos_save_file_dialog(title: [*:0]const u8, initial_dir: ?[*:0]const u8, default_filename: ?[*:0]const u8) ?[*:0]u8;
-extern fn phantty_macos_services_free(ptr: ?*anyopaque) void;
+extern fn wispterm_macos_open_file_dialog(title: [*:0]const u8) ?[*:0]u8;
+extern fn wispterm_macos_save_file_dialog(title: [*:0]const u8, initial_dir: ?[*:0]const u8, default_filename: ?[*:0]const u8) ?[*:0]u8;
+extern fn wispterm_macos_services_free(ptr: ?*anyopaque) void;
 
 pub fn windowOwner(native_window: usize) Owner {
     return .{ .native_window = native_window };
@@ -37,8 +37,8 @@ pub fn openFile(allocator: std.mem.Allocator, request: OpenRequest) ?[]u8 {
     _ = request.filters;
     const title = allocator.dupeZ(u8, request.title) catch return null;
     defer allocator.free(title);
-    const raw = phantty_macos_open_file_dialog(title.ptr) orelse return null;
-    defer phantty_macos_services_free(raw);
+    const raw = wispterm_macos_open_file_dialog(title.ptr) orelse return null;
+    defer wispterm_macos_services_free(raw);
     return allocator.dupe(u8, std.mem.span(raw)) catch null;
 }
 
@@ -53,11 +53,11 @@ pub fn saveFile(allocator: std.mem.Allocator, request: SaveRequest) ?[]u8 {
     const default_filename = if (request.default_filename) |name| allocator.dupeZ(u8, name) catch return null else null;
     defer if (default_filename) |name| allocator.free(name);
 
-    const raw = phantty_macos_save_file_dialog(
+    const raw = wispterm_macos_save_file_dialog(
         title.ptr,
         if (initial_dir) |dir| dir.ptr else null,
         if (default_filename) |name| name.ptr else null,
     ) orelse return null;
-    defer phantty_macos_services_free(raw);
+    defer wispterm_macos_services_free(raw);
     return allocator.dupe(u8, std.mem.span(raw)) catch null;
 }

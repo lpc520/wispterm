@@ -2,8 +2,8 @@ const std = @import("std");
 const platform_update_package = @import("platform/update_package.zig");
 const release_package = @import("release_package.zig");
 
-pub const latest_release_api_url = "https://api.github.com/repos/xuzhougeng/phantty/releases/latest";
-pub const latest_release_page_url = "https://github.com/xuzhougeng/phantty/releases/latest";
+pub const latest_release_api_url = "https://api.github.com/repos/xuzhougeng/wispterm/releases/latest";
+pub const latest_release_page_url = "https://github.com/xuzhougeng/wispterm/releases/latest";
 pub const asset_name_buffer_len = 128;
 pub const asset_download_url_buffer_len = 512;
 
@@ -228,7 +228,7 @@ pub fn formatStatusMessage(buf: []u8, result: CheckResult) ![]const u8 {
     return switch (result.state) {
         .idle => std.fmt.bufPrint(buf, "", .{}),
         .checking => std.fmt.bufPrint(buf, "Checking for updates...", .{}),
-        .up_to_date => std.fmt.bufPrint(buf, "Phantty is up to date", .{}),
+        .up_to_date => std.fmt.bufPrint(buf, "WispTerm is up to date", .{}),
         .update_available => std.fmt.bufPrint(buf, "Update available: {s}", .{result.latest_version}),
         .downloading => std.fmt.bufPrint(buf, "Downloading update...", .{}),
         .downloaded => std.fmt.bufPrint(buf, "Saved to Downloads - unzip to update", .{}),
@@ -299,7 +299,7 @@ pub fn fetchLatestReleaseForPackage(
         .method = .GET,
         .keep_alive = false,
         .headers = .{
-            .user_agent = .{ .override = "phantty" },
+            .user_agent = .{ .override = "wispterm" },
         },
         .response_writer = &body.writer,
     }) catch return .{ .state = .failed };
@@ -330,12 +330,12 @@ test "update_check: malformed versions are unknown" {
 
 test "update_check: parses latest release json" {
     const json =
-        \\{"tag_name":"v0.23.3","html_url":"https://github.com/xuzhougeng/phantty/releases/tag/v0.23.3","draft":false,"prerelease":false}
+        \\{"tag_name":"v0.23.3","html_url":"https://github.com/xuzhougeng/wispterm/releases/tag/v0.23.3","draft":false,"prerelease":false}
     ;
     const release = try parseLatestRelease(std.testing.allocator, json);
     defer release.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("v0.23.3", release.tag_name);
-    try std.testing.expectEqualStrings("https://github.com/xuzhougeng/phantty/releases/tag/v0.23.3", release.html_url);
+    try std.testing.expectEqualStrings("https://github.com/xuzhougeng/wispterm/releases/tag/v0.23.3", release.html_url);
     try std.testing.expect(!release.draft);
     try std.testing.expect(!release.prerelease);
 }
@@ -347,7 +347,7 @@ test "update_check: decides when update is available" {
 
     const release = ReleaseInfo{
         .tag_name = "v0.23.3",
-        .html_url = "https://github.com/xuzhougeng/phantty/releases/tag/v0.23.3",
+        .html_url = "https://github.com/xuzhougeng/wispterm/releases/tag/v0.23.3",
         .draft = false,
         .prerelease = false,
         .assets = &.{
@@ -368,7 +368,7 @@ test "update_check: formats update messages" {
     const msg = try formatStatusMessage(&buf, .{
         .state = .update_available,
         .latest_version = "v0.23.3",
-        .release_url = "https://github.com/xuzhougeng/phantty/releases/tag/v0.23.3",
+        .release_url = "https://github.com/xuzhougeng/wispterm/releases/tag/v0.23.3",
     });
     try std.testing.expectEqualStrings("Update available: v0.23.3", msg);
 }
@@ -399,7 +399,7 @@ test "update_check: copies result strings into caller buffers" {
     const copied = copyResult(.{
         .state = .update_available,
         .latest_version = "v0.23.3",
-        .release_url = "https://github.com/xuzhougeng/phantty/releases/tag/v0.23.3",
+        .release_url = "https://github.com/xuzhougeng/wispterm/releases/tag/v0.23.3",
         .asset_name = "selected-update.zip",
         .asset_download_url = "https://example.test/portable.zip",
         .asset_size = 1234,
@@ -412,7 +412,7 @@ test "update_check: copies result strings into caller buffers" {
 
     try std.testing.expectEqual(State.update_available, copied.state);
     try std.testing.expectEqualStrings("v0.23.3", copied.latest_version);
-    try std.testing.expectEqualStrings("https://github.com/xuzhougeng/phantty/releases/tag/v0.23.3", copied.release_url);
+    try std.testing.expectEqualStrings("https://github.com/xuzhougeng/wispterm/releases/tag/v0.23.3", copied.release_url);
     try std.testing.expectEqualStrings("selected-update.zip", copied.asset_name);
     try std.testing.expectEqualStrings("https://example.test/portable.zip", copied.asset_download_url);
     try std.testing.expectEqual(@as(u64, 1234), copied.asset_size);
@@ -426,7 +426,7 @@ test "update_check: copy result fails when asset buffers are too small" {
     const copied = copyResult(.{
         .state = .update_available,
         .latest_version = "v0.23.3",
-        .release_url = "https://github.com/xuzhougeng/phantty/releases/tag/v0.23.3",
+        .release_url = "https://github.com/xuzhougeng/wispterm/releases/tag/v0.23.3",
         .asset_name = "selected-update.zip",
         .asset_download_url = "https://example.test/portable.zip",
         .asset_size = 1234,
@@ -458,7 +458,7 @@ test "update_check: selects portable asset for runtime flavor" {
     const json = try std.fmt.allocPrint(std.testing.allocator,
         \\{{
         \\  "tag_name":"{s}",
-        \\  "html_url":"https://github.com/xuzhougeng/phantty/releases/tag/{s}",
+        \\  "html_url":"https://github.com/xuzhougeng/wispterm/releases/tag/{s}",
         \\  "draft":false,
         \\  "prerelease":false,
         \\  "assets":[
@@ -498,13 +498,13 @@ test "update_check: selects macOS DMG asset for macOS package" {
 
     const release = ReleaseInfo{
         .tag_name = "v0.32.0",
-        .html_url = "https://github.com/xuzhougeng/phantty/releases/tag/v0.32.0",
+        .html_url = "https://github.com/xuzhougeng/wispterm/releases/tag/v0.32.0",
         .draft = false,
         .prerelease = false,
         .assets = &.{
             .{
                 .name = asset_name,
-                .download_url = "https://example.test/phantty-macos-v0.32.0.dmg",
+                .download_url = "https://example.test/wispterm-macos-v0.32.0.dmg",
                 .size = 1234,
             },
         },
@@ -513,7 +513,7 @@ test "update_check: selects macOS DMG asset for macOS package" {
 
     const result = evaluateReleaseForPackage("0.31.0", release, package);
     try std.testing.expectEqual(State.update_available, result.state);
-    try std.testing.expectEqualStrings("phantty-macos-v0.32.0.dmg", result.asset_name);
+    try std.testing.expectEqualStrings("wispterm-macos-v0.32.0.dmg", result.asset_name);
 }
 
 test "update_check: update result includes selected asset fields" {
@@ -523,7 +523,7 @@ test "update_check: update result includes selected asset fields" {
 
     const release = ReleaseInfo{
         .tag_name = "v0.28.0",
-        .html_url = "https://github.com/xuzhougeng/phantty/releases/tag/v0.28.0",
+        .html_url = "https://github.com/xuzhougeng/wispterm/releases/tag/v0.28.0",
         .draft = false,
         .prerelease = false,
         .assets = &.{
@@ -552,7 +552,7 @@ test "update_check: missing matching asset fails instead of changing flavor" {
 
     const release = ReleaseInfo{
         .tag_name = "v0.28.0",
-        .html_url = "https://github.com/xuzhougeng/phantty/releases/tag/v0.28.0",
+        .html_url = "https://github.com/xuzhougeng/wispterm/releases/tag/v0.28.0",
         .draft = false,
         .prerelease = false,
         .assets = &.{
@@ -568,7 +568,7 @@ test "update_check: missing matching asset fails instead of changing flavor" {
     const result = evaluateReleaseForPackage("0.27.2", release, requested_package);
     try std.testing.expectEqual(State.failed, result.state);
     try std.testing.expectEqualStrings("v0.28.0", result.latest_version);
-    try std.testing.expectEqualStrings("https://github.com/xuzhougeng/phantty/releases/tag/v0.28.0", result.release_url);
+    try std.testing.expectEqualStrings("https://github.com/xuzhougeng/wispterm/releases/tag/v0.28.0", result.release_url);
     try std.testing.expectEqualStrings("", result.asset_name);
     try std.testing.expectEqualStrings("", result.asset_download_url);
 }

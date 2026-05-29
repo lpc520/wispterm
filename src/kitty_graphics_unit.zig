@@ -59,7 +59,7 @@ test "kitty graphics APC chunked transmit creates image placement" {
     try std.testing.expect(storage.dirty);
 }
 
-test "phantty image OSC fallback translates to kitty graphics APC" {
+test "wispterm image OSC fallback translates to kitty graphics APC" {
     const allocator = std.testing.allocator;
 
     var surface: Surface = undefined;
@@ -72,9 +72,9 @@ test "phantty image OSC fallback translates to kitty graphics APC" {
     });
     defer surface.terminal.deinit(allocator);
 
-    surface.phantty_image_osc_state = .ground;
-    surface.phantty_image_osc_buf = .empty;
-    defer surface.phantty_image_osc_buf.deinit(allocator);
+    surface.wispterm_image_osc_state = .ground;
+    surface.wispterm_image_osc_buf = .empty;
+    defer surface.wispterm_image_osc_buf.deinit(allocator);
 
     surface.vt_stream = Surface.VtStream.initAlloc(
         surface.terminal.screens.active.alloc,
@@ -82,8 +82,8 @@ test "phantty image OSC fallback translates to kitty graphics APC" {
     );
     defer surface.vt_stream.deinit();
 
-    surface.feedVtWithPhanttyImageFallback("x\x1b]7747;PhanttyImage=a=T,f=32,");
-    surface.feedVtWithPhanttyImageFallback("t=d,i=3,p=3,s=1,v=1,c=1,r=1;/////w==\x07y");
+    surface.feedVtWithWispTermImageFallback("x\x1b]7747;WispTermImage=a=T,f=32,");
+    surface.feedVtWithWispTermImageFallback("t=d,i=3,p=3,s=1,v=1,c=1,r=1;/////w==\x07y");
 
     const storage = &surface.terminal.screens.active.kitty_images;
     try std.testing.expect(storage.imageById(3) != null);

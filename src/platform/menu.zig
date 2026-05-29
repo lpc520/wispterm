@@ -24,7 +24,7 @@ const impl = switch (backendForOs(builtin.os.tag)) {
     .unsupported => @import("menu_unsupported.zig"),
 };
 
-/// Invoked when a menu item that maps to a Phantty keybind action is clicked.
+/// Invoked when a menu item that maps to a WispTerm keybind action is clicked.
 pub const ActionHandler = *const fn (action: keybind.Action) void;
 
 /// Build and install the platform application menu. On platforms without a

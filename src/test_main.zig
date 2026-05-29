@@ -76,8 +76,8 @@ comptime {
     {
         @compileError("update_install.zig tests must not assert concrete platform package backends directly");
     }
-    if (std.mem.indexOf(u8, update_install_source, "\"phantty.exe\"") != null or
-        std.mem.indexOf(u8, update_install_source, "\"phantty-updater.exe\"") != null)
+    if (std.mem.indexOf(u8, update_install_source, "\"wispterm.exe\"") != null or
+        std.mem.indexOf(u8, update_install_source, "\"wispterm-updater.exe\"") != null)
     {
         @compileError("update_install.zig tests must get executable payload paths through platform/update_package.zig");
     }
@@ -99,7 +99,7 @@ comptime {
     const app_source = @embedFile("App.zig");
     if (std.mem.indexOf(u8, app_source, "WebView2") != null or
         std.mem.indexOf(u8, app_source, "webview2") != null or
-        std.mem.indexOf(u8, app_source, "phantty-windows-portable") != null)
+        std.mem.indexOf(u8, app_source, "wispterm-windows-portable") != null)
     {
         @compileError("App.zig must keep concrete release asset names behind update/release package modules");
     }
@@ -135,7 +135,7 @@ comptime {
     }
 
     const update_check_source = @embedFile("update_check.zig");
-    if (std.mem.indexOf(u8, update_check_source, "phantty-windows-portable") != null) {
+    if (std.mem.indexOf(u8, update_check_source, "wispterm-windows-portable") != null) {
         @compileError("update_check.zig tests must build concrete release asset names through release_package helpers");
     }
     if (std.mem.indexOf(u8, update_check_source, "ReleasePackage.windowsPortable") != null) {
@@ -145,12 +145,12 @@ comptime {
         @compileError("update_check.zig tests must use platform-neutral update package scenarios");
     }
     const release_package_source = @embedFile("release_package.zig");
-    if (std.mem.indexOf(u8, release_package_source, "\"phantty.exe\"") != null or
-        std.mem.indexOf(u8, release_package_source, "\"phantty-updater.exe\"") != null)
+    if (std.mem.indexOf(u8, release_package_source, "\"wispterm.exe\"") != null or
+        std.mem.indexOf(u8, release_package_source, "\"wispterm-updater.exe\"") != null)
     {
         @compileError("release_package.zig must keep concrete executable payload names behind platform/update_package backends");
     }
-    if (std.mem.indexOf(u8, release_package_source, "phantty-windows-portable") != null) {
+    if (std.mem.indexOf(u8, release_package_source, "wispterm-windows-portable") != null) {
         @compileError("release_package.zig must keep concrete asset naming behind platform/update_package backends");
     }
     if (std.mem.indexOf(u8, release_package_source, "WindowsPortable") != null or
@@ -586,7 +586,7 @@ comptime {
     _ = @import("markdown_preview.zig");
     _ = @import("markdown_text.zig");
     _ = @import("memory_debug.zig");
-    _ = @import("phantty_docs.zig");
+    _ = @import("wispterm_docs.zig");
     _ = @import("platform/atomic_file.zig");
     _ = @import("platform/clipboard.zig");
     _ = @import("platform/com.zig");
@@ -656,12 +656,12 @@ comptime {
 }
 
 test "app version metadata is exposed for CLI and command center" {
-    try std.testing.expectEqualStrings("Phantty", app_metadata.name);
+    try std.testing.expectEqualStrings("WispTerm", app_metadata.name);
     try std.testing.expect(app_metadata.version.len > 0);
 
     var buf: [64]u8 = undefined;
     const line = try app_metadata.versionLine(&buf);
-    try std.testing.expectEqualStrings("Phantty " ++ app_metadata.version, line);
+    try std.testing.expectEqualStrings("WispTerm " ++ app_metadata.version, line);
 }
 
 test "command center browser entries do not expose backend implementation names" {

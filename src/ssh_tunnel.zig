@@ -189,8 +189,8 @@ fn spawnSshTunnel(allocator: std.mem.Allocator, conn: *const Surface.SshConnecti
         if (env_map) |*map| {
             map.put("SSH_ASKPASS", askpass_path.?) catch return null;
             map.put("SSH_ASKPASS_REQUIRE", "force") catch return null;
-            map.put("DISPLAY", "phantty") catch return null;
-            map.put("PHANTTY_SSH_PASSWORD", conn.password()) catch return null;
+            map.put("DISPLAY", "wispterm") catch return null;
+            map.put("WISPTERM_SSH_PASSWORD", conn.password()) catch return null;
         }
     }
 

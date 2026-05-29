@@ -60,7 +60,7 @@ pub fn downloadAsset(allocator: std.mem.Allocator, url: []const u8, dest_path: [
             .location = .{ .url = url },
             .method = .GET,
             .keep_alive = false,
-            .headers = .{ .user_agent = .{ .override = "phantty" } },
+            .headers = .{ .user_agent = .{ .override = "wispterm" } },
             .response_writer = &writer.interface,
         });
         try writer.end();
@@ -79,7 +79,7 @@ pub fn downloadAsset(allocator: std.mem.Allocator, url: []const u8, dest_path: [
 
 test "update_install: download destination is the asset name inside Downloads" {
     const allocator = std.testing.allocator;
-    const dest = downloadDestPath(allocator, "phantty-windows-portable-v0.28.0.zip") catch |err| {
+    const dest = downloadDestPath(allocator, "wispterm-windows-portable-v0.28.0.zip") catch |err| {
         // Environments without a resolvable Downloads dir cannot exercise this.
         try std.testing.expect(err == error.NoDownloadsPath);
         return;
@@ -87,7 +87,7 @@ test "update_install: download destination is the asset name inside Downloads" {
     defer allocator.free(dest);
 
     try std.testing.expect(std.fs.path.isAbsolute(dest));
-    try std.testing.expect(std.mem.endsWith(u8, dest, "phantty-windows-portable-v0.28.0.zip"));
+    try std.testing.expect(std.mem.endsWith(u8, dest, "wispterm-windows-portable-v0.28.0.zip"));
     const parent = std.fs.path.dirname(dest) orelse return error.MissingParent;
     try std.testing.expect(std.mem.endsWith(u8, parent, "Downloads"));
 }

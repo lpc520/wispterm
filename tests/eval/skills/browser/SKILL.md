@@ -11,7 +11,7 @@ interact with the page or submit data.
 
 ## GenericAgent-inspired browser workflow
 
-This default workflow is adapted for Phantty from GenericAgent's browser-agent
+This default workflow is adapted for WispTerm from GenericAgent's browser-agent
 pattern: keep the browser state real, keep observations compact, use precise
 page execution when available, and verify every page-changing action.
 
@@ -40,7 +40,7 @@ same execution as the action that needs it, then return JSON-shaped data.
 ### Compact page snapshot
 
 ```javascript
-function phanttyCompactSnapshot(limit = 120) {
+function wisptermCompactSnapshot(limit = 120) {
   const text = (node) => (node?.innerText || node?.textContent || "")
     .replace(/\s+/g, " ")
     .trim();
@@ -109,20 +109,20 @@ function phanttyCompactSnapshot(limit = 120) {
     bodyText: short(text(document.body), 4000)
   };
 }
-return phanttyCompactSnapshot();
+return wisptermCompactSnapshot();
 ```
 
 ### Action with before/after delta
 
-Paste `phanttyCompactSnapshot` before this helper. Replace the target-finding
+Paste `wisptermCompactSnapshot` before this helper. Replace the target-finding
 logic with the page-specific action.
 
 ```javascript
-async function phanttyWithDelta(action, waitMs = 800) {
-  const before = phanttyCompactSnapshot(80);
+async function wisptermWithDelta(action, waitMs = 800) {
+  const before = wisptermCompactSnapshot(80);
   const result = await action();
   await new Promise((resolve) => setTimeout(resolve, waitMs));
-  const after = phanttyCompactSnapshot(80);
+  const after = wisptermCompactSnapshot(80);
   return {
     result,
     urlChanged: before.url !== after.url,
@@ -133,7 +133,7 @@ async function phanttyWithDelta(action, waitMs = 800) {
   };
 }
 
-return await phanttyWithDelta(async () => {
+return await wisptermWithDelta(async () => {
   const targetText = "Continue";
   const target = Array.from(document.querySelectorAll("button,a,[role='button']"))
     .find((el) => (el.innerText || el.textContent || "").trim().includes(targetText));
@@ -149,7 +149,7 @@ Use this for simple forms. Always inspect the result afterward because some
 sites reject synthetic events or require trusted input paths.
 
 ```javascript
-function phanttySetValue(selector, value) {
+function wisptermSetValue(selector, value) {
   const el = document.querySelector(selector);
   if (!el) throw new Error("Element not found: " + selector);
   const proto = el.tagName === "TEXTAREA"
@@ -162,5 +162,5 @@ function phanttySetValue(selector, value) {
   el.dispatchEvent(new Event("change", { bubbles: true }));
   return { selector, value: el.value };
 }
-return phanttySetValue("input[name='q']", "search terms");
+return wisptermSetValue("input[name='q']", "search terms");
 ```

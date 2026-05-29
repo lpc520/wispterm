@@ -28,5 +28,5 @@ comptime {
 
 test "shared compile target has app metadata" {
     try std.testing.expect(build_options.app_version.len > 0);
-    try std.testing.expectEqualStrings("Phantty", app_metadata.name);
+    try std.testing.expectEqualStrings("WispTerm", app_metadata.name);
 }

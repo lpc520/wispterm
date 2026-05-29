@@ -88,7 +88,7 @@ pub const Client = struct {
         var req_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer req_arena.deinit();
         const a = req_arena.allocator();
-        const client_id = try std.fmt.allocPrint(a, "phantty-weixin-{d}-{d}", .{
+        const client_id = try std.fmt.allocPrint(a, "wispterm-weixin-{d}-{d}", .{
             std.time.milliTimestamp(), self.nextRandomU32(),
         });
         const body = try codec.buildSendTextBody(a, to_user_id, text, context_token, client_id);

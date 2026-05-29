@@ -381,7 +381,7 @@ fn appendResponseFunctionCallOutput(
 
 fn appendToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
     try out.appendSlice(allocator, ",\"tools\":[");
-    try out.appendSlice(allocator, toolSchema("terminal_list", "List Phantty terminal surfaces visible to the agent, including the current agent-selected write context. Before any terminal write, use terminal_select to choose the intended surface_id; use focused=true only as a default hint.", "{}"));
+    try out.appendSlice(allocator, toolSchema("terminal_list", "List WispTerm terminal surfaces visible to the agent, including the current agent-selected write context. Before any terminal write, use terminal_select to choose the intended surface_id; use focused=true only as a default hint.", "{}"));
     try out.append(allocator, ',');
     try out.appendSlice(allocator, toolSchema("terminal_snapshot", "Read a bounded text snapshot from one terminal surface or all surfaces.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Optional surface id from terminal_list.\"}}"));
     try out.append(allocator, ',');
@@ -415,9 +415,9 @@ fn appendToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(
     try out.append(allocator, ',');
     try out.appendSlice(allocator, toolSchema("terminal_repl_exec", "Send code or text to the selected already-open interactive REPL/app terminal without shell syntax. The surface_id must match the current terminal_select context. Use repl=r for R, repl=python for Python, repl=codex for Codex, repl=claude_code for Claude Code, or repl=plain for raw text input.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Selected surface id from terminal_select.\"},\"repl\":{\"type\":\"string\",\"description\":\"r, python, codex, claude_code, or plain\"},\"code\":{\"type\":\"string\",\"description\":\"Code or plain text to submit.\"},\"timeout_ms\":{\"type\":\"integer\"}}"));
     try out.append(allocator, ',');
-    try out.appendSlice(allocator, toolSchema("ssh_profile_save", "Create or update a saved Phantty SSH server profile. Use before ssh_profile_connect when the user provides SSH host, user, port, or password details.", "{\"name\":{\"type\":\"string\",\"description\":\"Optional profile name; defaults to host for new profiles.\"},\"host\":{\"type\":\"string\",\"description\":\"SSH host name or IP address.\"},\"user\":{\"type\":\"string\",\"description\":\"SSH username.\"},\"password\":{\"type\":\"string\",\"description\":\"Optional SSH password; omit when using keys.\"},\"port\":{\"type\":\"string\",\"description\":\"Optional SSH port; defaults to 22 for new profiles.\"}}"));
+    try out.appendSlice(allocator, toolSchema("ssh_profile_save", "Create or update a saved WispTerm SSH server profile. Use before ssh_profile_connect when the user provides SSH host, user, port, or password details.", "{\"name\":{\"type\":\"string\",\"description\":\"Optional profile name; defaults to host for new profiles.\"},\"host\":{\"type\":\"string\",\"description\":\"SSH host name or IP address.\"},\"user\":{\"type\":\"string\",\"description\":\"SSH username.\"},\"password\":{\"type\":\"string\",\"description\":\"Optional SSH password; omit when using keys.\"},\"port\":{\"type\":\"string\",\"description\":\"Optional SSH port; defaults to 22 for new profiles.\"}}"));
     try out.append(allocator, ',');
-    try out.appendSlice(allocator, toolSchema("ssh_profile_connect", "Create a new tab connected to a saved Phantty SSH server profile by its profile name or host.", "{\"profile_name\":{\"type\":\"string\",\"description\":\"Saved SSH profile name or host to open in a new tab.\"}}"));
+    try out.appendSlice(allocator, toolSchema("ssh_profile_connect", "Create a new tab connected to a saved WispTerm SSH server profile by its profile name or host.", "{\"profile_name\":{\"type\":\"string\",\"description\":\"Saved SSH profile name or host to open in a new tab.\"}}"));
     try out.append(allocator, ',');
     try appendToolSchema(
         allocator,
@@ -429,16 +429,16 @@ fn appendToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(
     try out.append(allocator, ',');
     try out.appendSlice(allocator, toolSchema("tab_close", "Close a terminal tab by zero-based tab_index, surface_id, title, or the active terminal tab when no selector is provided. Cannot close the AI chat tab running the agent.", "{\"tab_index\":{\"type\":\"integer\",\"description\":\"Zero-based tab index from terminal_list.\"},\"tab_number\":{\"type\":\"integer\",\"description\":\"One-based UI tab number, accepted as a convenience.\"},\"surface_id\":{\"type\":\"string\",\"description\":\"Surface id from terminal_list.\"},\"title\":{\"type\":\"string\",\"description\":\"Terminal tab title to close, such as CPU2.\"}}"));
     try out.append(allocator, ',');
-    try out.appendSlice(allocator, toolSchema("skill_info", "Load a Phantty skill by stable name. Use when the user explicitly names a skill or asks for specialized skill instructions.", "{\"skill_name\":{\"type\":\"string\",\"description\":\"Skill name or skill directory name.\"}}"));
+    try out.appendSlice(allocator, toolSchema("skill_info", "Load a WispTerm skill by stable name. Use when the user explicitly names a skill or asks for specialized skill instructions.", "{\"skill_name\":{\"type\":\"string\",\"description\":\"Skill name or skill directory name.\"}}"));
     try out.append(allocator, ',');
-    try out.appendSlice(allocator, toolSchema("phantty_docs", "Read Phantty's own documentation (features, configuration, shortcuts, AI agent, file explorer, media). Call with no topic to list available topics, then call again with a topic to read its full text.", "{\"topic\":{\"type\":\"string\",\"description\":\"Topic name from the list. Omit to list available topics.\"}}"));
+    try out.appendSlice(allocator, toolSchema("wispterm_docs", "Read WispTerm's own documentation (features, configuration, shortcuts, AI agent, file explorer, media). Call with no topic to list available topics, then call again with a topic to read its full text.", "{\"topic\":{\"type\":\"string\",\"description\":\"Topic name from the list. Omit to list available topics.\"}}"));
     try out.append(allocator, ']');
     try out.appendSlice(allocator, ",\"tool_choice\":\"auto\"");
 }
 
 fn appendResponseToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
     try out.appendSlice(allocator, ",\"tools\":[");
-    try out.appendSlice(allocator, responseToolSchema("terminal_list", "List Phantty terminal surfaces visible to the agent, including the current agent-selected write context. Before any terminal write, use terminal_select to choose the intended surface_id; use focused=true only as a default hint.", "{}"));
+    try out.appendSlice(allocator, responseToolSchema("terminal_list", "List WispTerm terminal surfaces visible to the agent, including the current agent-selected write context. Before any terminal write, use terminal_select to choose the intended surface_id; use focused=true only as a default hint.", "{}"));
     try out.append(allocator, ',');
     try out.appendSlice(allocator, responseToolSchema("terminal_snapshot", "Read a bounded text snapshot from one terminal surface or all surfaces.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Optional surface id from terminal_list.\"}}"));
     try out.append(allocator, ',');
@@ -472,9 +472,9 @@ fn appendResponseToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUn
     try out.append(allocator, ',');
     try out.appendSlice(allocator, responseToolSchema("terminal_repl_exec", "Send code or text to the selected already-open interactive REPL/app terminal without shell syntax. The surface_id must match the current terminal_select context. Use repl=r for R, repl=python for Python, repl=codex for Codex, repl=claude_code for Claude Code, or repl=plain for raw text input.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Selected surface id from terminal_select.\"},\"repl\":{\"type\":\"string\",\"description\":\"r, python, codex, claude_code, or plain\"},\"code\":{\"type\":\"string\",\"description\":\"Code or plain text to submit.\"},\"timeout_ms\":{\"type\":\"integer\"}}"));
     try out.append(allocator, ',');
-    try out.appendSlice(allocator, responseToolSchema("ssh_profile_save", "Create or update a saved Phantty SSH server profile. Use before ssh_profile_connect when the user provides SSH host, user, port, or password details.", "{\"name\":{\"type\":\"string\",\"description\":\"Optional profile name; defaults to host for new profiles.\"},\"host\":{\"type\":\"string\",\"description\":\"SSH host name or IP address.\"},\"user\":{\"type\":\"string\",\"description\":\"SSH username.\"},\"password\":{\"type\":\"string\",\"description\":\"Optional SSH password; omit when using keys.\"},\"port\":{\"type\":\"string\",\"description\":\"Optional SSH port; defaults to 22 for new profiles.\"}}"));
+    try out.appendSlice(allocator, responseToolSchema("ssh_profile_save", "Create or update a saved WispTerm SSH server profile. Use before ssh_profile_connect when the user provides SSH host, user, port, or password details.", "{\"name\":{\"type\":\"string\",\"description\":\"Optional profile name; defaults to host for new profiles.\"},\"host\":{\"type\":\"string\",\"description\":\"SSH host name or IP address.\"},\"user\":{\"type\":\"string\",\"description\":\"SSH username.\"},\"password\":{\"type\":\"string\",\"description\":\"Optional SSH password; omit when using keys.\"},\"port\":{\"type\":\"string\",\"description\":\"Optional SSH port; defaults to 22 for new profiles.\"}}"));
     try out.append(allocator, ',');
-    try out.appendSlice(allocator, responseToolSchema("ssh_profile_connect", "Create a new tab connected to a saved Phantty SSH server profile by its profile name or host.", "{\"profile_name\":{\"type\":\"string\",\"description\":\"Saved SSH profile name or host to open in a new tab.\"}}"));
+    try out.appendSlice(allocator, responseToolSchema("ssh_profile_connect", "Create a new tab connected to a saved WispTerm SSH server profile by its profile name or host.", "{\"profile_name\":{\"type\":\"string\",\"description\":\"Saved SSH profile name or host to open in a new tab.\"}}"));
     try out.append(allocator, ',');
     try appendResponseToolSchema(
         allocator,
@@ -486,9 +486,9 @@ fn appendResponseToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUn
     try out.append(allocator, ',');
     try out.appendSlice(allocator, responseToolSchema("tab_close", "Close a terminal tab by zero-based tab_index, surface_id, title, or the active terminal tab when no selector is provided. Cannot close the AI chat tab running the agent.", "{\"tab_index\":{\"type\":\"integer\",\"description\":\"Zero-based tab index from terminal_list.\"},\"tab_number\":{\"type\":\"integer\",\"description\":\"One-based UI tab number, accepted as a convenience.\"},\"surface_id\":{\"type\":\"string\",\"description\":\"Surface id from terminal_list.\"},\"title\":{\"type\":\"string\",\"description\":\"Terminal tab title to close, such as CPU2.\"}}"));
     try out.append(allocator, ',');
-    try out.appendSlice(allocator, responseToolSchema("skill_info", "Load a Phantty skill by stable name. Use when the user explicitly names a skill or asks for specialized skill instructions.", "{\"skill_name\":{\"type\":\"string\",\"description\":\"Skill name or skill directory name.\"}}"));
+    try out.appendSlice(allocator, responseToolSchema("skill_info", "Load a WispTerm skill by stable name. Use when the user explicitly names a skill or asks for specialized skill instructions.", "{\"skill_name\":{\"type\":\"string\",\"description\":\"Skill name or skill directory name.\"}}"));
     try out.append(allocator, ',');
-    try out.appendSlice(allocator, responseToolSchema("phantty_docs", "Read Phantty's own documentation (features, configuration, shortcuts, AI agent, file explorer, media). Call with no topic to list available topics, then call again with a topic to read its full text.", "{\"topic\":{\"type\":\"string\",\"description\":\"Topic name from the list. Omit to list available topics.\"}}"));
+    try out.appendSlice(allocator, responseToolSchema("wispterm_docs", "Read WispTerm's own documentation (features, configuration, shortcuts, AI agent, file explorer, media). Call with no topic to list available topics, then call again with a topic to read its full text.", "{\"topic\":{\"type\":\"string\",\"description\":\"Topic name from the list. Omit to list available topics.\"}}"));
     try out.append(allocator, ']');
     try out.appendSlice(allocator, ",\"tool_choice\":\"auto\"");
 }
@@ -891,19 +891,19 @@ test "buildRequestJson chat_completions emits tool_calls when present" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"terminal_list\"") != null);
 }
 
-test "buildRequestJson includes phantty_docs tool for both protocols" {
+test "buildRequestJson includes wispterm_docs tool for both protocols" {
     const a = std.testing.allocator;
     var msgs = [_]RequestMessage{.{ .role = .user, .content = @constCast("hi") }};
 
     const chat = RequestParams{ .model = "m", .system_prompt = "", .protocol = .chat_completions, .thinking_enabled = false, .reasoning_effort = "", .stream = false };
     const chat_json = try buildRequestJson(a, chat, &msgs, true);
     defer a.free(chat_json);
-    try std.testing.expect(std.mem.indexOf(u8, chat_json, "\"phantty_docs\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, chat_json, "\"wispterm_docs\"") != null);
 
     const resp = RequestParams{ .model = "m", .system_prompt = "", .protocol = .responses, .thinking_enabled = false, .reasoning_effort = "", .stream = false };
     const resp_json = try buildRequestJson(a, resp, &msgs, true);
     defer a.free(resp_json);
-    try std.testing.expect(std.mem.indexOf(u8, resp_json, "\"phantty_docs\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp_json, "\"wispterm_docs\"") != null);
 }
 
 test "parseApiResponse reads responses-protocol output text" {

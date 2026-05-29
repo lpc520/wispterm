@@ -21,17 +21,17 @@ pub const FontFilePath = struct {
     }
 };
 
-extern fn phantty_coretext_is_available() bool;
-extern fn phantty_coretext_find_font(family: [*:0]const u8, weight: u16) ?*anyopaque;
-extern fn phantty_coretext_find_fallback(codepoint: u32) ?*anyopaque;
-extern fn phantty_coretext_font_retain(handle: *anyopaque) void;
-extern fn phantty_coretext_font_release(handle: *anyopaque) void;
-extern fn phantty_coretext_font_has_character(handle: *anyopaque, codepoint: u32) bool;
-extern fn phantty_coretext_font_glyph_index(handle: *anyopaque, codepoint: u32) u16;
-extern fn phantty_coretext_font_copy_path(handle: *anyopaque) ?[*:0]u8;
-extern fn phantty_coretext_family_count() usize;
-extern fn phantty_coretext_copy_family_name(index: usize) ?[*:0]u8;
-extern fn phantty_coretext_free(ptr: ?*anyopaque) void;
+extern fn wispterm_coretext_is_available() bool;
+extern fn wispterm_coretext_find_font(family: [*:0]const u8, weight: u16) ?*anyopaque;
+extern fn wispterm_coretext_find_fallback(codepoint: u32) ?*anyopaque;
+extern fn wispterm_coretext_font_retain(handle: *anyopaque) void;
+extern fn wispterm_coretext_font_release(handle: *anyopaque) void;
+extern fn wispterm_coretext_font_has_character(handle: *anyopaque, codepoint: u32) bool;
+extern fn wispterm_coretext_font_glyph_index(handle: *anyopaque, codepoint: u32) u16;
+extern fn wispterm_coretext_font_copy_path(handle: *anyopaque) ?[*:0]u8;
+extern fn wispterm_coretext_family_count() usize;
+extern fn wispterm_coretext_copy_family_name(index: usize) ?[*:0]u8;
+extern fn wispterm_coretext_free(ptr: ?*anyopaque) void;
 
 pub const FallbackFont = struct {
     handle: *anyopaque,
@@ -43,12 +43,12 @@ pub const FallbackFont = struct {
     }
 
     pub fn release(self: *FallbackFont) void {
-        phantty_coretext_font_release(self.handle);
+        wispterm_coretext_font_release(self.handle);
         std.heap.c_allocator.destroy(self);
     }
 
     pub fn hasCharacter(self: *FallbackFont, codepoint: u32) bool {
-        return phantty_coretext_font_has_character(self.handle, codepoint);
+        return wispterm_coretext_font_has_character(self.handle, codepoint);
     }
 };
 
@@ -56,7 +56,7 @@ pub const FontDiscovery = struct {
     pub const FontResult = FontFilePath;
 
     pub fn init() !FontDiscovery {
-        if (!phantty_coretext_is_available()) return error.CoreTextUnavailable;
+        if (!wispterm_coretext_is_available()) return error.CoreTextUnavailable;
         return .{};
     }
 
@@ -74,13 +74,13 @@ pub const FontDiscovery = struct {
         _ = style;
         const family_z = try std.heap.c_allocator.dupeZ(u8, family_name);
         defer std.heap.c_allocator.free(family_z);
-        const handle = phantty_coretext_find_font(family_z.ptr, @intCast(@intFromEnum(weight))) orelse return null;
+        const handle = wispterm_coretext_find_font(family_z.ptr, @intCast(@intFromEnum(weight))) orelse return null;
         return try FallbackFont.wrap(handle);
     }
 
     pub fn findFallbackFont(self: *FontDiscovery, codepoint: u32) !?*FallbackFont {
         _ = self;
-        const handle = phantty_coretext_find_fallback(codepoint) orelse return null;
+        const handle = wispterm_coretext_find_fallback(codepoint) orelse return null;
         return try FallbackFont.wrap(handle);
     }
 
@@ -99,7 +99,7 @@ pub const FontDiscovery = struct {
 
     pub fn listFontFamilies(self: *FontDiscovery, allocator: std.mem.Allocator) ![][]const u8 {
         _ = self;
-        const count = phantty_coretext_family_count();
+        const count = wispterm_coretext_family_count();
         var families = try allocator.alloc([]const u8, count);
         var added: usize = 0;
         errdefer {
@@ -108,8 +108,8 @@ pub const FontDiscovery = struct {
         }
 
         for (0..count) |i| {
-            const raw = phantty_coretext_copy_family_name(i) orelse continue;
-            defer phantty_coretext_free(raw);
+            const raw = wispterm_coretext_copy_family_name(i) orelse continue;
+            defer wispterm_coretext_free(raw);
             families[added] = try allocator.dupe(u8, std.mem.span(raw));
             added += 1;
         }
@@ -138,16 +138,16 @@ pub const LoadedFont = struct {
     handle: *anyopaque,
 
     pub fn init(font: *FallbackFont) !LoadedFont {
-        phantty_coretext_font_retain(font.handle);
+        wispterm_coretext_font_retain(font.handle);
         return .{ .handle = font.handle };
     }
 
     pub fn deinit(self: *LoadedFont) void {
-        phantty_coretext_font_release(self.handle);
+        wispterm_coretext_font_release(self.handle);
     }
 
     pub fn getGlyphIndex(self: *LoadedFont, codepoint: u32) u16 {
-        return phantty_coretext_font_glyph_index(self.handle, codepoint);
+        return wispterm_coretext_font_glyph_index(self.handle, codepoint);
     }
 
     pub fn hasGlyph(self: *LoadedFont, codepoint: u32) bool {
@@ -165,8 +165,8 @@ pub fn fontWeightFromValue(value: u16) FontWeight {
 }
 
 pub fn fontFilePathAlloc(allocator: std.mem.Allocator, font: *FallbackFont) ?FontFilePath {
-    const raw_path = phantty_coretext_font_copy_path(font.handle) orelse return null;
-    defer phantty_coretext_free(raw_path);
+    const raw_path = wispterm_coretext_font_copy_path(font.handle) orelse return null;
+    defer wispterm_coretext_free(raw_path);
 
     const path = allocator.dupeZ(u8, std.mem.span(raw_path)) catch return null;
     return .{

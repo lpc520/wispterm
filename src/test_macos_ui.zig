@@ -1,6 +1,6 @@
 //! Native macOS UI smoke-test entry point.
 //!
-//! These tests exercise Phantty's platform-facing UI interaction paths without
+//! These tests exercise WispTerm's platform-facing UI interaction paths without
 //! depending on external Accessibility or Screen Recording permissions.
 
 const builtin = @import("builtin");

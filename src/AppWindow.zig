@@ -1581,9 +1581,9 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     g_force_rebuild = true;
     g_cursor_style = cfg.@"cursor-style";
     g_cursor_blink = cfg.@"cursor-style-blink";
-    overlays.g_debug_fps = cfg.@"phantty-debug-fps";
-    overlays.g_debug_draw_calls = cfg.@"phantty-debug-draw-calls";
-    g_debug_memory = cfg.@"phantty-debug-memory";
+    overlays.g_debug_fps = cfg.@"wispterm-debug-fps";
+    overlays.g_debug_draw_calls = cfg.@"wispterm-debug-draw-calls";
+    g_debug_memory = cfg.@"wispterm-debug-memory";
 
     // --- Split config ---
     overlays.g_unfocused_split_opacity = cfg.@"unfocused-split-opacity";
@@ -3362,7 +3362,7 @@ fn runMainLoop(self: *AppWindow) !void {
     var backend_window = window_backend.create(allocator, .{
         .width = 800,
         .height = 600,
-        .title = "Phantty",
+        .title = "WispTerm",
         .x = init_x,
         .y = init_y,
         .maximize = g_start_maximize and !g_start_fullscreen, // Don't maximize if going fullscreen

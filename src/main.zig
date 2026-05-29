@@ -1,4 +1,4 @@
-//! Phantty entry point.
+//! WispTerm entry point.
 //!
 //! Handles CLI args and special commands, then creates an App which
 //! manages one or more AppWindow instances. Most terminal logic lives
@@ -25,7 +25,7 @@ fn prepareCliConsole() void {
 /// macOS-only: .app bundles launched by launchd inherit cwd "/", which then
 /// leaks into every new shell session (initial_cwd, getActiveCwd, PTY
 /// inherited cwd). Reroot to $HOME so newly spawned tabs/splits land where
-/// the user expects, while leaving phantty alone when it was invoked from a
+/// the user expects, while leaving wispterm alone when it was invoked from a
 /// real shell with a meaningful cwd.
 ///
 /// Wrapped in a comptime os.tag check so Windows builds skip the whole body
@@ -144,7 +144,7 @@ pub fn main() !void {
         return;
     }
 
-    std.debug.print("Phantty starting...\n", .{});
+    std.debug.print("WispTerm starting...\n", .{});
     rerootCwdFromBundleRootIfNeeded();
     image_decoder.install();
 
@@ -160,7 +160,7 @@ pub fn main() !void {
 
     // Honor the config opt-in for render diagnostics before any window/GL
     // exists, so the very first WM_SIZE/WM_DPICHANGED events are captured.
-    render_diagnostics.enableFromConfig(cfg.@"phantty-debug-render");
+    render_diagnostics.enableFromConfig(cfg.@"wispterm-debug-render");
 
     // Create the App and run (first window on main thread, spawned windows on separate threads)
     var app = try App.init(allocator, cfg);
@@ -172,5 +172,5 @@ pub fn main() !void {
 
     try app.run();
 
-    std.debug.print("Phantty exiting...\n", .{});
+    std.debug.print("WispTerm exiting...\n", .{});
 }

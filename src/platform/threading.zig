@@ -1,4 +1,4 @@
-//! Platform thread spawn policy for Phantty-owned background threads.
+//! Platform thread spawn policy for WispTerm-owned background threads.
 
 const std = @import("std");
 

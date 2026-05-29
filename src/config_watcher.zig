@@ -1,6 +1,6 @@
 /// Watches the config file directory for changes.
 ///
-/// The app layer resolves Phantty's config path. The platform layer owns the
+/// The app layer resolves WispTerm's config path. The platform layer owns the
 /// OS-specific directory notification backend.
 const std = @import("std");
 const Config = @import("config.zig");

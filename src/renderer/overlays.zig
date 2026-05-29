@@ -113,7 +113,7 @@ threadlocal var g_transfer_cancel_confirm_visible: bool = false;
 
 const UPDATE_PROMPT_DURATION_MS: i64 = 10000;
 const UPDATE_STATUS_DURATION_MS: i64 = 2500;
-const SSH_CWD_HELP_URL = "https://github.com/xuzhougeng/phantty#ssh-current-directory-for-downloads-and-uploads";
+const SSH_CWD_HELP_URL = "https://github.com/xuzhougeng/wispterm#ssh-current-directory-for-downloads-and-uploads";
 const UpdatePromptAction = enum { none, open_release, download_update };
 threadlocal var g_update_prompt_until_ms: i64 = 0;
 threadlocal var g_update_prompt_buf: [128]u8 = undefined;
@@ -2748,7 +2748,7 @@ fn saveAiProfiles(allocator: std.mem.Allocator) void {
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(allocator);
-    out.appendSlice(allocator, "# Phantty AI Chat profiles. Fields are hex encoded: name, base_url, api_key, model, system_prompt, thinking, reasoning_effort, stream, agent, protocol.\n") catch return;
+    out.appendSlice(allocator, "# WispTerm AI Chat profiles. Fields are hex encoded: name, base_url, api_key, model, system_prompt, thinking, reasoning_effort, stream, agent, protocol.\n") catch return;
     for (g_ai_profiles[0..g_ai_profile_count]) |profile| {
         for (0..AI_FIELD_COUNT) |i| {
             if (i > 0) out.append(allocator, '\t') catch return;
@@ -2811,7 +2811,7 @@ fn saveSshProfiles(allocator: std.mem.Allocator) void {
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(allocator);
-    out.appendSlice(allocator, "# Phantty SSH profiles. Fields are hex encoded: name, host, user, password, port.\n") catch return;
+    out.appendSlice(allocator, "# WispTerm SSH profiles. Fields are hex encoded: name, host, user, password, port.\n") catch return;
     for (g_ssh_profiles[0..g_ssh_profile_count]) |profile| {
         for (0..SSH_FIELD_COUNT) |i| {
             if (i > 0) out.append(allocator, '\t') catch return;
@@ -3321,7 +3321,7 @@ const ThemePreset = struct {
 };
 
 const SETTINGS_THEME_PRESETS = [_]ThemePreset{
-    .{ .label = "Phantty Default", .theme = null, .detail = "Warm balanced dark" },
+    .{ .label = "WispTerm Default", .theme = null, .detail = "Warm balanced dark" },
     .{ .label = "Catppuccin Mocha", .theme = "Catppuccin Mocha", .detail = "Soft popular dark" },
     .{ .label = "TokyoNight Night", .theme = "TokyoNight Night", .detail = "Deep blue coding" },
     .{ .label = "GitHub Light", .theme = "GitHub Light Default", .detail = "Clean white" },
@@ -4272,7 +4272,7 @@ pub fn renderWindowCloseConfirm(window_width: f32, window_height: f32) void {
 
     const text_x = icon_x + icon_size + 18;
     const text_right = layout.panel_x + layout.panel_w - pad;
-    renderTitlebarTextStrongLimited("Close Phantty?", text_x, title_y, fg, text_right - text_x);
+    renderTitlebarTextStrongLimited("Close WispTerm?", text_x, title_y, fg, text_right - text_x);
 
     const body_y = title_y - overlayTextHeight() - 16;
     renderTitlebarTextLimited("Running panels in this window will be terminated.", text_x, body_y, body, text_right - text_x);
@@ -4347,7 +4347,7 @@ pub fn renderCloseShortcutConfirm(window_width: f32, window_height: f32) void {
     var shortcut_buf: [64]u8 = undefined;
     const shortcut = keybind.formatActionShortcut(&AppWindow.g_keybinds, .close_panel_or_tab, &shortcut_buf) orelse "close shortcut";
     var text_buf: [128]u8 = undefined;
-    const text = std.fmt.bufPrint(&text_buf, "Press {s} again to close Phantty", .{shortcut}) catch "Press close shortcut again to close Phantty";
+    const text = std.fmt.bufPrint(&text_buf, "Press {s} again to close WispTerm", .{shortcut}) catch "Press close shortcut again to close WispTerm";
 
     const pad_h: f32 = 18;
     const pad_v: f32 = 8;

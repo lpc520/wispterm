@@ -10,7 +10,7 @@
 // Query the current working directory of a live process by pid (used to
 // resolve relative preview paths for shells that don't emit OSC 7, e.g. zsh).
 // Writes the path into `buf` and returns its length, or -1 on failure.
-int32_t phantty_macos_proc_cwd(int32_t pid, char *buf, int32_t buf_len) {
+int32_t wispterm_macos_proc_cwd(int32_t pid, char *buf, int32_t buf_len) {
     if (pid <= 0 || buf == NULL || buf_len <= 0) return -1;
     struct proc_vnodepathinfo vpi;
     const int ret = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &vpi, sizeof(vpi));
@@ -22,7 +22,7 @@ int32_t phantty_macos_proc_cwd(int32_t pid, char *buf, int32_t buf_len) {
     return (int32_t)len;
 }
 
-__attribute__((weak)) bool phantty_macos_window_post_message(void *handle, uint32_t message, uintptr_t wparam, intptr_t lparam) {
+__attribute__((weak)) bool wispterm_macos_window_post_message(void *handle, uint32_t message, uintptr_t wparam, intptr_t lparam) {
     (void)handle;
     (void)message;
     (void)wparam;
@@ -30,20 +30,20 @@ __attribute__((weak)) bool phantty_macos_window_post_message(void *handle, uint3
     return false;
 }
 
-typedef struct PhanttyMacHotkeySlot {
+typedef struct WispTermMacHotkeySlot {
     int32_t id;
     void *window_handle;
     EventHotKeyRef ref;
-} PhanttyMacHotkeySlot;
+} WispTermMacHotkeySlot;
 
-static const OSType phantty_macos_hotkey_signature = 'PhTY';
-static const uint32_t phantty_macos_hotkey_message = 0x0312;
-static PhanttyMacHotkeySlot phantty_macos_hotkey_slots[32];
-static EventHandlerRef phantty_macos_hotkey_handler_ref = NULL;
+static const OSType wispterm_macos_hotkey_signature = 'PhTY';
+static const uint32_t wispterm_macos_hotkey_message = 0x0312;
+static WispTermMacHotkeySlot wispterm_macos_hotkey_slots[32];
+static EventHandlerRef wispterm_macos_hotkey_handler_ref = NULL;
 
-void phantty_macos_global_hotkey_unregister(void *window_handle, int32_t id);
+void wispterm_macos_global_hotkey_unregister(void *window_handle, int32_t id);
 
-static char *phantty_macos_copy_nsstring(NSString *string) {
+static char *wispterm_macos_copy_nsstring(NSString *string) {
     if (string == nil) return NULL;
     const char *utf8 = [string UTF8String];
     if (utf8 == NULL) return NULL;
@@ -54,11 +54,11 @@ static char *phantty_macos_copy_nsstring(NSString *string) {
     return out;
 }
 
-void phantty_macos_services_free(void *ptr) {
+void wispterm_macos_services_free(void *ptr) {
     free(ptr);
 }
 
-bool phantty_macos_clipboard_write_text(const char *text) {
+bool wispterm_macos_clipboard_write_text(const char *text) {
     @autoreleasepool {
         if (text == NULL) return false;
         NSString *string = [NSString stringWithUTF8String:text];
@@ -69,14 +69,14 @@ bool phantty_macos_clipboard_write_text(const char *text) {
     }
 }
 
-char *phantty_macos_clipboard_copy_text(void) {
+char *wispterm_macos_clipboard_copy_text(void) {
     @autoreleasepool {
         NSString *string = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
-        return phantty_macos_copy_nsstring(string);
+        return wispterm_macos_copy_nsstring(string);
     }
 }
 
-void phantty_macos_cursor_set(uint32_t shape) {
+void wispterm_macos_cursor_set(uint32_t shape) {
     @autoreleasepool {
         switch (shape) {
             case 1: [[NSCursor IBeamCursor] set]; break;
@@ -88,18 +88,18 @@ void phantty_macos_cursor_set(uint32_t shape) {
     }
 }
 
-void phantty_macos_notification_bell(void) {
+void wispterm_macos_notification_bell(void) {
     NSBeep();
 }
 
-void phantty_macos_notification_request_attention(void *window_handle) {
+void wispterm_macos_notification_request_attention(void *window_handle) {
     (void)window_handle;
     @autoreleasepool {
         [[NSApplication sharedApplication] requestUserAttention:NSInformationalRequest];
     }
 }
 
-bool phantty_macos_display_point_on_any_screen(int32_t x, int32_t y) {
+bool wispterm_macos_display_point_on_any_screen(int32_t x, int32_t y) {
     @autoreleasepool {
         NSPoint point = NSMakePoint(x, y);
         for (NSScreen *screen in [NSScreen screens]) {
@@ -109,7 +109,7 @@ bool phantty_macos_display_point_on_any_screen(int32_t x, int32_t y) {
     }
 }
 
-int32_t phantty_macos_text_case_insensitive_equal(const char *a, const char *b) {
+int32_t wispterm_macos_text_case_insensitive_equal(const char *a, const char *b) {
     @autoreleasepool {
         if (a == NULL || b == NULL) return -1;
         NSString *lhs = [NSString stringWithUTF8String:a];
@@ -119,7 +119,7 @@ int32_t phantty_macos_text_case_insensitive_equal(const char *a, const char *b) 
     }
 }
 
-bool phantty_macos_workspace_open_url(const char *url) {
+bool wispterm_macos_workspace_open_url(const char *url) {
     @autoreleasepool {
         if (url == NULL) return false;
         NSString *string = [NSString stringWithUTF8String:url];
@@ -130,7 +130,7 @@ bool phantty_macos_workspace_open_url(const char *url) {
     }
 }
 
-bool phantty_macos_workspace_open_path(const char *path, bool reveal) {
+bool wispterm_macos_workspace_open_path(const char *path, bool reveal) {
     @autoreleasepool {
         if (path == NULL) return false;
         NSString *string = [NSString stringWithUTF8String:path];
@@ -145,7 +145,7 @@ bool phantty_macos_workspace_open_path(const char *path, bool reveal) {
     }
 }
 
-static uint32_t phantty_macos_carbon_modifiers(uint32_t modifiers) {
+static uint32_t wispterm_macos_carbon_modifiers(uint32_t modifiers) {
     uint32_t out = 0;
     if ((modifiers & 0x0001) != 0) out |= optionKey;
     if ((modifiers & 0x0002) != 0) out |= controlKey;
@@ -154,7 +154,7 @@ static uint32_t phantty_macos_carbon_modifiers(uint32_t modifiers) {
     return out;
 }
 
-static bool phantty_macos_carbon_key_code(uint32_t key_code, UInt32 *out) {
+static bool wispterm_macos_carbon_key_code(uint32_t key_code, UInt32 *out) {
     if (out == NULL) return false;
 
     switch (key_code) {
@@ -232,31 +232,31 @@ static bool phantty_macos_carbon_key_code(uint32_t key_code, UInt32 *out) {
     return false;
 }
 
-bool phantty_macos_global_hotkey_translate(uint32_t modifiers, uint32_t key_code, uint32_t *out_modifiers, uint32_t *out_key_code) {
+bool wispterm_macos_global_hotkey_translate(uint32_t modifiers, uint32_t key_code, uint32_t *out_modifiers, uint32_t *out_key_code) {
     UInt32 carbon_key = 0;
-    if (!phantty_macos_carbon_key_code(key_code, &carbon_key)) return false;
-    if (out_modifiers != NULL) *out_modifiers = phantty_macos_carbon_modifiers(modifiers);
+    if (!wispterm_macos_carbon_key_code(key_code, &carbon_key)) return false;
+    if (out_modifiers != NULL) *out_modifiers = wispterm_macos_carbon_modifiers(modifiers);
     if (out_key_code != NULL) *out_key_code = carbon_key;
     return true;
 }
 
-static PhanttyMacHotkeySlot *phantty_macos_hotkey_slot_for_id(int32_t id) {
-    for (size_t i = 0; i < sizeof(phantty_macos_hotkey_slots) / sizeof(phantty_macos_hotkey_slots[0]); i++) {
-        if (phantty_macos_hotkey_slots[i].ref != NULL && phantty_macos_hotkey_slots[i].id == id) {
-            return &phantty_macos_hotkey_slots[i];
+static WispTermMacHotkeySlot *wispterm_macos_hotkey_slot_for_id(int32_t id) {
+    for (size_t i = 0; i < sizeof(wispterm_macos_hotkey_slots) / sizeof(wispterm_macos_hotkey_slots[0]); i++) {
+        if (wispterm_macos_hotkey_slots[i].ref != NULL && wispterm_macos_hotkey_slots[i].id == id) {
+            return &wispterm_macos_hotkey_slots[i];
         }
     }
     return NULL;
 }
 
-static PhanttyMacHotkeySlot *phantty_macos_empty_hotkey_slot(void) {
-    for (size_t i = 0; i < sizeof(phantty_macos_hotkey_slots) / sizeof(phantty_macos_hotkey_slots[0]); i++) {
-        if (phantty_macos_hotkey_slots[i].ref == NULL) return &phantty_macos_hotkey_slots[i];
+static WispTermMacHotkeySlot *wispterm_macos_empty_hotkey_slot(void) {
+    for (size_t i = 0; i < sizeof(wispterm_macos_hotkey_slots) / sizeof(wispterm_macos_hotkey_slots[0]); i++) {
+        if (wispterm_macos_hotkey_slots[i].ref == NULL) return &wispterm_macos_hotkey_slots[i];
     }
     return NULL;
 }
 
-static OSStatus phantty_macos_hotkey_handler(EventHandlerCallRef next_handler, EventRef event, void *context) {
+static OSStatus wispterm_macos_hotkey_handler(EventHandlerCallRef next_handler, EventRef event, void *context) {
     (void)next_handler;
     (void)context;
 
@@ -270,15 +270,15 @@ static OSStatus phantty_macos_hotkey_handler(EventHandlerCallRef next_handler, E
         NULL,
         &hotkey_id
     );
-    if (status != noErr || hotkey_id.signature != phantty_macos_hotkey_signature) return eventNotHandledErr;
+    if (status != noErr || hotkey_id.signature != wispterm_macos_hotkey_signature) return eventNotHandledErr;
 
-    PhanttyMacHotkeySlot *slot = phantty_macos_hotkey_slot_for_id((int32_t)hotkey_id.id);
+    WispTermMacHotkeySlot *slot = wispterm_macos_hotkey_slot_for_id((int32_t)hotkey_id.id);
     if (slot == NULL) return eventNotHandledErr;
 
-    if (phantty_macos_window_post_message != NULL && slot->window_handle != NULL) {
-        phantty_macos_window_post_message(
+    if (wispterm_macos_window_post_message != NULL && slot->window_handle != NULL) {
+        wispterm_macos_window_post_message(
             slot->window_handle,
-            phantty_macos_hotkey_message,
+            wispterm_macos_hotkey_message,
             (uintptr_t)slot->id,
             0
         );
@@ -286,21 +286,21 @@ static OSStatus phantty_macos_hotkey_handler(EventHandlerCallRef next_handler, E
     return noErr;
 }
 
-static bool phantty_macos_install_hotkey_handler(void) {
-    if (phantty_macos_hotkey_handler_ref != NULL) return true;
+static bool wispterm_macos_install_hotkey_handler(void) {
+    if (wispterm_macos_hotkey_handler_ref != NULL) return true;
 
     EventTypeSpec event_type = { .eventClass = kEventClassKeyboard, .eventKind = kEventHotKeyPressed };
     OSStatus status = InstallApplicationEventHandler(
-        &phantty_macos_hotkey_handler,
+        &wispterm_macos_hotkey_handler,
         1,
         &event_type,
         NULL,
-        &phantty_macos_hotkey_handler_ref
+        &wispterm_macos_hotkey_handler_ref
     );
     return status == noErr;
 }
 
-char *phantty_macos_open_file_dialog(const char *title) {
+char *wispterm_macos_open_file_dialog(const char *title) {
     @autoreleasepool {
         NSOpenPanel *panel = [NSOpenPanel openPanel];
         panel.canChooseFiles = YES;
@@ -308,11 +308,11 @@ char *phantty_macos_open_file_dialog(const char *title) {
         panel.allowsMultipleSelection = NO;
         if (title != NULL) panel.title = [NSString stringWithUTF8String:title];
         if ([panel runModal] != NSModalResponseOK) return NULL;
-        return phantty_macos_copy_nsstring(panel.URL.path);
+        return wispterm_macos_copy_nsstring(panel.URL.path);
     }
 }
 
-char *phantty_macos_save_file_dialog(const char *title, const char *initial_dir, const char *default_filename) {
+char *wispterm_macos_save_file_dialog(const char *title, const char *initial_dir, const char *default_filename) {
     @autoreleasepool {
         NSSavePanel *panel = [NSSavePanel savePanel];
         if (title != NULL) panel.title = [NSString stringWithUTF8String:title];
@@ -322,24 +322,24 @@ char *phantty_macos_save_file_dialog(const char *title, const char *initial_dir,
         }
         if (default_filename != NULL) panel.nameFieldStringValue = [NSString stringWithUTF8String:default_filename];
         if ([panel runModal] != NSModalResponseOK) return NULL;
-        return phantty_macos_copy_nsstring(panel.URL.path);
+        return wispterm_macos_copy_nsstring(panel.URL.path);
     }
 }
 
-bool phantty_macos_global_hotkey_register(void *window_handle, int32_t id, uint32_t modifiers, uint32_t key_code) {
+bool wispterm_macos_global_hotkey_register(void *window_handle, int32_t id, uint32_t modifiers, uint32_t key_code) {
     @autoreleasepool {
         if (window_handle == NULL) return false;
         UInt32 carbon_modifiers = 0;
         UInt32 carbon_key = 0;
-        if (!phantty_macos_global_hotkey_translate(modifiers, key_code, &carbon_modifiers, &carbon_key)) return false;
-        if (!phantty_macos_install_hotkey_handler()) return false;
+        if (!wispterm_macos_global_hotkey_translate(modifiers, key_code, &carbon_modifiers, &carbon_key)) return false;
+        if (!wispterm_macos_install_hotkey_handler()) return false;
 
-        phantty_macos_global_hotkey_unregister(window_handle, id);
-        PhanttyMacHotkeySlot *slot = phantty_macos_empty_hotkey_slot();
+        wispterm_macos_global_hotkey_unregister(window_handle, id);
+        WispTermMacHotkeySlot *slot = wispterm_macos_empty_hotkey_slot();
         if (slot == NULL) return false;
 
         EventHotKeyID hotkey_id = {
-            .signature = phantty_macos_hotkey_signature,
+            .signature = wispterm_macos_hotkey_signature,
             .id = (UInt32)id,
         };
         EventHotKeyRef ref = NULL;
@@ -360,9 +360,9 @@ bool phantty_macos_global_hotkey_register(void *window_handle, int32_t id, uint3
     }
 }
 
-void phantty_macos_global_hotkey_unregister(void *window_handle, int32_t id) {
+void wispterm_macos_global_hotkey_unregister(void *window_handle, int32_t id) {
     (void)window_handle;
-    PhanttyMacHotkeySlot *slot = phantty_macos_hotkey_slot_for_id(id);
+    WispTermMacHotkeySlot *slot = wispterm_macos_hotkey_slot_for_id(id);
     if (slot == NULL) return;
     UnregisterEventHotKey(slot->ref);
     slot->id = 0;

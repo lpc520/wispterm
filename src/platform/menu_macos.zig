@@ -1,6 +1,6 @@
 //! macOS NSMenu implementation behind `platform/menu.zig`.
 //!
-//! Builds a Phantty main menu (Phantty / File / Edit / View / Window) by
+//! Builds a WispTerm main menu (WispTerm / File / Edit / View / Window) by
 //! driving the ObjC bridge with structured calls. Each user-facing menu item
 //! carries an action id derived from `keybind.Action`'s integer index so the
 //! callback can re-enter the standard action dispatcher and reuse the exact
@@ -10,7 +10,7 @@ const std = @import("std");
 const keybind = @import("../keybind.zig");
 const menu = @import("menu.zig");
 
-// Modifier bitmask values must mirror the PHANTTY_MAC_MENU_MOD_* constants in
+// Modifier bitmask values must mirror the WISPTERM_MAC_MENU_MOD_* constants in
 // the ObjC bridge.
 pub const ModCmd: u32 = 1 << 0;
 pub const ModShift: u32 = 1 << 1;
@@ -27,28 +27,28 @@ pub const SystemAction = enum(i32) {
 
 const CCallback = *const fn (action_id: i32) callconv(.c) void;
 
-extern fn phantty_macos_menu_install(callback: CCallback) void;
-extern fn phantty_macos_menu_begin() void;
-extern fn phantty_macos_menu_begin_submenu(title: [*:0]const u8) void;
-extern fn phantty_macos_menu_add_item(
+extern fn wispterm_macos_menu_install(callback: CCallback) void;
+extern fn wispterm_macos_menu_begin() void;
+extern fn wispterm_macos_menu_begin_submenu(title: [*:0]const u8) void;
+extern fn wispterm_macos_menu_add_item(
     title: [*:0]const u8,
     action_id: i32,
     key_equivalent: [*:0]const u8,
     modifier_mask: u32,
 ) void;
-extern fn phantty_macos_menu_add_separator() void;
-extern fn phantty_macos_menu_end_submenu() void;
-extern fn phantty_macos_menu_finalize() void;
-extern fn phantty_macos_menu_is_installed() bool;
+extern fn wispterm_macos_menu_add_separator() void;
+extern fn wispterm_macos_menu_end_submenu() void;
+extern fn wispterm_macos_menu_finalize() void;
+extern fn wispterm_macos_menu_is_installed() bool;
 
 // Test-only inspection functions exposed by the bridge.
-pub extern fn phantty_macos_menu_top_level_count_for_test() i32;
-pub extern fn phantty_macos_menu_item_count_for_test(menu_index: i32) i32;
-pub extern fn phantty_macos_menu_item_action_for_test(menu_index: i32, item_index: i32) i32;
-pub extern fn phantty_macos_menu_item_title_for_test(menu_index: i32, item_index: i32) ?[*:0]const u8;
-pub extern fn phantty_macos_menu_item_modifier_for_test(menu_index: i32, item_index: i32) u32;
-pub extern fn phantty_macos_menu_item_key_equivalent_for_test(menu_index: i32, item_index: i32) ?[*:0]const u8;
-pub extern fn phantty_macos_menu_invoke_for_test(menu_index: i32, item_index: i32) void;
+pub extern fn wispterm_macos_menu_top_level_count_for_test() i32;
+pub extern fn wispterm_macos_menu_item_count_for_test(menu_index: i32) i32;
+pub extern fn wispterm_macos_menu_item_action_for_test(menu_index: i32, item_index: i32) i32;
+pub extern fn wispterm_macos_menu_item_title_for_test(menu_index: i32, item_index: i32) ?[*:0]const u8;
+pub extern fn wispterm_macos_menu_item_modifier_for_test(menu_index: i32, item_index: i32) u32;
+pub extern fn wispterm_macos_menu_item_key_equivalent_for_test(menu_index: i32, item_index: i32) ?[*:0]const u8;
+pub extern fn wispterm_macos_menu_invoke_for_test(menu_index: i32, item_index: i32) void;
 
 var g_handler: ?menu.ActionHandler = null;
 
@@ -59,12 +59,12 @@ fn onCAction(action_id: i32) callconv(.c) void {
 
 pub fn install(handler: menu.ActionHandler) void {
     g_handler = handler;
-    phantty_macos_menu_install(onCAction);
+    wispterm_macos_menu_install(onCAction);
     buildDefaultMenu();
 }
 
 pub fn isInstalled() bool {
-    return phantty_macos_menu_is_installed();
+    return wispterm_macos_menu_is_installed();
 }
 
 pub fn actionFromId(action_id: i32) ?keybind.Action {
@@ -79,62 +79,62 @@ inline fn id(action: keybind.Action) i32 {
 }
 
 fn buildDefaultMenu() void {
-    phantty_macos_menu_begin();
+    wispterm_macos_menu_begin();
 
-    // Phantty (application) menu.
-    phantty_macos_menu_begin_submenu("Phantty");
-    phantty_macos_menu_add_item("About Phantty", @intFromEnum(SystemAction.about), "", 0);
-    phantty_macos_menu_add_separator();
-    phantty_macos_menu_add_item("Settings…", id(.open_config), ",", ModCmd);
-    phantty_macos_menu_add_separator();
-    phantty_macos_menu_add_item("Hide Phantty", @intFromEnum(SystemAction.hide), "h", ModCmd);
-    phantty_macos_menu_add_item("Hide Others", @intFromEnum(SystemAction.hide_others), "h", ModCmd | ModOpt);
-    phantty_macos_menu_add_item("Show All", @intFromEnum(SystemAction.show_all), "", 0);
-    phantty_macos_menu_add_separator();
-    phantty_macos_menu_add_item("Quit Phantty", @intFromEnum(SystemAction.quit), "q", ModCmd);
-    phantty_macos_menu_end_submenu();
+    // WispTerm (application) menu.
+    wispterm_macos_menu_begin_submenu("WispTerm");
+    wispterm_macos_menu_add_item("About WispTerm", @intFromEnum(SystemAction.about), "", 0);
+    wispterm_macos_menu_add_separator();
+    wispterm_macos_menu_add_item("Settings…", id(.open_config), ",", ModCmd);
+    wispterm_macos_menu_add_separator();
+    wispterm_macos_menu_add_item("Hide WispTerm", @intFromEnum(SystemAction.hide), "h", ModCmd);
+    wispterm_macos_menu_add_item("Hide Others", @intFromEnum(SystemAction.hide_others), "h", ModCmd | ModOpt);
+    wispterm_macos_menu_add_item("Show All", @intFromEnum(SystemAction.show_all), "", 0);
+    wispterm_macos_menu_add_separator();
+    wispterm_macos_menu_add_item("Quit WispTerm", @intFromEnum(SystemAction.quit), "q", ModCmd);
+    wispterm_macos_menu_end_submenu();
 
     // File.
-    phantty_macos_menu_begin_submenu("File");
-    phantty_macos_menu_add_item("New Tab", id(.new_session), "t", ModCtrl | ModShift);
-    phantty_macos_menu_add_item("New Window", id(.new_window), "n", ModCtrl | ModShift);
-    phantty_macos_menu_add_item("Split Right", id(.split_right), "o", ModCtrl | ModShift);
-    phantty_macos_menu_add_separator();
-    phantty_macos_menu_add_item("Close Tab", id(.close_panel_or_tab), "w", ModCtrl | ModShift);
-    phantty_macos_menu_end_submenu();
+    wispterm_macos_menu_begin_submenu("File");
+    wispterm_macos_menu_add_item("New Tab", id(.new_session), "t", ModCtrl | ModShift);
+    wispterm_macos_menu_add_item("New Window", id(.new_window), "n", ModCtrl | ModShift);
+    wispterm_macos_menu_add_item("Split Right", id(.split_right), "o", ModCtrl | ModShift);
+    wispterm_macos_menu_add_separator();
+    wispterm_macos_menu_add_item("Close Tab", id(.close_panel_or_tab), "w", ModCtrl | ModShift);
+    wispterm_macos_menu_end_submenu();
 
     // Edit.
-    phantty_macos_menu_begin_submenu("Edit");
-    phantty_macos_menu_add_item("Copy", id(.copy), "c", ModCtrl | ModShift);
-    phantty_macos_menu_add_item("Paste", id(.paste), "v", ModCtrl);
-    phantty_macos_menu_add_item("Paste Image", id(.paste_image), "v", ModCtrl | ModShift);
-    phantty_macos_menu_end_submenu();
+    wispterm_macos_menu_begin_submenu("Edit");
+    wispterm_macos_menu_add_item("Copy", id(.copy), "c", ModCtrl | ModShift);
+    wispterm_macos_menu_add_item("Paste", id(.paste), "v", ModCtrl);
+    wispterm_macos_menu_add_item("Paste Image", id(.paste_image), "v", ModCtrl | ModShift);
+    wispterm_macos_menu_end_submenu();
 
     // View.
-    phantty_macos_menu_begin_submenu("View");
-    phantty_macos_menu_add_item("Open Command Center", id(.toggle_command_palette), "p", ModCtrl | ModShift);
-    phantty_macos_menu_add_separator();
-    phantty_macos_menu_add_item("Toggle Tab Sidebar", id(.toggle_sidebar), "b", ModCtrl | ModShift);
-    phantty_macos_menu_add_item("Toggle File Explorer", id(.toggle_file_explorer), "e", ModCtrl | ModShift | ModOpt);
-    phantty_macos_menu_add_separator();
-    phantty_macos_menu_add_item("Increase Font Size", id(.font_size_increase), "+", ModCtrl);
-    phantty_macos_menu_add_item("Decrease Font Size", id(.font_size_decrease), "-", ModCtrl);
-    phantty_macos_menu_end_submenu();
+    wispterm_macos_menu_begin_submenu("View");
+    wispterm_macos_menu_add_item("Open Command Center", id(.toggle_command_palette), "p", ModCtrl | ModShift);
+    wispterm_macos_menu_add_separator();
+    wispterm_macos_menu_add_item("Toggle Tab Sidebar", id(.toggle_sidebar), "b", ModCtrl | ModShift);
+    wispterm_macos_menu_add_item("Toggle File Explorer", id(.toggle_file_explorer), "e", ModCtrl | ModShift | ModOpt);
+    wispterm_macos_menu_add_separator();
+    wispterm_macos_menu_add_item("Increase Font Size", id(.font_size_increase), "+", ModCtrl);
+    wispterm_macos_menu_add_item("Decrease Font Size", id(.font_size_decrease), "-", ModCtrl);
+    wispterm_macos_menu_end_submenu();
 
     // Window.
-    phantty_macos_menu_begin_submenu("Window");
-    phantty_macos_menu_add_item("Toggle Maximize", id(.toggle_maximize), "\r", ModOpt);
-    phantty_macos_menu_add_separator();
-    phantty_macos_menu_add_item("Next Tab", id(.next_tab), "\t", ModCtrl);
-    phantty_macos_menu_add_item("Previous Tab", id(.previous_tab), "\t", ModCtrl | ModShift);
-    phantty_macos_menu_add_separator();
-    phantty_macos_menu_add_item("Equalize Splits", id(.equalize_splits), "z", ModCtrl | ModShift);
-    phantty_macos_menu_end_submenu();
+    wispterm_macos_menu_begin_submenu("Window");
+    wispterm_macos_menu_add_item("Toggle Maximize", id(.toggle_maximize), "\r", ModOpt);
+    wispterm_macos_menu_add_separator();
+    wispterm_macos_menu_add_item("Next Tab", id(.next_tab), "\t", ModCtrl);
+    wispterm_macos_menu_add_item("Previous Tab", id(.previous_tab), "\t", ModCtrl | ModShift);
+    wispterm_macos_menu_add_separator();
+    wispterm_macos_menu_add_item("Equalize Splits", id(.equalize_splits), "z", ModCtrl | ModShift);
+    wispterm_macos_menu_end_submenu();
 
-    phantty_macos_menu_finalize();
+    wispterm_macos_menu_finalize();
 }
 
-test "menu_macos: actionFromId round-trips known Phantty actions" {
+test "menu_macos: actionFromId round-trips known WispTerm actions" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const expected = keybind.Action.toggle_command_palette;
     const action_id: i32 = @intCast(@intFromEnum(expected));

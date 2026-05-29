@@ -1,4 +1,4 @@
-//! Native Win32 windowing backend for Phantty.
+//! Native Win32 windowing backend for WispTerm.
 //!
 //! Replaces GLFW with direct Win32 API calls for window creation,
 //! input handling, and message loop. Uses WGL for OpenGL context
@@ -836,7 +836,7 @@ pub const Window = struct {
     ime_caret_y: i32 = TITLEBAR_HEIGHT + 10,
     ime_caret_height: i32 = 20,
     /// UTF-8 preedit text currently owned by the IME composition session.
-    /// Phantty renders this inline, so Windows' default white composition
+    /// WispTerm renders this inline, so Windows' default white composition
     /// popup is hidden.
     ime_preedit_buf: [1024]u8 = undefined,
     ime_preedit_len: usize = 0,
@@ -908,8 +908,8 @@ pub const Window = struct {
         const physical_height = scaleFrom96(height, initial_dpi);
 
         // --- Step 1: Register window classes ---
-        const dummy_class = std.unicode.utf8ToUtf16LeStringLiteral("PhanttyDummyClass");
-        const real_class = std.unicode.utf8ToUtf16LeStringLiteral("PhanttyWindowClass");
+        const dummy_class = std.unicode.utf8ToUtf16LeStringLiteral("WispTermDummyClass");
+        const real_class = std.unicode.utf8ToUtf16LeStringLiteral("WispTermWindowClass");
 
         const dummy_wc = WNDCLASSEXW{
             .style = CS_OWNDC,
@@ -919,7 +919,7 @@ pub const Window = struct {
         };
         _ = RegisterClassExW(&dummy_wc);
 
-        // Load application icon from embedded resource (resource ID 1, set in phantty.rc).
+        // Load application icon from embedded resource (resource ID 1, set in wispterm.rc).
         // MAKEINTRESOURCE(1) = 1, IMAGE_ICON = 1, LR_SHARED = 0x8000
         const IMAGE_ICON: UINT = 1;
         const LR_SHARED: UINT = 0x8000;

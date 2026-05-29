@@ -1,6 +1,6 @@
 # Skill loading eval suite
 
-Fixed filesystem fixtures for Phantty's explicit skill loader. This suite does
+Fixed filesystem fixtures for WispTerm's explicit skill loader. This suite does
 not call an LLM: `$skill` routing is deterministic, so the regression target is
 whether `SKILL.md` files are discovered, matched by name or directory, and
 rendered into stable replayable snapshots.
@@ -46,7 +46,7 @@ The default browser/web skill fixture is inspired by
 design, especially its real-browser session model, compact HTML observation
 flow, JS execution loop, and CDP bridge notes in `TMWebDriver.py`,
 `simphtml.py`, `assets/tmwd_cdp_bridge/`, and `memory/tmwebdriver_sop.md`.
-Phantty adapts those ideas as skill guidance plus small Phantty-authored
+WispTerm adapts those ideas as skill guidance plus small WispTerm-authored
 JavaScript snippets; the fixture does not vendor GenericAgent code or add a
 GenericAgent-compatible browser driver.
 

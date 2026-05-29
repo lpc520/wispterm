@@ -34,7 +34,7 @@ pub fn openTextFile(allocator: std.mem.Allocator, request: Request) bool {
 }
 
 test "platform editor selects a detached text editor command per OS" {
-    const path = "C:/Users/alice/AppData/Roaming/phantty/config";
+    const path = "C:/Users/alice/AppData/Roaming/wispterm/config";
 
     const windows = commandForTextFile(.windows, path).?;
     try std.testing.expectEqual(@as(usize, 2), windows.len);

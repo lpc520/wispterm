@@ -35,9 +35,9 @@ pub const Error = error{
 
 pub threadlocal var handles: Handles = .{};
 
-extern fn phantty_metal_context_init(layer: ?*anyopaque, out: *Handles, error_buf: [*]u8, error_buf_len: usize) bool;
-extern fn phantty_metal_context_deinit(ctx: *Handles) void;
-extern fn phantty_metal_context_is_usable(ctx: *const Handles) bool;
+extern fn wispterm_metal_context_init(layer: ?*anyopaque, out: *Handles, error_buf: [*]u8, error_buf_len: usize) bool;
+extern fn wispterm_metal_context_deinit(ctx: *Handles) void;
+extern fn wispterm_metal_context_is_usable(ctx: *const Handles) bool;
 
 /// Bring up the Metal context.
 /// The `loader` parameter is the macOS surface seam (today typed as the OpenGL
@@ -54,7 +54,7 @@ pub fn initWithLayer(layer: ?*anyopaque) !void {
     if (isInitialized()) deinit();
 
     var error_buf: [256]u8 = @splat(0);
-    if (!phantty_metal_context_init(layer, &handles, &error_buf, error_buf.len)) {
+    if (!wispterm_metal_context_init(layer, &handles, &error_buf, error_buf.len)) {
         const end = std.mem.indexOfScalar(u8, &error_buf, 0) orelse error_buf.len;
         std.debug.print("Metal context init failed: {s}\n", .{error_buf[0..end]});
         return Error.MetalContextInitFailed;
@@ -63,11 +63,11 @@ pub fn initWithLayer(layer: ?*anyopaque) !void {
 
 pub fn deinit() void {
     if (!isInitialized()) return;
-    phantty_metal_context_deinit(&handles);
+    wispterm_metal_context_deinit(&handles);
 }
 
 pub fn isInitialized() bool {
-    return phantty_metal_context_is_usable(&handles);
+    return wispterm_metal_context_is_usable(&handles);
 }
 
 pub fn deviceHandle() ?*anyopaque {

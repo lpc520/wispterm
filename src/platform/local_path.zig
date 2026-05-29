@@ -294,24 +294,24 @@ test "platform local path basename and parents follow target separator rules" {
 }
 
 test "platform local path recognizes absolute install paths" {
-    try std.testing.expect(isAbsoluteInstallPath("C:\\Apps\\Phantty"));
+    try std.testing.expect(isAbsoluteInstallPath("C:\\Apps\\WispTerm"));
     try std.testing.expect(isAbsoluteInstallPath("\\\\server\\share\\App"));
-    try std.testing.expect(isAbsoluteInstallPath("\\\\?\\C:\\Apps\\Phantty"));
+    try std.testing.expect(isAbsoluteInstallPath("\\\\?\\C:\\Apps\\WispTerm"));
     try std.testing.expect(isAbsoluteInstallPath("/usr/local/bin"));
     try std.testing.expect(!isAbsoluteInstallPath("relative/path"));
 }
 
 test "platform local path compares absolute paths with platform-compatible rules" {
-    try std.testing.expect(absolutePathEqual("C:\\Apps\\Phantty", "c:\\apps\\phantty\\"));
-    try std.testing.expect(absolutePathEqual("D:/Tools/Phantty/", "d:/tools/phantty"));
+    try std.testing.expect(absolutePathEqual("C:\\Apps\\WispTerm", "c:\\apps\\wispterm\\"));
+    try std.testing.expect(absolutePathEqual("D:/Tools/WispTerm/", "d:/tools/wispterm"));
     try std.testing.expect(absolutePathEqual("C:\\Apps\\Ångström", "c:\\apps\\ångström\\"));
-    try std.testing.expect(absolutePathEqual("\\\\Server\\Share\\Apps\\Phantty", "\\\\server\\share\\apps\\phantty\\"));
-    try std.testing.expect(absolutePathEqual("//Server/Share/Apps/Phantty", "\\\\server\\share\\apps\\phantty"));
+    try std.testing.expect(absolutePathEqual("\\\\Server\\Share\\Apps\\WispTerm", "\\\\server\\share\\apps\\wispterm\\"));
+    try std.testing.expect(absolutePathEqual("//Server/Share/Apps/WispTerm", "\\\\server\\share\\apps\\wispterm"));
     try std.testing.expect(absolutePathEqual("\\\\server\\share", "\\\\SERVER\\SHARE\\"));
-    try std.testing.expect(absolutePathEqual("\\\\?\\C:\\Apps\\Phantty", "C:\\Apps\\Phantty"));
-    try std.testing.expect(absolutePathEqual("\\\\?\\C:\\Apps\\Phantty", "\\\\?\\c:\\apps\\phantty\\"));
+    try std.testing.expect(absolutePathEqual("\\\\?\\C:\\Apps\\WispTerm", "C:\\Apps\\WispTerm"));
+    try std.testing.expect(absolutePathEqual("\\\\?\\C:\\Apps\\WispTerm", "\\\\?\\c:\\apps\\wispterm\\"));
     try std.testing.expect(absolutePathEqual("\\\\?\\UNC\\Server\\Share\\App", "\\\\server\\share\\App"));
     try std.testing.expect(absolutePathEqual("\\\\?\\UNC\\server\\share", "\\\\server\\share\\"));
-    try std.testing.expect(absolutePathEqual("/opt/phantty/", "/opt/phantty"));
-    try std.testing.expect(!absolutePathEqual("/opt/phantty", "/opt/other"));
+    try std.testing.expect(absolutePathEqual("/opt/wispterm/", "/opt/wispterm"));
+    try std.testing.expect(!absolutePathEqual("/opt/wispterm", "/opt/other"));
 }

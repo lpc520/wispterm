@@ -1,6 +1,6 @@
 const std = @import("std");
 
-extern fn phantty_macos_text_case_insensitive_equal(a: [*:0]const u8, b: [*:0]const u8) i32;
+extern fn wispterm_macos_text_case_insensitive_equal(a: [*:0]const u8, b: [*:0]const u8) i32;
 
 pub fn nativeOrdinalIgnoreCaseUtf8Equal(a: []const u8, b: []const u8) ?bool {
     var a_buf: [4096:0]u8 = undefined;
@@ -10,7 +10,7 @@ pub fn nativeOrdinalIgnoreCaseUtf8Equal(a: []const u8, b: []const u8) ?bool {
     @memcpy(b_buf[0..b.len], b);
     a_buf[a.len] = 0;
     b_buf[b.len] = 0;
-    return switch (phantty_macos_text_case_insensitive_equal(&a_buf, &b_buf)) {
+    return switch (wispterm_macos_text_case_insensitive_equal(&a_buf, &b_buf)) {
         1 => true,
         0 => false,
         else => null,

@@ -141,7 +141,7 @@ pub fn connect(allocator: std.mem.Allocator, endpoint: Endpoint) !Handles {
     var handles: Handles = .{};
     errdefer handles.close();
 
-    const agent = std.unicode.utf8ToUtf16LeStringLiteral("Phantty Remote");
+    const agent = std.unicode.utf8ToUtf16LeStringLiteral("WispTerm Remote");
     handles.session = WinHttpOpen(agent, winhttp_access_type_default_proxy, null, null, 0) orelse return error.WinHttpOpenFailed;
 
     const host_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, endpoint.host);

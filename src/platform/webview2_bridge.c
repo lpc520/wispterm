@@ -145,31 +145,31 @@ struct ICoreWebView2CreateCoreWebView2ControllerCompletedHandler {
     const ICoreWebView2CreateCoreWebView2ControllerCompletedHandlerVtbl *lpVtbl;
 };
 
-typedef struct PhanttyWebView2Browser PhanttyWebView2Browser;
+typedef struct WispTermWebView2Browser WispTermWebView2Browser;
 
 typedef struct EnvCompletedHandler {
     ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler iface;
     LONG refs;
-    PhanttyWebView2Browser *browser;
+    WispTermWebView2Browser *browser;
 } EnvCompletedHandler;
 
 typedef struct ControllerCompletedHandler {
     ICoreWebView2CreateCoreWebView2ControllerCompletedHandler iface;
     LONG refs;
-    PhanttyWebView2Browser *browser;
+    WispTermWebView2Browser *browser;
 } ControllerCompletedHandler;
 
 typedef struct AcceleratorKeyPressedHandler {
     ICoreWebView2AcceleratorKeyPressedEventHandler iface;
     LONG refs;
-    PhanttyWebView2Browser *browser;
+    WispTermWebView2Browser *browser;
 } AcceleratorKeyPressedHandler;
 
 typedef struct EventRegistrationToken {
     int64_t value;
 } EventRegistrationToken;
 
-struct PhanttyWebView2Browser {
+struct WispTermWebView2Browser {
     LONG refs;
     HWND parent;
     RECT bounds;
@@ -191,9 +191,9 @@ struct PhanttyWebView2Browser {
     WCHAR pending_url[2048];
 };
 
-static void browser_release(PhanttyWebView2Browser *browser);
+static void browser_release(WispTermWebView2Browser *browser);
 
-static void browser_add_ref(PhanttyWebView2Browser *browser) {
+static void browser_add_ref(WispTermWebView2Browser *browser) {
     if (browser) InterlockedIncrement(&browser->refs);
 }
 
@@ -233,7 +233,7 @@ static ULONG STDMETHODCALLTYPE env_AddRef(ICoreWebView2CreateCoreWebView2Environ
 static ULONG STDMETHODCALLTYPE env_Release(ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *This) {
     EnvCompletedHandler *handler = (EnvCompletedHandler *)This;
     LONG refs = InterlockedDecrement(&handler->refs);
-    PhanttyWebView2Browser *browser = handler->browser;
+    WispTermWebView2Browser *browser = handler->browser;
     if (refs == 1 && browser && browser->env_async_pending) {
         browser->env_async_pending = FALSE;
         browser_release(browser);
@@ -259,7 +259,7 @@ static ULONG STDMETHODCALLTYPE controller_AddRef(ICoreWebView2CreateCoreWebView2
 static ULONG STDMETHODCALLTYPE controller_Release(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *This) {
     ControllerCompletedHandler *handler = (ControllerCompletedHandler *)This;
     LONG refs = InterlockedDecrement(&handler->refs);
-    PhanttyWebView2Browser *browser = handler->browser;
+    WispTermWebView2Browser *browser = handler->browser;
     if (refs == 1 && browser && browser->controller_async_pending) {
         browser->controller_async_pending = FALSE;
         browser_release(browser);
@@ -411,7 +411,7 @@ static HMODULE load_loader(void) {
     return try_load_from_nuget();
 }
 
-int phantty_webview2_loader_available(void) {
+int wispterm_webview2_loader_available(void) {
     HMODULE loader = load_loader();
     if (!loader) return 0;
 
@@ -439,20 +439,20 @@ static void build_user_data_folder(WCHAR *buf, size_t len) {
     if (n == 0 || n >= MAX_PATH) return;
 
     WCHAR root[MAX_PATH];
-    if (wsprintfW(root, L"%s\\phantty", local_app_data) <= 0) return;
+    if (wsprintfW(root, L"%s\\wispterm", local_app_data) <= 0) return;
     CreateDirectoryW(root, NULL);
     wsprintfW(buf, L"%s\\webview2", root);
     CreateDirectoryW(buf, NULL);
 }
 
-static void browser_apply_bounds(PhanttyWebView2Browser *browser) {
+static void browser_apply_bounds(WispTermWebView2Browser *browser) {
     if (!browser || browser->closing || !browser->controller) return;
     browser->controller->lpVtbl->put_Bounds(browser->controller, browser->bounds);
     browser->controller->lpVtbl->put_IsVisible(browser->controller, browser->visible);
     browser->controller->lpVtbl->NotifyParentWindowPositionChanged(browser->controller);
 }
 
-static void browser_release_webview_resources(PhanttyWebView2Browser *browser) {
+static void browser_release_webview_resources(WispTermWebView2Browser *browser) {
     if (!browser) return;
     if (browser->controller) {
         if (browser->accelerator_registered) {
@@ -475,7 +475,7 @@ static void browser_release_webview_resources(PhanttyWebView2Browser *browser) {
     }
 }
 
-static void browser_release(PhanttyWebView2Browser *browser) {
+static void browser_release(WispTermWebView2Browser *browser) {
     if (!browser) return;
     if (InterlockedDecrement(&browser->refs) != 0) return;
 
@@ -497,7 +497,7 @@ static HRESULT STDMETHODCALLTYPE accelerator_Invoke(
     ICoreWebView2AcceleratorKeyPressedEventArgs *args) {
     (void)sender;
     AcceleratorKeyPressedHandler *handler = (AcceleratorKeyPressedHandler *)This;
-    PhanttyWebView2Browser *browser = handler->browser;
+    WispTermWebView2Browser *browser = handler->browser;
     if (!browser || browser->closing || !browser->parent || !args) return S_OK;
 
     int key_kind = 0;
@@ -525,7 +525,7 @@ static HRESULT STDMETHODCALLTYPE controller_Invoke(
     HRESULT errorCode,
     ICoreWebView2Controller *result) {
     ControllerCompletedHandler *handler = (ControllerCompletedHandler *)This;
-    PhanttyWebView2Browser *browser = handler->browser;
+    WispTermWebView2Browser *browser = handler->browser;
     if (!browser) return E_FAIL;
     browser->last_error = errorCode;
     if (browser->closing) {
@@ -560,7 +560,7 @@ static HRESULT STDMETHODCALLTYPE env_Invoke(
     HRESULT errorCode,
     ICoreWebView2Environment *result) {
     EnvCompletedHandler *handler = (EnvCompletedHandler *)This;
-    PhanttyWebView2Browser *browser = handler->browser;
+    WispTermWebView2Browser *browser = handler->browser;
     if (!browser) return E_FAIL;
     browser->last_error = errorCode;
     if (browser->closing || FAILED(errorCode) || !result) return S_OK;
@@ -580,7 +580,7 @@ static HRESULT STDMETHODCALLTYPE env_Invoke(
     return S_OK;
 }
 
-PhanttyWebView2Browser *phantty_webview2_create(
+WispTermWebView2Browser *wispterm_webview2_create(
     HWND parent,
     int left,
     int top,
@@ -589,7 +589,7 @@ PhanttyWebView2Browser *phantty_webview2_create(
     const WCHAR *initial_url) {
     HRESULT co_hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
-    PhanttyWebView2Browser *browser = (PhanttyWebView2Browser *)calloc(1, sizeof(PhanttyWebView2Browser));
+    WispTermWebView2Browser *browser = (WispTermWebView2Browser *)calloc(1, sizeof(WispTermWebView2Browser));
     if (!browser) {
         if (SUCCEEDED(co_hr)) CoUninitialize();
         return NULL;
@@ -649,7 +649,7 @@ PhanttyWebView2Browser *phantty_webview2_create(
     return browser;
 }
 
-void phantty_webview2_set_bounds(PhanttyWebView2Browser *browser, int left, int top, int right, int bottom) {
+void wispterm_webview2_set_bounds(WispTermWebView2Browser *browser, int left, int top, int right, int bottom) {
     if (!browser || browser->closing) return;
     browser->bounds.left = left;
     browser->bounds.top = top;
@@ -658,18 +658,18 @@ void phantty_webview2_set_bounds(PhanttyWebView2Browser *browser, int left, int 
     browser_apply_bounds(browser);
 }
 
-void phantty_webview2_set_visible(PhanttyWebView2Browser *browser, int visible) {
+void wispterm_webview2_set_visible(WispTermWebView2Browser *browser, int visible) {
     if (!browser || browser->closing) return;
     browser->visible = visible ? TRUE : FALSE;
     browser_apply_bounds(browser);
 }
 
-void phantty_webview2_focus(PhanttyWebView2Browser *browser) {
+void wispterm_webview2_focus(WispTermWebView2Browser *browser) {
     if (!browser || browser->closing || !browser->controller) return;
     browser->controller->lpVtbl->MoveFocus(browser->controller, 0);
 }
 
-void phantty_webview2_navigate(PhanttyWebView2Browser *browser, const WCHAR *url) {
+void wispterm_webview2_navigate(WispTermWebView2Browser *browser, const WCHAR *url) {
     if (!browser || browser->closing) return;
     copy_url(browser->pending_url, sizeof(browser->pending_url) / sizeof(browser->pending_url[0]), url);
     if (browser->webview && browser->pending_url[0] != 0) {
@@ -677,15 +677,15 @@ void phantty_webview2_navigate(PhanttyWebView2Browser *browser, const WCHAR *url
     }
 }
 
-int phantty_webview2_is_ready(PhanttyWebView2Browser *browser) {
+int wispterm_webview2_is_ready(WispTermWebView2Browser *browser) {
     return browser && !browser->closing && browser->controller && browser->webview;
 }
 
-HRESULT phantty_webview2_last_error(PhanttyWebView2Browser *browser) {
+HRESULT wispterm_webview2_last_error(WispTermWebView2Browser *browser) {
     return browser ? browser->last_error : E_POINTER;
 }
 
-void phantty_webview2_destroy(PhanttyWebView2Browser *browser) {
+void wispterm_webview2_destroy(WispTermWebView2Browser *browser) {
     if (!browser) return;
     browser->closing = TRUE;
     browser_release_webview_resources(browser);

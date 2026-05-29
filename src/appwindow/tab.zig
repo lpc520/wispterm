@@ -69,7 +69,7 @@ pub const TabState = struct {
             const chat_title = chat.title();
             return if (chat_title.len > 0) chat_title else "AI Chat";
         }
-        const surface = self.focusedSurface() orelse return "phantty";
+        const surface = self.focusedSurface() orelse return "wispterm";
         return surface.getTitle();
     }
 

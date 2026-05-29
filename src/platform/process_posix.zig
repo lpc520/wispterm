@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const shared = @import("process_shared.zig");
 
-extern fn phantty_macos_proc_cwd(pid: i32, buf: [*]u8, buf_len: i32) i32;
+extern fn wispterm_macos_proc_cwd(pid: i32, buf: [*]u8, buf_len: i32) i32;
 
 pub fn currentProcessId() u32 {
     return @intCast(std.c.getpid());
@@ -16,7 +16,7 @@ pub fn processCwd(allocator: std.mem.Allocator, pid: i32) ?[]u8 {
     if (pid <= 0) return null;
     if (builtin.os.tag == .macos) {
         var buf: [4096]u8 = undefined;
-        const len = phantty_macos_proc_cwd(pid, &buf, @intCast(buf.len));
+        const len = wispterm_macos_proc_cwd(pid, &buf, @intCast(buf.len));
         if (len <= 0) return null;
         return allocator.dupe(u8, buf[0..@intCast(len)]) catch null;
     } else {

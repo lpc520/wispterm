@@ -4,9 +4,9 @@ pub const Owner = struct {
     native_window: ?usize = null,
 };
 
-extern fn phantty_macos_clipboard_write_text(text: [*:0]const u8) bool;
-extern fn phantty_macos_clipboard_copy_text() ?[*:0]u8;
-extern fn phantty_macos_services_free(ptr: ?*anyopaque) void;
+extern fn wispterm_macos_clipboard_write_text(text: [*:0]const u8) bool;
+extern fn wispterm_macos_clipboard_copy_text() ?[*:0]u8;
+extern fn wispterm_macos_services_free(ptr: ?*anyopaque) void;
 
 pub fn windowOwner(native_window: usize) Owner {
     return .{ .native_window = native_window };
@@ -18,13 +18,13 @@ pub fn writeText(allocator: std.mem.Allocator, owner: Owner, text: []const u8) b
     defer allocator.free(normalized);
     const text_z = allocator.dupeZ(u8, normalized) catch return false;
     defer allocator.free(text_z);
-    return phantty_macos_clipboard_write_text(text_z.ptr);
+    return wispterm_macos_clipboard_write_text(text_z.ptr);
 }
 
 pub fn readText(allocator: std.mem.Allocator, owner: Owner) ?[]u8 {
     _ = owner;
-    const raw = phantty_macos_clipboard_copy_text() orelse return null;
-    defer phantty_macos_services_free(raw);
+    const raw = wispterm_macos_clipboard_copy_text() orelse return null;
+    defer wispterm_macos_services_free(raw);
     return allocator.dupe(u8, std.mem.span(raw)) catch null;
 }
 

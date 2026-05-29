@@ -1,4 +1,4 @@
-/// Embedded themes shipped with Phantty.
+/// Embedded themes shipped with WispTerm.
 ///
 /// All 453 themes from Ghostty (https://github.com/ghostty-org/ghostty)
 /// are embedded at compile time. User themes in the app config themes directory

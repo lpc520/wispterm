@@ -4,7 +4,7 @@ const release_package = @import("../release_package.zig");
 fn assetNameParts(package: release_package.Package) ?struct { prefix: []const u8, suffix: []const u8 } {
     if (package.platform != .macos) return null;
     return .{
-        .prefix = "phantty-macos-",
+        .prefix = "wispterm-macos-",
         .suffix = ".dmg",
     };
 }

@@ -1,4 +1,4 @@
-//! Boundary between WeChat routing and the live Phantty surfaces. The real
+//! Boundary between WeChat routing and the live WispTerm surfaces. The real
 //! vtable is supplied by controller.zig; tests supply a fake.
 const std = @import("std");
 

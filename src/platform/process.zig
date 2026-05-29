@@ -158,9 +158,9 @@ pub fn writeAllToPipe(file: std.fs.File, data: []const u8) PipeWriteError!void {
 pub fn sshAskPassScriptBodyForOs(os_tag: std.Target.Os.Tag) []const u8 {
     return switch (os_tag) {
         .windows => "@echo off\r\n" ++
-            "powershell.exe -NoLogo -NoProfile -Command \"[Console]::Out.Write($env:PHANTTY_SSH_PASSWORD)\"\r\n",
+            "powershell.exe -NoLogo -NoProfile -Command \"[Console]::Out.Write($env:WISPTERM_SSH_PASSWORD)\"\r\n",
         else => "#!/bin/sh\n" ++
-            "printf %s \"$PHANTTY_SSH_PASSWORD\"\n",
+            "printf %s \"$WISPTERM_SSH_PASSWORD\"\n",
     };
 }
 
@@ -176,8 +176,8 @@ pub fn sshAskPassScriptPathFromTempDirForOs(
     temp_dir: []const u8,
 ) ![]const u8 {
     const basename = switch (os_tag) {
-        .windows => "phantty-ssh-askpass.cmd",
-        else => "phantty-ssh-askpass.sh",
+        .windows => "wispterm-ssh-askpass.cmd",
+        else => "wispterm-ssh-askpass.sh",
     };
     return std.fs.path.join(allocator, &.{ temp_dir, basename });
 }
@@ -223,13 +223,13 @@ pub fn spawnDetachedWithOptions(allocator: std.mem.Allocator, options: DetachedS
 
 test "platform process exposes typed detached spawn options" {
     const options = DetachedSpawnOptions{
-        .argv = &.{ "phantty.exe", "--detached" },
-        .cwd = "C:/Phantty",
+        .argv = &.{ "wispterm.exe", "--detached" },
+        .cwd = "C:/WispTerm",
         .create_no_window = true,
     };
 
-    try std.testing.expectEqualStrings("phantty.exe", options.argv[0]);
-    try std.testing.expectEqualStrings("C:/Phantty", options.cwd.?);
+    try std.testing.expectEqualStrings("wispterm.exe", options.argv[0]);
+    try std.testing.expectEqualStrings("C:/WispTerm", options.cwd.?);
     try std.testing.expect(options.create_no_window);
     try std.testing.expectEqual(@as(usize, 2), @typeInfo(@TypeOf(spawnDetachedWithOptions)).@"fn".params.len);
 }
@@ -243,12 +243,12 @@ test "platform process wait exposes a child exit poll API" {
 
 test "platform process exposes SSH askpass script helpers" {
     const script = sshAskPassScriptBodyForOs(.windows);
-    try std.testing.expect(std.mem.indexOf(u8, script, "PHANTTY_SSH_PASSWORD") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "WISPTERM_SSH_PASSWORD") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "powershell.exe") != null);
 
     const path = try sshAskPassScriptPathFromTempDirForOs(std.testing.allocator, .windows, "C:/Temp");
     defer std.testing.allocator.free(path);
-    const expected = try std.fs.path.join(std.testing.allocator, &.{ "C:/Temp", "phantty-ssh-askpass.cmd" });
+    const expected = try std.fs.path.join(std.testing.allocator, &.{ "C:/Temp", "wispterm-ssh-askpass.cmd" });
     defer std.testing.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, path);
 }

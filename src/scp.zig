@@ -73,8 +73,8 @@ pub fn transferWithControl(allocator: std.mem.Allocator, conn: *const SshConnect
         if (env_map) |*map| {
             map.put("SSH_ASKPASS", askpass_path.?) catch return .spawn_error;
             map.put("SSH_ASKPASS_REQUIRE", "force") catch return .spawn_error;
-            map.put("DISPLAY", "phantty") catch return .spawn_error;
-            map.put("PHANTTY_SSH_PASSWORD", conn.password()) catch return .spawn_error;
+            map.put("DISPLAY", "wispterm") catch return .spawn_error;
+            map.put("WISPTERM_SSH_PASSWORD", conn.password()) catch return .spawn_error;
         }
     }
 
@@ -221,8 +221,8 @@ pub fn sshExec(allocator: std.mem.Allocator, conn: *const SshConnection, command
         if (env_map) |*map| {
             map.put("SSH_ASKPASS", askpass_path.?) catch return null;
             map.put("SSH_ASKPASS_REQUIRE", "force") catch return null;
-            map.put("DISPLAY", "phantty") catch return null;
-            map.put("PHANTTY_SSH_PASSWORD", conn.password()) catch return null;
+            map.put("DISPLAY", "wispterm") catch return null;
+            map.put("WISPTERM_SSH_PASSWORD", conn.password()) catch return null;
         }
     }
 
@@ -639,7 +639,7 @@ fn sshControlPathOption(allocator: std.mem.Allocator) ?[]u8 {
     for (trimmed) |ch| {
         normalized.append(allocator, if (ch == '\\') '/' else ch) catch return null;
     }
-    normalized.appendSlice(allocator, "/phantty-ssh-%C") catch return null;
+    normalized.appendSlice(allocator, "/wispterm-ssh-%C") catch return null;
     return normalized.toOwnedSlice(allocator) catch null;
 }
 
@@ -753,11 +753,11 @@ test "appendSshOptions with control path" {
     conn.port_len = 0;
 
     var argv_buf: [32][]const u8 = undefined;
-    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh, "ControlPath=C:/Temp/phantty-ssh-%C");
+    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh, "ControlPath=C:/Temp/wispterm-ssh-%C");
     try std.testing.expectEqual(@as(usize, 12), argc);
     try std.testing.expectEqualStrings("ControlMaster=auto", argv_buf[7]);
     try std.testing.expectEqualStrings("ControlPersist=10m", argv_buf[9]);
-    try std.testing.expectEqualStrings("ControlPath=C:/Temp/phantty-ssh-%C", argv_buf[11]);
+    try std.testing.expectEqualStrings("ControlPath=C:/Temp/wispterm-ssh-%C", argv_buf[11]);
 }
 
 test "appendSshOptions includes legacy algorithms when enabled" {
