@@ -365,12 +365,20 @@ fn slashCommandOutput(allocator: std.mem.Allocator, command: SlashCommand) ![]u8
     return switch (command) {
         .commands => slashCommandListOutput(allocator),
         .reload_skills => allocator.dupe(u8, "Skills will be re-read from disk on the next skill call."),
+        .reload_commands => allocator.dupe(u8, "Custom commands will be re-read from the commands directory."),
         .update_skills => allocator.dupe(u8, "Downloading the latest skills from GitHub in the background..."),
+        .clear => allocator.dupe(u8, "Cleared the conversation context."),
+        .resume_session => allocator.dupe(u8, "Opening saved conversation history..."),
+        .permission => permissionStatusOutput(allocator),
+        .export_markdown => allocator.dupe(u8, "Exporting the conversation as Markdown..."),
         .unknown => allocator.dupe(u8, "Unknown command. Use /commands to list commands."),
         .skills => listSkillsForDisplay(allocator),
-        // TODO(Task 2): implement lifecycle command handlers
-        .clear, .resume_session, .permission, .export_markdown, .reload_commands => allocator.dupe(u8, "Not yet implemented."),
     };
+}
+
+fn permissionStatusOutput(allocator: std.mem.Allocator) ![]u8 {
+    const current = currentAgentSettings().permission;
+    return std.fmt.allocPrint(allocator, "Agent permission is '{s}'. Use /permission confirm or /permission full to change it.", .{current.name()});
 }
 
 fn slashCommandListOutput(allocator: std.mem.Allocator) ![]u8 {
@@ -4323,6 +4331,21 @@ test "ai chat slash command suggestions use arrows and tab completion" {
     session.handleKey(.{ .key = input_key.Key.tab });
     try std.testing.expectEqualStrings("/commands", session.input());
     try std.testing.expectEqual(@as(usize, "/commands".len), session.inputCursor());
+}
+
+test "slashCommandOutput covers new lifecycle commands" {
+    const a = std.testing.allocator;
+    inline for (.{
+        .{ SlashCommand.clear, "Cleared" },
+        .{ SlashCommand.reload_commands, "commands" },
+        .{ SlashCommand.permission, "permission" },
+        .{ SlashCommand.export_markdown, "Export" },
+        .{ SlashCommand.resume_session, "history" },
+    }) |case| {
+        const out = try slashCommandOutput(a, case[0]);
+        defer a.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, case[1]) != null);
+    }
 }
 
 test "ai chat enter completes selected slash suggestion before command submit" {
