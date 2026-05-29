@@ -175,6 +175,18 @@ pub fn skillsDirFromEnvForOs(
     return pathInConfigDirFromEnvForOs(allocator, os_tag, env, "skills");
 }
 
+pub fn commandsDir(allocator: std.mem.Allocator) ![]const u8 {
+    return pathInConfigDir(allocator, "commands");
+}
+
+pub fn commandsDirFromEnvForOs(
+    allocator: std.mem.Allocator,
+    os_tag: std.Target.Os.Tag,
+    env: Env,
+) ![]const u8 {
+    return pathInConfigDirFromEnvForOs(allocator, os_tag, env, "commands");
+}
+
 pub fn pluginSkillsDir(allocator: std.mem.Allocator) ![]const u8 {
     const dir = try configDir(allocator);
     defer allocator.free(dir);
@@ -483,6 +495,12 @@ test "platform dirs expose app skill roots" {
     const expected_plugin_skills = try std.fs.path.join(allocator, &.{ "/home/alice", ".config", app_dir_name, "plugins", "skills" });
     defer allocator.free(expected_plugin_skills);
     try std.testing.expectEqualStrings(expected_plugin_skills, plugin_skills);
+
+    const commands = try commandsDirFromEnvForOs(allocator, .linux, env);
+    defer allocator.free(commands);
+    const expected_commands = try std.fs.path.join(allocator, &.{ "/home/alice", ".config", app_dir_name, "commands" });
+    defer allocator.free(expected_commands);
+    try std.testing.expectEqualStrings(expected_commands, commands);
 }
 
 test "platform dirs resolve downloads directory per OS" {

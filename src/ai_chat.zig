@@ -15,6 +15,7 @@ const platform_pty_command = @import("platform/pty_command.zig");
 const agent_detector = @import("agent_detector.zig");
 const agent_history = @import("agent_history.zig");
 const skill_registry = @import("skill_registry.zig");
+const command_registry = @import("command_registry.zig");
 const wispterm_docs = @import("wispterm_docs.zig");
 const markdown_text = @import("markdown_text.zig");
 const ai_chat_protocol = @import("ai_chat_protocol.zig");
@@ -548,6 +549,19 @@ fn defaultSkillRootPaths(allocator: std.mem.Allocator) ![][]const u8 {
     return roots.toOwnedSlice(allocator);
 }
 
+fn defaultCommandRootPaths(allocator: std.mem.Allocator) ![][]const u8 {
+    var roots: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (roots.items) |r| allocator.free(r);
+        roots.deinit(allocator);
+    }
+    if (platform_dirs.commandsDir(allocator)) |d| {
+        try appendOwnedSkillRootPath(allocator, &roots, d);
+    } else |_| {}
+    try appendSkillRootPath(allocator, &roots, "commands");
+    return roots.toOwnedSlice(allocator);
+}
+
 fn appendSkillRootPath(
     allocator: std.mem.Allocator,
     roots: *std.ArrayListUnmanaged([]const u8),
@@ -576,6 +590,40 @@ fn appendOwnedSkillRootPath(
 fn freeSkillRootPaths(allocator: std.mem.Allocator, roots: [][]const u8) void {
     for (roots) |root| allocator.free(root);
     allocator.free(roots);
+}
+
+/// Maps a custom command's `action:` frontmatter value to the built-in slash
+/// command it triggers. Returns null for unrecognized actions (those commands
+/// are dropped during load).
+fn knownActionFromName(value: []const u8) ?SlashCommand {
+    if (std.mem.eql(u8, value, "clear_context")) return .clear;
+    if (std.mem.eql(u8, value, "restore_session")) return .resume_session;
+    if (std.mem.eql(u8, value, "set_permission")) return .permission;
+    if (std.mem.eql(u8, value, "export_markdown")) return .export_markdown;
+    return null;
+}
+
+/// True when `name` (without a leading slash) collides with a built-in slash
+/// command. The registry stores names without a slash (e.g. "review"); built-in
+/// entries store them with one (e.g. "/clear").
+fn isBuiltinCommandName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    var buf: [128]u8 = undefined;
+    if (name.len + 1 > buf.len) return false;
+    buf[0] = '/';
+    @memcpy(buf[1 .. 1 + name.len], name);
+    const slashed = buf[0 .. 1 + name.len];
+    for (slash_command_entries) |entry| {
+        if (std.mem.eql(u8, slashed, entry.suggestion.command)) return true;
+    }
+    return false;
+}
+
+fn hasName(items: []const command_registry.CustomCommand, name: []const u8) bool {
+    for (items) |c| {
+        if (std.mem.eql(u8, c.name, name)) return true;
+    }
+    return false;
 }
 
 fn freeOwnedSkillMetaList(allocator: std.mem.Allocator, list: []skill_registry.SkillMeta) void {
@@ -615,6 +663,7 @@ pub const Session = struct {
     skill_suggestions: []skill_registry.SkillMeta = &.{},
     skill_suggestions_loaded: bool = false,
     skill_suggestions_owned: bool = false,
+    custom_commands: []command_registry.CustomCommand = &.{},
     transcript_select_all: bool = false,
     transcript_selection: ?TranscriptSelection = null,
     status_buf: [512]u8 = undefined,
@@ -744,6 +793,9 @@ pub const Session = struct {
             } else |_| {}
         }
         session.setStatus("Ready");
+        // Load custom commands from disk last, after every settings buffer is
+        // populated. Best-effort: a missing commands dir leaves the list empty.
+        session.reloadCustomCommands();
         return session;
     }
 
@@ -802,6 +854,7 @@ pub const Session = struct {
         }
         self.messages.deinit(self.allocator);
         self.freeSkillSuggestions();
+        command_registry.freeCommandList(self.allocator, self.custom_commands);
         self.allocator.destroy(self);
     }
 
@@ -940,6 +993,40 @@ pub const Session = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.freeSkillSuggestions();
+    }
+
+    /// Rescans the command root directories, validates each command's action and
+    /// name, and replaces `self.custom_commands`. Best-effort: missing dirs or
+    /// allocation failures leave the session usable (possibly with no commands).
+    pub fn reloadCustomCommands(self: *Session) void {
+        const roots = defaultCommandRootPaths(self.allocator) catch return;
+        defer freeSkillRootPaths(self.allocator, roots);
+        var merged: std.ArrayListUnmanaged(command_registry.CustomCommand) = .empty;
+        for (roots) |root| {
+            var dir = openDirectoryPath(root) catch continue;
+            defer dir.close();
+            const cmds = command_registry.listCommands(self.allocator, dir, "") catch continue;
+            defer self.allocator.free(cmds); // free the slice; item ownership moves to `merged` or is deinit'd below
+            for (cmds) |cmd| {
+                var c = cmd;
+                if (c.action) |av| if (knownActionFromName(av) == null) {
+                    c.deinit(self.allocator);
+                    continue;
+                };
+                // Dedup ONLY against built-ins + commands already merged in THIS reload.
+                // Do NOT check self.custom_commands (it is the old list being replaced).
+                if (isBuiltinCommandName(c.name) or hasName(merged.items, c.name)) {
+                    c.deinit(self.allocator);
+                    continue;
+                }
+                merged.append(self.allocator, c) catch {
+                    c.deinit(self.allocator);
+                    break;
+                };
+            }
+        }
+        command_registry.freeCommandList(self.allocator, self.custom_commands);
+        self.custom_commands = merged.toOwnedSlice(self.allocator) catch &.{};
     }
 
     pub fn status(self: *const Session) []const u8 {
@@ -4388,6 +4475,29 @@ test "ai chat enter submits slash commands instead of completing suggestions" {
 
     for (session.messages.items) |msg| msg.deinit(allocator);
     session.messages.deinit(allocator);
+}
+
+test "session loads custom commands from a commands directory" {
+    const a = std.testing.allocator;
+    const root = ".zig-cache/tmp/cmdtest";
+    std.fs.cwd().deleteTree(root) catch {};
+    try std.fs.cwd().makePath(root ++ "/commands");
+    defer std.fs.cwd().deleteTree(root) catch {};
+    try std.fs.cwd().writeFile(.{ .sub_path = root ++ "/commands/review.md", .data = "---\nname: review\ndescription: review diff\n---\nReview the diff." });
+
+    var dir = try std.fs.cwd().openDir(root, .{});
+    defer dir.close();
+    const cmds = try command_registry.listCommands(a, dir, "commands");
+    defer command_registry.freeCommandList(a, cmds);
+    try std.testing.expectEqual(@as(usize, 1), cmds.len);
+    try std.testing.expectEqualStrings("review", cmds[0].name);
+}
+
+test "isBuiltinCommandName recognizes built-in slash commands only" {
+    try std.testing.expect(isBuiltinCommandName("clear"));
+    try std.testing.expect(isBuiltinCommandName("commands"));
+    try std.testing.expect(!isBuiltinCommandName("review"));
+    try std.testing.expect(!isBuiltinCommandName(""));
 }
 
 test "ai chat dollar skill suggestions filter and enter completes with trailing space" {
