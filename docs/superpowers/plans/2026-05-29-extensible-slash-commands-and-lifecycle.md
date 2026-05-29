@@ -715,28 +715,39 @@ git commit -m "feat(ai-chat): /permission [confirm|full] runtime toggle"
 - Modify: `src/AppWindow.zig` (register them at startup)
 - Test: `src/ai_chat.zig` (inline, capture-hook style)
 
-- [ ] **Step 1: Write the failing test:**
+- [ ] **Step 1: Write the failing test** (drive the public `submit` path — slash dispatch is synchronous, no api key/network needed — and capture the trigger):
 
 ```zig
 var test_export_mode: ?MarkdownExportMode = null;
 fn testExportHook(mode: MarkdownExportMode) void { test_export_mode = mode; }
 
-test "/export fires the export trigger with parsed mode" {
+test "/export via submit fires the export trigger with parsed mode" {
+    const a = std.testing.allocator;
     setMarkdownExportTrigger(testExportHook);
     defer setMarkdownExportTrigger(null);
+
+    var session = try Session.init(a, "chat", "https://api.example.com", "key", "m1", "sys", "false", "", "false", "false");
+    defer session.deinit();
+
     test_export_mode = null;
-    fireExportCommand("full");
+    session.appendInputText("/export full");
+    session.submit();
     try std.testing.expectEqual(MarkdownExportMode.full, test_export_mode.?);
-    fireExportCommand("");
+
+    test_export_mode = null;
+    session.appendInputText("/export");
+    session.submit();
     try std.testing.expectEqual(MarkdownExportMode.clean, test_export_mode.?); // default clean
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — `setMarkdownExportTrigger`/`fireExportCommand` undefined.
+- [ ] **Step 2: Run test to verify it fails** — `setMarkdownExportTrigger` undefined (and the deferred-action plumbing not yet present).
 
-Run: `zig build test 2>&1 | head -40`
+Run: `zig build test-full 2>&1 | head -40`
 
-- [ ] **Step 3: Add the callbacks** next to `g_skill_update_trigger` (`:317`):
+**DEADLOCK WARNING:** `runBuiltinCommandLocked` runs with the session mutex HELD. The export trigger calls `AppWindow.exportActiveAiChatMarkdown` → `session.allocMarkdownExport` which **locks the same session mutex** → deadlock. So the resume/export triggers MUST fire AFTER the dispatch unlocks. (`g_skill_update_trigger` is fine to fire under the lock because it only spawns a background thread; export/resume are not.) Implement this with a **deferred action** returned from `runBuiltinCommandLocked`.
+
+- [ ] **Step 3: Add the callbacks + deferred-action plumbing** next to `g_skill_update_trigger` (`:317`):
 
 ```zig
 var g_session_resume_trigger: ?*const fn () void = null;
@@ -744,14 +755,44 @@ var g_markdown_export_trigger: ?*const fn (MarkdownExportMode) void = null;
 
 pub fn setSessionResumeTrigger(cb: ?*const fn () void) void { g_session_resume_trigger = cb; }
 pub fn setMarkdownExportTrigger(cb: ?*const fn (MarkdownExportMode) void) void { g_markdown_export_trigger = cb; }
+```
 
-fn fireExportCommand(arg: []const u8) void {
-    const mode: MarkdownExportMode = if (std.mem.eql(u8, std.mem.trim(u8, arg, " \t\r\n"), "full")) .full else .clean;
-    if (g_markdown_export_trigger) |t| t(mode);
+Change `runBuiltinCommandLocked` to return BOTH the history change and a deferred action (since it must not fire resume/export under the lock). Replace its `?PendingHistoryChange` return with:
+
+```zig
+const DeferredAction = union(enum) { none, resume_picker, export_markdown: MarkdownExportMode };
+const BuiltinResult = struct { history_change: ?PendingHistoryChange = null, deferred: DeferredAction = .none };
+```
+
+In the `switch`, set the deferred action instead of firing:
+```zig
+.resume_session => result.deferred = .resume_picker,
+.export_markdown => result.deferred = .{ .export_markdown = if (std.mem.eql(u8, std.mem.trim(u8, arg, " \t\r\n"), "full")) .full else .clean },
+```
+(`.update_skills` keeps firing `g_skill_update_trigger` inline — it's deadlock-safe.)
+
+Add a helper that fires a deferred action (called AFTER unlock):
+```zig
+fn fireDeferredAction(action: DeferredAction) void {
+    switch (action) {
+        .none => {},
+        .resume_picker => if (g_session_resume_trigger) |t| t(),
+        .export_markdown => |mode| if (g_markdown_export_trigger) |t| t(mode),
+    }
 }
 ```
 
-Wire `g_session_resume_trigger` into the `.resume_session` branch and `fireExportCommand` into the `.export_markdown` branch of `runBuiltinCommandLocked`.
+Update the THREE dispatch return branches that call `runBuiltinCommandLocked` (built-in, custom-action, legacy) to the pattern:
+```zig
+const r = self.runBuiltinCommandLocked(command, arg);
+self.mutex.unlock();
+self.notifyHistoryChange(r.history_change);
+fireDeferredAction(r.deferred);
+return;
+```
+(Extract a tiny local closure/helper if you want to avoid repeating the 4 lines, but duplication across the 3 branches is acceptable.)
+
+The test still targets the mode-parsing: since `fireExportCommand` no longer exists, test the mode parse via the public path instead — e.g. assert that submitting `/export full` (no api key needed; slash dispatch is synchronous) invokes the registered export trigger with `.full`, and `/export` with `.clean`. Use a capture hook:
 
 - [ ] **Step 4: Register in AppWindow** — find the `ai_chat.setSkillUpdateTrigger(...)` call site in `AppWindow.zig` and add next to it:
 
