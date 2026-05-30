@@ -24,7 +24,7 @@
 2. **macOS API：`UNUserNotificationCenter`**（唯一未废弃的现代 API，以 "WispTerm" 身份显示）。拒绝授权 / 未决 / 非 bundle 运行 → 回落 badge。
 3. **fallback 呈现：标题栏铃铛 badge，复用现有 `bell_indicator` 渲染**（零新渲染代码）。**v1 不显示通知正文文字**（标题栏瞬时文字渲染列为后续增强）。
 4. **尊重焦点**：窗口聚焦且通知来自当前活动 surface → 不弹 toast、铃铛短闪；来自后台 tab 或窗口失焦 → 弹 toast + 该 tab 铃铛常驻。
-5. **限流 + 去重**：镜像 ghostty——每 surface ≤ 1 条/秒；`Wyhash(title+body)` 与上一条在 1s 窗口内相同则丢弃。
+5. **限流 + 去重**：每 surface ≤ 1 条/秒（限流，任意内容）；另对**相同内容**（`Wyhash(title+body)`）用更长的 **5s** 去重窗口抑制重复。〔实现期细化：原措辞的"1s 去重窗口"与"≤1/s 限流"等价冗余、会让 Wyhash 变成死参数，故把去重窗口拉长到 5s，使限流与去重成为两条真正生效的规则。详见 plan 自审。〕
 6. **单一配置开关** `desktop-notifications`（默认开）；关闭时整条通知忽略（不弹、不置 badge），不影响裸 `\a` 响铃。
 
 ## 4. 架构（方案 A1）
