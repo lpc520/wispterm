@@ -121,12 +121,21 @@ notifyln="$(grep -n '^notify' "$CODEX" | head -1 | cut -d: -f1)"
 HOME="$FAKE2" sh "$INSTALL" >/dev/null 2>&1
 [ "$(grep -c '^notify' "$CODEX")" -eq 1 ] && ok "codex: idempotent (one notify line)" || fail "codex: notify duplicated"
 
+# Case A': absent ~/.codex dir + no config.toml -> bootstrapped + notify added.
+FAKE4="$(mktemp -d)"
+mkdir -p "$FAKE4/.claude"
+printf '{}\n' > "$FAKE4/.claude/settings.json"
+HOME="$FAKE4" sh "$INSTALL" >/dev/null 2>&1
+DEST4="$FAKE4/.config/wispterm/wispterm-notify.sh"
+[ -f "$FAKE4/.codex/config.toml" ] && ok "codex: bootstrapped config.toml when absent" || fail "codex: config.toml not created"
+assert_contains "$FAKE4/.codex/config.toml" "notify = [\"$DEST4\"]" "codex: notify added to bootstrapped config"
+
 # Case B: pre-existing DIFFERENT notify -> left untouched + warning.
 FAKE3="$(mktemp -d)"
 mkdir -p "$FAKE3/.claude" "$FAKE3/.codex"
 printf '{}\n' > "$FAKE3/.claude/settings.json"
 printf 'notify = ["/some/other/notifier.sh"]\n' > "$FAKE3/.codex/config.toml"
-out="$(HOME="$FAKE3" sh "$INSTALL" 2>&1)"
+out="$(HOME="$FAKE3" sh "$INSTALL" 2>/dev/null)"
 assert_contains "$FAKE3/.codex/config.toml" '/some/other/notifier.sh' "codex: existing notify preserved"
 assert_not_contains "$FAKE3/.codex/config.toml" 'wispterm-notify.sh' "codex: did not clobber existing notify"
 printf '%s' "$out" | grep -qi 'warn' && ok "codex: warned about existing notify" || fail "codex: no warning on conflict"

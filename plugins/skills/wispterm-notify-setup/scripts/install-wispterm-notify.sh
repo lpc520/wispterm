@@ -70,7 +70,7 @@ cp "$CODEX" "$CODEX.bak"
 
 # A top-level bare key appended after a [section] would bind to that section,
 # so we PREPEND the notify line to keep it top-level.
-existing="$(grep -nE '^[[:space:]]*notify[[:space:]]*=' "$CODEX" | head -1 || true)"
+existing="$(grep -nE '^notify[[:space:]]*=' "$CODEX" | head -1 || true)"
 if [ -z "$existing" ]; then
   tmp="$(mktemp)"
   printf 'notify = ["%s"]\n' "$DEST" >"$tmp"
