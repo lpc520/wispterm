@@ -309,6 +309,8 @@ threadlocal var g_markdown_preview_image_drag_last_x: f64 = 0;
 threadlocal var g_markdown_preview_image_drag_last_y: f64 = 0;
 pub threadlocal var g_browser_resize_hover: bool = false; // Mouse is over the embedded browser edge
 pub threadlocal var g_browser_resize_dragging: bool = false; // Currently dragging the browser edge
+pub threadlocal var g_ai_copilot_resize_hover: bool = false; // Mouse is over the AI copilot left edge
+pub threadlocal var g_ai_copilot_resize_dragging: bool = false; // Currently dragging the AI copilot edge
 pub threadlocal var g_url_open_mode: link_open.Mode = .embedded;
 
 /// Whether the AI copilot sidebar currently owns keyboard/mouse focus. Set by
@@ -439,6 +441,8 @@ pub fn cancelTransientMouseState(win: anytype) void {
     g_markdown_preview_image_drag_last_y = 0;
     g_browser_resize_hover = false;
     g_browser_resize_dragging = false;
+    g_ai_copilot_resize_hover = false;
+    g_ai_copilot_resize_dragging = false;
     g_selecting = false;
     plus_btn_pressed = false;
     tab.g_tab_close_pressed = null;
@@ -1537,6 +1541,41 @@ fn applyBrowserWidthFromMouse(xpos: f64) void {
     AppWindow.g_cells_valid = false;
 }
 
+// AI copilot panel resize grip. The copilot is right-docked (right_offset 0)
+// and its bounds are computed against framebufferSize everywhere (renderer +
+// click handling), so the hit-test/apply mirror the browser resize structure
+// but read the framebuffer size to track the panel's actual left edge.
+fn hitTestAiCopilotResizeHandle(xpos: f64, ypos: f64) bool {
+    if (!AppWindow.aiCopilotVisible()) return false;
+    if (ypos < titlebarHeight()) return false;
+    const win = AppWindow.g_window orelse return false;
+    const fb = window_backend.framebufferSize(win);
+    const bounds = ai_sidebar.boundsForWindow(
+        @intCast(fb.width),
+        @intCast(fb.height),
+        @floatCast(titlebarHeight()),
+        AppWindow.leftPanelsWidth(),
+        0,
+    );
+    const panel_x: f64 = @floatFromInt(bounds.left);
+    const half_hit: f64 = @as(f64, @floatCast(ai_sidebar.RESIZE_HIT_WIDTH)) / 2;
+    return xpos >= panel_x - half_hit and xpos <= panel_x + half_hit;
+}
+
+fn applyAiCopilotWidthFromMouse(xpos: f64) void {
+    const win = AppWindow.g_window orelse return;
+    const fb = window_backend.framebufferSize(win);
+    // Right-docked at the far right edge (right_offset 0): width grows as the
+    // mouse moves left, same as the browser's right-edge math.
+    const right_edge = @as(f64, @floatFromInt(fb.width));
+    const new_width = right_edge - xpos;
+    const available_width: f32 = @as(f32, @floatFromInt(fb.width)) - AppWindow.leftPanelsWidth();
+    if (!ai_sidebar.setWidth(@floatCast(new_width), available_width)) return;
+    syncGridFromWindow(win);
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+}
+
 fn hitTestMarkdownPreviewResizeHandle(xpos: f64, ypos: f64) bool {
     if (!markdown_preview_panel.isVisibleForActiveTab()) return false;
     if (ypos < titlebarHeight()) return false;
@@ -2606,6 +2645,12 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 platform_cursor.set(.size_we);
                 return;
             }
+            if (hitTestAiCopilotResizeHandle(xpos, ypos)) {
+                g_ai_copilot_resize_dragging = true;
+                g_ai_copilot_resize_hover = true;
+                platform_cursor.set(.size_we);
+                return;
+            }
 
             if (over_browser_url_bar) {
                 file_explorer.g_focused = false;
@@ -3051,6 +3096,12 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 platform_cursor.set(if (g_browser_resize_hover) .size_we else .arrow);
                 return;
             }
+            if (g_ai_copilot_resize_dragging) {
+                g_ai_copilot_resize_dragging = false;
+                g_ai_copilot_resize_hover = hitTestAiCopilotResizeHandle(xpos, ypos);
+                platform_cursor.set(if (g_ai_copilot_resize_hover) .size_we else .arrow);
+                return;
+            }
 
             // Handle divider drag release
             if (g_divider_dragging) {
@@ -3286,6 +3337,11 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         platform_cursor.set(.size_we);
         return;
     }
+    if (g_ai_copilot_resize_dragging) {
+        applyAiCopilotWidthFromMouse(xpos);
+        platform_cursor.set(.size_we);
+        return;
+    }
     if (g_ai_input_scroll_dragging) {
         if (g_ai_input_scroll_chat) |chat| applyAiInputScrollbarDrag(chat, ypos);
         return;
@@ -3429,6 +3485,15 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         } else if (g_browser_resize_hover) {
             platform_cursor.set(.arrow);
             g_browser_resize_hover = false;
+        }
+        const over_ai_copilot_resize = hitTestAiCopilotResizeHandle(xpos, ypos);
+        if (over_ai_copilot_resize) {
+            platform_cursor.set(.size_we);
+            g_ai_copilot_resize_hover = true;
+            return;
+        } else if (g_ai_copilot_resize_hover) {
+            platform_cursor.set(.arrow);
+            g_ai_copilot_resize_hover = false;
         }
     }
 
