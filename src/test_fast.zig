@@ -23,6 +23,7 @@ test {
     _ = @import("input/command_dispatch.zig");
     _ = @import("input/click_tracker.zig");
     _ = @import("input/hit_test.zig");
+    _ = @import("input/mouse_report.zig");
     _ = @import("command_palette_model.zig");
     _ = @import("command_center_state.zig");
     _ = @import("config.zig");

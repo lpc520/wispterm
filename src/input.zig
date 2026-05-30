@@ -45,6 +45,7 @@ const clipboard = @import("input/clipboard.zig");
 const click_tracker = @import("input/click_tracker.zig");
 const hit_test = @import("input/hit_test.zig");
 const preview_source = @import("input/preview_source.zig");
+const mouse_report = @import("input/mouse_report.zig");
 const writeToPty = clipboard.writeToPty;
 pub const copyTextToClipboard = clipboard.copyTextToClipboard;
 const activeTerminalSelectionExists = clipboard.activeTerminalSelectionExists;
@@ -250,6 +251,15 @@ pub threadlocal var g_selecting: bool = false; // True while mouse button is hel
 pub threadlocal var g_click_x: f64 = 0; // X position of initial click (for threshold calculation)
 pub threadlocal var g_click_y: f64 = 0; // Y position of initial click
 var g_selection_changed_for_copy: bool = false;
+
+// Terminal mouse reporting drag state. When a press is delivered to the PTY
+// (the focused program enabled mouse tracking and Shift wasn't held), the
+// matching drag-motion and release are routed to the PTY too — until the
+// button lifts — instead of driving local text selection. See
+// input/mouse_report.zig for the protocol encoder.
+threadlocal var g_mouse_report_button: ?mouse_report.Button = null;
+threadlocal var g_mouse_report_surface: ?*Surface = null;
+threadlocal var g_mouse_report_last_cell: ?CellPos = null;
 threadlocal var g_left_click_tracker: click_tracker.ClickTracker = .{};
 const MULTI_CLICK_INTERVAL_MS: i64 = 500;
 const MAX_SELECTION_COLS: usize = 4096;
@@ -2540,6 +2550,21 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             return;
         }
     }
+
+    // Terminal mouse reporting (xterm 1000/1002/1003). When the focused
+    // program has enabled mouse tracking, deliver button events to the PTY
+    // instead of driving local selection / paste / context-menu. A release
+    // always finishes an in-progress reported drag — any modifier, anywhere —
+    // so state never leaks. A press starts reporting only over terminal
+    // content, with Shift up (Shift forces the terminal's own selection) and
+    // without the link-open modifier (Ctrl/Cmd keeps opening links/previews
+    // through the existing path below).
+    if (ev.action == .release) {
+        if (finishTerminalMouseReport(ev)) return;
+    } else if (!ev.shift and !(primaryOpenMod(ev.ctrl, ev.super) and !ev.alt)) {
+        if (beginTerminalMouseReport(ev)) return;
+    }
+
     // Double-click on tab text to rename, elsewhere to maximize
     if (ev.button == .left and ev.action == .double_click) {
         const xpos: f64 = @floatFromInt(ev.x);
@@ -3367,6 +3392,13 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         return;
     }
 
+    // Reported mouse drag: stream motion to the PTY (button/any tracking
+    // modes) and suppress local hover/selection while the button is held.
+    if (g_mouse_report_button) |button| {
+        if (g_mouse_report_surface) |surface| reportMouseMotion(surface, button, ev);
+        return;
+    }
+
     if (AppWindow.g_window) |hover_win| {
         if (AppWindow.activeAiChat()) |chat| {
             const hover_fb = window_backend.framebufferSize(hover_win);
@@ -3625,6 +3657,168 @@ fn appendAlternateScrollKeys(surface: *Surface, ev: platform_input.MouseWheelEve
         if (!appendBytes(out, len, seq)) return false;
     }
     return true;
+}
+
+// --- Terminal mouse button reporting --------------------------------------
+// Companion to appendMouseWheelReport: encodes button presses, releases and
+// drags so mouse-aware TUIs (nvim, tmux, htop) receive clicks, not just wheel
+// scrolls. The pure protocol encoder lives in input/mouse_report.zig; these
+// helpers map ghostty-vt's flags onto it and deliver the bytes to the PTY.
+
+// Map ghostty-vt's mouse flags onto the local encoder enums. Typed `anytype`
+// because the enums aren't re-exported from the ghostty-vt module root; the
+// switch over enum literals coerces to whatever enum the flags field holds
+// (the same literals the wheel path compares against in appendMouseWheelReport).
+fn mouseReportEvent(mode: anytype) mouse_report.Event {
+    return switch (mode) {
+        .none => .none,
+        .x10 => .x10,
+        .normal => .normal,
+        .button => .button,
+        .any => .any,
+    };
+}
+
+fn mouseReportFormat(fmt: anytype) mouse_report.Format {
+    return switch (fmt) {
+        .x10 => .x10,
+        .utf8 => .utf8,
+        .sgr => .sgr,
+        .urxvt => .urxvt,
+        .sgr_pixels => .sgr_pixels,
+    };
+}
+
+fn platformMouseButton(button: platform_input.MouseButton) mouse_report.Button {
+    return switch (button) {
+        .left => .left,
+        .middle => .middle,
+        .right => .right,
+    };
+}
+
+/// Encode and deliver one mouse button/motion event to the surface's PTY.
+/// Returns true if bytes were written (false when the active mode does not
+/// report this event — e.g. motion in normal mode, or no tracking at all).
+fn sendTerminalMouseReport(
+    surface: *Surface,
+    action: mouse_report.Action,
+    button: ?mouse_report.Button,
+    x_px: i32,
+    y_px: i32,
+    mods: mouse_report.Mods,
+) bool {
+    var buf: [512]u8 = undefined;
+    var len: usize = 0;
+    surface.render_state.mutex.lock();
+    const mode = mouseReportEvent(surface.terminal.flags.mouse_event);
+    const fmt = mouseReportFormat(surface.terminal.flags.mouse_format);
+    if (mode == .none) {
+        surface.render_state.mutex.unlock();
+        return false;
+    }
+    const cell = mouseToSurfaceCell(surface, @floatFromInt(x_px), @floatFromInt(y_px));
+    const pixel = mouseToSurfacePixel(surface, x_px, y_px);
+    _ = mouse_report.encode(mode, fmt, action, button, mods, cell.col, cell.row, pixel.x, pixel.y, &buf, &len);
+    surface.render_state.mutex.unlock();
+    if (len == 0) return false;
+    writeToPty(surface, buf[0..len]);
+    return true;
+}
+
+/// True when the AI copilot sidebar is shown and covers (xf, yf).
+fn aiCopilotRegionContains(xf: f64, yf: f64) bool {
+    if (!AppWindow.aiCopilotVisible()) return false;
+    const win = AppWindow.g_window orelse return false;
+    const fb = window_backend.framebufferSize(win);
+    const bounds = ai_sidebar.boundsForWindow(
+        @intCast(fb.width),
+        @intCast(fb.height),
+        @floatCast(titlebarHeight()),
+        AppWindow.leftPanelsWidth(),
+        0,
+    );
+    return xf >= @as(f64, @floatFromInt(bounds.left)) and xf < @as(f64, @floatFromInt(bounds.right)) and
+        yf >= @as(f64, @floatFromInt(bounds.top)) and yf < @as(f64, @floatFromInt(bounds.bottom));
+}
+
+/// The surface that should receive a mouse report for an event at (x, y), or
+/// null when the point is over window chrome / side panels or the focused
+/// program has not enabled mouse tracking. Mirrors the chrome exclusions the
+/// left-press path walks before it reaches terminal content.
+fn terminalMouseReportTarget(x_i: i32, y_i: i32) ?*Surface {
+    const xf: f64 = @floatFromInt(x_i);
+    const yf: f64 = @floatFromInt(y_i);
+    if (yf < titlebarHeight()) return null; // titlebar
+    if (AppWindow.activeAiChat() != null) return null; // AI chat tab: no terminal
+    if (tab.g_sidebar_visible and xf < @as(f64, @floatCast(titlebar.sidebarWidth()))) return null;
+    if (hitTestFileExplorer(xf, yf)) return null;
+    if (hitTestBrowserUrlBar(xf, yf)) return null;
+    if (hitTestBrowserPanel(xf, yf)) return null;
+    if (hitTestMarkdownPreviewPanel(xf, yf)) return null;
+    if (aiCopilotRegionContains(xf, yf)) return null;
+    const surface = split_layout.surfaceAtPoint(x_i, y_i) orelse return null;
+    surface.render_state.mutex.lock();
+    const mode = surface.terminal.flags.mouse_event;
+    surface.render_state.mutex.unlock();
+    if (mode == .none) return null;
+    return surface;
+}
+
+/// Begin a reported press for an event that landed on terminal content.
+/// Returns true if the press was consumed (delivered to the PTY).
+fn beginTerminalMouseReport(ev: platform_input.MouseButtonEvent) bool {
+    const surface = terminalMouseReportTarget(ev.x, ev.y) orelse return false;
+    const button = platformMouseButton(ev.button);
+    updateFocusFromMouse(ev.x, ev.y);
+    _ = sendTerminalMouseReport(surface, .press, button, ev.x, ev.y, .{
+        .shift = ev.shift,
+        .alt = ev.alt,
+        .ctrl = ev.ctrl,
+    });
+    g_mouse_report_button = button;
+    g_mouse_report_surface = surface;
+    g_mouse_report_last_cell = null;
+    return true;
+}
+
+/// Finish a reported drag on button release (wherever the pointer ends up, and
+/// regardless of modifiers) so the app always sees button-up and state never
+/// leaks. Returns true if a matching reported press was in progress.
+fn finishTerminalMouseReport(ev: platform_input.MouseButtonEvent) bool {
+    const active = g_mouse_report_button orelse return false;
+    if (active != platformMouseButton(ev.button)) return false;
+    const surface = g_mouse_report_surface;
+    g_mouse_report_button = null;
+    g_mouse_report_surface = null;
+    g_mouse_report_last_cell = null;
+    if (surface) |s| {
+        _ = sendTerminalMouseReport(s, .release, active, ev.x, ev.y, .{
+            .shift = ev.shift,
+            .alt = ev.alt,
+            .ctrl = ev.ctrl,
+        });
+    }
+    return true;
+}
+
+/// Stream a drag-motion report while a reported press is held, deduplicated by
+/// cell so we don't flood the PTY with one report per pixel.
+fn reportMouseMotion(surface: *Surface, button: mouse_report.Button, ev: platform_input.MouseMoveEvent) void {
+    const cell = blk: {
+        surface.render_state.mutex.lock();
+        defer surface.render_state.mutex.unlock();
+        break :blk mouseToSurfaceCell(surface, @floatFromInt(ev.x), @floatFromInt(ev.y));
+    };
+    if (g_mouse_report_last_cell) |last| {
+        if (last.col == cell.col and last.row == cell.row) return;
+    }
+    g_mouse_report_last_cell = cell;
+    _ = sendTerminalMouseReport(surface, .motion, button, ev.x, ev.y, .{
+        .shift = ev.shift,
+        .alt = ev.alt,
+        .ctrl = ev.ctrl,
+    });
 }
 
 fn handleMouseWheel(ev: platform_input.MouseWheelEvent) void {
