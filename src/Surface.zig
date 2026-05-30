@@ -398,6 +398,15 @@ pub fn init(
     surface.exited = std.atomic.Value(bool).init(false);
     surface.resize_in_progress = std.atomic.Value(bool).init(false);
 
+    // Desktop-notification state. `allocator.create` returns undefined memory
+    // and this constructor initializes every field explicitly (struct-default
+    // values are NOT applied here), so these must be set or notif_queue's mutex
+    // is garbage — the first handleNotification()/Queue.pop() lock then aborts
+    // with os_unfair_lock corruption (SIGKILL on the first frame).
+    surface.notif_queue = .{};
+    surface.last_notif_hash = 0;
+    surface.last_notif_time = 0;
+
     // Initialize mailbox for main thread → IO writer communication
     surface.mailbox = try termio.Mailbox.init();
     errdefer surface.mailbox.deinit();
