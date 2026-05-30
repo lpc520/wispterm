@@ -1379,6 +1379,14 @@ pub const Session = struct {
         self.clearSelectionLocked();
     }
 
+    /// True when the composer or transcript has an active selection that Esc
+    /// should clear before any higher-level dismiss (e.g. closing a panel).
+    pub fn hasSelection(self: *Session) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.input_select_all or self.transcript_select_all or self.transcript_selection != null;
+    }
+
     pub fn beginTranscriptSelection(self: *Session, message_index: usize, byte_offset: usize) void {
         self.mutex.lock();
         defer self.mutex.unlock();

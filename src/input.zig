@@ -1211,8 +1211,15 @@ fn handleKey(ev: platform_input.KeyEvent) void {
     if (aiCopilotFocused()) {
         if (AppWindow.activeCopilotSessionForInput()) |chat| {
             if (ev.key_code == platform_input.key_escape) {
+                // Progressive Esc: stop an in-flight request, else clear an
+                // active selection, else hide the panel. Matches the AI-chat
+                // tab's stop/clear behavior; closing is only the final step,
+                // so Esc never abruptly dismisses a panel that still has a
+                // selection to clear.
                 if (chat.requestState().inflight) {
                     chat.stopRequest();
+                } else if (chat.hasSelection()) {
+                    chat.clearSelection();
                 } else {
                     AppWindow.hideAiCopilot();
                 }
