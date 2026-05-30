@@ -497,6 +497,7 @@ pub fn toggleBrowserPanel() void {
         _ = platform_open_url.open(allocator, .{ .url = target });
         return;
     }
+    if (!browser_panel.isVisibleForActiveTab()) AppWindow.hideAiCopilot();
     if (!browser_panel.toggleForSurface(allocator, parent, surface)) return;
     if (AppWindow.g_window) |win| {
         syncPanelGridFromWindow(win);
@@ -2198,6 +2199,7 @@ fn openPreviewAsync(kind: markdown_preview.Kind, title: []const u8, path: []cons
     const perf = ui_perf.begin("input.open_preview_async");
     defer perf.end();
 
+    AppWindow.hideAiCopilot();
     if (!markdown_preview_panel.beginAsyncLoad(kind, title, path, source_kind)) {
         file_explorer.setTransferStatus(.failed, "Preview failed");
         return true;

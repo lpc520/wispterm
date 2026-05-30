@@ -652,6 +652,16 @@ pub fn aiCopilotVisible() bool {
     return ai_sidebar.g_visible and isActiveTabTerminal();
 }
 
+/// Hide the copilot panel if visible (used by the right-slot arbiter when
+/// another right panel opens). No-op if already hidden.
+pub fn hideAiCopilot() void {
+    if (!ai_sidebar.g_visible) return;
+    ai_sidebar.hide();
+    input.blurAiCopilot();
+    g_force_rebuild = true;
+    g_cells_valid = false;
+}
+
 pub fn aiCopilotWidth(window_width: i32) f32 {
     if (!aiCopilotVisible()) return 0;
     return ai_sidebar.panelWidthForWindow(window_width, leftPanelsWidth(), 0);
