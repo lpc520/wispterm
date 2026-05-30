@@ -255,6 +255,7 @@ const ChatRequest = struct {
     stream: bool,
     max_tokens: u32 = 8192,
     agent_enabled: bool,
+    copilot: bool = false,
     tool_host: ?ToolHost,
     tool_snapshot: ?ToolSnapshot,
     started_ms: i64,
@@ -761,6 +762,11 @@ pub const Session = struct {
     approval_command_len: usize = 0,
     approval_reason_buf: [256]u8 = undefined,
     approval_reason_len: usize = 0,
+    /// Copilot mode: when true, requests pre-target the bound surface and exec
+    /// tools fall back to it when the model omits surface_id (Issue #98).
+    copilot: bool = false,
+    bound_surface_id_buf: [16]u8 = undefined,
+    bound_surface_id_len: usize = 0,
 
     pub const RequestState = struct {
         inflight: bool,
@@ -783,6 +789,16 @@ pub const Session = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.history_on_change = hook;
+    }
+
+    pub fn setBoundSurface(self: *Session, surface_id: []const u8) void {
+        const n = @min(surface_id.len, self.bound_surface_id_buf.len);
+        @memcpy(self.bound_surface_id_buf[0..n], surface_id[0..n]);
+        self.bound_surface_id_len = n;
+    }
+
+    pub fn boundSurfaceId(self: *const Session) []const u8 {
+        return self.bound_surface_id_buf[0..self.bound_surface_id_len];
     }
 
     pub fn init(
@@ -2273,6 +2289,7 @@ pub const Session = struct {
             .stream = self.stream and !agent_enabled and self.protocol != .anthropic,
             .max_tokens = self.max_tokens,
             .agent_enabled = agent_enabled,
+            .copilot = self.copilot,
             .tool_host = tool_host,
             .tool_snapshot = tool_snapshot,
             .started_ms = std.time.milliTimestamp(),
@@ -2282,6 +2299,9 @@ pub const Session = struct {
         model_owned = false;
         system_prompt_owned = false;
         reasoning_effort_owned = false;
+        if (self.copilot and self.bound_surface_id_len > 0) {
+            setWriteContext(req, self.boundSurfaceId());
+        }
         return req;
     }
 
@@ -3356,7 +3376,7 @@ fn executeToolCall(request: *ChatRequest, call: ToolCall) ![]u8 {
     if (std.mem.eql(u8, call.name, "ssh_session_exec")) {
         const args = parseArgs(request.allocator, call.arguments) orelse return request.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const surface_id = jsonStringArg(args.value, "surface_id") orelse return request.allocator.dupe(u8, "Missing surface_id");
+        const surface_id = jsonStringArg(args.value, "surface_id") orelse defaultExecSurfaceId(request) orelse return request.allocator.dupe(u8, "Missing surface_id");
         const command = jsonStringArg(args.value, "command") orelse return request.allocator.dupe(u8, "Missing command");
         const timeout_ms = jsonIntArg(args.value, "timeout_ms") orelse currentAgentSettings().command_timeout_ms;
         return sshSessionExecTool(request, surface_id, command, timeout_ms);
@@ -3364,7 +3384,7 @@ fn executeToolCall(request: *ChatRequest, call: ToolCall) ![]u8 {
     if (std.mem.eql(u8, call.name, "wsl_session_exec")) {
         const args = parseArgs(request.allocator, call.arguments) orelse return request.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const surface_id = jsonStringArg(args.value, "surface_id") orelse return request.allocator.dupe(u8, "Missing surface_id");
+        const surface_id = jsonStringArg(args.value, "surface_id") orelse defaultExecSurfaceId(request) orelse return request.allocator.dupe(u8, "Missing surface_id");
         const command = jsonStringArg(args.value, "command") orelse return request.allocator.dupe(u8, "Missing command");
         const timeout_ms = jsonIntArg(args.value, "timeout_ms") orelse currentAgentSettings().command_timeout_ms;
         return wslSessionExecTool(request, surface_id, command, timeout_ms);
@@ -3372,7 +3392,7 @@ fn executeToolCall(request: *ChatRequest, call: ToolCall) ![]u8 {
     if (std.mem.eql(u8, call.name, "terminal_repl_exec")) {
         const args = parseArgs(request.allocator, call.arguments) orelse return request.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const surface_id = jsonStringArg(args.value, "surface_id") orelse return request.allocator.dupe(u8, "Missing surface_id");
+        const surface_id = jsonStringArg(args.value, "surface_id") orelse defaultExecSurfaceId(request) orelse return request.allocator.dupe(u8, "Missing surface_id");
         const repl = jsonStringArg(args.value, "repl") orelse return request.allocator.dupe(u8, "Missing repl");
         const code = jsonStringArg(args.value, "code") orelse return request.allocator.dupe(u8, "Missing code");
         const timeout_ms = jsonIntArg(args.value, "timeout_ms") orelse currentAgentSettings().command_timeout_ms;
@@ -4271,6 +4291,15 @@ fn setWriteContext(request: *ChatRequest, surface_id: []const u8) void {
     const len = @min(surface_id.len, request.write_context_surface_id.len);
     @memcpy(request.write_context_surface_id[0..len], surface_id[0..len]);
     request.write_context_surface_id_len = len;
+}
+
+/// Copilot fallback: when an exec tool omits surface_id, use the request's
+/// pre-seeded write-context (the bound/focused terminal). Non-copilot requests
+/// keep the original "Missing surface_id" behavior.
+fn defaultExecSurfaceId(request: *const ChatRequest) ?[]const u8 {
+    if (!request.copilot) return null;
+    if (request.write_context_surface_id_len == 0) return null;
+    return request.write_context_surface_id[0..request.write_context_surface_id_len];
 }
 
 fn ensureWriteContext(request: *ChatRequest, surface: ToolSurface) !?[]u8 {
@@ -5901,6 +5930,21 @@ test "ai chat write context requires explicit selection and can switch surfaces"
     const switched = (try ensureWriteContext(&request, snapshot.surfaces[1])).?;
     defer allocator.free(switched);
     try std.testing.expect(std.mem.indexOf(u8, switched, "selected agent terminal context is surface_id=surface-a") != null);
+}
+
+test "copilot session pre-targets the bound surface in its request" {
+    const session = try Session.init(
+        std.testing.allocator,
+        "copilot", "", "", "", "", "", "", "", "",
+    );
+    defer session.deinit();
+    session.copilot = true;
+    session.setBoundSurface("abc123");
+
+    const req = try session.buildRequestLocked();
+    defer req.deinit();
+
+    try std.testing.expectEqualStrings("abc123", req.write_context_surface_id[0..req.write_context_surface_id_len]);
 }
 
 test "ai chat R string literal escapes code for REPL eval" {
