@@ -63,6 +63,7 @@ pub const browser_panel = if (build_options.webview)
 else
     @import("browser_panel_stub.zig");
 pub const ai_chat_renderer = @import("renderer/ai_chat_renderer.zig");
+const ai_sidebar = @import("ai_sidebar.zig");
 pub const ui_perf = @import("ui_perf.zig");
 const log = std.log.scoped(.app_window);
 
@@ -633,6 +634,11 @@ pub fn currentTitlebarHeight() f32 {
 
 pub fn leftPanelsWidth() f32 {
     return titlebar.sidebarWidth() + file_explorer.width();
+}
+
+pub fn toggleAiCopilot() void {
+    // Implemented fully in a later task (arbiter + focus). Stub keeps the build green.
+    ai_sidebar.toggle();
 }
 
 pub fn rightPanelsWidth() f32 {

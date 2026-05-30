@@ -973,6 +973,7 @@ fn executeCommand(cmd: command_dispatch.Command) bool {
         .split_right => AppWindow.splitFocused(.right),
         .toggle_file_explorer => toggleFileExplorer(),
         .toggle_sidebar => toggleSidebar(),
+        .toggle_ai_copilot => AppWindow.toggleAiCopilot(),
         .close_panel_or_tab => closePanelOrTab(),
         .toggle_maximize => toggleMaximize(),
         .font_size => |delta| adjustFontSize(delta),
