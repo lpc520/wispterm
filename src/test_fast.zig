@@ -40,6 +40,7 @@ test {
     _ = @import("sync_output.zig");
     _ = @import("agent_history.zig");
     _ = @import("render_diagnostics.zig");
+    _ = @import("notification.zig");
     _ = @import("renderer/gpu/backend.zig");
     _ = @import("renderer/cell_geometry.zig");
     _ = @import("renderer/titlebar_layout.zig");

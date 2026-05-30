@@ -28,6 +28,7 @@ const platform_file_dialog = @import("platform/file_dialog.zig");
 const platform_global_hotkey = @import("platform/global_hotkey.zig");
 const platform_menu = @import("platform/menu.zig");
 const platform_notifications = @import("platform/notifications.zig");
+const notif_mod = @import("notification.zig");
 const platform_pty_command = @import("platform/pty_command.zig");
 const platform_window_state = @import("platform/window_state.zig");
 const platform_wsl = @import("platform/wsl.zig");
@@ -1367,6 +1368,8 @@ threadlocal var g_agent_context_surface_id_len: usize = 0;
 pub threadlocal var g_copy_on_select: bool = false;
 pub threadlocal var g_right_click_action: Config.RightClickAction = .copy;
 pub threadlocal var g_ssh_legacy_algorithms: bool = false;
+pub threadlocal var g_desktop_notifications: bool = true;
+threadlocal var g_notif_auth_requested: bool = false;
 
 /// Update cursor blink state based on time (call once per frame)
 fn updateCursorBlink() void {
@@ -1709,6 +1712,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     g_right_click_action = cfg.@"right-click-action";
     input.g_url_open_mode = cfg.@"url-open-mode";
     g_ssh_legacy_algorithms = cfg.@"ssh-legacy-algorithms";
+    g_desktop_notifications = cfg.@"desktop-notifications";
     tab.g_ssh_legacy_algorithms = cfg.@"ssh-legacy-algorithms";
     overlays.g_split_divider_color = cfg.@"split-divider-color";
 
@@ -3463,6 +3467,74 @@ fn handleBell(surface: *Surface, win: *window_backend.Window, is_active_tab: boo
     platform_notifications.requestAttention(window_backend.nativeHandle(win));
 }
 
+/// Drain and handle queued desktop notifications for one surface.
+/// `is_active_surface` means this is the focused surface of the active tab.
+/// Window focus is applied separately inside `notif_mod.decideRoute`, which
+/// only suppresses the toast when the window is focused AND this is true.
+fn handleNotification(surface: *Surface, is_active_surface: bool) void {
+    if (!g_desktop_notifications) {
+        // Drain and discard so the queue can't grow while disabled.
+        while (surface.notif_queue.pop() != null) {}
+        return;
+    }
+
+    const native_toast = platform_notifications.supports_desktop_notifications;
+
+    while (surface.notif_queue.pop()) |item| {
+        const now = std.time.milliTimestamp();
+        const h = notif_mod.contentHash(item.title(), item.body());
+        if (!notif_mod.shouldDeliver(now, h, surface.last_notif_time, surface.last_notif_hash)) {
+            continue;
+        }
+
+        // Lazy authorization request (macOS): first time we'd want a toast,
+        // ask once. This delivery falls back to badge until the user answers.
+        if (native_toast and !g_notif_auth_requested) {
+            platform_notifications.requestNotificationAuth();
+            g_notif_auth_requested = true;
+        }
+
+        const auth: notif_mod.AuthStatus = @enumFromInt(
+            @intFromEnum(platform_notifications.notificationAuthStatus()),
+        );
+        const route = notif_mod.decideRoute(
+            true, // g_desktop_notifications already checked above
+            native_toast,
+            auth,
+            window_focused,
+            is_active_surface,
+        );
+
+        switch (route) {
+            .none => {},
+            .toast => {
+                var title_z: [notif_mod.max_title + 1]u8 = undefined;
+                var body_z: [notif_mod.max_body + 1]u8 = undefined;
+                const t = item.title();
+                const b = item.body();
+                @memcpy(title_z[0..t.len], t);
+                title_z[t.len] = 0;
+                @memcpy(body_z[0..b.len], b);
+                body_z[b.len] = 0;
+                platform_notifications.showDesktopNotification(
+                    title_z[0..t.len :0],
+                    body_z[0..b.len :0],
+                );
+                surface.bell_indicator = true; // also badge the tab
+                surface.bell_indicator_time = now;
+                surface.last_notif_hash = h;
+                surface.last_notif_time = now;
+            },
+            .badge => {
+                surface.bell_indicator = true;
+                surface.bell_indicator_time = now;
+                surface.last_notif_hash = h;
+                surface.last_notif_time = now;
+            },
+        }
+    }
+}
+
 /// Internal main loop - called by AppWindow.run() after init() has set up globals.
 fn runMainLoop(self: *AppWindow) !void {
     const allocator = self.allocator;
@@ -3966,6 +4038,11 @@ fn runMainLoop(self: *AppWindow) !void {
                 while (it.next()) |entry| {
                     if (entry.surface.bell_pending.swap(false, .acquire)) {
                         handleBell(entry.surface, win, ti == tab.g_active_tab);
+                    }
+                    {
+                        const is_active_surface = (ti == tab.g_active_tab) and
+                            (if (tb.focusedSurface()) |fs| fs == entry.surface else false);
+                        handleNotification(entry.surface, is_active_surface);
                     }
                 }
             }
