@@ -21,6 +21,7 @@ const remote = @import("remote_client.zig");
 const threading = @import("threading.zig");
 const agent_detector = @import("agent_detector.zig");
 const sync_output = @import("sync_output.zig");
+const notification = @import("notification.zig");
 const platform_pty_command = @import("platform/pty_command.zig");
 const platform_process = @import("platform/process.zig");
 
@@ -136,6 +137,15 @@ pub const VtHandler = struct {
             return;
         }
 
+        if (action == .show_desktop_notification) {
+            notification.ingest(
+                &self.surface.notif_queue,
+                value.title,
+                value.body,
+            );
+            return;
+        }
+
         const sync_before = self.surface.terminal.modes.get(.synchronized_output);
         const sync_mode_touched = switch (action) {
             .set_mode,
@@ -226,6 +236,16 @@ bell_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
 /// Timestamp of the last bell notification, for rate limiting (100ms like Ghostty).
 last_bell_time: i64 = 0,
+
+// ============================================================================
+// Desktop notification state (OSC 9 / OSC 777)
+// ============================================================================
+
+/// Notifications pushed by the IO reader thread, drained on the main thread.
+notif_queue: notification.Queue = .{},
+/// Last delivered notification's content hash + time, for dedup / rate limit.
+last_notif_hash: u64 = 0,
+last_notif_time: i64 = 0,
 
 /// Bell indicator opacity (0.0 = hidden, 1.0 = fully visible).
 /// Fades in when bell fires, fades out on active tab after hold period.
