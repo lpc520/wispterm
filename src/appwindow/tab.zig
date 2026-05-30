@@ -323,6 +323,7 @@ pub fn spawnTabWithCommandAndCwd(allocator: std.mem.Allocator, cols: u16, rows: 
     t.tree = tree;
     t.focused = .root;
     t.ai_chat_session = null;
+    t.copilot_session = null;
 
     g_tabs[g_tab_count] = t;
     g_active_tab = g_tab_count;
@@ -375,6 +376,7 @@ pub fn spawnAiChatTab(
     t.tree = .empty;
     t.focused = .root;
     t.ai_chat_session = session;
+    t.copilot_session = null;
 
     g_tabs[g_tab_count] = t;
     g_active_tab = g_tab_count;
@@ -402,6 +404,7 @@ pub fn spawnAiChatTabFromHistoryRecord(allocator: std.mem.Allocator, record: age
     t.tree = .empty;
     t.focused = .root;
     t.ai_chat_session = session;
+    t.copilot_session = null;
 
     g_tabs[g_tab_count] = t;
     g_active_tab = g_tab_count;
@@ -1228,6 +1231,7 @@ pub fn restoreTab(
     // Resolve focused_leaf from pre-order index back to a Handle.
     t.focused = handleOfNthLeaf(&t.tree, snap.focused_leaf) orelse .root;
     t.ai_chat_session = null;
+    t.copilot_session = null;
 
     g_tabs[g_tab_count] = t;
     g_active_tab = g_tab_count;
