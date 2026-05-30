@@ -66,7 +66,7 @@ else
       *) break ;;
     esac
     [ -z "$pid" ] && break
-    [ "$pid" = 0 ] && break
+    { [ "$pid" = 0 ] || [ "$pid" = 1 ]; } && break
     i=$((i + 1))
   done
 fi

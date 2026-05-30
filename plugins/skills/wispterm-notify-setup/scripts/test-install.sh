@@ -27,7 +27,7 @@ assert_contains "$t" "$BEL" "CC Notification -> emits BEL"
 # ---- notify: Claude Code Stop on stdin ----
 t="$(mktemp)"
 printf '%s' '{"hook_event_name":"Stop"}' | WISPTERM_NOTIFY_TTY="$t" sh "$NOTIFY"
-assert_contains "$t" "${ESC}]777;notify;Claude Code;" "CC Stop -> OSC777 Claude Code title"
+assert_contains "$t" "${ESC}]777;notify;Claude Code;完成，轮到你了${BEL}" "CC Stop -> OSC777 Claude Code title+body"
 
 # ---- notify: Codex event as LAST argv ----
 t="$(mktemp)"
@@ -39,6 +39,12 @@ t="$(mktemp)"
 printf '%s' '{"hook_event_name":"Notification","title":"a;b","message":"x;y"}' \
   | WISPTERM_NOTIFY_TTY="$t" sh "$NOTIFY"
 assert_contains "$t" "${ESC}]777;notify;ab;xy${BEL}" "sanitize strips ';' from title and body"
+
+# ---- notify: sanitization strips control bytes (ESC/BEL) decoded by jq ----
+t="$(mktemp)"
+printf '%s' '{"hook_event_name":"Notification","title":"a","message":"b\u001bc\u0007d"}' \
+  | WISPTERM_NOTIFY_TTY="$t" sh "$NOTIFY"
+assert_contains "$t" "${ESC}]777;notify;a;bcd${BEL}" "sanitize strips ESC/BEL control bytes from body"
 
 # ---- notify: empty payload -> no output, exit 0 ----
 t="$(mktemp)"
