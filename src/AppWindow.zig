@@ -132,6 +132,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
     input.g_url_open_mode = app.url_open_mode;
     g_ssh_legacy_algorithms = app.ssh_legacy_algorithms;
     tab.g_ssh_legacy_algorithms = app.ssh_legacy_algorithms;
+    g_weixin_notify_forward = app.weixin_notify_forward;
     overlays.g_split_divider_color = app.split_divider_color;
 
     // Apply window size from config
@@ -1369,6 +1370,7 @@ pub threadlocal var g_copy_on_select: bool = false;
 pub threadlocal var g_right_click_action: Config.RightClickAction = .copy;
 pub threadlocal var g_ssh_legacy_algorithms: bool = false;
 pub threadlocal var g_desktop_notifications: bool = true;
+pub threadlocal var g_weixin_notify_forward: bool = false;
 threadlocal var g_notif_auth_requested: bool = false;
 
 /// Update cursor blink state based on time (call once per frame)
@@ -1713,6 +1715,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     input.g_url_open_mode = cfg.@"url-open-mode";
     g_ssh_legacy_algorithms = cfg.@"ssh-legacy-algorithms";
     g_desktop_notifications = cfg.@"desktop-notifications";
+    g_weixin_notify_forward = cfg.@"weixin-notify-forward";
     tab.g_ssh_legacy_algorithms = cfg.@"ssh-legacy-algorithms";
     overlays.g_split_divider_color = cfg.@"split-divider-color";
 
@@ -3531,6 +3534,19 @@ fn handleNotification(surface: *Surface, is_active_surface: bool) void {
                 surface.last_notif_hash = h;
                 surface.last_notif_time = now;
             },
+        }
+
+        // Forward to the bound WeChat owner when the notifier marked it, the
+        // opt-in is on, and you are not looking right at this surface. The
+        // controller self-guards on an active binding + bound owner and sends
+        // off-thread, so this never blocks. (Reaches here only after the
+        // shouldDeliver gate above, so it inherits rate-limit/dedup.)
+        if (item.forward_wechat and g_weixin_notify_forward and
+            !(window_focused and is_active_surface))
+        {
+            if (g_app) |app| {
+                if (app.weixin_controller) |ctrl| ctrl.enqueueNotify(item.title(), item.body());
+            }
         }
     }
 }

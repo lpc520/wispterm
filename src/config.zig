@@ -343,6 +343,10 @@ shell: []const u8 = platform_pty_command.default_shell_name,
 /// the first 1:1 sender after login is auto-bound as owner.
 @"weixin-allowed-user": ?[]const u8 = null,
 
+/// When true (with weixin-direct-enabled and a bound owner), also forward agent
+/// finish/confirm notifications to the bound WeChat owner. Opt-in; default off.
+@"weixin-notify-forward": bool = false,
+
 /// Show a debug FPS overlay in the bottom-right corner.
 @"wispterm-debug-fps": bool = false,
 @"wispterm-debug-draw-calls": bool = false,
@@ -821,6 +825,14 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
         };
     } else if (std.mem.eql(u8, key, "weixin-allowed-user")) {
         self.@"weixin-allowed-user" = self.dupeString(allocator, value) orelse return;
+    } else if (std.mem.eql(u8, key, "weixin-notify-forward")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"weixin-notify-forward" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"weixin-notify-forward" = false;
+        } else {
+            log.warn("invalid weixin-notify-forward: {s}", .{value});
+        }
     } else if (std.mem.eql(u8, key, "wispterm-debug-fps")) {
         if (std.mem.eql(u8, value, "true")) {
             self.@"wispterm-debug-fps" = true;
@@ -1237,6 +1249,7 @@ pub fn writeHelp(writer: anytype) !void {
         \\  --weixin-base-url <url>      Override ilink API base URL
         \\  --weixin-reply-timeout-ms <n> Deprecated (no-op); AI-reply window is ~30 min
         \\  --weixin-allowed-user <id>   Restrict control to one ilink user_id
+        \\  --weixin-notify-forward <bool> Forward agent notifications to the bound WeChat owner
         \\  --quake-mode <bool>          Enable Quake-style drop-down mode (default: true)
         \\
         \\Color Options (override theme):
