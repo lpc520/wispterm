@@ -97,6 +97,14 @@ test "extractFirstTurn: null when empty" {
     try std.testing.expect(extractFirstTurn(&msgs) == null);
 }
 
+test "extractFirstTurn: null when user missing" {
+    const msgs = [_]TurnMessage{
+        .{ .role = .assistant, .content = "hello" },
+        .{ .role = .tool, .content = "x" },
+    };
+    try std.testing.expect(extractFirstTurn(&msgs) == null);
+}
+
 pub const TitleGate = struct {
     attempted: bool,
     has_api_key: bool,
@@ -164,10 +172,10 @@ const quote_pairs = [_]struct { open: []const u8, close: []const u8 }{
     .{ .open = "\"", .close = "\"" },
     .{ .open = "'", .close = "'" },
     .{ .open = "`", .close = "`" },
-    .{ .open = "\xe2\x80\x9c", .close = "\xe2\x80\x9d" },
-    .{ .open = "\xe3\x80\x8c", .close = "\xe3\x80\x8d" },
-    .{ .open = "\xe3\x80\x8e", .close = "\xe3\x80\x8f" },
-    .{ .open = "\xe3\x80\x8a", .close = "\xe3\x80\x8b" },
+    .{ .open = "\u{201C}", .close = "\u{201D}" },
+    .{ .open = "\u{300C}", .close = "\u{300D}" },
+    .{ .open = "\u{300E}", .close = "\u{300F}" },
+    .{ .open = "\u{300A}", .close = "\u{300B}" },
 };
 
 fn stripSurroundingQuotes(s: []const u8) []const u8 {
@@ -182,7 +190,7 @@ fn stripSurroundingQuotes(s: []const u8) []const u8 {
     return s;
 }
 
-const cjk_trailing_puncts = [_][]const u8{ "\xe3\x80\x82", "\xef\xbc\x81", "\xef\xbc\x9f", "\xef\xbc\x8c", "\xe3\x80\x81", "\xef\xbc\x9b", "\xef\xbc\x9a" };
+const cjk_trailing_puncts = [_][]const u8{ "\u{3002}", "\u{FF01}", "\u{FF1F}", "\u{FF0C}", "\u{3001}", "\u{FF1B}", "\u{FF1A}" };
 
 fn stripTrailingNoise(s: []const u8) []const u8 {
     var end = s.len;
@@ -322,4 +330,16 @@ test "buildUserContent: truncates each section on UTF-8 boundary" {
     const after_prefix = c["User: ".len..];
     const user_section = after_prefix[0 .. std.mem.indexOf(u8, after_prefix, "\n\n").?];
     try std.testing.expect(user_section.len <= max_section_bytes);
+}
+
+test "buildUserContent: truncates assistant section on UTF-8 boundary" {
+    const big = "一" ** 1000; // 3000 bytes > max_section_bytes
+    const turn = FirstTurn{ .user = "ok", .assistant = big };
+    const c = try buildUserContent(std.testing.allocator, turn);
+    defer std.testing.allocator.free(c);
+    try std.testing.expect(std.mem.startsWith(u8, c, "User: ok\n\nAssistant: "));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(c));
+    const marker = "\n\nAssistant: ";
+    const assistant_section = c[std.mem.indexOf(u8, c, marker).? + marker.len ..];
+    try std.testing.expect(assistant_section.len <= max_section_bytes);
 }
