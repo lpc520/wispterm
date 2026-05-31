@@ -181,13 +181,6 @@ pub const CdnMedia = struct {
     file_key: []const u8 = "",
 };
 
-pub const VoiceMetadata = struct {
-    encode_type: i64,
-    sample_rate: i64,
-    playtime: i64,
-    codec: []const u8 = "",
-};
-
 pub const UploadedFileAttachment = struct {
     media: CdnMedia,
     file_name: []const u8,
@@ -197,13 +190,6 @@ pub const UploadedFileAttachment = struct {
 pub const UploadedImage = struct {
     media: CdnMedia,
     mid_size: u64,
-};
-
-pub const UploadedVoice = struct {
-    media: CdnMedia,
-    encode_type: i64,
-    sample_rate: i64,
-    playtime: i64,
 };
 
 pub const AttachmentSender = struct {
@@ -319,19 +305,6 @@ pub fn uploadUrlWithTicket(allocator: std.mem.Allocator, base_url: []const u8, t
     @compileError("uploadUrlWithTicket is not implemented");
 }
 
-pub fn voiceEncodeType(codec: []const u8, path: []const u8) !i64 {
-    _ = codec;
-    _ = path;
-    @compileError("voiceEncodeType is not implemented");
-}
-
-pub fn parseFfprobeVoiceMetadata(allocator: std.mem.Allocator, json: []const u8, path: []const u8) !types.VoiceMetadata {
-    _ = allocator;
-    _ = json;
-    _ = path;
-    @compileError("parseFfprobeVoiceMetadata is not implemented");
-}
-
 const t = std.testing;
 
 test "pkcs7 padding always adds at least one AES block" {
@@ -373,27 +346,6 @@ test "uploadUrlWithTicket appends ticket query using question mark or ampersand"
     const b = try uploadUrlWithTicket(t.allocator, "https://cdn.example/upload?x=1", "ticket=abc");
     defer t.allocator.free(b);
     try t.expectEqualStrings("https://cdn.example/upload?x=1&ticket=abc", b);
-}
-
-test "voiceEncodeType maps codec and extension values" {
-    try t.expectEqual(@as(i64, 1), try voiceEncodeType("pcm_s16le", "note.wav"));
-    try t.expectEqual(@as(i64, 5), try voiceEncodeType("amr_nb", "note.amr"));
-    try t.expectEqual(@as(i64, 6), try voiceEncodeType("silk", "note.silk"));
-    try t.expectEqual(@as(i64, 7), try voiceEncodeType("mp3", "note.mp3"));
-    try t.expectEqual(@as(i64, 8), try voiceEncodeType("speex", "note.ogg"));
-    try t.expectError(error.UnsupportedVoiceCodec, voiceEncodeType("aac", "note.m4a"));
-}
-
-test "parseFfprobeVoiceMetadata reads codec sample rate and duration" {
-    const json =
-        \\{"streams":[{"codec_type":"audio","codec_name":"mp3","sample_rate":"44100","duration":"2.700000"}],
-        \\"format":{"duration":"2.700000"}}
-    ;
-    const meta = try parseFfprobeVoiceMetadata(t.allocator, json, "voice.mp3");
-    try t.expectEqual(@as(i64, 7), meta.encode_type);
-    try t.expectEqual(@as(i64, 44100), meta.sample_rate);
-    try t.expectEqual(@as(i64, 2700), meta.playtime);
-    try t.expectEqualStrings("mp3", meta.codec);
 }
 ```
 
@@ -471,59 +423,6 @@ pub fn md5Hex(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 pub fn uploadUrlWithTicket(allocator: std.mem.Allocator, base_url: []const u8, ticket: []const u8) ![]u8 {
     const sep: []const u8 = if (std.mem.indexOfScalar(u8, base_url, '?') == null) "?" else "&";
     return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ base_url, sep, ticket });
-}
-
-pub fn voiceEncodeType(codec: []const u8, path: []const u8) !i64 {
-    const ext = std.fs.path.extension(path);
-    if (std.ascii.eqlIgnoreCase(codec, "pcm_s16le") or std.ascii.eqlIgnoreCase(codec, "pcm_u8") or std.ascii.eqlIgnoreCase(ext, ".wav")) return 1;
-    if (std.ascii.eqlIgnoreCase(codec, "amr_nb") or std.ascii.eqlIgnoreCase(codec, "amr_wb") or std.ascii.eqlIgnoreCase(ext, ".amr")) return 5;
-    if (std.ascii.eqlIgnoreCase(codec, "silk") or std.ascii.eqlIgnoreCase(ext, ".silk")) return 6;
-    if (std.ascii.eqlIgnoreCase(codec, "mp3") or std.ascii.eqlIgnoreCase(ext, ".mp3")) return 7;
-    if (std.ascii.eqlIgnoreCase(codec, "speex") or std.ascii.eqlIgnoreCase(codec, "opus") or std.ascii.eqlIgnoreCase(codec, "vorbis") or std.ascii.eqlIgnoreCase(ext, ".ogg")) return 8;
-    return error.UnsupportedVoiceCodec;
-}
-
-fn voiceCodecLabel(encode_type: i64) []const u8 {
-    return switch (encode_type) {
-        1 => "pcm",
-        5 => "amr",
-        6 => "silk",
-        7 => "mp3",
-        8 => "ogg",
-        else => "unknown",
-    };
-}
-
-pub fn parseFfprobeVoiceMetadata(allocator: std.mem.Allocator, json: []const u8, path: []const u8) !types.VoiceMetadata {
-    const Probe = struct {
-        streams: []struct {
-            codec_type: []const u8 = "",
-            codec_name: []const u8 = "",
-            sample_rate: []const u8 = "",
-            duration: []const u8 = "",
-        } = &.{},
-        format: struct { duration: []const u8 = "" } = .{},
-    };
-    var parsed = try std.json.parseFromSlice(Probe, allocator, json, .{
-        .ignore_unknown_fields = true,
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    for (parsed.value.streams) |stream| {
-        if (!std.mem.eql(u8, stream.codec_type, "audio")) continue;
-        const sample_rate = std.fmt.parseInt(i64, stream.sample_rate, 10) catch 0;
-        const duration_text = if (stream.duration.len != 0) stream.duration else parsed.value.format.duration;
-        const seconds = std.fmt.parseFloat(f64, duration_text) catch 0;
-        const encode_type = try voiceEncodeType(stream.codec_name, path);
-        return .{
-            .encode_type = encode_type,
-            .sample_rate = sample_rate,
-            .playtime = @as(i64, @intFromFloat(@round(seconds * 1000.0))),
-            .codec = voiceCodecLabel(encode_type),
-        };
-    }
-    return error.NoAudioStream;
 }
 ```
 
@@ -619,28 +518,6 @@ test "builds uploaded image sendmessage body" {
     try t.expect(std.mem.indexOf(u8, body, "\"type\":2") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"image_item\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"mid_size\":64") != null);
-}
-
-test "builds uploaded voice sendmessage body" {
-    const media = types.CdnMedia{
-        .encrypt_query_param = "encrypted-param",
-        .aes_key = "encoded-key",
-        .md5 = "md5",
-        .size = 64,
-        .file_key = "file-key",
-    };
-    const body = try buildSendUploadedVoiceBody(t.allocator, "u1", "ctx", "cid", .{
-        .media = media,
-        .encode_type = 7,
-        .sample_rate = 44100,
-        .playtime = 2700,
-    });
-    defer t.allocator.free(body);
-    try t.expect(std.mem.indexOf(u8, body, "\"type\":3") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"voice_item\"") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"encode_type\":7") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"sample_rate\":44100") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"playtime\":2700") != null);
 }
 
 test "parses inbound voice transcription into message item" {
@@ -814,46 +691,6 @@ pub fn buildSendUploadedImageBody(
     const items = [_]Item{.{ .image_item = .{
         .media = wireMedia(image.media),
         .mid_size = image.mid_size,
-    } }};
-    return std.json.Stringify.valueAlloc(allocator, Body{
-        .msg = .{
-            .to_user_id = to_user_id,
-            .client_id = client_id,
-            .context_token = context_token,
-            .item_list = &items,
-        },
-        .base_info = .{ .channel_version = CHANNEL_VERSION },
-    }, .{});
-}
-
-pub fn buildSendUploadedVoiceBody(
-    allocator: std.mem.Allocator,
-    to_user_id: []const u8,
-    context_token: []const u8,
-    client_id: []const u8,
-    voice: types.UploadedVoice,
-) ![]u8 {
-    const VoiceItem = struct {
-        media: WireCdnMedia,
-        encode_type: i64,
-        sample_rate: i64,
-        playtime: i64,
-    };
-    const Item = struct { type: i64 = 3, voice_item: VoiceItem };
-    const Msg = struct {
-        to_user_id: []const u8,
-        client_id: []const u8,
-        message_type: i64 = 2,
-        message_state: i64 = 2,
-        context_token: []const u8,
-        item_list: []const Item,
-    };
-    const Body = struct { msg: Msg, base_info: BaseInfo };
-    const items = [_]Item{.{ .voice_item = .{
-        .media = wireMedia(voice.media),
-        .encode_type = voice.encode_type,
-        .sample_rate = voice.sample_rate,
-        .playtime = voice.playtime,
     } }};
     return std.json.Stringify.valueAlloc(allocator, Body{
         .msg = .{

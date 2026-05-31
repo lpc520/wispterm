@@ -66,13 +66,6 @@ pub const CdnMedia = struct {
     file_key: []const u8 = "",
 };
 
-pub const VoiceMetadata = struct {
-    encode_type: i64,
-    sample_rate: i64,
-    playtime: i64,
-    codec: []const u8 = "",
-};
-
 pub const UploadedFileAttachment = struct {
     media: CdnMedia,
     file_name: []const u8,
@@ -82,13 +75,6 @@ pub const UploadedFileAttachment = struct {
 pub const UploadedImage = struct {
     media: CdnMedia,
     mid_size: u64,
-};
-
-pub const UploadedVoice = struct {
-    media: CdnMedia,
-    encode_type: i64,
-    sample_rate: i64,
-    playtime: i64,
 };
 
 pub const AttachmentSender = struct {

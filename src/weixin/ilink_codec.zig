@@ -143,46 +143,6 @@ pub fn buildSendUploadedImageBody(
     }, .{});
 }
 
-pub fn buildSendUploadedVoiceBody(
-    allocator: std.mem.Allocator,
-    to_user_id: []const u8,
-    context_token: []const u8,
-    client_id: []const u8,
-    voice: types.UploadedVoice,
-) ![]u8 {
-    const VoiceItem = struct {
-        media: WireCdnMedia,
-        encode_type: i64,
-        sample_rate: i64,
-        playtime: i64,
-    };
-    const Item = struct { type: i64 = 3, voice_item: VoiceItem };
-    const Msg = struct {
-        to_user_id: []const u8,
-        client_id: []const u8,
-        message_type: i64 = 2,
-        message_state: i64 = 2,
-        context_token: []const u8,
-        item_list: []const Item,
-    };
-    const Body = struct { msg: Msg, base_info: BaseInfo };
-    const items = [_]Item{.{ .voice_item = .{
-        .media = wireMedia(voice.media),
-        .encode_type = voice.encode_type,
-        .sample_rate = voice.sample_rate,
-        .playtime = voice.playtime,
-    } }};
-    return std.json.Stringify.valueAlloc(allocator, Body{
-        .msg = .{
-            .to_user_id = to_user_id,
-            .client_id = client_id,
-            .context_token = context_token,
-            .item_list = &items,
-        },
-        .base_info = .{ .channel_version = CHANNEL_VERSION },
-    }, .{});
-}
-
 pub fn buildGetUploadUrlBody(
     allocator: std.mem.Allocator,
     kind: types.AttachmentKind,
@@ -431,35 +391,6 @@ test "builds uploaded image sendmessage body" {
     try t.expect(std.mem.indexOf(u8, body, "\"type\":2") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"image_item\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"mid_size\":64") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"channel_version\":\"1.0.2\"") != null);
-}
-
-test "builds uploaded voice sendmessage body" {
-    const media = types.CdnMedia{
-        .encrypt_query_param = "encrypted-param",
-        .aes_key = "encoded-key",
-        .md5 = "md5",
-        .size = 64,
-        .file_key = "file-key",
-    };
-    const body = try buildSendUploadedVoiceBody(t.allocator, "u1", "ctx", "cid", .{
-        .media = media,
-        .encode_type = 7,
-        .sample_rate = 44100,
-        .playtime = 2700,
-    });
-    defer t.allocator.free(body);
-    try t.expect(std.mem.indexOf(u8, body, "\"to_user_id\":\"u1\"") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"client_id\":\"cid\"") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"message_type\":2") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"message_state\":2") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"context_token\":\"ctx\"") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"item_list\"") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"type\":3") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"voice_item\"") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"encode_type\":7") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"sample_rate\":44100") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"playtime\":2700") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"channel_version\":\"1.0.2\"") != null);
 }
 
