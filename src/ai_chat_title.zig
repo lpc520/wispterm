@@ -96,3 +96,62 @@ test "extractFirstTurn: null when empty" {
     const msgs = [_]TurnMessage{};
     try std.testing.expect(extractFirstTurn(&msgs) == null);
 }
+
+pub const TitleGate = struct {
+    attempted: bool,
+    has_api_key: bool,
+    title: []const u8,
+    default_name: []const u8,
+};
+
+/// Auto-title fires only when: not attempted yet, an API key is configured, the
+/// title is still the default (user has not renamed), and a first turn exists.
+pub fn shouldAutoTitle(gate: TitleGate, turn: ?FirstTurn) bool {
+    if (gate.attempted) return false;
+    if (!gate.has_api_key) return false;
+    if (!std.mem.eql(u8, gate.title, gate.default_name)) return false;
+    return turn != null;
+}
+
+test "shouldAutoTitle: fires on first turn with default title and key" {
+    const turn = FirstTurn{ .user = "u", .assistant = "a" };
+    try std.testing.expect(shouldAutoTitle(.{
+        .attempted = false,
+        .has_api_key = true,
+        .title = "DeepSeek",
+        .default_name = "DeepSeek",
+    }, turn));
+}
+
+test "shouldAutoTitle: blocked when title not default" {
+    const turn = FirstTurn{ .user = "u", .assistant = "a" };
+    try std.testing.expect(!shouldAutoTitle(.{
+        .attempted = false,
+        .has_api_key = true,
+        .title = "My chat",
+        .default_name = "DeepSeek",
+    }, turn));
+}
+
+test "shouldAutoTitle: blocked when attempted / no key / no turn" {
+    const turn = FirstTurn{ .user = "u", .assistant = "a" };
+    const base = TitleGate{
+        .attempted = false,
+        .has_api_key = true,
+        .title = "DeepSeek",
+        .default_name = "DeepSeek",
+    };
+    try std.testing.expect(!shouldAutoTitle(.{
+        .attempted = true,
+        .has_api_key = base.has_api_key,
+        .title = base.title,
+        .default_name = base.default_name,
+    }, turn));
+    try std.testing.expect(!shouldAutoTitle(.{
+        .attempted = base.attempted,
+        .has_api_key = false,
+        .title = base.title,
+        .default_name = base.default_name,
+    }, turn));
+    try std.testing.expect(!shouldAutoTitle(base, null));
+}
