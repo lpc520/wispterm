@@ -366,6 +366,7 @@ test "builds getuploadurl body for file media" {
     try t.expect(std.mem.indexOf(u8, body, "\"size\":123") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"md5\":\"900150983cd24fb0d6963f7d28e17f72\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"file_key\":\"file-key\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"channel_version\":\"1.0.2\"") != null);
 }
 
 test "parses getuploadurl response" {
@@ -394,11 +395,18 @@ test "builds uploaded file sendmessage body" {
         .len = 123,
     });
     defer t.allocator.free(body);
+    try t.expect(std.mem.indexOf(u8, body, "\"to_user_id\":\"u1\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"client_id\":\"cid\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"message_type\":2") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"message_state\":2") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"context_token\":\"ctx\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"item_list\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"type\":4") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"file_item\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"file_name\":\"report.pdf\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"len\":\"123\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"encrypt_query_param\":\"encrypted-param\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"channel_version\":\"1.0.2\"") != null);
 }
 
 test "builds uploaded image sendmessage body" {
@@ -414,9 +422,16 @@ test "builds uploaded image sendmessage body" {
         .mid_size = 64,
     });
     defer t.allocator.free(body);
+    try t.expect(std.mem.indexOf(u8, body, "\"to_user_id\":\"u1\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"client_id\":\"cid\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"message_type\":2") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"message_state\":2") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"context_token\":\"ctx\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"item_list\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"type\":2") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"image_item\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"mid_size\":64") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"channel_version\":\"1.0.2\"") != null);
 }
 
 test "builds uploaded voice sendmessage body" {
@@ -434,11 +449,18 @@ test "builds uploaded voice sendmessage body" {
         .playtime = 2700,
     });
     defer t.allocator.free(body);
+    try t.expect(std.mem.indexOf(u8, body, "\"to_user_id\":\"u1\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"client_id\":\"cid\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"message_type\":2") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"message_state\":2") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"context_token\":\"ctx\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"item_list\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"type\":3") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"voice_item\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"encode_type\":7") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"sample_rate\":44100") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"playtime\":2700") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"channel_version\":\"1.0.2\"") != null);
 }
 
 test "parses inbound voice transcription into message item" {
