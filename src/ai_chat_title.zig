@@ -38,3 +38,61 @@ test "utf8SafeLen: backs off mid-codepoint" {
     try std.testing.expectEqual(@as(usize, 5), utf8SafeLen(s, 5));
     try std.testing.expectEqual(@as(usize, 5), utf8SafeLen(s, 99));
 }
+
+/// Minimal view of a chat message for first-turn extraction.
+pub const TurnMessage = struct {
+    role: Role,
+    content: []const u8,
+};
+
+pub const FirstTurn = struct {
+    user: []const u8,
+    assistant: []const u8,
+};
+
+/// Return the first user message and the first assistant message, skipping all
+/// tool messages (agent-mode tool-call progress / tool results). Returns null
+/// if either a user or an assistant message is missing.
+pub fn extractFirstTurn(messages: []const TurnMessage) ?FirstTurn {
+    var user: ?[]const u8 = null;
+    var assistant: ?[]const u8 = null;
+    for (messages) |m| {
+        switch (m.role) {
+            .user => if (user == null) {
+                user = m.content;
+            },
+            .assistant => if (assistant == null) {
+                assistant = m.content;
+            },
+            .tool => {},
+        }
+    }
+    if (user == null or assistant == null) return null;
+    return .{ .user = user.?, .assistant = assistant.? };
+}
+
+test "extractFirstTurn: first user + first assistant, skipping tool messages" {
+    const msgs = [_]TurnMessage{
+        .{ .role = .user, .content = "deploy the app" },
+        .{ .role = .tool, .content = "running build" },
+        .{ .role = .tool, .content = "build ok" },
+        .{ .role = .assistant, .content = "Deployed successfully." },
+        .{ .role = .assistant, .content = "second answer" },
+    };
+    const turn = extractFirstTurn(&msgs).?;
+    try std.testing.expectEqualStrings("deploy the app", turn.user);
+    try std.testing.expectEqualStrings("Deployed successfully.", turn.assistant);
+}
+
+test "extractFirstTurn: null when assistant missing" {
+    const msgs = [_]TurnMessage{
+        .{ .role = .user, .content = "hi" },
+        .{ .role = .tool, .content = "x" },
+    };
+    try std.testing.expect(extractFirstTurn(&msgs) == null);
+}
+
+test "extractFirstTurn: null when empty" {
+    const msgs = [_]TurnMessage{};
+    try std.testing.expect(extractFirstTurn(&msgs) == null);
+}
