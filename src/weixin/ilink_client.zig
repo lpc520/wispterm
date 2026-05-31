@@ -561,7 +561,6 @@ fn readResponseBodyExcerpt(allocator: std.mem.Allocator, reader: *std.Io.Reader)
     const out = try allocator.alloc(u8, Client.ERROR_BODY_EXCERPT_BYTES);
     errdefer allocator.free(out);
     const len = try reader.readSliceShort(out);
-    _ = try reader.discardRemaining();
     return allocator.realloc(out, len);
 }
 
@@ -680,7 +679,7 @@ fn skipPlainValue(input: []const u8, start: usize) usize {
     var i = start;
     while (i < input.len) : (i += 1) {
         switch (input[i]) {
-            ' ', '\t', '\r', '\n', ',', ';', '&', '}' => return i,
+            '\r', '\n', ',', ';', '&', '}' => return i,
             else => {},
         }
     }
@@ -855,6 +854,16 @@ test "safe response excerpts redact sensitive fields and omit binary bodies" {
     try std.testing.expect(std.mem.indexOf(u8, message, "param-2") == null);
     try std.testing.expect(std.mem.indexOf(u8, message, "file-2") == null);
 
+    const bearer = try safeDiagnosticTextAlloc(std.testing.allocator, "Authorization: Bearer secret-token\nstatus=401");
+    defer std.testing.allocator.free(bearer);
+    try std.testing.expect(std.mem.indexOf(u8, bearer, "secret-token") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bearer, "status=401") != null);
+
+    const spaced = try safeDiagnosticTextAlloc(std.testing.allocator, "access_token: tok with suffix; ret=1");
+    defer std.testing.allocator.free(spaced);
+    try std.testing.expect(std.mem.indexOf(u8, spaced, "tok with suffix") == null);
+    try std.testing.expect(std.mem.indexOf(u8, spaced, "ret=1") != null);
+
     const binary = try safeDiagnosticTextAlloc(std.testing.allocator, "abc\x00def");
     defer std.testing.allocator.free(binary);
     try std.testing.expectEqualStrings("[binary body omitted]", binary);
@@ -871,7 +880,7 @@ test "readResponseBodyExcerpt caps diagnostic body reads" {
     const excerpt = try readResponseBodyExcerpt(std.testing.allocator, &reader);
     defer std.testing.allocator.free(excerpt);
     try std.testing.expectEqual(@as(usize, Client.ERROR_BODY_EXCERPT_BYTES), excerpt.len);
-    try std.testing.expectError(error.EndOfStream, reader.takeByte());
+    try std.testing.expectEqual(@as(u8, 'a'), try reader.takeByte());
 }
 
 test "voice attachment uploads as a file item through injected transport" {
