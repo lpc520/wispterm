@@ -316,25 +316,23 @@ pub const Client = struct {
 
         var transfer_buffer: [16 * 1024]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
-        var response_body: std.Io.Writer.Allocating = .init(arena);
-        _ = reader.streamRemaining(&response_body.writer) catch |err| {
+        const response_excerpt = readResponseBodyExcerpt(arena, reader) catch |err| {
             std.debug.print("weixin upload-cdn({d}): status=read_failed err={}\n", .{ std.time.milliTimestamp(), err });
             return error.WeixinCdnUploadFailed;
         };
-        const response_items = response_body.toArrayList().items;
 
         if (response.head.status != .ok) {
             std.debug.print("weixin upload-cdn({d}): status=failed http_status={} body_excerpt={s}\n", .{
                 std.time.milliTimestamp(),
                 response.head.status,
-                responseExcerpt(response_items),
+                logSafeResponseExcerpt(arena, response_excerpt),
             });
             return error.WeixinCdnUploadFailed;
         }
         if (encrypted_param) |param| return param;
         std.debug.print("weixin upload-cdn({d}): status=missing-encrypted-param body_excerpt={s}\n", .{
             std.time.milliTimestamp(),
-            responseExcerpt(response_items),
+            logSafeResponseExcerpt(arena, response_excerpt),
         });
         return error.WeixinCdnMissingEncryptedParam;
     }
@@ -349,7 +347,7 @@ pub const Client = struct {
         const ret = w.ret orelse {
             std.debug.print("weixin send({d}): kind=attachment status=malformed body_excerpt={s}\n", .{
                 std.time.milliTimestamp(),
-                responseExcerpt(resp),
+                logSafeResponseExcerpt(arena, resp),
             });
             return error.IlinkSendMessageMalformed;
         };
@@ -424,7 +422,7 @@ pub const Client = struct {
                 std.time.milliTimestamp(),
                 endpointForLog(path),
                 response.status,
-                responseExcerpt(response_items),
+                logSafeResponseExcerpt(arena, response_items),
             });
             return error.IlinkHttpStatus;
         }
@@ -491,17 +489,51 @@ fn appendQueryEscaped(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
 }
 
 fn readLocalFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const path_kind = try localPathKind(path);
+    switch (path_kind) {
+        .file => {},
+        .directory => return error.IsDir,
+        else => return error.WeixinAttachmentNotRegularFile,
+    }
+
     var file = if (std.fs.path.isAbsolute(path))
         try std.fs.openFileAbsolute(path, .{})
     else
         try std.fs.cwd().openFile(path, .{});
     defer file.close();
 
+    // Re-check the opened handle so a path replaced after the initial stat is
+    // not read if it no longer resolves to a regular file.
     const stat = try file.stat();
     switch (stat.kind) {
         .file => return file.readToEndAlloc(allocator, std.math.maxInt(usize)),
         .directory => return error.IsDir,
         else => return error.WeixinAttachmentNotRegularFile,
+    }
+}
+
+fn localPathKind(path: []const u8) !std.fs.File.Kind {
+    const stat = std.fs.cwd().statFile(path) catch |err| switch (err) {
+        error.IsDir => return .directory,
+        error.AccessDenied => {
+            if (pathIsDirectory(path)) return .directory;
+            return err;
+        },
+        else => return err,
+    };
+    return stat.kind;
+}
+
+fn pathIsDirectory(path: []const u8) bool {
+    var dir = if (std.fs.path.isAbsolute(path))
+        std.fs.openDirAbsolute(path, .{})
+    else
+        std.fs.cwd().openDir(path, .{});
+    if (dir) |*d| {
+        d.close();
+        return true;
+    } else |_| {
+        return false;
     }
 }
 
@@ -515,8 +547,104 @@ fn endpointForLog(path: []const u8) []const u8 {
     return path[0..query_index];
 }
 
-fn responseExcerpt(body: []const u8) []const u8 {
-    return body[0..@min(body.len, Client.ERROR_BODY_EXCERPT_BYTES)];
+fn readResponseBodyExcerpt(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]u8 {
+    const out = try allocator.alloc(u8, Client.ERROR_BODY_EXCERPT_BYTES);
+    errdefer allocator.free(out);
+    const len = try reader.readSliceShort(out);
+    _ = try reader.discardRemaining();
+    return allocator.realloc(out, len);
+}
+
+fn logSafeResponseExcerpt(allocator: std.mem.Allocator, body: []const u8) []const u8 {
+    return safeResponseExcerptAlloc(allocator, body) catch "[response excerpt unavailable]";
+}
+
+fn safeResponseExcerptAlloc(allocator: std.mem.Allocator, body: []const u8) ![]u8 {
+    const capped = body[0..@min(body.len, Client.ERROR_BODY_EXCERPT_BYTES)];
+    if (looksBinary(capped)) return allocator.dupe(u8, "[binary body omitted]");
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < capped.len) {
+        if (try appendRedactedJsonField(&out, allocator, capped, &i)) continue;
+        try appendLogEscapedByte(&out, allocator, capped[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn looksBinary(bytes: []const u8) bool {
+    for (bytes) |b| {
+        if (b == 0 or b == 0x7f) return true;
+        if (b < 0x20 and b != '\n' and b != '\r' and b != '\t') return true;
+    }
+    return false;
+}
+
+fn appendRedactedJsonField(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    index: *usize,
+) !bool {
+    const fields = [_][]const u8{
+        "context_token",
+        "aes_key",
+        "encrypt_query_param",
+        "token",
+        "bot_token",
+        "access_token",
+        "authorization",
+        "Authorization",
+        "ticket",
+    };
+    for (fields) |field| {
+        if (jsonStringValueStart(input, index.*, field)) |value_quote| {
+            try out.appendSlice(allocator, input[index.* .. value_quote + 1]);
+            try out.appendSlice(allocator, "[redacted]");
+            try out.append(allocator, '"');
+            index.* = skipJsonString(input, value_quote + 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+fn jsonStringValueStart(input: []const u8, start: usize, field: []const u8) ?usize {
+    if (start >= input.len or input[start] != '"') return null;
+    const key_end = start + 1 + field.len;
+    if (key_end >= input.len) return null;
+    if (!std.mem.eql(u8, input[start + 1 .. key_end], field)) return null;
+    if (input[key_end] != '"') return null;
+    var i = key_end + 1;
+    while (i < input.len and std.ascii.isWhitespace(input[i])) : (i += 1) {}
+    if (i >= input.len or input[i] != ':') return null;
+    i += 1;
+    while (i < input.len and std.ascii.isWhitespace(input[i])) : (i += 1) {}
+    if (i >= input.len or input[i] != '"') return null;
+    return i;
+}
+
+fn skipJsonString(input: []const u8, start: usize) usize {
+    var i = start;
+    while (i < input.len) : (i += 1) {
+        if (input[i] == '\\') {
+            if (i + 1 < input.len) i += 1;
+            continue;
+        }
+        if (input[i] == '"') return i + 1;
+    }
+    return input.len;
+}
+
+fn appendLogEscapedByte(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, b: u8) !void {
+    switch (b) {
+        '\n' => try out.appendSlice(allocator, "\\n"),
+        '\r' => try out.appendSlice(allocator, "\\r"),
+        '\t' => try out.appendSlice(allocator, "\\t"),
+        else => try out.append(allocator, b),
+    }
 }
 
 test "client init defaults the base url" {
@@ -615,6 +743,39 @@ test "readLocalFileAlloc rejects non-regular files" {
     } else |err| {
         try std.testing.expectEqual(error.WeixinAttachmentNotRegularFile, err);
     }
+}
+
+test "readLocalFileAlloc rejects directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+
+    try std.testing.expectError(error.IsDir, readLocalFileAlloc(std.testing.allocator, root));
+}
+
+test "safe response excerpts redact sensitive fields and omit binary bodies" {
+    const redacted = try safeResponseExcerptAlloc(std.testing.allocator, "{\"context_token\":\"ctx-1\",\"aes_key\":\"secret\",\"encrypt_query_param\":\"param\",\"bot_token\":\"bot\",\"message\":\"line\nnext\"}");
+    defer std.testing.allocator.free(redacted);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "ctx-1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "secret") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "\":\"param\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "\":\"bot\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "[redacted]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "\\n") != null);
+
+    const binary = try safeResponseExcerptAlloc(std.testing.allocator, "abc\x00def");
+    defer std.testing.allocator.free(binary);
+    try std.testing.expectEqualStrings("[binary body omitted]", binary);
+}
+
+test "readResponseBodyExcerpt caps diagnostic body reads" {
+    var long_body: [Client.ERROR_BODY_EXCERPT_BYTES + 64]u8 = undefined;
+    @memset(long_body[0..], 'a');
+    var reader: std.Io.Reader = .fixed(&long_body);
+    const excerpt = try readResponseBodyExcerpt(std.testing.allocator, &reader);
+    defer std.testing.allocator.free(excerpt);
+    try std.testing.expectEqual(@as(usize, Client.ERROR_BODY_EXCERPT_BYTES), excerpt.len);
 }
 
 test "voice attachment uploads as a file item through injected transport" {
