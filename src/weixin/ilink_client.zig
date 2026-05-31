@@ -300,7 +300,7 @@ pub const Client = struct {
         const reader = response.reader(&transfer_buffer);
         var discard_buffer: [1024]u8 = undefined;
         var discarding: std.Io.Writer.Discarding = .init(&discard_buffer);
-        _ = reader.streamRemaining(&discarding.writer) catch {};
+        _ = reader.streamRemaining(&discarding.writer) catch return error.WeixinCdnUploadFailed;
 
         if (response.head.status != .ok) return error.WeixinCdnUploadFailed;
         return encrypted_param orelse error.WeixinCdnMissingEncryptedParam;
@@ -315,7 +315,7 @@ pub const Client = struct {
         });
         if (w.ret) |ret| {
             if (ret != 0) {
-                std.debug.print("weixin send({d}): kind=sendmessage status=failed ret={} errcode={} message={s}\n", .{ std.time.milliTimestamp(), ret, w.errcode, w.message });
+                std.debug.print("weixin send({d}): kind=attachment status=failed ret={} errcode={} message={s}\n", .{ std.time.milliTimestamp(), ret, w.errcode, w.message });
                 return error.IlinkSendMessageFailed;
             }
         }
@@ -333,23 +333,19 @@ pub const Client = struct {
             "json",
             path,
         };
-        var child = std.process.Child.init(&argv, arena);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-        child.create_no_window = true;
-        child.spawn() catch |err| switch (err) {
+        const result = std.process.Child.run(.{
+            .allocator = arena,
+            .argv = &argv,
+            .max_output_bytes = 64 * 1024,
+        }) catch |err| switch (err) {
             error.FileNotFound => return error.FfprobeNotFound,
             else => return error.FfprobeFailed,
         };
-
-        const stdout = if (child.stdout) |out| try out.readToEndAlloc(arena, 64 * 1024) else "";
-        const term = child.wait() catch return error.FfprobeFailed;
-        switch (term) {
+        switch (result.term) {
             .Exited => |code| if (code != 0) return error.FfprobeFailed,
             else => return error.FfprobeFailed,
         }
-        return media.parseFfprobeVoiceMetadata(arena, stdout, path);
+        return media.parseFfprobeVoiceMetadata(arena, result.stdout, path);
     }
 
     /// Performs one HTTP request, returning the response body bytes allocated in
@@ -409,10 +405,8 @@ pub const Client = struct {
         return self.rng.random().int(u32);
     }
 
-    fn randomBytes(self: *Client, out: []u8) void {
-        self.rng_mutex.lock();
-        defer self.rng_mutex.unlock();
-        self.rng.random().bytes(out);
+    fn randomBytes(_: *Client, out: []u8) void {
+        std.crypto.random.bytes(out);
     }
 
     // --- ClientApi adapter ---

@@ -503,6 +503,7 @@ const FakeClient = struct {
         return .{ .ctx = self, .vtable = &.{
             .get_updates = getUpdates,
             .send_text = sendText,
+            .send_attachment = sendAttachment,
         } };
     }
 
@@ -519,6 +520,17 @@ const FakeClient = struct {
     fn sendText(ctx: *anyopaque, _: []const u8, _: []const u8, _: []const u8) anyerror!void {
         const self: *FakeClient = @ptrCast(@alignCast(ctx));
         self.send_count += 1;
+    }
+
+    fn sendAttachment(
+        ctx: *anyopaque,
+        _: types.AttachmentKind,
+        _: []const u8,
+        _: []const u8,
+        _: []const u8,
+        _: []const u8,
+    ) anyerror!void {
+        _ = ctx;
     }
 };
 
