@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let the desktop direct Weixin bridge route inbound text and voice transcripts into AI Chat, and let AI Chat call `weixin_send_attachment` to send local `file`, `image`, or `voice` attachments back to the active Weixin conversation.
+**Goal:** Let the desktop direct Weixin bridge route inbound text and voice transcripts into AI Chat, and let AI Chat call `weixin_send_attachment` to send local `file`, `image`, or `voice` inputs back to the active Weixin conversation. Outbound `voice` is sent as a normal file attachment in v1.
 
 **Architecture:** Keep iLink upload protocol code inside `src/weixin/`, keep terminal/VT/rendering unaware of Weixin, and pass a short-lived reply context from the poller through the app control boundary into the AI Chat request. The Agent tool dispatch uses that context only when the current request came from Weixin; normal local AI Chat requests return a clear no-context tool result.
 
@@ -21,9 +21,21 @@ CiteBox reference mapping:
 - `internal/weixin/cdn.go`: confirms `media.aes_key` is base64 of the hex-encoded AES key.
 - `internal/service/weixin_im_bridge.go`: confirms inbound `voice_item.text` is the transcript used as ordinary text.
 
+## Approved Change: Outbound Voice As File
+
+After Task 4 review, the user clarified that outbound `voice` should be treated
+as `file`. Keep accepting `kind=voice` as a tool input for convenience, but send
+it through the generic `file_item` path:
+
+- Do not call `ffprobe` from the iLink client.
+- Do not send outbound iLink `voice_item` messages in v1.
+- Use media type `3` and `file_item` for both `kind=file` and `kind=voice`.
+- Inbound Weixin voice transcription remains unchanged: continue extracting
+  `voice_item.text` as ordinary message text.
+
 ## File Structure
 
-- Create `src/weixin/media.zig`: pure media helpers plus narrow `ffprobe` parsing helpers. No bot token storage.
+- Create `src/weixin/media.zig`: pure media helpers. No bot token storage.
 - Modify `src/weixin/types.zig`: attachment kinds, upload URL response, CDN media structs, uploaded media structs, sender and reply context structs.
 - Modify `src/weixin/ilink_codec.zig`: JSON builders for upload URL and typed sendmessage bodies; parser for upload URL response.
 - Modify `src/weixin/ilink_client.zig`: high-level attachment send flow and `ClientApi.send_attachment`.
@@ -146,7 +158,7 @@ pub const AttachmentKind = enum {
         return switch (self) {
             .image => 1,
             .file => 3,
-            .voice => 4,
+            .voice => 3,
         };
     }
 };
@@ -1029,7 +1041,7 @@ Add these functions inside `Client`.
         return switch (kind) {
             .file => self.sendFileAttachment(path, displayNameOrBasename(display_name, path), to_user_id, context_token),
             .image => self.sendImageFile(path, to_user_id, context_token),
-            .voice => self.sendVoiceFile(path, to_user_id, context_token),
+            .voice => self.sendFileAttachment(path, displayNameOrBasename(display_name, path), to_user_id, context_token),
         };
     }
 
@@ -1062,22 +1074,6 @@ Add these functions inside `Client`.
         try self.postSendMessage(a, body);
     }
 
-    fn sendVoiceFile(self: *Client, path: []const u8, to_user_id: []const u8, context_token: []const u8) !void {
-        var req_arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer req_arena.deinit();
-        const a = req_arena.allocator();
-
-        const uploaded = try self.uploadLocalFile(a, .voice, path);
-        const meta = try self.probeVoiceFile(a, path);
-        const client_id = try self.clientId(a);
-        const body = try codec.buildSendUploadedVoiceBody(a, to_user_id, context_token, client_id, .{
-            .media = uploaded.media,
-            .encode_type = meta.encode_type,
-            .sample_rate = meta.sample_rate,
-            .playtime = meta.playtime,
-        });
-        try self.postSendMessage(a, body);
-    }
 ```
 
 Add these helper functions inside `Client`.
@@ -1199,28 +1195,6 @@ Add these helper functions inside `Client`.
                 return error.IlinkSendMessageFailed;
             }
         }
-    }
-
-    fn probeVoiceFile(self: *Client, arena: std.mem.Allocator, path: []const u8) !types.VoiceMetadata {
-        _ = self;
-        var child = std.process.Child.init(&.{
-            "ffprobe",
-            "-v", "error",
-            "-show_entries", "stream=codec_type,codec_name,sample_rate,duration:format=duration",
-            "-of", "json",
-            path,
-        }, arena);
-        child.stdin_behavior = .Ignore;
-        child.stderr_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        const result = child.run() catch |err| switch (err) {
-            error.FileNotFound => return error.FfprobeNotFound,
-            else => return err,
-        };
-        defer arena.free(result.stdout);
-        defer arena.free(result.stderr);
-        if (result.term != .Exited or result.term.Exited != 0) return error.FfprobeFailed;
-        return media.parseFfprobeVoiceMetadata(arena, result.stdout, path);
     }
 
     fn randomBytes(self: *Client, out: []u8) void {
@@ -1352,7 +1326,7 @@ test "platform agent prompt describes the Weixin attachment tool" {
         const p = defaultSystemPromptForOs(os);
         try std.testing.expect(std.mem.indexOf(u8, p, "weixin_send_attachment") != null);
         try std.testing.expect(std.mem.indexOf(u8, p, "kind=image") != null);
-        try std.testing.expect(std.mem.indexOf(u8, p, "kind=voice") != null);
+        try std.testing.expect(std.mem.indexOf(u8, p, "voice files are sent as file attachments") != null);
         try std.testing.expect(std.mem.indexOf(u8, p, "kind=file") != null);
     }
 }
@@ -1374,7 +1348,7 @@ Expected: both fail because the schema and prompt do not mention `weixin_send_at
 In `src/ai_chat_protocol.zig`, add this `emit` call inside `forEachToolSpec`, after `wispterm_docs`.
 
 ```zig
-    try emit(ctx, "weixin_send_attachment", "Send a local file back to the active Weixin conversation that triggered this agent request. Use only when the current request came from Weixin; normal local chat requests have no Weixin reply context.", "{\"kind\":{\"type\":\"string\",\"description\":\"Attachment kind: file, image, or voice.\"},\"path\":{\"type\":\"string\",\"description\":\"Readable local file path to send.\"},\"display_name\":{\"type\":\"string\",\"description\":\"Optional filename shown in Weixin for file attachments; defaults to the path basename.\"}}");
+    try emit(ctx, "weixin_send_attachment", "Send a local file back to the active Weixin conversation that triggered this agent request. Use only when the current request came from Weixin; normal local chat requests have no Weixin reply context. Audio and voice files are sent as ordinary file attachments.", "{\"kind\":{\"type\":\"string\",\"description\":\"Attachment kind: file, image, or voice. Voice is accepted as an alias for file.\"},\"path\":{\"type\":\"string\",\"description\":\"Readable local file path to send.\"},\"display_name\":{\"type\":\"string\",\"description\":\"Optional filename shown in Weixin for file attachments; defaults to the path basename.\"}}");
 ```
 
 - [ ] **Step 4: Add prompt guidance**
@@ -1383,8 +1357,8 @@ In `src/platform/agent_prompt.zig`, insert these lines in `common_tools_after_ws
 
 ```zig
     \\- When the request came from Weixin and the user asks you to send a generated or local artifact, call `weixin_send_attachment`.
-    \\- Use `kind=image` for image previews, `kind=voice` only for playable voice messages, and `kind=file` for ordinary attachments.
-    \\- If voice metadata probing fails or playback as an in-chat voice message is not required, send the same path with `kind=file`.
+    \\- Use `kind=image` for image previews and `kind=file` for ordinary attachments; voice files are sent as file attachments.
+    \\- `kind=voice` is accepted for Weixin, but it behaves like `kind=file` and does not create an in-chat voice message.
 ```
 
 - [ ] **Step 5: Run tests and commit**
