@@ -370,10 +370,11 @@ test "builds getuploadurl body for file media" {
 
 test "parses getuploadurl response" {
     var parsed = try parseGetUploadUrl(t.allocator,
-        \\{"ret":0,"errcode":0,"url":"https://cdn.example/upload","ticket":"ticket=abc","file_key":"file-key"}
+        \\{"ret":0,"errcode":42,"url":"https://cdn.example/upload","ticket":"ticket=abc","file_key":"file-key"}
     );
     defer parsed.deinit();
     try t.expectEqual(@as(i64, 0), parsed.value.ret);
+    try t.expectEqual(@as(i64, 42), parsed.value.errcode);
     try t.expectEqualStrings("https://cdn.example/upload", parsed.value.url);
     try t.expectEqualStrings("ticket=abc", parsed.value.ticket);
     try t.expectEqualStrings("file-key", parsed.value.file_key);
@@ -394,6 +395,7 @@ test "builds uploaded file sendmessage body" {
     });
     defer t.allocator.free(body);
     try t.expect(std.mem.indexOf(u8, body, "\"type\":4") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"file_item\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"file_name\":\"report.pdf\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"len\":\"123\"") != null);
     try t.expect(std.mem.indexOf(u8, body, "\"encrypt_query_param\":\"encrypted-param\"") != null);
