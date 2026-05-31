@@ -694,6 +694,7 @@ fn isSensitiveDiagnosticField(field: []const u8) bool {
         "encryptqueryparam",
         "encryptedparam",
         "xencryptedparam",
+        "filekey",
         "token",
         "bottoken",
         "accesstoken",
@@ -834,22 +835,25 @@ test "readLocalFileAlloc rejects directories" {
 }
 
 test "safe response excerpts redact sensitive fields and omit binary bodies" {
-    const redacted = try safeDiagnosticTextAlloc(std.testing.allocator, "{\"context_token\":\"ctx-1\",\"aesKey\":\"secret\",\"encryptQueryParam\":\"param\",\"x-encrypted-param\":\"header-param\",\"accessToken\":\"access\",\"bot_token\":\"bot\",\"message\":\"line\nnext\"}");
+    const redacted = try safeDiagnosticTextAlloc(std.testing.allocator, "{\"context_token\":\"ctx-1\",\"aesKey\":\"secret\",\"encryptQueryParam\":\"param\",\"x-encrypted-param\":\"header-param\",\"accessToken\":\"access\",\"file_key\":\"file-secret\",\"fileKey\":\"camel-file-secret\",\"bot_token\":\"bot\",\"message\":\"line\nnext\"}");
     defer std.testing.allocator.free(redacted);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "ctx-1") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "secret") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "\":\"param\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "header-param") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "\":\"access\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "file-secret") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "camel-file-secret") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "\":\"bot\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "[redacted]") != null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "\\n") != null);
 
-    const message = try safeDiagnosticTextAlloc(std.testing.allocator, "failed contextToken=ctx-2 aes_key=key-2 encrypted_param=param-2");
+    const message = try safeDiagnosticTextAlloc(std.testing.allocator, "failed contextToken=ctx-2 aes_key=key-2 encrypted_param=param-2 fileKey=file-2");
     defer std.testing.allocator.free(message);
     try std.testing.expect(std.mem.indexOf(u8, message, "ctx-2") == null);
     try std.testing.expect(std.mem.indexOf(u8, message, "key-2") == null);
     try std.testing.expect(std.mem.indexOf(u8, message, "param-2") == null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "file-2") == null);
 
     const binary = try safeDiagnosticTextAlloc(std.testing.allocator, "abc\x00def");
     defer std.testing.allocator.free(binary);

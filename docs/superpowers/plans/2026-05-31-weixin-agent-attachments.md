@@ -32,6 +32,8 @@ it through the generic `file_item` path:
 - Use media type `3` and `file_item` for both `kind=file` and `kind=voice`.
 - Inbound Weixin voice transcription remains unchanged: continue extracting
   `voice_item.text` as ordinary message text.
+- Do not pre-block oversized files in v1. If iLink rejects the file, surface
+  that API error.
 
 ## File Structure
 
