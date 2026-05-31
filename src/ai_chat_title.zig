@@ -287,3 +287,39 @@ test "cleanTitle: clamps to max_title_bytes on UTF-8 boundary" {
     try std.testing.expect(t.len % 3 == 0); // never split a codepoint
     try std.testing.expect(std.unicode.utf8ValidateSlice(t));
 }
+
+/// Truncate `s` to at most `max_section_bytes` on a UTF-8 boundary.
+fn truncateSection(s: []const u8) []const u8 {
+    return s[0..utf8SafeLen(s, max_section_bytes)];
+}
+
+/// Build the user-content message ("User: ...\n\nAssistant: ...") for the title
+/// request. Each section is truncated to `max_section_bytes` on a UTF-8 boundary.
+pub fn buildUserContent(allocator: std.mem.Allocator, turn: FirstTurn) ![]u8 {
+    return std.fmt.allocPrint(allocator, "User: {s}\n\nAssistant: {s}", .{
+        truncateSection(turn.user),
+        truncateSection(turn.assistant),
+    });
+}
+
+test "buildUserContent: formats user + assistant sections" {
+    const turn = FirstTurn{ .user = "hello", .assistant = "world" };
+    const c = try buildUserContent(std.testing.allocator, turn);
+    defer std.testing.allocator.free(c);
+    try std.testing.expectEqualStrings("User: hello\n\nAssistant: world", c);
+}
+
+test "buildUserContent: truncates each section on UTF-8 boundary" {
+    const big = "一" ** 1000; // 3000 bytes, exceeds max_section_bytes (1500)
+    const turn = FirstTurn{ .user = big, .assistant = "ok" };
+    const c = try buildUserContent(std.testing.allocator, turn);
+    defer std.testing.allocator.free(c);
+    // "User: " + truncated + "\n\nAssistant: ok"
+    try std.testing.expect(std.mem.startsWith(u8, c, "User: "));
+    try std.testing.expect(std.mem.endsWith(u8, c, "\n\nAssistant: ok"));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(c));
+    // user section bytes <= max_section_bytes
+    const after_prefix = c["User: ".len..];
+    const user_section = after_prefix[0 .. std.mem.indexOf(u8, after_prefix, "\n\n").?];
+    try std.testing.expect(user_section.len <= max_section_bytes);
+}
