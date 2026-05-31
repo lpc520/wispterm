@@ -38,6 +38,8 @@ const DEFAULT_AGENT_OUTPUT_LIMIT: u32 = 16 * 1024;
 const REMOTE_SNAPSHOT_MAX_BYTES: usize = 24 * 1024;
 const INPUT_PROMPT_MAX_BYTES: usize = 64 * 1024;
 const SYSTEM_PROMPT_MAX_BYTES: usize = 16 * 1024;
+/// 两次 ESC 间隔不超过此毫秒数时判定为"双击"，用于打开回溯选择器。
+const DOUBLE_ESC_WINDOW_MS: i64 = 400;
 
 pub const COPILOT_CONTEXT_LINES: usize = 40;
 
@@ -732,6 +734,14 @@ pub const Session = struct {
     custom_command_suggestions: []SlashCommandSuggestion = &.{},
     transcript_select_all: bool = false,
     transcript_selection: ?TranscriptSelection = null,
+    // 双击 ESC 回溯选择器（rewind picker）。
+    // last_esc_ms 为上一次 ESC 的时间戳（0 = 无）；空闲时若两次 ESC 间隔
+    // <= DOUBLE_ESC_WINDOW_MS 则打开选择器。rewind_selected 是回溯点序号
+    // （0 = 最早的用户消息，count-1 = 最近一条）。now_ms_override 为测试时钟。
+    rewind_open: bool = false,
+    rewind_selected: usize = 0,
+    last_esc_ms: i64 = 0,
+    now_ms_override: ?i64 = null,
     status_buf: [512]u8 = undefined,
     status_len: usize = 0,
     title_buf: [128]u8 = undefined,
@@ -2112,6 +2122,35 @@ pub const Session = struct {
             var msg = self.messages.pop().?;
             msg.deinit(self.allocator);
         }
+    }
+
+    /// 对话中 role == .user 的消息条数（回溯点数量）。持锁内部版本。
+    fn rewindPointCountLocked(self: *Session) usize {
+        var n: usize = 0;
+        for (self.messages.items) |msg| {
+            if (msg.role == .user) n += 1;
+        }
+        return n;
+    }
+
+    /// 供 ESC handler（未持锁）调用：自行加锁返回回溯点数量。
+    pub fn rewindPointCount(self: *Session) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.rewindPointCountLocked();
+    }
+
+    /// 第 n 个回溯点在 messages 中的索引（n 为 0-based 用户消息序号）。
+    /// 调用方需保证 n < rewindPointCountLocked()。找不到返回 messages.items.len。
+    fn rewindPointMessageIndexLocked(self: *Session, n: usize) usize {
+        var seen: usize = 0;
+        for (self.messages.items, 0..) |msg, i| {
+            if (msg.role == .user) {
+                if (seen == n) return i;
+                seen += 1;
+            }
+        }
+        return self.messages.items.len;
     }
 
     fn collapseAutoExpandedDetailsLocked(self: *Session) void {
@@ -6719,6 +6758,25 @@ test "ai chat escape stops in-flight request" {
     try std.testing.expect(session.request_stopping);
     try std.testing.expect(session.stop_requested.load(.acquire));
     try std.testing.expectEqualStrings("Stopping...", session.status());
+}
+
+test "ai chat rewind point count and index map user messages" {
+    const a = std.testing.allocator;
+    var session = Session{ .allocator = a };
+    defer {
+        for (session.messages.items) |msg| msg.deinit(a);
+        session.messages.deinit(a);
+    }
+    try session.messages.append(a, .{ .role = .user, .content = try a.dupe(u8, "first") });
+    try session.messages.append(a, .{ .role = .assistant, .content = try a.dupe(u8, "reply-1") });
+    try session.messages.append(a, .{ .role = .user, .content = try a.dupe(u8, "second") });
+
+    try std.testing.expectEqual(@as(usize, 2), session.rewindPointCount());
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    try std.testing.expectEqual(@as(usize, 0), session.rewindPointMessageIndexLocked(0));
+    try std.testing.expectEqual(@as(usize, 2), session.rewindPointMessageIndexLocked(1));
 }
 
 test "ai chat request state exposes in-flight stop status for remote layout" {
