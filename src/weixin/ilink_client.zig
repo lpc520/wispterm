@@ -144,9 +144,8 @@ pub const Client = struct {
         context_token: []const u8,
     ) !void {
         return switch (kind) {
-            .file => self.sendFileAttachment(path, displayNameOrBasename(display_name, path), to_user_id, context_token),
+            .file, .voice => self.sendFileAttachment(path, displayNameOrBasename(display_name, path), to_user_id, context_token),
             .image => self.sendImageFile(path, to_user_id, context_token),
-            .voice => self.sendVoiceFile(path, to_user_id, context_token),
         };
     }
 
@@ -173,22 +172,6 @@ pub const Client = struct {
         const body = try codec.buildSendUploadedImageBody(a, to_user_id, context_token, client_id, .{
             .media = uploaded.media,
             .mid_size = uploaded.encrypted_len,
-        });
-        try self.postSendMessage(a, body);
-    }
-
-    fn sendVoiceFile(self: *Client, path: []const u8, to_user_id: []const u8, context_token: []const u8) !void {
-        var req_arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer req_arena.deinit();
-        const a = req_arena.allocator();
-        const metadata = try self.probeVoiceFile(a, path);
-        const uploaded = try self.uploadLocalFile(a, .voice, path);
-        const client_id = try self.clientId(a);
-        const body = try codec.buildSendUploadedVoiceBody(a, to_user_id, context_token, client_id, .{
-            .media = uploaded.media,
-            .encode_type = metadata.encode_type,
-            .sample_rate = metadata.sample_rate,
-            .playtime = metadata.playtime,
         });
         try self.postSendMessage(a, body);
     }
@@ -270,7 +253,7 @@ pub const Client = struct {
         };
     }
 
-    fn uploadBufferToCdn(self: *Client, arena: std.mem.Allocator, upload_url: []const u8, ticket: []const u8, encrypted: []const u8) ![]u8 {
+    fn uploadBufferToCdn(self: *Client, arena: std.mem.Allocator, upload_url: []const u8, ticket: []const u8, encrypted: []u8) ![]u8 {
         var client: std.http.Client = .{ .allocator = self.allocator };
         defer client.deinit();
 
@@ -319,33 +302,6 @@ pub const Client = struct {
                 return error.IlinkSendMessageFailed;
             }
         }
-    }
-
-    fn probeVoiceFile(self: *Client, arena: std.mem.Allocator, path: []const u8) !types.VoiceMetadata {
-        _ = self;
-        const argv = [_][]const u8{
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "stream=codec_type,codec_name,sample_rate,duration:format=duration",
-            "-of",
-            "json",
-            path,
-        };
-        const result = std.process.Child.run(.{
-            .allocator = arena,
-            .argv = &argv,
-            .max_output_bytes = 64 * 1024,
-        }) catch |err| switch (err) {
-            error.FileNotFound => return error.FfprobeNotFound,
-            else => return error.FfprobeFailed,
-        };
-        switch (result.term) {
-            .Exited => |code| if (code != 0) return error.FfprobeFailed,
-            else => return error.FfprobeFailed,
-        }
-        return media.parseFfprobeVoiceMetadata(arena, result.stdout, path);
     }
 
     /// Performs one HTTP request, returning the response body bytes allocated in
@@ -549,4 +505,12 @@ test "client ids are generated with the wispterm weixin prefix" {
     const id = try c.clientId(std.testing.allocator);
     defer std.testing.allocator.free(id);
     try std.testing.expect(std.mem.startsWith(u8, id, "wispterm-weixin-"));
+}
+
+test "voice attachment uses file path handling before network access" {
+    var c = Client.init(std.testing.allocator, "https://x.test", "tok");
+    try std.testing.expectError(
+        error.WeixinAttachmentFileNotFound,
+        c.sendAttachment(.voice, "definitely-missing-file.mp3", "", "u", "ctx"),
+    );
 }

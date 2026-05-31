@@ -43,8 +43,7 @@ pub const AttachmentKind = enum {
     pub fn uploadMediaType(self: AttachmentKind) i64 {
         return switch (self) {
             .image => 1,
-            .file => 3,
-            .voice => 4,
+            .file, .voice => 3,
         };
     }
 };
@@ -174,7 +173,7 @@ test "AttachmentKind parses accepted tool values" {
     try t.expectEqualStrings("voice", AttachmentKind.voice.name());
     try t.expectEqual(@as(i64, 1), AttachmentKind.image.uploadMediaType());
     try t.expectEqual(@as(i64, 3), AttachmentKind.file.uploadMediaType());
-    try t.expectEqual(@as(i64, 4), AttachmentKind.voice.uploadMediaType());
+    try t.expectEqual(@as(i64, 3), AttachmentKind.voice.uploadMediaType());
 }
 
 test "AttachmentSender forwards typed send calls" {
