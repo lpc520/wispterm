@@ -1369,6 +1369,7 @@ pub threadlocal var g_copy_on_select: bool = false;
 pub threadlocal var g_right_click_action: Config.RightClickAction = .copy;
 pub threadlocal var g_ssh_legacy_algorithms: bool = false;
 pub threadlocal var g_desktop_notifications: bool = true;
+pub threadlocal var g_weixin_notify_forward: bool = false;
 threadlocal var g_notif_auth_requested: bool = false;
 
 /// Update cursor blink state based on time (call once per frame)
@@ -1713,6 +1714,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     input.g_url_open_mode = cfg.@"url-open-mode";
     g_ssh_legacy_algorithms = cfg.@"ssh-legacy-algorithms";
     g_desktop_notifications = cfg.@"desktop-notifications";
+    g_weixin_notify_forward = cfg.@"weixin-notify-forward";
     tab.g_ssh_legacy_algorithms = cfg.@"ssh-legacy-algorithms";
     overlays.g_split_divider_color = cfg.@"split-divider-color";
 
