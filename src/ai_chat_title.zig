@@ -155,3 +155,135 @@ test "shouldAutoTitle: blocked when attempted / no key / no turn" {
     }, turn));
     try std.testing.expect(!shouldAutoTitle(base, null));
 }
+
+fn isTitleSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\r' or c == '\n';
+}
+
+const quote_pairs = [_]struct { open: []const u8, close: []const u8 }{
+    .{ .open = "\"", .close = "\"" },
+    .{ .open = "'", .close = "'" },
+    .{ .open = "`", .close = "`" },
+    .{ .open = "\xe2\x80\x9c", .close = "\xe2\x80\x9d" },
+    .{ .open = "\xe3\x80\x8c", .close = "\xe3\x80\x8d" },
+    .{ .open = "\xe3\x80\x8e", .close = "\xe3\x80\x8f" },
+    .{ .open = "\xe3\x80\x8a", .close = "\xe3\x80\x8b" },
+};
+
+fn stripSurroundingQuotes(s: []const u8) []const u8 {
+    for (quote_pairs) |pair| {
+        if (s.len >= pair.open.len + pair.close.len and
+            std.mem.startsWith(u8, s, pair.open) and
+            std.mem.endsWith(u8, s, pair.close))
+        {
+            return s[pair.open.len .. s.len - pair.close.len];
+        }
+    }
+    return s;
+}
+
+const cjk_trailing_puncts = [_][]const u8{ "\xe3\x80\x82", "\xef\xbc\x81", "\xef\xbc\x9f", "\xef\xbc\x8c", "\xe3\x80\x81", "\xef\xbc\x9b", "\xef\xbc\x9a" };
+
+fn stripTrailingNoise(s: []const u8) []const u8 {
+    var end = s.len;
+    outer: while (end > 0) {
+        const c = s[end - 1];
+        if (isTitleSpace(c) or c == '.' or c == ',' or c == '!' or
+            c == '?' or c == ';' or c == ':')
+        {
+            end -= 1;
+            continue;
+        }
+        for (cjk_trailing_puncts) |p| {
+            if (end >= p.len and std.mem.eql(u8, s[end - p.len .. end], p)) {
+                end -= p.len;
+                continue :outer;
+            }
+        }
+        break;
+    }
+    return s[0..end];
+}
+
+/// Drop a trailing partial UTF-8 sequence (if `s` was byte-cut mid-codepoint).
+fn trimIncompleteUtf8(s: []const u8) []const u8 {
+    if (s.len == 0) return s;
+    var i = s.len;
+    while (i > 0) {
+        i -= 1;
+        if ((s[i] & 0xC0) != 0x80) break; // found a leading byte
+    }
+    const cp_len = std.unicode.utf8ByteSequenceLength(s[i]) catch return s[0..i];
+    if (i + cp_len <= s.len) return s; // complete
+    return s[0..i]; // incomplete tail
+}
+
+/// Clean a raw model response into a display title written into `out`
+/// (must be >= `max_title_bytes`). Returns the populated slice, or null if the
+/// cleaned title is empty.
+/// Steps: take first line, trim, strip a single pair of surrounding quotes,
+/// collapse internal whitespace to single spaces (clamped to max_title_bytes on
+/// a UTF-8 boundary), then strip trailing whitespace / sentence punctuation.
+pub fn cleanTitle(raw: []const u8, out: []u8) ?[]const u8 {
+    std.debug.assert(out.len >= max_title_bytes);
+    var line = raw;
+    if (std.mem.indexOfScalar(u8, line, '\n')) |nl| line = line[0..nl];
+    line = std.mem.trim(u8, line, " \t\r\n");
+    line = stripSurroundingQuotes(line);
+    line = std.mem.trim(u8, line, " \t\r\n");
+
+    var w: usize = 0;
+    var pending_space = false;
+    for (line) |c| {
+        if (isTitleSpace(c)) {
+            if (w > 0) pending_space = true;
+            continue;
+        }
+        if (pending_space) {
+            if (w >= max_title_bytes) break;
+            out[w] = ' ';
+            w += 1;
+            pending_space = false;
+        }
+        if (w >= max_title_bytes) break;
+        out[w] = c;
+        w += 1;
+    }
+
+    var cleaned = trimIncompleteUtf8(out[0..w]);
+    cleaned = stripTrailingNoise(cleaned);
+    if (cleaned.len == 0) return null;
+    return cleaned;
+}
+
+test "cleanTitle: first line, strip quotes, collapse spaces" {
+    var buf: [max_title_bytes]u8 = undefined;
+    const t = cleanTitle("  \"Deploy   the   App\"\nextra line ", &buf).?;
+    try std.testing.expectEqualStrings("Deploy the App", t);
+}
+
+test "cleanTitle: strip trailing punctuation (ascii + cjk)" {
+    var buf: [max_title_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("Set up titles", cleanTitle("Set up titles.", &buf).?);
+    try std.testing.expectEqualStrings("配置自动命名", cleanTitle("配置自动命名。", &buf).?);
+}
+
+test "cleanTitle: strip CJK corner-bracket quotes" {
+    var buf: [max_title_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("部署应用", cleanTitle("「部署应用」", &buf).?);
+}
+
+test "cleanTitle: empty / whitespace returns null" {
+    var buf: [max_title_bytes]u8 = undefined;
+    try std.testing.expect(cleanTitle("   \n  ", &buf) == null);
+    try std.testing.expect(cleanTitle("", &buf) == null);
+}
+
+test "cleanTitle: clamps to max_title_bytes on UTF-8 boundary" {
+    var buf: [max_title_bytes]u8 = undefined;
+    const long = "一" ** 50; // 150 bytes of U+4E00 (3 bytes each)
+    const t = cleanTitle(long, &buf).?;
+    try std.testing.expect(t.len <= max_title_bytes);
+    try std.testing.expect(t.len % 3 == 0); // never split a codepoint
+    try std.testing.expect(std.unicode.utf8ValidateSlice(t));
+}
