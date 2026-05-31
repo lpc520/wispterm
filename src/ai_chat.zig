@@ -97,6 +97,7 @@ pub const TranscriptSelection = struct {
 };
 
 const RequestMessage = ai_chat_protocol.RequestMessage;
+const ai_chat_title = @import("ai_chat_title.zig");
 const ToolCall = ai_chat_protocol.ToolCall;
 
 pub const AgentPermission = enum {
@@ -757,6 +758,8 @@ pub const Session = struct {
     request_inflight: bool = false,
     request_stopping: bool = false,
     request_thread: ?std.Thread = null,
+    title_thread: ?std.Thread = null,
+    auto_title_attempted: bool = false,
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     scroll_px: f32 = 0,
@@ -925,6 +928,16 @@ pub const Session = struct {
 
             try session.messages.append(allocator, cloned_msg);
         }
+        // A restored session that already has an assistant reply has passed its
+        // first-turn window; never re-title it. (A half-finished session with no
+        // assistant reply keeps auto_title_attempted=false and is still default-
+        // titled, so it can be named after its next completed turn.)
+        for (session.messages.items) |restored| {
+            if (restored.role == .assistant) {
+                session.auto_title_attempted = true;
+                break;
+            }
+        }
         return session;
     }
 
@@ -934,6 +947,10 @@ pub const Session = struct {
         if (self.request_thread) |thread| {
             thread.join();
             self.request_thread = null;
+        }
+        if (self.title_thread) |thread| {
+            thread.join();
+            self.title_thread = null;
         }
         for (self.messages.items) |msg| {
             msg.deinit(self.allocator);
@@ -5395,6 +5412,50 @@ test "ai_chat: setTitle emits history hook snapshot" {
     try std.testing.expect(capture.event != null);
     try std.testing.expectEqualStrings("After", capture.event.?.record.title);
     try std.testing.expectEqualStrings("After", session.title());
+}
+
+test "ai_chat: initFromHistoryRecord marks auto_title_attempted when assistant present" {
+    const allocator = std.testing.allocator;
+    var msgs = [_]agent_history.MessageRecord{
+        .{ .role = .user, .content = "hi" },
+        .{ .role = .assistant, .content = "hello" },
+    };
+    const record = agent_history.SessionRecord{
+        .session_id = "sess-1",
+        .title = "Restored Chat",
+        .base_url = "https://api.example.com",
+        .api_key = "secret",
+        .model = "model-a",
+        .system_prompt = "system",
+        .thinking_enabled = true,
+        .reasoning_effort = "high",
+        .stream = false,
+        .agent_enabled = false,
+        .created_at = 0,
+        .updated_at = 0,
+        .messages = &msgs,
+    };
+    const session = try Session.initFromHistoryRecord(allocator, record);
+    defer session.deinit();
+    try std.testing.expect(session.auto_title_attempted);
+}
+
+test "ai_chat: fresh session has auto_title_attempted=false" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        DEFAULT_NAME,
+        "https://api.example.com",
+        "secret",
+        "model-a",
+        "system",
+        "enabled",
+        "high",
+        "false",
+        "true",
+    );
+    defer session.deinit();
+    try std.testing.expect(!session.auto_title_attempted);
 }
 
 test "ai chat endpoint normalization" {
