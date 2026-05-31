@@ -149,6 +149,19 @@ test "AES ECB PKCS7 encrypts and decrypts a short buffer" {
     try t.expectEqualStrings("hello", decrypted);
 }
 
+test "AES ECB PKCS7 encrypts and decrypts multiple blocks" {
+    const key: AesKey = [_]u8{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f };
+    const plain = "0123456789abcdef0123456789abcdef!";
+    const encrypted = try aes128EcbPkcs7Encrypt(t.allocator, key, plain);
+    defer t.allocator.free(encrypted);
+    try t.expectEqual(@as(usize, 48), encrypted.len);
+    try t.expect(!std.mem.eql(u8, encrypted[0..plain.len], plain));
+
+    const decrypted = try aes128EcbPkcs7DecryptForTest(t.allocator, key, encrypted);
+    defer t.allocator.free(decrypted);
+    try t.expectEqualStrings(plain, decrypted);
+}
+
 test "AES key is encoded as base64 of hex bytes" {
     const key: AesKey = [_]u8{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f };
     const encoded = try encodeIlinkAesKey(t.allocator, key);
