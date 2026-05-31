@@ -130,13 +130,11 @@ New media helper module.
 
 Responsibilities:
 
-- Build `getuploadurl` request bodies.
 - Build CDN upload URLs.
 - AES-ECB encrypt with PKCS7 padding.
 - Encode AES keys in the iLink-compatible form.
-- Build typed `sendmessage` payloads for file and image.
-- Keep inbound `voice_item.text` parsing. Outbound `kind=voice` does not use
-  `ffprobe` in v1.
+- Keep upload crypto and URL helpers pure; JSON request/response shapes stay in
+  `ilink_codec.zig`.
 
 ### `src/weixin/types.zig`
 
@@ -157,6 +155,8 @@ Extend JSON builders/parsers:
 - `buildSendUploadedImageBody(...)`
 - keep existing `voice_item.text` parsing for inbound messages and add direct
   tests for it.
+- do not add outbound `voice_item` builders in v1; `kind=voice` is sent with
+  the file payload path.
 
 ### `src/weixin/ilink_client.zig`
 
