@@ -88,7 +88,7 @@ remote_device_name: ?[]const u8,
 remote_session_key: ?[]const u8,
 remote_client: ?*remote.Client,
 
-// WeChat direct (embedded ilink). Mutually exclusive with remote_client.
+// WeChat direct (embedded ilink). Independent from the remote relay client.
 weixin_controller: ?*weixin.Controller,
 
 // AI agent config
@@ -299,15 +299,10 @@ fn startRemoteClient(
 // WeChat here). /term-/keys terminal delegation and the AI transcript (for
 // reply-progress streaming) remain stubbed in AppWindow — see its TODOs.
 
-/// Creates and starts the WeChat direct controller when enabled and remote is
-/// not active. Call once, after App is at its final address (see main.zig).
-/// Mutually exclusive with remote: if remote is active, this is skipped.
+/// Creates and starts the WeChat direct controller when enabled. Call once,
+/// after App is at its final address (see main.zig).
 pub fn startWeixin(self: *App, cfg: *const Config) void {
     if (!cfg.@"weixin-direct-enabled") return;
-    if (self.remote_client != null) {
-        std.debug.print("weixin-direct disabled: remote-enabled takes precedence\n", .{});
-        return;
-    }
     const state_path = platform_dirs.pathInConfigDir(self.allocator, "weixin.json") catch return;
     defer self.allocator.free(state_path);
 
@@ -1052,6 +1047,37 @@ test "app: updateConfig refreshes configured shell command" {
     const expected_len = platform_pty_command.resolveShellCommandLine(&expected_buf, next_shell);
     const CommandUnit = @TypeOf(expected_buf[0]);
     try testing.expectEqualSlices(CommandUnit, expected_buf[0..expected_len], app.getShellCmd());
+}
+
+test "app: WeChat direct can start while remote client is active" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_root);
+    const config_dir = try std.fs.path.join(allocator, &.{ tmp_root, "config" });
+    defer allocator.free(config_dir);
+
+    platform_dirs.setTestConfigDirForCurrentThread(config_dir);
+    defer platform_dirs.clearTestConfigDirForCurrentThread();
+    try tmp.dir.makePath("config");
+
+    const cfg = Config{
+        .@"remote-enabled" = true,
+        .@"weixin-direct-enabled" = true,
+    };
+    var app = try App.init(allocator, cfg);
+    defer app.deinit();
+
+    app.remote_client = @ptrFromInt(@as(usize, 0x1000));
+    defer app.remote_client = null;
+
+    app.startWeixin(&cfg);
+
+    try testing.expect(app.weixin_controller != null);
 }
 
 test "app: pending download snapshot remains stable when update buffers change" {

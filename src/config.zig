@@ -327,8 +327,8 @@ shell: []const u8 = platform_pty_command.default_shell_name,
 /// instance uses it directly and later local instances append _1, _2, ...
 @"remote-session-key": ?[]const u8 = null,
 
-/// Enables the embedded WeChat ilink direct path. Mutually exclusive with
-/// remote-enabled; if both are true, remote wins and this is disabled.
+/// Enables the embedded WeChat ilink direct path. Independent from
+/// remote-enabled and from the Remote server's Weixin bridge binding.
 @"weixin-direct-enabled": bool = false,
 
 /// Override for the ilink API base URL. Defaults to the public endpoint.

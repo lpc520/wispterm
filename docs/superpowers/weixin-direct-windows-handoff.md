@@ -13,6 +13,8 @@ builds for Windows (`build.zig`: `uses_windows_backend = os_tag == .windows`).
 - Ships **off by default**: `weixin-direct-enabled = false`.
 - Backend is wired: config → `App.startWeixin` → `weixin.Controller` →
   `ilink.Client` + `poller.Poller`, with Control marshalled to the UI thread.
+  This desktop direct binding is independent from the Remote server's Weixin
+  bridge binding.
 - GUI login/control entries now exist: Command Center → **Connect WeChat**
   starts `controller.startLoginAsync()` and renders the QR login panel. Command
   Center → **WeChat: Start** starts polling from the saved binding,
@@ -59,10 +61,11 @@ builds for Windows (`build.zig`: `uses_windows_backend = os_tag == .windows`).
    ```
    CLI equivalents: `--weixin-direct-enabled <bool>` etc. (`src/config.zig:1204`).
 
-3. **Mutual-exclusion check:** also set `remote-enabled true` and relaunch.
-   Expect the stderr line and the weixin path staying off:
-   `weixin-direct disabled: remote-enabled takes precedence`
-   (`src/App.zig:296`). Then turn remote back off for the real tests.
+3. **Coexistence check:** also set `remote-enabled true` and relaunch.
+   Expect the remote client and the Zig WeChat direct controller to both remain
+   available. The Remote server's Weixin bridge stores its binding under
+   `REMOTE_DATA_DIR/weixin/*`; the desktop direct path stores its binding in
+   the app config directory as `weixin.json`.
 
 4. **Idle check:** with `weixin-direct-enabled true` and no `weixin.json`,
    launch should NOT crash and should NOT poll (no token → `controller.start()`

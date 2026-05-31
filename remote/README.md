@@ -207,6 +207,10 @@ Runtime state is stored under `REMOTE_DATA_DIR` (default `./data`):
 - `weixin/settings.json` stores bridge enablement and target Remote session.
 - `weixin/sync_buf` stores the iLink update cursor.
 
+This Remote server binding is separate from the desktop Zig direct binding
+stored in WispTerm's config directory as `weixin.json`; enabling or unbinding
+one does not disable or clear the other.
+
 Authenticated routes:
 
 - `GET /api/weixin/settings`

@@ -8,9 +8,11 @@ Phantty long-polls `https://ilinkai.weixin.qq.com` directly, routes inbound
 WeChat messages into the local AI-chat / terminal surfaces, and replies over
 ilink. No Cloudflare Worker, no `wss` relay, and no web login are involved.
 
-This path is **mutually exclusive** with the existing remote (Worker) path:
-exactly one of them may drive a given WeChat bot, because a single `bot_token`
-can have only one active `getUpdates` consumer.
+This path can coexist with the existing remote Weixin bridge. They keep
+separate bindings and persistence locations, so enabling or unbinding one does
+not disable or clear the other. Operationally, the same `bot_token` should not
+be copied into both active pollers because a single iLink bot token only has one
+`getUpdates` cursor stream.
 
 ## Relationship to the existing remote bridge
 
@@ -40,8 +42,9 @@ These were settled during brainstorming and are fixed for v1:
   `/help`, default-text→AI, and AI-reply progress streaming. `/sessions` and
   `/use` are dropped (there is only one local app).
 - **Login UX:** an in-app QR panel/window.
-- **Coexistence:** mutually exclusive with `remote-enabled`. If both are enabled,
-  **remote wins** and the direct path is disabled with a warning.
+- **Coexistence:** independent from `remote-enabled` and from the Remote
+  server's Weixin bridge binding; if both desktop remote access and WeChat
+  direct are enabled, both start.
 - **Authorization:** the first 1:1 sender after login is auto-bound as the owner
   and persisted; afterward only that `user_id` is accepted. A configured
   `weixin-allowed-user` overrides auto-bind.
@@ -122,10 +125,11 @@ New keys in `src/config.zig`, alongside the existing `remote-*` keys:
 `sync_buf` live in a `0600` state file in the app data/state directory, using the
 same directory resolution `session_persist.zig` uses for session files.
 
-**Mutual exclusion:** at startup, if both `remote-enabled` and
-`weixin-direct-enabled` are true, log a warning and **disable the direct path**
-(remote wins). This guarantees one bot is never double-polled. The decision is
-surfaced in `/status`.
+**Coexistence:** at startup, `remote-enabled` does not disable
+`weixin-direct-enabled`. The Remote server bridge persists its binding under
+`REMOTE_DATA_DIR/weixin/*`; the desktop direct path persists its binding as
+`weixin.json` in the WispTerm config directory. The two bindings are managed
+independently.
 
 ## Authorization & security
 

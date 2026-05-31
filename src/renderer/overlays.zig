@@ -3428,7 +3428,7 @@ const SETTINGS_THEME_PRESETS = [_]ThemePreset{
 
 const SETTINGS_THEME_ROW = 1;
 const SETTINGS_CONTROL_ROW_START = SETTINGS_THEME_ROW + 1;
-const SETTINGS_ROW_COUNT = SETTINGS_CONTROL_ROW_START + 7;
+const SETTINGS_ROW_COUNT = SETTINGS_CONTROL_ROW_START + 8;
 
 const SettingsAction = enum {
     font_size_minus,
@@ -3439,6 +3439,7 @@ const SettingsAction = enum {
     toggle_focus_follows_mouse,
     cycle_shell,
     cycle_default_ai_profile,
+    toggle_weixin_direct,
     open_raw_config,
     close,
 };
@@ -3577,8 +3578,9 @@ fn settingsHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, 
         2 => .toggle_focus_follows_mouse,
         3 => .cycle_shell,
         4 => .cycle_default_ai_profile,
-        5 => .open_raw_config,
-        6 => .close,
+        5 => .toggle_weixin_direct,
+        6 => .open_raw_config,
+        7 => .close,
         else => null,
     };
 }
@@ -3610,6 +3612,7 @@ fn executeSettingsAction(action: SettingsAction) void {
                 invalidateAiDefaultName();
             }
         },
+        .toggle_weixin_direct => Config.setConfigValue(allocator, "weixin-direct-enabled", if (cfg.@"weixin-direct-enabled") "false" else "true") catch {},
         .open_raw_config => Config.openConfigInEditor(allocator),
         .close => settingsPageClose(),
     }
@@ -3632,8 +3635,9 @@ fn runSettingsFocusPrimary() void {
         SETTINGS_CONTROL_ROW_START + 2 => executeSettingsAction(.toggle_focus_follows_mouse),
         SETTINGS_CONTROL_ROW_START + 3 => executeSettingsAction(.cycle_shell),
         SETTINGS_CONTROL_ROW_START + 4 => executeSettingsAction(.cycle_default_ai_profile),
-        SETTINGS_CONTROL_ROW_START + 5 => executeSettingsAction(.open_raw_config),
-        SETTINGS_CONTROL_ROW_START + 6 => executeSettingsAction(.close),
+        SETTINGS_CONTROL_ROW_START + 5 => executeSettingsAction(.toggle_weixin_direct),
+        SETTINGS_CONTROL_ROW_START + 6 => executeSettingsAction(.open_raw_config),
+        SETTINGS_CONTROL_ROW_START + 7 => executeSettingsAction(.close),
         else => {},
     }
 }
@@ -3832,8 +3836,9 @@ pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32
     else
         "Add profiles via Command Center";
     renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 4, "Default AI", ai_default_value, ai_default_hint, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 4);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 5, "Raw config file", "open", "Advanced editor", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 5);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 6, "Close settings", "Esc", "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 6);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 5, "WeChat direct", boolText(cfg.@"weixin-direct-enabled"), "Enter / Right", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 5);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 6, "Raw config file", "open", "Advanced editor", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 6);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 7, "Close settings", "Esc", "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 7);
 }
 
 // ============================================================================
@@ -4149,6 +4154,48 @@ test "macOS UI smoke: command center opens settings and settings writes config" 
     defer allocator.free(content);
 
     try std.testing.expect(std.mem.indexOf(u8, content, "font-size = 14") != null);
+}
+
+test "macOS UI smoke: settings toggles WeChat direct" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_root);
+    const config_dir = try std.fs.path.join(allocator, &.{ tmp_root, "config" });
+    defer allocator.free(config_dir);
+
+    platform_dirs.setTestConfigDirForCurrentThread(config_dir);
+    defer platform_dirs.clearTestConfigDirForCurrentThread();
+
+    try tmp.dir.makePath("config");
+    {
+        const file = try tmp.dir.createFile("config/config", .{});
+        defer file.close();
+        try file.writeAll(
+            \\weixin-direct-enabled = false
+            \\
+        );
+    }
+
+    const previous_allocator = AppWindow.g_allocator;
+    defer AppWindow.g_allocator = previous_allocator;
+    AppWindow.g_allocator = allocator;
+
+    settingsPageOpen();
+    defer settingsPageClose();
+
+    executeSettingsAction(.toggle_weixin_direct);
+
+    const config_path = try std.fs.path.join(allocator, &.{ config_dir, "config" });
+    defer allocator.free(config_path);
+    const content = try std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024);
+    defer allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "weixin-direct-enabled = true") != null);
 }
 
 test "overlays: active download toast can be clicked for interruption" {
