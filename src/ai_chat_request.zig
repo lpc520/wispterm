@@ -1,0 +1,690 @@
+//! AI-chat request layer: worker-thread bodies, the agent tool loop, provider
+//! network calls, request-JSON serialization, and request-message cloning.
+//! Mutually imports ai_chat.zig for Session/ChatRequest and the (pub) Session-
+//! state helpers; references are pointer-based so the cycle is legal in Zig.
+const std = @import("std");
+const ai_chat = @import("ai_chat.zig");
+const Session = ai_chat.Session;
+const ChatRequest = ai_chat.ChatRequest;
+const ai_chat_protocol = @import("ai_chat_protocol.zig");
+const ai_chat_tools = @import("ai_chat_tools.zig");
+const ai_chat_types = @import("ai_chat_types.zig");
+
+// Type aliases from ai_chat_protocol
+const RequestMessage = ai_chat_protocol.RequestMessage;
+const ToolCall = ai_chat_protocol.ToolCall;
+const ApiResult = ai_chat_protocol.ApiResult;
+const ApiUsage = ai_chat_protocol.ApiUsage;
+const Role = ai_chat_protocol.Role;
+
+// ---------------------------------------------------------------------------
+// MOVE: worker-thread entry points
+// ---------------------------------------------------------------------------
+
+pub fn requestThreadMain(request: *ChatRequest) void {
+    const allocator = request.allocator;
+    defer request.deinit();
+
+    if (request.agent_enabled) {
+        const result = runAgentRequest(request) catch |err| blk: {
+            if (ai_chat.requestCancelled(request)) {
+                ai_chat.finishStoppedRequest(request.session);
+                return;
+            }
+            const text = std.fmt.allocPrint(allocator, "Agent request failed: {}", .{err}) catch return;
+            break :blk ApiResult{ .content = text };
+        };
+        defer result.deinit(allocator);
+        if (ai_chat.requestCancelled(request)) {
+            ai_chat.finishStoppedRequest(request.session);
+            return;
+        }
+        ai_chat.appendAssistantResult(request.session, result, request.started_ms);
+        ai_chat.maybeAutoTitle(request.session);
+        return;
+    }
+
+    if (request.stream) {
+        runChatRequestStreaming(request) catch |err| {
+            if (ai_chat.requestCancelled(request)) {
+                ai_chat.finishStoppedRequest(request.session);
+                return;
+            }
+            const text = std.fmt.allocPrint(allocator, "AI stream failed: {}", .{err}) catch return;
+            defer allocator.free(text);
+            ai_chat.appendAssistantResult(request.session, .{ .content = text }, request.started_ms);
+        };
+        if (ai_chat.requestCancelled(request)) {
+            ai_chat.finishStoppedRequest(request.session);
+            return;
+        }
+        ai_chat.maybeAutoTitle(request.session);
+        return;
+    }
+
+    const result = runChatRequest(request) catch |err| blk: {
+        if (ai_chat.requestCancelled(request)) {
+            ai_chat.finishStoppedRequest(request.session);
+            return;
+        }
+        const text = std.fmt.allocPrint(allocator, "AI request failed: {}", .{err}) catch return;
+        break :blk ApiResult{ .content = text };
+    };
+    defer result.deinit(allocator);
+
+    if (ai_chat.requestCancelled(request)) {
+        ai_chat.finishStoppedRequest(request.session);
+        return;
+    }
+    ai_chat.appendAssistantResult(request.session, result, request.started_ms);
+    ai_chat.maybeAutoTitle(request.session);
+}
+
+/// Background worker for one title request. Owns `req` and frees it on exit.
+pub fn titleThreadMain(req: *ChatRequest) void {
+    defer req.deinit();
+    const session = req.session;
+    const allocator = req.allocator;
+    if (session.closing.load(.acquire)) return;
+
+    const result = runChatRequestForMessages(req, req.messages, false) catch return;
+    defer result.deinit(allocator);
+    if (session.closing.load(.acquire)) return;
+
+    ai_chat.applyGeneratedTitle(session, result.content);
+}
+
+// ---------------------------------------------------------------------------
+// MOVE: agent tool loop
+// ---------------------------------------------------------------------------
+
+fn runAgentRequest(request: *ChatRequest) !ApiResult {
+    var transcript: std.ArrayListUnmanaged(RequestMessage) = .empty;
+    defer {
+        for (transcript.items) |msg| msg.deinit(request.allocator);
+        transcript.deinit(request.allocator);
+    }
+
+    for (request.messages) |msg| {
+        var cloned = try cloneRequestMessage(request.allocator, msg);
+        var cloned_owned = true;
+        errdefer if (cloned_owned) cloned.deinit(request.allocator);
+        try transcript.append(request.allocator, cloned);
+        cloned_owned = false;
+    }
+
+    var total_usage: ApiUsage = .{};
+    var has_usage = false;
+    while (true) {
+        if (ai_chat.requestCancelled(request)) return error.Canceled;
+        const result = try runChatRequestForMessages(request, transcript.items, true);
+        if (ai_chat.requestCancelled(request)) {
+            result.deinit(request.allocator);
+            return error.Canceled;
+        }
+        if (result.usage) |usage| {
+            total_usage.add(usage);
+            has_usage = true;
+        }
+        if (result.tool_calls == null or result.tool_calls.?.len == 0) {
+            var final = result;
+            if (has_usage) final.usage = total_usage;
+            return final;
+        }
+        errdefer result.deinit(request.allocator);
+
+        if (result.content.len > 0) {
+            ai_chat.appendProgressMessage(request.session, result.content) catch {};
+        }
+
+        var assistant_msg = try assistantToolCallMessage(request.allocator, result.content, result.reasoning, result.tool_calls.?);
+        var assistant_msg_owned = true;
+        errdefer if (assistant_msg_owned) assistant_msg.deinit(request.allocator);
+        try transcript.append(request.allocator, assistant_msg);
+        assistant_msg_owned = false;
+
+        for (result.tool_calls.?) |call| {
+            if (ai_chat.requestCancelled(request)) return error.Canceled;
+            const progress = try std.fmt.allocPrint(request.allocator, "running {s} {s}", .{ call.name, call.arguments });
+            defer request.allocator.free(progress);
+            ai_chat.appendProgressMessage(request.session, progress) catch {};
+
+            const tool_result = try executeToolCall(request, call);
+            defer request.allocator.free(tool_result);
+            if (ai_chat.requestCancelled(request)) return error.Canceled;
+            if (std.mem.eql(u8, call.name, "skill_info")) {
+                ai_chat.appendReplayableToolMessage(request.session, call.id, call.name, tool_result) catch {};
+            }
+
+            var tool_msg = try requestMessageWithClonedFields(request.allocator, .tool, tool_result, null, call.id, null);
+            var tool_msg_owned = true;
+            errdefer if (tool_msg_owned) tool_msg.deinit(request.allocator);
+            try transcript.append(request.allocator, tool_msg);
+            tool_msg_owned = false;
+        }
+        result.deinit(request.allocator);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MOVE: network / HTTP calls
+// ---------------------------------------------------------------------------
+
+fn runChatRequest(request: *const ChatRequest) !ApiResult {
+    return runChatRequestForMessages(request, request.messages, request.agent_enabled);
+}
+
+fn runChatRequestForMessages(request: *const ChatRequest, messages: []const RequestMessage, include_tools: bool) !ApiResult {
+    if (ai_chat.requestCancelled(request)) return error.Canceled;
+    const allocator = request.allocator;
+    const endpoint = try ai_chat_protocol.apiEndpoint(allocator, request.base_url, request.protocol);
+    defer allocator.free(endpoint);
+
+    const body = try buildRequestJsonForMessages(allocator, request, messages, include_tools);
+    defer allocator.free(body);
+
+    const bearer = try std.fmt.allocPrint(allocator, "Bearer {s}", .{request.api_key});
+    defer allocator.free(bearer);
+
+    var client: std.http.Client = .{
+        .allocator = allocator,
+        .write_buffer_size = 16384,
+    };
+    defer client.deinit();
+
+    var resp_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer resp_buf.deinit();
+
+    const is_anthropic = request.protocol == .anthropic;
+    const anthropic_headers = [_]std.http.Header{
+        .{ .name = "x-api-key", .value = request.api_key },
+        .{ .name = "anthropic-version", .value = "2023-06-01" },
+    };
+    const result = client.fetch(.{
+        .location = .{ .url = endpoint },
+        .method = .POST,
+        .payload = body,
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+            .authorization = if (is_anthropic) .omit else .{ .override = bearer },
+        },
+        .extra_headers = if (is_anthropic) &anthropic_headers else &.{},
+        .response_writer = &resp_buf.writer,
+    }) catch return error.RequestFailed;
+    if (ai_chat.requestCancelled(request)) return error.Canceled;
+
+    var resp_list = resp_buf.toArrayList();
+    defer resp_list.deinit(allocator);
+
+    if (result.status != .ok) {
+        const trimmed = std.mem.trim(u8, resp_list.items, " \t\r\n");
+        if (trimmed.len > 0) return ApiResult{ .content = try allocator.dupe(u8, trimmed) };
+        return ApiResult{ .content = try std.fmt.allocPrint(allocator, "HTTP {d}", .{@intFromEnum(result.status)}) };
+    }
+
+    return if (request.stream)
+        ai_chat.parseApiStreamResponse(allocator, resp_list.items)
+    else
+        ai_chat_protocol.parseApiResponse(allocator, resp_list.items, request.protocol);
+}
+
+fn runChatRequestStreaming(request: *const ChatRequest) !void {
+    if (ai_chat.requestCancelled(request)) return error.Canceled;
+    const allocator = request.allocator;
+    const endpoint = try ai_chat_protocol.apiEndpoint(allocator, request.base_url, request.protocol);
+    defer allocator.free(endpoint);
+
+    const body = try buildRequestJson(allocator, request);
+    defer allocator.free(body);
+
+    const bearer = try std.fmt.allocPrint(allocator, "Bearer {s}", .{request.api_key});
+    defer allocator.free(bearer);
+
+    var client: std.http.Client = .{
+        .allocator = allocator,
+        .write_buffer_size = 16384,
+    };
+    defer client.deinit();
+
+    const is_anthropic = request.protocol == .anthropic;
+    const anthropic_headers = [_]std.http.Header{
+        .{ .name = "x-api-key", .value = request.api_key },
+        .{ .name = "anthropic-version", .value = "2023-06-01" },
+    };
+    const uri = try std.Uri.parse(endpoint);
+    var req = try client.request(.POST, uri, .{
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+            .authorization = if (is_anthropic) .omit else .{ .override = bearer },
+        },
+        .extra_headers = if (is_anthropic) &anthropic_headers else &.{},
+        .keep_alive = false,
+    });
+    defer req.deinit();
+
+    try req.sendBodyComplete(body);
+
+    var redirect_buffer: [8 * 1024]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buffer);
+    if (ai_chat.requestCancelled(request)) return error.Canceled;
+    var transfer_buffer: [16 * 1024]u8 = undefined;
+    const reader = response.reader(&transfer_buffer);
+
+    if (response.head.status != .ok) {
+        var err_buf: std.Io.Writer.Allocating = .init(allocator);
+        defer err_buf.deinit();
+        _ = reader.streamRemaining(&err_buf.writer) catch {};
+        var err_list = err_buf.toArrayList();
+        defer err_list.deinit(allocator);
+        const trimmed = std.mem.trim(u8, err_list.items, " \t\r\n");
+        if (trimmed.len > 0) {
+            ai_chat.failAssistantStream(request.session, null, trimmed);
+        } else {
+            const msg = try std.fmt.allocPrint(allocator, "HTTP {d}", .{@intFromEnum(response.head.status)});
+            defer allocator.free(msg);
+            ai_chat.failAssistantStream(request.session, null, msg);
+        }
+        return;
+    }
+
+    const message_idx = try ai_chat.beginAssistantStream(request.session);
+    var usage: ?ApiUsage = null;
+    while (true) {
+        if (ai_chat.requestCancelled(request)) return error.Canceled;
+        const line = reader.takeDelimiter('\n') catch |err| {
+            if (ai_chat.requestCancelled(request)) return error.Canceled;
+            const msg = std.fmt.allocPrint(allocator, "Stream read failed: {}", .{err}) catch return err;
+            defer allocator.free(msg);
+            ai_chat.failAssistantStream(request.session, message_idx, msg);
+            return;
+        } orelse break;
+
+        if (ai_chat.requestCancelled(request)) return error.Canceled;
+        if (try ai_chat.applyApiStreamLineToSession(allocator, request.session, message_idx, line, &usage)) break;
+    }
+    ai_chat.finishAssistantStream(request.session, message_idx, request.started_ms, usage);
+}
+
+// ---------------------------------------------------------------------------
+// MOVE: request-JSON serialization
+// ---------------------------------------------------------------------------
+
+pub fn buildRequestJson(allocator: std.mem.Allocator, request: *const ChatRequest) ![]u8 {
+    return ai_chat_protocol.buildRequestJson(allocator, request.toParams(), request.messages, request.agent_enabled);
+}
+
+pub fn buildRequestJsonForMessages(allocator: std.mem.Allocator, request: *const ChatRequest, messages: []const RequestMessage, include_tools: bool) ![]u8 {
+    return ai_chat_protocol.buildRequestJson(allocator, request.toParams(), messages, include_tools);
+}
+
+// ---------------------------------------------------------------------------
+// MOVE: request-message cloning
+// ---------------------------------------------------------------------------
+
+fn cloneRequestMessage(allocator: std.mem.Allocator, msg: RequestMessage) !RequestMessage {
+    return requestMessageWithClonedFields(allocator, msg.role, msg.content, msg.reasoning, msg.tool_call_id, msg.tool_calls);
+}
+
+fn cloneToolCalls(allocator: std.mem.Allocator, calls: []const ToolCall) ![]ToolCall {
+    const out = try allocator.alloc(ToolCall, calls.len);
+    errdefer allocator.free(out);
+    var written: usize = 0;
+    errdefer {
+        for (out[0..written]) |call| call.deinit(allocator);
+    }
+    for (calls, 0..) |call, i| {
+        {
+            const id = try allocator.dupe(u8, call.id);
+            errdefer allocator.free(id);
+            const name = try allocator.dupe(u8, call.name);
+            errdefer allocator.free(name);
+            const arguments = try allocator.dupe(u8, call.arguments);
+            errdefer allocator.free(arguments);
+            out[i] = .{
+                .id = id,
+                .name = name,
+                .arguments = arguments,
+            };
+        }
+        written += 1;
+    }
+    return out;
+}
+
+fn assistantToolCallMessage(allocator: std.mem.Allocator, content: []const u8, reasoning: ?[]const u8, calls: []const ToolCall) !RequestMessage {
+    return requestMessageWithClonedFields(allocator, .assistant, content, reasoning, null, calls);
+}
+
+pub fn requestMessageWithClonedFields(
+    allocator: std.mem.Allocator,
+    role: Role,
+    content: []const u8,
+    reasoning: ?[]const u8,
+    tool_call_id: ?[]const u8,
+    tool_calls: ?[]const ToolCall,
+) !RequestMessage {
+    const content_copy = try allocator.dupe(u8, content);
+    errdefer allocator.free(content_copy);
+
+    var reasoning_copy: ?[]u8 = null;
+    errdefer if (reasoning_copy) |text| allocator.free(text);
+    if (reasoning) |text| reasoning_copy = try allocator.dupe(u8, text);
+
+    var tool_call_id_copy: ?[]u8 = null;
+    errdefer if (tool_call_id_copy) |id| allocator.free(id);
+    if (tool_call_id) |id| tool_call_id_copy = try allocator.dupe(u8, id);
+
+    var tool_calls_copy: ?[]ToolCall = null;
+    errdefer if (tool_calls_copy) |calls| {
+        for (calls) |call| call.deinit(allocator);
+        allocator.free(calls);
+    };
+    if (tool_calls) |calls| tool_calls_copy = try cloneToolCalls(allocator, calls);
+
+    return .{
+        .role = role,
+        .content = content_copy,
+        .reasoning = reasoning_copy,
+        .tool_call_id = tool_call_id_copy,
+        .tool_calls = tool_calls_copy,
+    };
+}
+
+pub fn durableToolAssistantRequestMessage(allocator: std.mem.Allocator, id: []const u8, name: []const u8) !RequestMessage {
+    const content = try allocator.dupe(u8, "");
+    errdefer allocator.free(content);
+
+    const calls = try allocator.alloc(ToolCall, 1);
+    errdefer allocator.free(calls);
+
+    {
+        const id_copy = try allocator.dupe(u8, id);
+        errdefer allocator.free(id_copy);
+        const name_copy = try allocator.dupe(u8, name);
+        errdefer allocator.free(name_copy);
+        const arguments = try allocator.dupe(u8, "{}");
+        errdefer allocator.free(arguments);
+
+        calls[0] = .{
+            .id = id_copy,
+            .name = name_copy,
+            .arguments = arguments,
+        };
+    }
+
+    return .{
+        .role = .assistant,
+        .content = content,
+        .tool_calls = calls,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// MOVE: ToolContext seam adapters — bridge Session into the leaf tool module
+// ---------------------------------------------------------------------------
+
+fn toolApprove(ctx: *anyopaque, tool: []const u8, command: []const u8, reason: []const u8) bool {
+    const session: *Session = @ptrCast(@alignCast(ctx));
+    return session.requestApproval(tool, command, reason);
+}
+
+fn toolCancelled(ctx: *anyopaque) bool {
+    const session: *Session = @ptrCast(@alignCast(ctx));
+    return ai_chat.sessionCancelled(session);
+}
+
+fn toolContextFromRequest(request: *ChatRequest) ai_chat_types.ToolContext {
+    return .{
+        .allocator = request.allocator,
+        .ctx = request.session,
+        .tool_host = request.tool_host,
+        .tool_snapshot = request.tool_snapshot,
+        .settings = ai_chat.currentAgentSettings(),
+        .copilot = request.copilot,
+        .weixin_reply_context = request.weixin_reply_context,
+        .write_context_surface_id = request.write_context_surface_id,
+        .write_context_surface_id_len = request.write_context_surface_id_len,
+        .approve = toolApprove,
+        .cancelled = toolCancelled,
+    };
+}
+
+pub fn executeToolCall(request: *ChatRequest, call: ToolCall) ![]u8 {
+    var tool_ctx = toolContextFromRequest(request);
+    const result = try ai_chat_tools.executeToolCall(&tool_ctx, call);
+    // Write-context state may have changed inside the tool (e.g. terminal_select).
+    request.write_context_surface_id = tool_ctx.write_context_surface_id;
+    request.write_context_surface_id_len = tool_ctx.write_context_surface_id_len;
+    // tool_snapshot may have been updated (e.g. tab_new, tab_close, ssh_profile_connect).
+    request.tool_snapshot = tool_ctx.tool_snapshot;
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Tests for request JSON serialization (moved from ai_chat.zig)
+// ---------------------------------------------------------------------------
+
+test "ai chat request json includes deepseek thinking mode" {
+    const allocator = std.testing.allocator;
+    var messages = [_]RequestMessage{.{
+        .role = .user,
+        .content = @constCast("Hello"),
+    }};
+    const request = ChatRequest{
+        .allocator = allocator,
+        .session = undefined,
+        .base_url = @constCast("https://api.deepseek.com"),
+        .api_key = @constCast("key"),
+        .model = @constCast(ai_chat.DEFAULT_MODEL),
+        .system_prompt = @constCast(ai_chat.DEFAULT_SYSTEM_PROMPT),
+        .messages = messages[0..],
+        .thinking_enabled = true,
+        .reasoning_effort = @constCast("high"),
+        .stream = false,
+        .agent_enabled = false,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .started_ms = 0,
+    };
+    const json = try buildRequestJson(allocator, &request);
+    defer allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"thinking\":{\"type\":\"enabled\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"reasoning_effort\":\"high\"") != null);
+}
+
+test "ai chat agent request json includes tool schemas" {
+    const allocator = std.testing.allocator;
+    var messages = [_]RequestMessage{.{
+        .role = .user,
+        .content = @constCast("List terminals"),
+    }};
+    const request = ChatRequest{
+        .allocator = allocator,
+        .session = undefined,
+        .base_url = @constCast("https://api.deepseek.com"),
+        .api_key = @constCast("key"),
+        .model = @constCast(ai_chat.DEFAULT_MODEL),
+        .system_prompt = @constCast(ai_chat.DEFAULT_SYSTEM_PROMPT),
+        .messages = messages[0..],
+        .thinking_enabled = true,
+        .reasoning_effort = @constCast("high"),
+        .stream = false,
+        .agent_enabled = true,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .started_ms = 0,
+    };
+    const json = try buildRequestJson(allocator, &request);
+    defer allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"tools\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"tool_choice\":\"auto\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"terminal_list\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"terminal_select\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ssh_session_exec\"") != null);
+    if (@import("platform/pty_command.zig").wslSessionToolsEnabled()) {
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"wsl_session_exec\"") != null);
+    } else {
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"wsl_session_exec\"") == null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"terminal_repl_exec\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ssh_profile_save\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"proxy_jump\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ssh_profile_connect\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"tab_new\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, @import("platform/pty_command.zig").tabNewToolPropertiesJson()) != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, @import("platform/pty_command.zig").tabKindUsage()) != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"tab_close\"") != null);
+}
+
+test "ai chat responses request json uses input and response tool schemas" {
+    const allocator = std.testing.allocator;
+    var calls = [_]ToolCall{.{
+        .id = @constCast("call_1"),
+        .name = @constCast("terminal_list"),
+        .arguments = @constCast("{}"),
+    }};
+    var messages = [_]RequestMessage{
+        .{
+            .role = .user,
+            .content = @constCast("List terminals"),
+        },
+        .{
+            .role = .assistant,
+            .content = @constCast(""),
+            .tool_calls = calls[0..],
+        },
+        .{
+            .role = .tool,
+            .content = @constCast("surface=1"),
+            .tool_call_id = @constCast("call_1"),
+        },
+    };
+    const request = ChatRequest{
+        .allocator = allocator,
+        .session = undefined,
+        .base_url = @constCast("https://api.openai.com/v1"),
+        .api_key = @constCast("key"),
+        .model = @constCast("gpt-5"),
+        .protocol = .responses,
+        .system_prompt = @constCast("system"),
+        .messages = messages[0..],
+        .thinking_enabled = true,
+        .reasoning_effort = @constCast("high"),
+        .stream = false,
+        .agent_enabled = true,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .started_ms = 0,
+    };
+    const json = try buildRequestJsonForMessages(allocator, &request, messages[0..], true);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"instructions\":\"system\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"input\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"messages\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"function\",\"name\":\"terminal_list\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"function_call\",\"call_id\":\"call_1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"function_call_output\",\"call_id\":\"call_1\",\"output\":\"surface=1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"reasoning\":{\"effort\":\"high\"}") != null);
+}
+
+test "ai chat request json replays assistant reasoning content" {
+    const allocator = std.testing.allocator;
+    var messages = [_]RequestMessage{.{
+        .role = .assistant,
+        .content = @constCast("I will inspect the system."),
+        .reasoning = @constCast("Need system info before answering."),
+    }};
+    const request = ChatRequest{
+        .allocator = allocator,
+        .session = undefined,
+        .base_url = @constCast("https://api.deepseek.com"),
+        .api_key = @constCast("key"),
+        .model = @constCast(ai_chat.DEFAULT_MODEL),
+        .system_prompt = @constCast(ai_chat.DEFAULT_SYSTEM_PROMPT),
+        .messages = messages[0..],
+        .thinking_enabled = true,
+        .reasoning_effort = @constCast("high"),
+        .stream = false,
+        .agent_enabled = true,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .started_ms = 0,
+    };
+    const json = try buildRequestJson(allocator, &request);
+    defer allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"reasoning_content\":\"Need system info before answering.\"") != null);
+}
+
+test "ai chat request json adds thinking fallback for assistant tool calls without reasoning" {
+    const allocator = std.testing.allocator;
+    var calls = [_]ToolCall{.{
+        .id = @constCast("call-1"),
+        .name = @constCast("skill_info"),
+        .arguments = @constCast("{}"),
+    }};
+    var messages = [_]RequestMessage{.{
+        .role = .assistant,
+        .content = @constCast(""),
+        .tool_calls = calls[0..],
+    }};
+    const request = ChatRequest{
+        .allocator = allocator,
+        .session = undefined,
+        .base_url = @constCast("https://api.deepseek.com"),
+        .api_key = @constCast("key"),
+        .model = @constCast(ai_chat.DEFAULT_MODEL),
+        .system_prompt = @constCast(ai_chat.DEFAULT_SYSTEM_PROMPT),
+        .messages = messages[0..],
+        .thinking_enabled = true,
+        .reasoning_effort = @constCast("high"),
+        .stream = false,
+        .agent_enabled = true,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .started_ms = 0,
+    };
+
+    const json = try buildRequestJson(allocator, &request);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"reasoning_content\":\"Tool call is required before answering.\"") != null);
+}
+
+test "ai chat request json replaces invalid utf8 bytes" {
+    const allocator = std.testing.allocator;
+    const bad = [_]u8{ 'o', 'k', ' ', 0xff, ' ', 0xc3 };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try ai_chat_protocol.appendJsonString(allocator, &out, bad[0..]);
+    try std.testing.expectEqualStrings("\"ok \\ufffd \\ufffd\"", out.items);
+}
+
+test "ai chat streaming request asks provider to include usage" {
+    const allocator = std.testing.allocator;
+    var content = [_]u8{ 'h', 'i' };
+    var model = [_]u8{ 'd', 'e', 'e', 'p', 's', 'e', 'e', 'k', '-', 'v', '4', '-', 'p', 'r', 'o' };
+    var reasoning = [_]u8{ 'h', 'i', 'g', 'h' };
+    var msg = [_]RequestMessage{.{ .role = .user, .content = content[0..] }};
+    var request = ChatRequest{
+        .allocator = allocator,
+        .session = undefined,
+        .base_url = &.{},
+        .api_key = &.{},
+        .model = model[0..],
+        .system_prompt = &.{},
+        .messages = msg[0..],
+        .stream = true,
+        .agent_enabled = false,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .thinking_enabled = true,
+        .reasoning_effort = reasoning[0..],
+        .started_ms = 0,
+    };
+    const body = try buildRequestJsonForMessages(allocator, &request, msg[0..], false);
+    defer allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"stream_options\":{\"include_usage\":true}") != null);
+}
+
