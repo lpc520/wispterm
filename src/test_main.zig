@@ -607,6 +607,7 @@ comptime {
     _ = @import("ai_chat_composer.zig");
     _ = @import("ai_history_types.zig");
     _ = @import("ai_history_provider_codex.zig");
+    _ = @import("ai_history_provider_claude.zig");
     _ = @import("agent_detector.zig");
     _ = @import("App.zig");
     _ = @import("AppWindow.zig");
