@@ -3047,47 +3047,47 @@ fn sessionTwoColumnWidth(left: []const u8, right: []const u8) f32 {
 
 fn sessionLauncherTitle() []const u8 {
     if (g_ai_form_visible) {
-        return "AI Agent";
+        return i18n.s().sl_ai_agent;
     }
     if (g_ai_list_visible) {
         return switch (g_ai_list_mode) {
-            .manage => "LLM Providers",
-            .edit_select => "Edit LLM Provider",
-            .delete_select => "Delete LLM Provider",
+            .manage => i18n.s().sl_llm_providers,
+            .edit_select => i18n.s().sl_edit_llm_provider,
+            .delete_select => i18n.s().sl_delete_llm_provider,
         };
     }
-    if (g_ssh_form_visible) return "SSH Server";
+    if (g_ssh_form_visible) return i18n.s().sl_ssh_server;
     if (g_ssh_list_visible) {
         return switch (g_ssh_list_mode) {
-            .manage => "SSH Servers",
-            .edit_select => "Edit SSH Server",
-            .delete_select => "Delete SSH Server",
+            .manage => i18n.s().sl_ssh_servers,
+            .edit_select => i18n.s().sl_edit_ssh_server,
+            .delete_select => i18n.s().sl_delete_ssh_server,
         };
     }
-    return "New Session";
+    return i18n.s().sl_new_session;
 }
 
 fn sessionLauncherHint() []const u8 {
     if (g_ai_form_visible) {
-        return "Configure once, then Enter opens";
+        return i18n.s().sl_hint_ai_form;
     }
     if (g_ai_list_visible) {
         return switch (g_ai_list_mode) {
-            .manage => "Enter opens, New/Edit/Delete manage",
-            .edit_select => "Choose a profile to edit",
-            .delete_select => "Choose a profile to delete",
+            .manage => i18n.s().sl_hint_ai_manage,
+            .edit_select => i18n.s().sl_hint_choose_profile_edit,
+            .delete_select => i18n.s().sl_hint_choose_profile_delete,
         };
     }
-    if (g_ssh_form_visible) return "Tab changes field, Enter connects";
+    if (g_ssh_form_visible) return i18n.s().sl_hint_ssh_form;
     if (g_ssh_list_visible) {
         const has_filter = g_ssh_list_filter_len > 0;
         return switch (g_ssh_list_mode) {
-            .manage => if (has_filter) "Type to filter, Backspace edits, Enter connects" else "Type to filter, Enter connects, New/Edit/Delete manage",
-            .edit_select => if (has_filter) "Type to filter, Choose a server to edit" else "Choose a server to edit",
-            .delete_select => if (has_filter) "Type to filter, Choose a server to delete" else "Choose a server to delete",
+            .manage => if (has_filter) i18n.s().sl_hint_ssh_filter_edits else i18n.s().sl_hint_ssh_filter_manage,
+            .edit_select => if (has_filter) i18n.s().sl_hint_ssh_filter_choose_edit else i18n.s().sl_hint_choose_server_edit,
+            .delete_select => if (has_filter) i18n.s().sl_hint_ssh_filter_choose_delete else i18n.s().sl_hint_choose_server_delete,
         };
     }
-    return "Up/Down select, Enter starts";
+    return i18n.s().sl_hint_main;
 }
 
 fn sessionDesiredBoxWidth() f32 {
@@ -3096,32 +3096,32 @@ fn sessionDesiredBoxWidth() f32 {
     var desired = @max(measureTitlebarText(title), measureTitlebarText(hint)) + 48.0;
 
     if (g_ai_form_visible) {
-        desired = @max(desired, sessionTwoColumnWidth("Profile name", aiField(.name)));
-        desired = @max(desired, sessionTwoColumnWidth("Base URL", aiField(.base_url)));
-        desired = @max(desired, sessionTwoColumnWidth("API key", aiField(.api_key)));
-        desired = @max(desired, sessionTwoColumnWidth("Model", aiField(.model)));
-        desired = @max(desired, sessionTwoColumnWidth("System", aiField(.system_prompt)));
-        desired = @max(desired, sessionTwoColumnWidth("Thinking", aiField(.thinking)));
-        desired = @max(desired, sessionTwoColumnWidth("Effort", aiField(.reasoning_effort)));
-        desired = @max(desired, sessionTwoColumnWidth("Stream", aiField(.stream)));
-        desired = @max(desired, sessionTwoColumnWidth("Protocol", aiProtocolDisplay()));
-        desired = @max(desired, sessionTwoColumnWidth("Max Tokens", aiField(.max_tokens)));
-        desired = @max(desired, sessionTwoColumnWidth("Save & Open", "agent"));
-        desired = @max(desired, sessionTwoColumnWidth("Save", "profile"));
-        desired = @max(desired, sessionTwoColumnWidth("Cancel", "Esc"));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_profile_name, aiField(.name)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_base_url, aiField(.base_url)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_api_key, aiField(.api_key)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_model, aiField(.model)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_system, aiField(.system_prompt)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_thinking, aiField(.thinking)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_effort, aiField(.reasoning_effort)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_stream, aiField(.stream)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_protocol, aiProtocolDisplay()));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_max_tokens, aiField(.max_tokens)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_save_open, i18n.s().sl_v_agent));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_save, i18n.s().sl_v_profile));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_cancel, "Esc"));
         return desired;
     }
 
     if (g_ssh_form_visible) {
-        desired = @max(desired, sessionTwoColumnWidth("Server name", sshField(.name)));
-        desired = @max(desired, sessionTwoColumnWidth("IP / host", sshField(.ip)));
-        desired = @max(desired, sessionTwoColumnWidth("User", sshField(.user)));
-        desired = @max(desired, sessionTwoColumnWidth("Password", sshField(.password)));
-        desired = @max(desired, sessionTwoColumnWidth("Port", sshField(.port)));
-        desired = @max(desired, sessionTwoColumnWidth("Jump host", sshField(.proxy_jump)));
-        desired = @max(desired, sessionTwoColumnWidth("Save & Connect", platform_pty_command.sshLauncherDetail()));
-        desired = @max(desired, sessionTwoColumnWidth("Save", "profile"));
-        desired = @max(desired, sessionTwoColumnWidth("Cancel", "Esc"));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ssh_server_name, sshField(.name)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ssh_ip_host, sshField(.ip)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ssh_user, sshField(.user)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ssh_password, sshField(.password)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ssh_port, sshField(.port)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ssh_jump_host, sshField(.proxy_jump)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_save_connect, platform_pty_command.sshLauncherDetail()));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_save, i18n.s().sl_v_profile));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_cancel, "Esc"));
         return desired;
     }
 
@@ -3140,13 +3140,13 @@ fn sessionDesiredBoxWidth() f32 {
         }
         switch (g_ai_list_mode) {
             .manage => {
-                desired = @max(desired, sessionTwoColumnWidth("New LLM Provider", "add"));
-                desired = @max(desired, sessionTwoColumnWidth("Edit LLM Provider", if (g_ai_profile_count > 0) "choose" else "no profile"));
-                desired = @max(desired, sessionTwoColumnWidth("Delete LLM Provider", if (g_ai_profile_count > 0) "choose" else "no profile"));
-                desired = @max(desired, sessionTwoColumnWidth("Cancel", "Esc"));
+                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_new_llm_provider, i18n.s().sl_v_add));
+                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_edit_llm_provider, if (g_ai_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_profile));
+                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_delete_llm_provider, if (g_ai_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_profile));
+                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_cancel, "Esc"));
             },
             .edit_select, .delete_select => {
-                desired = @max(desired, sessionTwoColumnWidth("Back", "manage"));
+                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_back, i18n.s().sl_v_manage));
             },
         }
         return desired;
@@ -3169,24 +3169,24 @@ fn sessionDesiredBoxWidth() f32 {
         }
         switch (g_ssh_list_mode) {
             .manage => {
-                desired = @max(desired, sessionTwoColumnWidth("New SSH Server", "add"));
-                desired = @max(desired, sessionTwoColumnWidth("Edit SSH Server", if (g_ssh_profile_count > 0) "choose" else "no server"));
-                desired = @max(desired, sessionTwoColumnWidth("Delete SSH Server", if (g_ssh_profile_count > 0) "choose" else "no server"));
-                desired = @max(desired, sessionTwoColumnWidth("Cancel", "Esc"));
+                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_new_ssh_server, i18n.s().sl_v_add));
+                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_edit_ssh_server, if (g_ssh_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_server));
+                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_delete_ssh_server, if (g_ssh_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_server));
+                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_cancel, "Esc"));
             },
             .edit_select, .delete_select => {
-                desired = @max(desired, sessionTwoColumnWidth("Back", "manage"));
+                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_back, i18n.s().sl_v_manage));
             },
         }
         return desired;
     }
 
     desired = @max(desired, sessionTwoColumnWidth(platform_pty_command.localShellLauncherTitle(), AppWindow.configuredLocalShellSessionDetail()));
-    desired = @max(desired, sessionTwoColumnWidth("SSH", "connect server"));
+    desired = @max(desired, sessionTwoColumnWidth("SSH", i18n.s().sl_v_connect_server));
     if (platform_pty_command.sessionLauncherWslRow() != null) {
         desired = @max(desired, sessionTwoColumnWidth("WSL", platform_pty_command.wslLauncherDetail()));
     }
-    desired = @max(desired, sessionTwoColumnWidth("AI Agent", defaultAiModeLabel()));
+    desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_agent, defaultAiModeLabel()));
     return desired;
 }
 
@@ -3360,17 +3360,17 @@ fn sshProfileTarget(profile: *const SshProfile, target_buf: []u8) []const u8 {
 fn renderAiProfileRow(layout: SessionLayout, window_height: f32, row: usize, profile: *const AiProfile, selected: bool) void {
     const name = aiProfileField(profile, .name);
     const mode = aiProfileModeLabel(profile);
-    var detail_buf: [24]u8 = undefined;
+    var detail_buf: [48]u8 = undefined;
     const detail = if (row == defaultAiProfileIndex())
-        (std.fmt.bufPrint(detail_buf[0..], "{s} (default)", .{mode}) catch mode)
+        (std.fmt.bufPrint(detail_buf[0..], "{s}{s}", .{ mode, i18n.s().sl_default_suffix }) catch mode)
     else
         mode;
     renderSessionRow(layout, window_height, row, name, detail, selected);
 }
 
 fn aiModeText(value: []const u8) []const u8 {
-    if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "enabled")) return "Agent";
-    return "Chat";
+    if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "enabled")) return i18n.s().sl_ai_agent_field;
+    return i18n.s().sl_mode_chat;
 }
 
 fn aiProfileModeLabel(profile: *const AiProfile) []const u8 {
@@ -3416,16 +3416,16 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
             }
             switch (g_ai_list_mode) {
                 .manage => {
-                    renderSessionRow(layout, window_height, row, "New LLM Provider", "add", g_ai_list_selected == row);
+                    renderSessionRow(layout, window_height, row, i18n.s().sl_new_llm_provider, i18n.s().sl_v_add, g_ai_list_selected == row);
                     row += 1;
-                    renderSessionRow(layout, window_height, row, "Edit LLM Provider", if (g_ai_profile_count > 0) "choose" else "no profile", g_ai_list_selected == row);
+                    renderSessionRow(layout, window_height, row, i18n.s().sl_edit_llm_provider, if (g_ai_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_profile, g_ai_list_selected == row);
                     row += 1;
-                    renderSessionRow(layout, window_height, row, "Delete LLM Provider", if (g_ai_profile_count > 0) "choose" else "no profile", g_ai_list_selected == row);
+                    renderSessionRow(layout, window_height, row, i18n.s().sl_delete_llm_provider, if (g_ai_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_profile, g_ai_list_selected == row);
                     row += 1;
-                    renderSessionRow(layout, window_height, row, "Cancel", "Esc", g_ai_list_selected == row);
+                    renderSessionRow(layout, window_height, row, i18n.s().sl_cancel, "Esc", g_ai_list_selected == row);
                 },
                 .edit_select, .delete_select => {
-                    renderSessionRow(layout, window_height, row, "Back", "manage", g_ai_list_selected == row);
+                    renderSessionRow(layout, window_height, row, i18n.s().sl_back, i18n.s().sl_v_manage, g_ai_list_selected == row);
                 },
             }
             return;
@@ -3441,16 +3441,16 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
             }
             switch (g_ssh_list_mode) {
                 .manage => {
-                    renderSessionRow(layout, window_height, row, "New SSH Server", "add", g_ssh_list_selected == row);
+                    renderSessionRow(layout, window_height, row, i18n.s().sl_new_ssh_server, i18n.s().sl_v_add, g_ssh_list_selected == row);
                     row += 1;
-                    renderSessionRow(layout, window_height, row, "Edit SSH Server", if (g_ssh_profile_count > 0) "choose" else "no server", g_ssh_list_selected == row);
+                    renderSessionRow(layout, window_height, row, i18n.s().sl_edit_ssh_server, if (g_ssh_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_server, g_ssh_list_selected == row);
                     row += 1;
-                    renderSessionRow(layout, window_height, row, "Delete SSH Server", if (g_ssh_profile_count > 0) "choose" else "no server", g_ssh_list_selected == row);
+                    renderSessionRow(layout, window_height, row, i18n.s().sl_delete_ssh_server, if (g_ssh_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_server, g_ssh_list_selected == row);
                     row += 1;
-                    renderSessionRow(layout, window_height, row, "Cancel", "Esc", g_ssh_list_selected == row);
+                    renderSessionRow(layout, window_height, row, i18n.s().sl_cancel, "Esc", g_ssh_list_selected == row);
                 },
                 .edit_select, .delete_select => {
-                    renderSessionRow(layout, window_height, row, "Back", "manage", g_ssh_list_selected == row);
+                    renderSessionRow(layout, window_height, row, i18n.s().sl_back, i18n.s().sl_v_manage, g_ssh_list_selected == row);
                 },
             }
             return;
@@ -3458,44 +3458,44 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
         var row: usize = 0;
         renderSessionRow(layout, window_height, row, platform_pty_command.localShellLauncherTitle(), AppWindow.configuredLocalShellSessionDetail(), g_session_launcher_selected == row);
         row += 1;
-        renderSessionRow(layout, window_height, row, "SSH", "connect server", g_session_launcher_selected == row);
+        renderSessionRow(layout, window_height, row, "SSH", i18n.s().sl_v_connect_server, g_session_launcher_selected == row);
         row += 1;
         if (platform_pty_command.sessionLauncherWslRow()) |wsl_row| {
             row = wsl_row;
             renderSessionRow(layout, window_height, row, "WSL", platform_pty_command.wslLauncherDetail(), g_session_launcher_selected == row);
             row += 1;
         }
-        renderSessionRow(layout, window_height, command_center_state.SESSION_LAUNCHER_ROW_AI_AGENT, "AI Agent", defaultAiModeLabel(), g_session_launcher_selected == command_center_state.SESSION_LAUNCHER_ROW_AI_AGENT);
+        renderSessionRow(layout, window_height, command_center_state.SESSION_LAUNCHER_ROW_AI_AGENT, i18n.s().sl_ai_agent, defaultAiModeLabel(), g_session_launcher_selected == command_center_state.SESSION_LAUNCHER_ROW_AI_AGENT);
         return;
     }
 
     if (g_ai_form_visible) {
-        renderAiSessionField(layout, window_height, @intFromEnum(AiField.name), "Profile name", aiField(.name), false);
-        renderAiSessionField(layout, window_height, @intFromEnum(AiField.base_url), "Base URL", aiField(.base_url), false);
-        renderAiSessionField(layout, window_height, @intFromEnum(AiField.api_key), "API key", aiField(.api_key), true);
-        renderAiSessionField(layout, window_height, @intFromEnum(AiField.model), "Model", aiField(.model), false);
-        renderAiSessionField(layout, window_height, @intFromEnum(AiField.system_prompt), "System", aiField(.system_prompt), false);
-        renderAiSessionField(layout, window_height, @intFromEnum(AiField.thinking), "Thinking", aiField(.thinking), false);
-        renderAiSessionField(layout, window_height, @intFromEnum(AiField.reasoning_effort), "Effort", aiField(.reasoning_effort), false);
-        renderAiSessionField(layout, window_height, @intFromEnum(AiField.stream), "Stream", aiField(.stream), false);
-        renderAiSessionField(layout, window_height, @intFromEnum(AiField.agent), "Agent", aiField(.agent), false);
-        renderAiSessionField(layout, window_height, @intFromEnum(AiField.protocol), "Protocol", aiProtocolDisplay(), false);
-        renderAiSessionField(layout, window_height, @intFromEnum(AiField.max_tokens), "Max Tokens", aiField(.max_tokens), false);
-        renderSessionRow(layout, window_height, AI_FIELD_COUNT, "Save & Open", "agent", g_ai_focus == AI_FIELD_COUNT);
-        renderSessionRow(layout, window_height, AI_FIELD_COUNT + 1, "Save", "profile", g_ai_focus == AI_FIELD_COUNT + 1);
-        renderSessionRow(layout, window_height, AI_FIELD_COUNT + 2, "Cancel", "Esc", g_ai_focus == AI_FIELD_COUNT + 2);
+        renderAiSessionField(layout, window_height, @intFromEnum(AiField.name), i18n.s().sl_ai_profile_name, aiField(.name), false);
+        renderAiSessionField(layout, window_height, @intFromEnum(AiField.base_url), i18n.s().sl_ai_base_url, aiField(.base_url), false);
+        renderAiSessionField(layout, window_height, @intFromEnum(AiField.api_key), i18n.s().sl_ai_api_key, aiField(.api_key), true);
+        renderAiSessionField(layout, window_height, @intFromEnum(AiField.model), i18n.s().sl_ai_model, aiField(.model), false);
+        renderAiSessionField(layout, window_height, @intFromEnum(AiField.system_prompt), i18n.s().sl_ai_system, aiField(.system_prompt), false);
+        renderAiSessionField(layout, window_height, @intFromEnum(AiField.thinking), i18n.s().sl_ai_thinking, aiField(.thinking), false);
+        renderAiSessionField(layout, window_height, @intFromEnum(AiField.reasoning_effort), i18n.s().sl_ai_effort, aiField(.reasoning_effort), false);
+        renderAiSessionField(layout, window_height, @intFromEnum(AiField.stream), i18n.s().sl_ai_stream, aiField(.stream), false);
+        renderAiSessionField(layout, window_height, @intFromEnum(AiField.agent), i18n.s().sl_ai_agent_field, aiField(.agent), false);
+        renderAiSessionField(layout, window_height, @intFromEnum(AiField.protocol), i18n.s().sl_ai_protocol, aiProtocolDisplay(), false);
+        renderAiSessionField(layout, window_height, @intFromEnum(AiField.max_tokens), i18n.s().sl_ai_max_tokens, aiField(.max_tokens), false);
+        renderSessionRow(layout, window_height, AI_FIELD_COUNT, i18n.s().sl_save_open, i18n.s().sl_v_agent, g_ai_focus == AI_FIELD_COUNT);
+        renderSessionRow(layout, window_height, AI_FIELD_COUNT + 1, i18n.s().sl_save, i18n.s().sl_v_profile, g_ai_focus == AI_FIELD_COUNT + 1);
+        renderSessionRow(layout, window_height, AI_FIELD_COUNT + 2, i18n.s().sl_cancel, "Esc", g_ai_focus == AI_FIELD_COUNT + 2);
         return;
     }
 
-    renderSessionField(layout, window_height, @intFromEnum(SshField.name), "Server name", sshField(.name), false);
-    renderSessionField(layout, window_height, @intFromEnum(SshField.ip), "IP / host", sshField(.ip), false);
-    renderSessionField(layout, window_height, @intFromEnum(SshField.user), "User", sshField(.user), false);
-    renderSessionField(layout, window_height, @intFromEnum(SshField.password), "Password", sshField(.password), true);
-    renderSessionField(layout, window_height, @intFromEnum(SshField.port), "Port", sshField(.port), false);
-    renderSessionField(layout, window_height, @intFromEnum(SshField.proxy_jump), "Jump host", sshField(.proxy_jump), false);
-    renderSessionRow(layout, window_height, SSH_FIELD_COUNT, "Save & Connect", platform_pty_command.sshLauncherDetail(), g_ssh_focus == SSH_FIELD_COUNT);
-    renderSessionRow(layout, window_height, SSH_FIELD_COUNT + 1, "Save", "profile", g_ssh_focus == SSH_FIELD_COUNT + 1);
-    renderSessionRow(layout, window_height, SSH_FIELD_COUNT + 2, "Cancel", "Esc", g_ssh_focus == SSH_FIELD_COUNT + 2);
+    renderSessionField(layout, window_height, @intFromEnum(SshField.name), i18n.s().sl_ssh_server_name, sshField(.name), false);
+    renderSessionField(layout, window_height, @intFromEnum(SshField.ip), i18n.s().sl_ssh_ip_host, sshField(.ip), false);
+    renderSessionField(layout, window_height, @intFromEnum(SshField.user), i18n.s().sl_ssh_user, sshField(.user), false);
+    renderSessionField(layout, window_height, @intFromEnum(SshField.password), i18n.s().sl_ssh_password, sshField(.password), true);
+    renderSessionField(layout, window_height, @intFromEnum(SshField.port), i18n.s().sl_ssh_port, sshField(.port), false);
+    renderSessionField(layout, window_height, @intFromEnum(SshField.proxy_jump), i18n.s().sl_ssh_jump_host, sshField(.proxy_jump), false);
+    renderSessionRow(layout, window_height, SSH_FIELD_COUNT, i18n.s().sl_save_connect, platform_pty_command.sshLauncherDetail(), g_ssh_focus == SSH_FIELD_COUNT);
+    renderSessionRow(layout, window_height, SSH_FIELD_COUNT + 1, i18n.s().sl_save, i18n.s().sl_v_profile, g_ssh_focus == SSH_FIELD_COUNT + 1);
+    renderSessionRow(layout, window_height, SSH_FIELD_COUNT + 2, i18n.s().sl_cancel, "Esc", g_ssh_focus == SSH_FIELD_COUNT + 2);
 }
 
 // ============================================================================
