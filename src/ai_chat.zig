@@ -103,23 +103,7 @@ const RequestMessage = ai_chat_protocol.RequestMessage;
 const ai_chat_title = @import("ai_chat_title.zig");
 const ToolCall = ai_chat_protocol.ToolCall;
 
-pub const AgentPermission = enum {
-    confirm,
-    full,
-
-    pub fn parse(value: []const u8) ?AgentPermission {
-        if (std.mem.eql(u8, value, "confirm")) return .confirm;
-        if (std.mem.eql(u8, value, "full") or std.mem.eql(u8, value, "full-permission")) return .full;
-        return null;
-    }
-
-    pub fn name(self: AgentPermission) []const u8 {
-        return switch (self) {
-            .confirm => "confirm",
-            .full => "full",
-        };
-    }
-};
+pub const AgentPermission = @import("ai_agent_config.zig").AgentPermission;
 
 pub const AgentSettings = struct {
     enabled: bool = false,
