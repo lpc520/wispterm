@@ -440,7 +440,10 @@ pub fn spawnAiChatTabFromHistoryRecord(allocator: std.mem.Allocator, record: age
 pub fn spawnAiHistoryTab(allocator: std.mem.Allocator, source: ai_history_source.Source) bool {
     if (g_tab_count >= MAX_TABS) return false;
     const session_ptr = allocator.create(ai_history_session.Session) catch return false;
-    session_ptr.* = ai_history_session.Session.init(allocator, source);
+    session_ptr.* = ai_history_session.Session.initOwned(allocator, source) catch {
+        allocator.destroy(session_ptr);
+        return false;
+    };
 
     const t = allocator.create(TabState) catch {
         session_ptr.deinit();
@@ -1559,10 +1562,46 @@ test "tab: spawnAiHistoryTab creates active ai_history tab" {
     try std.testing.expectEqualStrings("local-history", session.source.id);
 }
 
+test "tab: spawnAiHistoryTab owns mutable ssh source buffers" {
+    resetTestTabGlobals();
+    const allocator = std.testing.allocator;
+    defer {
+        for (0..g_tab_count) |idx| {
+            if (g_tabs[idx]) |tab_state| {
+                tab_state.deinit(allocator);
+                allocator.destroy(tab_state);
+                g_tabs[idx] = null;
+            }
+        }
+        resetTestTabGlobals();
+    }
+
+    var id_buf = [_]u8{ 's', 's', 'h', '-', 'h', 'i', 's', 't', 'o', 'r', 'y' };
+    var name_buf = [_]u8{ 'B', 'u', 'i', 'l', 'd', ' ', 'B', 'o', 'x' };
+    var profile_buf = [_]u8{ 'b', 'u', 'i', 'l', 'd', 'b', 'o', 'x' };
+
+    try std.testing.expect(spawnAiHistoryTab(allocator, .{
+        .id = id_buf[0..],
+        .name = name_buf[0..],
+        .target = .{ .ssh = .{ .profile_name = profile_buf[0..] } },
+    }));
+
+    @memset(&id_buf, 'x');
+    @memset(&name_buf, 'x');
+    @memset(&profile_buf, 'x');
+
+    const active = activeTab() orelse return error.ExpectedActiveTab;
+    const session = active.ai_history_session orelse return error.ExpectedAiHistorySession;
+    try std.testing.expectEqualStrings("ssh-history", session.source.id);
+    try std.testing.expectEqualStrings("Build Box", session.source.name);
+    try std.testing.expectEqualStrings("buildbox", session.source.target.ssh.profile_name);
+    try std.testing.expectEqualStrings("Build Box", active.getTitle());
+}
+
 test "tab: spawnAiHistoryTab rolls back when tab allocation fails" {
     resetTestTabGlobals();
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{
-        .fail_index = 1,
+        .fail_index = 3,
     });
 
     try std.testing.expect(!spawnAiHistoryTab(failing_allocator.allocator(), .{

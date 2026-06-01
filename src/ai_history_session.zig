@@ -8,8 +8,9 @@ pub const LoadState = enum { idle, scanning, ready, failed };
 pub const Session = struct {
     /// Allocator used for row storage. Do not change while rows are live.
     allocator: std.mem.Allocator,
-    /// Source is stored shallowly; nested string slices must outlive Session.
+    /// Borrowed when initialized with init; owned when initialized with initOwned.
     source: source_mod.Source,
+    source_owned: bool = false,
     state: LoadState = .idle,
     /// Rows shallow-copy SessionMeta values. All string slices inside each row
     /// are borrowed and must outlive these rows until replacement or deinit.
@@ -26,8 +27,19 @@ pub const Session = struct {
         };
     }
 
+    pub fn initOwned(allocator: std.mem.Allocator, source: source_mod.Source) !Session {
+        return .{
+            .allocator = allocator,
+            .source = try cloneSource(allocator, source),
+            .source_owned = true,
+        };
+    }
+
     pub fn deinit(self: *Session) void {
         self.rows.deinit(self.allocator);
+        if (self.source_owned) {
+            freeOwnedSource(self.allocator, &self.source);
+        }
         self.* = undefined;
     }
 
@@ -102,6 +114,85 @@ pub const Session = struct {
     }
 };
 
+fn cloneSource(allocator: std.mem.Allocator, source: source_mod.Source) !source_mod.Source {
+    var cloned = source_mod.Source{
+        .id = "",
+        .name = "",
+        .target = .local,
+        .providers = source.providers,
+        .codex_root_override = null,
+        .claude_root_override = null,
+        .extra_roots = &.{},
+    };
+    errdefer freeOwnedSource(allocator, &cloned);
+
+    cloned.id = try cloneSlice(allocator, source.id);
+    cloned.name = try cloneSlice(allocator, source.name);
+    cloned.target = switch (source.target) {
+        .local => .local,
+        .wsl => |target| .{ .wsl = .{ .distro = try cloneSlice(allocator, target.distro) } },
+        .ssh => |target| .{ .ssh = .{ .profile_name = try cloneSlice(allocator, target.profile_name) } },
+    };
+    cloned.codex_root_override = try cloneOptionalSlice(allocator, source.codex_root_override);
+    cloned.claude_root_override = try cloneOptionalSlice(allocator, source.claude_root_override);
+    cloned.extra_roots = try cloneProviderRoots(allocator, source.extra_roots);
+
+    return cloned;
+}
+
+fn cloneSlice(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    if (value.len == 0) return "";
+    return try allocator.dupe(u8, value);
+}
+
+fn cloneOptionalSlice(allocator: std.mem.Allocator, value: ?[]const u8) !?[]const u8 {
+    return if (value) |slice| try cloneSlice(allocator, slice) else null;
+}
+
+fn cloneProviderRoots(allocator: std.mem.Allocator, roots: []const source_mod.ProviderRoot) ![]const source_mod.ProviderRoot {
+    if (roots.len == 0) return &.{};
+
+    const cloned_roots = try allocator.alloc(source_mod.ProviderRoot, roots.len);
+    errdefer allocator.free(cloned_roots);
+
+    var initialized: usize = 0;
+    errdefer {
+        for (cloned_roots[0..initialized]) |root| {
+            freeSlice(allocator, root.path);
+        }
+    }
+
+    for (roots, 0..) |root, idx| {
+        cloned_roots[idx] = .{
+            .provider = root.provider,
+            .path = try cloneSlice(allocator, root.path),
+        };
+        initialized += 1;
+    }
+
+    return cloned_roots;
+}
+
+fn freeOwnedSource(allocator: std.mem.Allocator, source: *source_mod.Source) void {
+    freeSlice(allocator, source.id);
+    freeSlice(allocator, source.name);
+    switch (source.target) {
+        .local => {},
+        .wsl => |target| freeSlice(allocator, target.distro),
+        .ssh => |target| freeSlice(allocator, target.profile_name),
+    }
+    if (source.codex_root_override) |value| freeSlice(allocator, value);
+    if (source.claude_root_override) |value| freeSlice(allocator, value);
+    for (source.extra_roots) |root| {
+        freeSlice(allocator, root.path);
+    }
+    if (source.extra_roots.len > 0) allocator.free(source.extra_roots);
+}
+
+fn freeSlice(allocator: std.mem.Allocator, value: []const u8) void {
+    if (value.len > 0) allocator.free(value);
+}
+
 test "ai_history_session: replacing rows sorts by last active time" {
     var session = Session.init(std.testing.allocator, .{ .id = "local", .name = "Local", .target = .local });
     defer session.deinit();
@@ -148,6 +239,66 @@ test "ai_history_session: persistSnap duplicates source identity" {
     try std.testing.expectEqualStrings("Local", snap.target_name);
     try std.testing.expect(snap.source_id.ptr != session.source.id.ptr);
     try std.testing.expect(snap.target_name.ptr != session.source.name.ptr);
+}
+
+test "ai_history_session: initOwned clones source identity and ssh roots" {
+    const allocator = std.testing.allocator;
+    var id_buf = [_]u8{ 's', 's', 'h', '-', 'h', 'i', 's', 't', 'o', 'r', 'y' };
+    var name_buf = [_]u8{ 'B', 'u', 'i', 'l', 'd', ' ', 'B', 'o', 'x' };
+    var profile_buf = [_]u8{ 'b', 'u', 'i', 'l', 'd', 'b', 'o', 'x' };
+    var codex_buf = [_]u8{ '/', 't', 'm', 'p', '/', 'c', 'o', 'd', 'e', 'x' };
+    var claude_buf = [_]u8{ '/', 't', 'm', 'p', '/', 'c', 'l', 'a', 'u', 'd', 'e' };
+    var extra_path_buf = [_]u8{ '/', 't', 'm', 'p', '/', 'e', 'x', 't', 'r', 'a' };
+    const extra_roots = [_]source_mod.ProviderRoot{
+        .{ .provider = .codex, .path = extra_path_buf[0..] },
+    };
+
+    var session = try Session.initOwned(allocator, .{
+        .id = id_buf[0..],
+        .name = name_buf[0..],
+        .target = .{ .ssh = .{ .profile_name = profile_buf[0..] } },
+        .codex_root_override = codex_buf[0..],
+        .claude_root_override = claude_buf[0..],
+        .extra_roots = extra_roots[0..],
+    });
+    defer session.deinit();
+
+    @memset(&id_buf, 'x');
+    @memset(&name_buf, 'x');
+    @memset(&profile_buf, 'x');
+    @memset(&codex_buf, 'x');
+    @memset(&claude_buf, 'x');
+    @memset(&extra_path_buf, 'x');
+
+    try std.testing.expectEqualStrings("ssh-history", session.source.id);
+    try std.testing.expectEqualStrings("Build Box", session.source.name);
+    try std.testing.expectEqualStrings("buildbox", session.source.target.ssh.profile_name);
+    try std.testing.expectEqualStrings("/tmp/codex", session.source.codex_root_override.?);
+    try std.testing.expectEqualStrings("/tmp/claude", session.source.claude_root_override.?);
+    try std.testing.expectEqual(@as(usize, 1), session.source.extra_roots.len);
+    try std.testing.expectEqualStrings("/tmp/extra", session.source.extra_roots[0].path);
+    try std.testing.expect(session.source.id.ptr != id_buf[0..].ptr);
+    try std.testing.expect(session.source.name.ptr != name_buf[0..].ptr);
+    try std.testing.expect(session.source.target.ssh.profile_name.ptr != profile_buf[0..].ptr);
+    try std.testing.expect(session.source.extra_roots.ptr != extra_roots[0..].ptr);
+    try std.testing.expect(session.source.extra_roots[0].path.ptr != extra_path_buf[0..].ptr);
+}
+
+test "ai_history_session: initOwned clones wsl distro" {
+    const allocator = std.testing.allocator;
+    var distro_buf = [_]u8{ 'U', 'b', 'u', 'n', 't', 'u' };
+
+    var session = try Session.initOwned(allocator, .{
+        .id = "wsl",
+        .name = "WSL",
+        .target = .{ .wsl = .{ .distro = distro_buf[0..] } },
+    });
+    defer session.deinit();
+
+    @memset(&distro_buf, 'x');
+
+    try std.testing.expectEqualStrings("Ubuntu", session.source.target.wsl.distro);
+    try std.testing.expect(session.source.target.wsl.distro.ptr != distro_buf[0..].ptr);
 }
 
 test "ai_history_session: persistSnap frees partial duplicates on allocation failure" {

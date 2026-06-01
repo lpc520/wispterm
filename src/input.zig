@@ -859,6 +859,7 @@ fn logicalKeyFromCode(key_code: platform_input.KeyCode) input_key.Key {
         0x41 => .key_a,
         0x43 => .key_c,
         0x45 => .key_e,
+        0x48 => .key_h,
         0x4B => .key_k,
         0x4C => .key_l,
         0x4E => .key_n,
@@ -870,6 +871,10 @@ fn logicalKeyFromCode(key_code: platform_input.KeyCode) input_key.Key {
         0x59 => .key_y,
         else => .unidentified,
     };
+}
+
+test "input: logical key mapping includes session launcher H mnemonic" {
+    try std.testing.expectEqual(input_key.Key.key_h, logicalKeyFromCode(0x48));
 }
 
 fn actionIs(action: ?keybind.Action, expected: keybind.Action) bool {

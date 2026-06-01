@@ -102,8 +102,8 @@ pub const session_launcher_detail = sessionLauncherDetailForOs(builtin.os.tag);
 
 pub fn sessionLauncherDetailForOs(os_tag: std.Target.Os.Tag) []const u8 {
     return switch (backendForOs(os_tag)) {
-        .windows => "Choose PowerShell, SSH, WSL, or AI Agent",
-        .unsupported => "Choose Shell, SSH, or AI Agent",
+        .windows => "Choose PowerShell, SSH, WSL, AI Agent, or AI History",
+        .unsupported => "Choose Shell, SSH, AI Agent, or AI History",
     };
 }
 
@@ -115,8 +115,8 @@ pub const session_launcher_row_count = sessionLauncherRowCountForOs(builtin.os.t
 
 pub fn sessionLauncherRowCountForOs(os_tag: std.Target.Os.Tag) usize {
     return switch (backendForOs(os_tag)) {
-        .windows => 4,
-        .unsupported => 3,
+        .windows => 5,
+        .unsupported => 4,
     };
 }
 
@@ -130,6 +130,19 @@ pub fn sessionLauncherAiAgentRowForOs(os_tag: std.Target.Os.Tag) usize {
     return switch (backendForOs(os_tag)) {
         .windows => 3,
         .unsupported => 2,
+    };
+}
+
+pub fn sessionLauncherAiHistoryRow() usize {
+    return session_launcher_ai_history_row;
+}
+
+pub const session_launcher_ai_history_row = sessionLauncherAiHistoryRowForOs(builtin.os.tag);
+
+pub fn sessionLauncherAiHistoryRowForOs(os_tag: std.Target.Os.Tag) usize {
+    return switch (backendForOs(os_tag)) {
+        .windows => 4,
+        .unsupported => 3,
     };
 }
 
@@ -597,16 +610,19 @@ test "platform pty command maps native shell titles to friendly display labels" 
 }
 
 test "platform pty command exposes session launcher layout by target OS" {
-    try std.testing.expectEqual(@as(usize, 4), sessionLauncherRowCountForOs(.windows));
-    try std.testing.expectEqual(@as(usize, 3), sessionLauncherRowCountForOs(.linux));
-    try std.testing.expectEqual(@as(usize, 3), sessionLauncherRowCountForOs(.macos));
+    try std.testing.expectEqual(@as(usize, 5), sessionLauncherRowCountForOs(.windows));
+    try std.testing.expectEqual(@as(usize, 4), sessionLauncherRowCountForOs(.linux));
+    try std.testing.expectEqual(@as(usize, 4), sessionLauncherRowCountForOs(.macos));
 
     try std.testing.expectEqual(@as(usize, 3), sessionLauncherAiAgentRowForOs(.windows));
     try std.testing.expectEqual(@as(usize, 2), sessionLauncherAiAgentRowForOs(.linux));
+    try std.testing.expectEqual(@as(usize, 4), sessionLauncherAiHistoryRowForOs(.windows));
+    try std.testing.expectEqual(@as(usize, 3), sessionLauncherAiHistoryRowForOs(.linux));
     try std.testing.expectEqual(@as(?usize, 2), sessionLauncherWslRowForOs(.windows));
     try std.testing.expectEqual(@as(?usize, null), sessionLauncherWslRowForOs(.linux));
 
     try std.testing.expect(std.mem.indexOf(u8, sessionLauncherDetailForOs(.windows), "WSL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sessionLauncherDetailForOs(.windows), "AI History") != null);
     try std.testing.expect(std.mem.indexOf(u8, sessionLauncherDetailForOs(.linux), "WSL") == null);
     try std.testing.expect(std.mem.indexOf(u8, sessionLauncherDetailForOs(.macos), "Shell") != null);
 

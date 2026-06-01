@@ -469,6 +469,12 @@ comptime {
     {
         @compileError("renderer/overlays.zig must get optional WSL session launcher layout from platform/pty_command.zig");
     }
+    if (std.mem.indexOf(u8, overlays_source, ".codex") != null or
+        std.mem.indexOf(u8, overlays_source, ".claude") != null or
+        std.mem.indexOf(u8, overlays_source, "parseMetadata") != null)
+    {
+        @compileError("renderer/overlays.zig must only launch AI History sources; provider scanning belongs in ai_history modules");
+    }
 
     const titlebar_source = @embedFile("renderer/titlebar.zig");
     if (std.mem.indexOf(u8, titlebar_source, "Windows Terminal-style caption button") != null or
