@@ -491,10 +491,10 @@ fn executeCommand(action: CommandAction) void {
         .open_latest_release => openLatestRelease(),
         .update_skills => {
             if (AppWindow.g_app) |app| {
-                showStatusToast("Updating skills...");
+                showStatusToast(i18n.s().toast_updating_skills);
                 app.requestSkillUpdate();
             } else {
-                showStatusToast("Update Skills unavailable");
+                showStatusToast(i18n.s().toast_update_skills_unavailable);
             }
         },
     }
@@ -508,11 +508,11 @@ fn activeWeixinController() ?*weixin_qr_panel.Controller {
 fn connectWeixinDirect() void {
     const allocator = AppWindow.g_allocator orelse std.heap.page_allocator;
     const controller = activeWeixinController() orelse {
-        showStatusToast("Enable weixin-direct-enabled first");
+        showStatusToast(i18n.s().toast_enable_weixin_first);
         return;
     };
     weixin_qr_panel.start(allocator, controller) catch {
-        showStatusToast("WeChat login failed to start");
+        showStatusToast(i18n.s().toast_wechat_login_failed);
         return;
     };
     AppWindow.g_force_rebuild = true;
@@ -521,24 +521,24 @@ fn connectWeixinDirect() void {
 
 fn startWeixinDirect() void {
     const controller = activeWeixinController() orelse {
-        showStatusToast("Enable weixin-direct-enabled first");
+        showStatusToast(i18n.s().toast_enable_weixin_first);
         return;
     };
     const before = controller.statusSnapshot();
     if (before.running) {
-        showStatusToast("WeChat poller already running");
+        showStatusToast(i18n.s().toast_wechat_poller_already_running);
         return;
     }
     controller.start() catch |err| {
         std.debug.print("weixin direct start failed from command palette: {}\n", .{err});
-        showStatusToast("WeChat start failed");
+        showStatusToast(i18n.s().toast_wechat_start_failed);
         return;
     };
     const after = controller.statusSnapshot();
     if (after.running) {
         showStatusToast(i18n.s().toast_wechat_poller_started);
     } else if (after.has_token) {
-        showStatusToast("WeChat binding saved; poller stopped");
+        showStatusToast(i18n.s().toast_wechat_binding_saved_stopped);
     } else {
         showStatusToast(i18n.s().toast_wechat_not_connected);
     }
@@ -546,7 +546,7 @@ fn startWeixinDirect() void {
 
 fn stopWeixinDirect() void {
     const controller = activeWeixinController() orelse {
-        showStatusToast("WeChat direct is not active");
+        showStatusToast(i18n.s().toast_wechat_not_active);
         return;
     };
     const before = controller.statusSnapshot();
@@ -558,9 +558,9 @@ fn stopWeixinDirect() void {
     if (before.running) {
         showStatusToast(i18n.s().toast_wechat_poller_stopped);
     } else if (before.login_active) {
-        showStatusToast("WeChat login is still waiting");
+        showStatusToast(i18n.s().toast_wechat_login_waiting);
     } else {
-        showStatusToast("WeChat poller already stopped");
+        showStatusToast(i18n.s().toast_wechat_poller_already_stopped);
     }
 }
 
@@ -602,15 +602,15 @@ fn weixinLoginStatusName(status: weixin_types.QrStatusKind) []const u8 {
 
 fn unbindWeixinDirect() void {
     const controller = activeWeixinController() orelse {
-        showStatusToast("WeChat direct is not active");
+        showStatusToast(i18n.s().toast_wechat_not_active);
         return;
     };
     controller.unbind() catch {
-        showStatusToast("WeChat unbind failed");
+        showStatusToast(i18n.s().toast_wechat_unbind_failed);
         return;
     };
     weixin_qr_panel.close();
-    showStatusToast("WeChat unbound");
+    showStatusToast(i18n.s().toast_wechat_unbound);
 }
 
 pub fn weixinQrPanelHandleAction(action: weixin_qr_panel.Action) void {
@@ -625,11 +625,11 @@ pub fn weixinQrPanelHandleAction(action: weixin_qr_panel.Action) void {
         .retry => {
             const allocator = AppWindow.g_allocator orelse std.heap.page_allocator;
             const controller = weixin_qr_panel.controller() orelse activeWeixinController() orelse {
-                showStatusToast("WeChat direct is not active");
+                showStatusToast(i18n.s().toast_wechat_not_active);
                 return;
             };
             weixin_qr_panel.start(allocator, controller) catch {
-                showStatusToast("WeChat login failed to start");
+                showStatusToast(i18n.s().toast_wechat_login_failed);
                 return;
             };
             AppWindow.g_force_rebuild = true;
@@ -1283,8 +1283,8 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
 
     const pad_x: f32 = 24;
     const title_y = textYFromTop(window_height, layout.box_top_px + 16);
-    renderTitlebarText(if (commandPaletteIsHistoryMode()) "Agent History" else "Command Center", layout.box_x + pad_x, title_y, title_color);
-    const esc_hint = if (commandPaletteIsHistoryMode()) "Esc returns" else "Esc closes";
+    renderTitlebarText(if (commandPaletteIsHistoryMode()) i18n.s().cmd_palette_history_title else i18n.s().cmd_palette_title, layout.box_x + pad_x, title_y, title_color);
+    const esc_hint = if (commandPaletteIsHistoryMode()) i18n.s().cmd_palette_esc_returns else i18n.s().cmd_palette_esc_closes;
     renderTitlebarText(esc_hint, layout.box_x + layout.box_w - pad_x - measureTitlebarText(esc_hint), title_y, muted);
 
     const filter_x = @round(layout.box_x + pad_x);
@@ -1296,22 +1296,22 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     const filter_text_y = rowTextY(filter_box_y, layout.filter_h);
     if (commandPaletteIsHistoryMode()) {
         const history_hint = if (g_command_palette_history_rows.len == 0)
-            "No saved agent sessions yet"
+            i18n.s().cmd_palette_no_sessions_yet
         else
-            "Recent agent sessions";
+            i18n.s().cmd_palette_recent_sessions;
         renderTitlebarTextLimited(history_hint, filter_x + 12, filter_text_y, dim, filter_w - 24);
     } else {
         const filter = commandPaletteFilter();
         if (filter.len > 0) {
             renderTitlebarTextLimited(filter, filter_x + 12, filter_text_y, fg, filter_w - 24);
         } else {
-            renderTitlebarTextLimited("Filter commands or themes", filter_x + 12, filter_text_y, dim, filter_w - 24);
+            renderTitlebarTextLimited(i18n.s().cmd_palette_filter_placeholder, filter_x + 12, filter_text_y, dim, filter_w - 24);
         }
     }
 
     if (commandPaletteIsHistoryMode()) {
         if (g_command_palette_history_rows.len == 0) {
-            const empty_text = "No saved agent sessions";
+            const empty_text = i18n.s().cmd_palette_no_sessions;
             const empty_y = @round(window_height - layout.row_top_px - layout.row_h + (layout.row_h - overlayTextHeight()) / 2);
             renderTitlebarText(empty_text, layout.box_x + (layout.box_w - measureTitlebarText(empty_text)) / 2, empty_y, muted);
         } else {
@@ -1427,7 +1427,7 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
         }
     }
 
-    const footer = if (commandPaletteIsHistoryMode()) "Up/Down selects, Enter reopens, Delete removes, Esc returns" else "Up/Down + Enter applies";
+    const footer = if (commandPaletteIsHistoryMode()) i18n.s().cmd_palette_footer_history else i18n.s().cmd_palette_footer;
     renderTitlebarTextLimited(footer, layout.box_x + pad_x, rowTextY(box_y, layout.footer_h), muted, layout.box_w - pad_x * 2);
 }
 
@@ -4037,7 +4037,7 @@ pub fn remoteKeyCopiedFlash() void {
 }
 
 pub fn showCopyToast(byte_count: usize) void {
-    const msg = std.fmt.bufPrint(&g_copy_toast_buf, "Copied ({d} bytes)", .{byte_count}) catch return;
+    const msg = std.fmt.bufPrint(&g_copy_toast_buf, "{s}{d}{s}", .{ i18n.s().toast_copied_prefix, byte_count, i18n.s().toast_copied_bytes_suffix }) catch return;
     g_copy_toast_len = msg.len;
     g_copy_toast_until_ms = std.time.milliTimestamp() + COPY_TOAST_DURATION_MS;
 }
