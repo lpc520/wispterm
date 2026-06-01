@@ -2,6 +2,7 @@
 const std = @import("std");
 
 pub const AesKey = [16]u8;
+pub const DEFAULT_CDN_UPLOAD_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 
 pub fn pkcs7PaddedLen(input_len: usize) usize {
     const block = 16;
@@ -70,9 +71,37 @@ fn writeHexLower(out: []u8, data: []const u8) void {
     }
 }
 
-pub fn uploadUrlWithTicket(allocator: std.mem.Allocator, base_url: []const u8, ticket: []const u8) ![]u8 {
-    const sep: []const u8 = if (std.mem.indexOfScalar(u8, base_url, '?') == null) "?" else "&";
-    return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ base_url, sep, ticket });
+pub fn cdnUploadUrl(allocator: std.mem.Allocator, upload_full_url: []const u8, upload_param: []const u8, file_key: []const u8) ![]u8 {
+    if (upload_full_url.len != 0) return allocator.dupe(u8, upload_full_url);
+
+    const base_url = DEFAULT_CDN_UPLOAD_BASE_URL;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, base_url);
+    if (std.mem.endsWith(u8, base_url, "/")) {
+        try out.appendSlice(allocator, "upload?");
+    } else {
+        try out.appendSlice(allocator, "/upload?");
+    }
+    try out.appendSlice(allocator, "encrypted_query_param=");
+    try appendQueryEscaped(&out, allocator, upload_param);
+    try out.appendSlice(allocator, "&filekey=");
+    try appendQueryEscaped(&out, allocator, file_key);
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendQueryEscaped(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (value) |ch| {
+        if (std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.' or ch == '~') {
+            try out.append(allocator, ch);
+        } else {
+            try out.append(allocator, '%');
+            try out.append(allocator, hex[ch >> 4]);
+            try out.append(allocator, hex[ch & 0x0f]);
+        }
+    }
 }
 
 const t = std.testing;
@@ -121,12 +150,12 @@ test "md5Hex returns lowercase hex digest" {
     try t.expectEqualStrings("900150983cd24fb0d6963f7d28e17f72", digest);
 }
 
-test "uploadUrlWithTicket appends ticket query using question mark or ampersand" {
-    const a = try uploadUrlWithTicket(t.allocator, "https://cdn.example/upload", "ticket=abc");
+test "cdnUploadUrl appends encrypted upload query fields" {
+    const a = try cdnUploadUrl(t.allocator, "", "a+b&c=1", "file key");
     defer t.allocator.free(a);
-    try t.expectEqualStrings("https://cdn.example/upload?ticket=abc", a);
+    try t.expectEqualStrings(DEFAULT_CDN_UPLOAD_BASE_URL ++ "/upload?encrypted_query_param=a%2Bb%26c%3D1&filekey=file%20key", a);
 
-    const b = try uploadUrlWithTicket(t.allocator, "https://cdn.example/upload?x=1", "ticket=abc");
+    const b = try cdnUploadUrl(t.allocator, "https://cdn.example/full-upload?token=1", "ignored", "ignored-key");
     defer t.allocator.free(b);
-    try t.expectEqualStrings("https://cdn.example/upload?x=1&ticket=abc", b);
+    try t.expectEqualStrings("https://cdn.example/full-upload?token=1", b);
 }

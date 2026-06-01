@@ -146,22 +146,33 @@ pub fn buildSendUploadedImageBody(
 pub fn buildGetUploadUrlBody(
     allocator: std.mem.Allocator,
     kind: types.AttachmentKind,
-    size: u64,
-    md5: []const u8,
+    to_user_id: []const u8,
+    raw_size: u64,
+    raw_md5: []const u8,
+    encrypted_size: u64,
+    aes_key_hex: []const u8,
     file_key: []const u8,
 ) ![]u8 {
     const Body = struct {
         media_type: i64,
-        size: u64,
-        md5: []const u8,
-        file_key: []const u8,
+        to_user_id: []const u8,
+        rawsize: u64,
+        rawfilemd5: []const u8,
+        filesize: u64,
+        no_need_thumb: bool,
+        aeskey: []const u8,
+        filekey: []const u8,
         base_info: BaseInfo,
     };
     return std.json.Stringify.valueAlloc(allocator, Body{
         .media_type = kind.uploadMediaType(),
-        .size = size,
-        .md5 = md5,
-        .file_key = file_key,
+        .to_user_id = to_user_id,
+        .rawsize = raw_size,
+        .rawfilemd5 = raw_md5,
+        .filesize = encrypted_size,
+        .no_need_thumb = true,
+        .aeskey = aes_key_hex,
+        .filekey = file_key,
         .base_info = .{ .channel_version = CHANNEL_VERSION },
     }, .{});
 }
@@ -210,8 +221,8 @@ const WireUploadUrl = struct {
     ret: i64 = 0,
     errcode: i64 = 0,
     message: []const u8 = "",
-    url: []const u8 = "",
-    ticket: []const u8 = "",
+    upload_param: []const u8 = "",
+    upload_full_url: []const u8 = "",
     file_key: []const u8 = "",
 };
 
@@ -237,8 +248,8 @@ pub fn parseGetUploadUrl(allocator: std.mem.Allocator, json: []const u8) !Parsed
             .ret = wire.ret,
             .errcode = wire.errcode,
             .message = wire.message,
-            .url = wire.url,
-            .ticket = wire.ticket,
+            .upload_param = wire.upload_param,
+            .upload_full_url = wire.upload_full_url,
             .file_key = wire.file_key,
         },
     };
@@ -320,24 +331,29 @@ test "maps qrcode status strings to the enum" {
 }
 
 test "builds getuploadurl body for file media" {
-    const body = try buildGetUploadUrlBody(t.allocator, .file, 123, "900150983cd24fb0d6963f7d28e17f72", "file-key");
+    const body = try buildGetUploadUrlBody(t.allocator, .file, "wx-user", 123, "900150983cd24fb0d6963f7d28e17f72", 128, "00112233445566778899aabbccddeeff", "file-key");
     defer t.allocator.free(body);
     try t.expect(std.mem.indexOf(u8, body, "\"media_type\":3") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"size\":123") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"md5\":\"900150983cd24fb0d6963f7d28e17f72\"") != null);
-    try t.expect(std.mem.indexOf(u8, body, "\"file_key\":\"file-key\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"to_user_id\":\"wx-user\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"rawsize\":123") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"rawfilemd5\":\"900150983cd24fb0d6963f7d28e17f72\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"filesize\":128") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"no_need_thumb\":true") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"aeskey\":\"00112233445566778899aabbccddeeff\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"filekey\":\"file-key\"") != null);
+    try t.expect(std.mem.indexOf(u8, body, "\"file_key\"") == null);
     try t.expect(std.mem.indexOf(u8, body, "\"channel_version\":\"1.0.2\"") != null);
 }
 
 test "parses getuploadurl response" {
     var parsed = try parseGetUploadUrl(t.allocator,
-        \\{"ret":0,"errcode":42,"url":"https://cdn.example/upload","ticket":"ticket=abc","file_key":"file-key"}
+        \\{"ret":0,"errcode":42,"upload_param":"param=abc","upload_full_url":"https://cdn.example/upload","file_key":"file-key"}
     );
     defer parsed.deinit();
     try t.expectEqual(@as(i64, 0), parsed.value.ret);
     try t.expectEqual(@as(i64, 42), parsed.value.errcode);
-    try t.expectEqualStrings("https://cdn.example/upload", parsed.value.url);
-    try t.expectEqualStrings("ticket=abc", parsed.value.ticket);
+    try t.expectEqualStrings("param=abc", parsed.value.upload_param);
+    try t.expectEqualStrings("https://cdn.example/upload", parsed.value.upload_full_url);
     try t.expectEqualStrings("file-key", parsed.value.file_key);
 }
 

@@ -69,7 +69,6 @@ pub const Client = struct {
         client: *Client,
         arena: std.mem.Allocator,
         upload_url: []const u8,
-        ticket: []const u8,
         encrypted: []u8,
     ) anyerror![]u8;
 
@@ -181,7 +180,7 @@ pub const Client = struct {
         var req_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer req_arena.deinit();
         const a = req_arena.allocator();
-        const uploaded = try self.uploadLocalFile(a, .file, path);
+        const uploaded = try self.uploadLocalFile(a, .file, path, to_user_id);
         const client_id = try self.clientId(a);
         const body = try codec.buildSendUploadedFileBody(a, to_user_id, context_token, client_id, .{
             .media = uploaded.media,
@@ -195,7 +194,7 @@ pub const Client = struct {
         var req_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer req_arena.deinit();
         const a = req_arena.allocator();
-        const uploaded = try self.uploadLocalFile(a, .image, path);
+        const uploaded = try self.uploadLocalFile(a, .image, path, to_user_id);
         const client_id = try self.clientId(a);
         const body = try codec.buildSendUploadedImageBody(a, to_user_id, context_token, client_id, .{
             .media = uploaded.media,
@@ -204,7 +203,7 @@ pub const Client = struct {
         try self.postSendMessage(a, body);
     }
 
-    fn uploadLocalFile(self: *Client, arena: std.mem.Allocator, kind: types.AttachmentKind, path: []const u8) !UploadedLocalFile {
+    fn uploadLocalFile(self: *Client, arena: std.mem.Allocator, kind: types.AttachmentKind, path: []const u8, to_user_id: []const u8) !UploadedLocalFile {
         const plain = readLocalFileAlloc(arena, path) catch |err| switch (err) {
             error.FileNotFound => return error.WeixinAttachmentFileNotFound,
             error.IsDir => return error.WeixinAttachmentPathIsDirectory,
@@ -220,11 +219,16 @@ pub const Client = struct {
 
         var aes_key: media.AesKey = undefined;
         self.randomBytes(aes_key[0..]);
+        const aes_key_hex_bytes = std.fmt.bytesToHex(aes_key, .lower);
+        const aes_key_hex = try arena.dupe(u8, &aes_key_hex_bytes);
         const encoded_aes_key = try media.encodeIlinkAesKey(arena, aes_key);
 
-        const upload = try self.getUploadUrl(arena, kind, plain.len, md5, file_key);
+        const encrypted_len = media.pkcs7PaddedLen(plain.len);
+        const upload = try self.getUploadUrl(arena, kind, to_user_id, plain.len, md5, encrypted_len, aes_key_hex, file_key);
         const encrypted = try media.aes128EcbPkcs7Encrypt(arena, aes_key, plain);
-        const encrypted_param = try self.uploadBufferToCdn(arena, upload.url, upload.ticket, encrypted);
+        const resolved_file_key = if (upload.file_key.len != 0) upload.file_key else file_key;
+        const cdn_url = try media.cdnUploadUrl(arena, upload.upload_full_url, upload.upload_param, resolved_file_key);
+        const encrypted_param = try self.uploadBufferToCdn(arena, cdn_url, encrypted);
 
         return .{
             .media = .{
@@ -232,7 +236,7 @@ pub const Client = struct {
                 .aes_key = encoded_aes_key,
                 .md5 = md5,
                 .size = plain.len,
-                .file_key = if (upload.file_key.len != 0) upload.file_key else file_key,
+                .file_key = resolved_file_key,
             },
             .raw_len = plain.len,
             .encrypted_len = encrypted.len,
@@ -243,11 +247,14 @@ pub const Client = struct {
         self: *Client,
         arena: std.mem.Allocator,
         kind: types.AttachmentKind,
-        size: u64,
-        md5: []const u8,
+        to_user_id: []const u8,
+        raw_size: u64,
+        raw_md5: []const u8,
+        encrypted_size: usize,
+        aes_key_hex: []const u8,
         file_key: []const u8,
     ) !types.UploadUrl {
-        const body = try codec.buildGetUploadUrlBody(arena, kind, size, md5, file_key);
+        const body = try codec.buildGetUploadUrlBody(arena, kind, to_user_id, raw_size, raw_md5, @intCast(encrypted_size), aes_key_hex, file_key);
         const resp = try self.fetch(arena, .POST, "/ilink/bot/getuploadurl", body, null);
         var parsed = try codec.parseGetUploadUrl(self.allocator, resp);
         defer parsed.deinit();
@@ -262,8 +269,8 @@ pub const Client = struct {
             });
             return error.WeixinGetUploadUrlFailed;
         }
-        if (upload.url.len == 0 or upload.ticket.len == 0) {
-            std.debug.print("weixin upload-url({d}): kind={s} status=missing-url ret={} errcode={} message={s}\n", .{
+        if (upload.upload_param.len == 0) {
+            std.debug.print("weixin upload-url({d}): kind={s} status=missing-upload-param ret={} errcode={} message={s}\n", .{
                 std.time.milliTimestamp(),
                 kind.name(),
                 upload.ret,
@@ -273,8 +280,8 @@ pub const Client = struct {
             return error.WeixinGetUploadUrlMissingUrl;
         }
         return .{
-            .url = try arena.dupe(u8, upload.url),
-            .ticket = try arena.dupe(u8, upload.ticket),
+            .upload_param = try arena.dupe(u8, upload.upload_param),
+            .upload_full_url = try arena.dupe(u8, upload.upload_full_url),
             .file_key = try arena.dupe(u8, upload.file_key),
             .ret = upload.ret,
             .errcode = upload.errcode,
@@ -282,8 +289,8 @@ pub const Client = struct {
         };
     }
 
-    fn uploadBufferToCdn(self: *Client, arena: std.mem.Allocator, upload_url: []const u8, ticket: []const u8, encrypted: []u8) ![]u8 {
-        return self.cdn_upload_impl(self.transport_ctx, self, arena, upload_url, ticket, encrypted);
+    fn uploadBufferToCdn(self: *Client, arena: std.mem.Allocator, upload_url: []const u8, encrypted: []u8) ![]u8 {
+        return self.cdn_upload_impl(self.transport_ctx, self, arena, upload_url, encrypted);
     }
 
     fn httpUploadBufferToCdn(
@@ -291,14 +298,12 @@ pub const Client = struct {
         self: *Client,
         arena: std.mem.Allocator,
         upload_url: []const u8,
-        ticket: []const u8,
         encrypted: []u8,
     ) ![]u8 {
         var client: std.http.Client = .{ .allocator = self.allocator };
         defer client.deinit();
 
-        const ticket_url = try media.uploadUrlWithTicket(arena, upload_url, ticket);
-        const uri = try std.Uri.parse(ticket_url);
+        const uri = try std.Uri.parse(upload_url);
         var req = try client.request(.POST, uri, .{
             .headers = .{ .content_type = .{ .override = "application/octet-stream" } },
             .keep_alive = false,
@@ -319,22 +324,24 @@ pub const Client = struct {
             }
         }
 
-        var transfer_buffer: [16 * 1024]u8 = undefined;
-        const reader = response.reader(&transfer_buffer);
-        const response_excerpt = readResponseBodyExcerpt(arena, reader) catch |err| {
+        const status = response.head.status;
+        if (status == .ok) {
+            if (encrypted_param) |param| return param;
+        }
+
+        const response_excerpt = readResponseBodyExcerptFromResponse(arena, &response) catch |err| {
             std.debug.print("weixin upload-cdn({d}): status=read_failed err={}\n", .{ std.time.milliTimestamp(), err });
             return error.WeixinCdnUploadFailed;
         };
 
-        if (response.head.status != .ok) {
+        if (status != .ok) {
             std.debug.print("weixin upload-cdn({d}): status=failed http_status={} body_excerpt={s}\n", .{
                 std.time.milliTimestamp(),
-                response.head.status,
+                status,
                 logSafeResponseExcerpt(arena, response_excerpt),
             });
             return error.WeixinCdnUploadFailed;
         }
-        if (encrypted_param) |param| return param;
         std.debug.print("weixin upload-cdn({d}): status=missing-encrypted-param body_excerpt={s}\n", .{
             std.time.milliTimestamp(),
             logSafeResponseExcerpt(arena, response_excerpt),
@@ -349,13 +356,7 @@ pub const Client = struct {
             .ignore_unknown_fields = true,
             .allocate = .alloc_always,
         });
-        const ret = w.ret orelse {
-            std.debug.print("weixin send({d}): kind=attachment status=malformed body_excerpt={s}\n", .{
-                std.time.milliTimestamp(),
-                logSafeResponseExcerpt(arena, resp),
-            });
-            return error.IlinkSendMessageMalformed;
-        };
+        const ret = w.ret orelse return;
         if (ret != 0) {
             std.debug.print("weixin send({d}): kind=attachment status=failed ret={} errcode={} message={s}\n", .{
                 std.time.milliTimestamp(),
@@ -564,6 +565,27 @@ fn readResponseBodyExcerpt(allocator: std.mem.Allocator, reader: *std.Io.Reader)
     return allocator.realloc(out, len);
 }
 
+fn readResponseBodyExcerptFromResponse(allocator: std.mem.Allocator, response: *std.http.Client.Response) ![]u8 {
+    if (response.head.transfer_encoding == .none) {
+        const content_length = response.head.content_length orelse return allocator.dupe(u8, "");
+        if (content_length == 0) return allocator.dupe(u8, "");
+
+        const cap_u64: u64 = @intCast(Client.ERROR_BODY_EXCERPT_BYTES);
+        const read_len: usize = @intCast(@min(content_length, cap_u64));
+        const out = try allocator.alloc(u8, read_len);
+        errdefer allocator.free(out);
+
+        var transfer_buffer: [16 * 1024]u8 = undefined;
+        const reader = response.reader(&transfer_buffer);
+        const len = try reader.readSliceShort(out);
+        return allocator.realloc(out, len);
+    }
+
+    var transfer_buffer: [16 * 1024]u8 = undefined;
+    const reader = response.reader(&transfer_buffer);
+    return readResponseBodyExcerpt(allocator, reader);
+}
+
 fn logSafeResponseExcerpt(allocator: std.mem.Allocator, body: []const u8) []const u8 {
     return logSafeDiagnosticText(allocator, body);
 }
@@ -693,6 +715,8 @@ fn isSensitiveDiagnosticField(field: []const u8) bool {
         "encryptqueryparam",
         "encryptedparam",
         "xencryptedparam",
+        "uploadparam",
+        "uploadfullurl",
         "filekey",
         "token",
         "bottoken",
@@ -834,18 +858,23 @@ test "readLocalFileAlloc rejects directories" {
 }
 
 test "safe response excerpts redact sensitive fields and omit binary bodies" {
-    const redacted = try safeDiagnosticTextAlloc(std.testing.allocator, "{\"context_token\":\"ctx-1\",\"aesKey\":\"secret\",\"encryptQueryParam\":\"param\",\"x-encrypted-param\":\"header-param\",\"accessToken\":\"access\",\"file_key\":\"file-secret\",\"fileKey\":\"camel-file-secret\",\"bot_token\":\"bot\",\"message\":\"line\nnext\"}");
+    const redacted = try safeDiagnosticTextAlloc(std.testing.allocator, "{\"context_token\":\"ctx-1\",\"aesKey\":\"secret\",\"encryptQueryParam\":\"param\",\"x-encrypted-param\":\"header-param\",\"upload_param\":\"upload-secret\",\"uploadFullUrl\":\"https://cdn.example/upload?filekey=secret\",\"accessToken\":\"access\",\"file_key\":\"file-secret\",\"fileKey\":\"camel-file-secret\",\"bot_token\":\"bot\",\"message\":\"line\nnext\"}");
     defer std.testing.allocator.free(redacted);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "ctx-1") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "secret") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "\":\"param\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "header-param") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "upload-secret") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "cdn.example") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "\":\"access\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "file-secret") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "camel-file-secret") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "\":\"bot\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "[redacted]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, redacted, "\\n") != null);
+
+    const newline = try safeDiagnosticTextAlloc(std.testing.allocator, "{\"message\":\"line\nnext\"}");
+    defer std.testing.allocator.free(newline);
+    try std.testing.expect(std.mem.indexOf(u8, newline, "\\n") != null);
 
     const message = try safeDiagnosticTextAlloc(std.testing.allocator, "failed contextToken=ctx-2 aes_key=key-2 encrypted_param=param-2 fileKey=file-2");
     defer std.testing.allocator.free(message);
@@ -888,14 +917,12 @@ test "voice attachment uploads as a file item through injected transport" {
         getuploadurl_body: std.ArrayListUnmanaged(u8) = .empty,
         sendmessage_body: std.ArrayListUnmanaged(u8) = .empty,
         cdn_url: std.ArrayListUnmanaged(u8) = .empty,
-        cdn_ticket: std.ArrayListUnmanaged(u8) = .empty,
         encrypted_len: usize = 0,
 
         fn deinit(self: *@This()) void {
             self.getuploadurl_body.deinit(std.testing.allocator);
             self.sendmessage_body.deinit(std.testing.allocator);
             self.cdn_url.deinit(std.testing.allocator);
-            self.cdn_ticket.deinit(std.testing.allocator);
         }
 
         fn fetch(
@@ -914,12 +941,12 @@ test "voice attachment uploads as a file item through injected transport" {
             if (std.mem.eql(u8, path, "/ilink/bot/getuploadurl")) {
                 try self.getuploadurl_body.appendSlice(std.testing.allocator, payload.?);
                 return arena.dupe(u8,
-                    \\{"ret":0,"url":"https://cdn.test/upload","ticket":"ticket=abc","file_key":"server-file-key"}
+                    \\{"ret":0,"upload_param":"upload param=abc","file_key":"server-file-key"}
                 );
             }
             if (std.mem.eql(u8, path, "/ilink/bot/sendmessage")) {
                 try self.sendmessage_body.appendSlice(std.testing.allocator, payload.?);
-                return arena.dupe(u8, "{\"ret\":0}");
+                return arena.dupe(u8, "{}");
             }
             return error.UnexpectedPath;
         }
@@ -929,13 +956,11 @@ test "voice attachment uploads as a file item through injected transport" {
             client: *Client,
             arena: std.mem.Allocator,
             upload_url: []const u8,
-            ticket: []const u8,
             encrypted: []u8,
         ) anyerror![]u8 {
             _ = client;
             const self: *@This() = @ptrCast(@alignCast(ctx.?));
             try self.cdn_url.appendSlice(std.testing.allocator, upload_url);
-            try self.cdn_ticket.appendSlice(std.testing.allocator, ticket);
             self.encrypted_len = encrypted.len;
             return arena.dupe(u8, "encrypted-param");
         }
@@ -959,10 +984,17 @@ test "voice attachment uploads as a file item through injected transport" {
     try c.sendAttachment(.voice, path, "", "wx-user", "ctx-1");
 
     try std.testing.expect(std.mem.indexOf(u8, capture.getuploadurl_body.items, "\"media_type\":3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, capture.getuploadurl_body.items, "\"size\":5") != null);
-    try std.testing.expect(std.mem.indexOf(u8, capture.getuploadurl_body.items, "\"md5\":\"5d41402abc4b2a76b9719d911017c592\"") != null);
-    try std.testing.expectEqualStrings("https://cdn.test/upload", capture.cdn_url.items);
-    try std.testing.expectEqualStrings("ticket=abc", capture.cdn_ticket.items);
+    try std.testing.expect(std.mem.indexOf(u8, capture.getuploadurl_body.items, "\"to_user_id\":\"wx-user\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.getuploadurl_body.items, "\"rawsize\":5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.getuploadurl_body.items, "\"rawfilemd5\":\"5d41402abc4b2a76b9719d911017c592\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.getuploadurl_body.items, "\"filesize\":16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.getuploadurl_body.items, "\"no_need_thumb\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.getuploadurl_body.items, "\"aeskey\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.getuploadurl_body.items, "\"filekey\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.getuploadurl_body.items, "\"file_key\"") == null);
+    try std.testing.expect(std.mem.startsWith(u8, capture.cdn_url.items, media.DEFAULT_CDN_UPLOAD_BASE_URL ++ "/upload?"));
+    try std.testing.expect(std.mem.indexOf(u8, capture.cdn_url.items, "encrypted_query_param=upload%20param%3Dabc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.cdn_url.items, "&filekey=server-file-key") != null);
     try std.testing.expectEqual(@as(usize, 16), capture.encrypted_len);
     try std.testing.expect(std.mem.indexOf(u8, capture.sendmessage_body.items, "\"type\":4") != null);
     try std.testing.expect(std.mem.indexOf(u8, capture.sendmessage_body.items, "\"file_item\"") != null);

@@ -49,8 +49,8 @@ pub const AttachmentKind = enum {
 };
 
 pub const UploadUrl = struct {
-    url: []const u8 = "",
-    ticket: []const u8 = "",
+    upload_param: []const u8 = "",
+    upload_full_url: []const u8 = "",
     file_key: []const u8 = "",
     ret: i64 = 0,
     errcode: i64 = 0,
