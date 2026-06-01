@@ -307,7 +307,7 @@ shell: []const u8 = platform_pty_command.default_shell_name,
 /// first saved profile.
 @"ai-default-profile": []const u8 = "",
 
-/// 界面语言：auto（跟随系统 locale，默认）、en、zh-CN。重启生效。
+/// UI language. auto follows the system locale. Restart required.
 language: i18n.LanguageSetting = .auto,
 
 // ============================================================================
@@ -758,7 +758,7 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
         if (i18n.LanguageSetting.parse(value)) |setting| {
             self.language = setting;
         } else {
-            log.warn("unknown language: {s}", .{value});
+            log.warn("invalid language: {s}", .{value});
         }
     } else if (std.mem.eql(u8, key, "url-open-mode")) {
         if (UrlOpenMode.parse(value)) |mode| {
@@ -1242,6 +1242,7 @@ pub fn writeHelp(writer: anytype) !void {
         \\  --copy-on-select <bool>      Copy terminal selection when mouse selection completes
         \\  --right-click-action <mode>  ignore | copy | paste | copy-or-paste
         \\  --url-open-mode <mode>       embedded | system-browser
+        \\  --language <lang>            UI language: auto | en | zh-CN (default: auto)
         \\  --ssh-legacy-algorithms <bool> Enable legacy ssh-rsa/ssh-dss OpenSSH options
         \\  --ai-agent-enabled <bool>    Enable AI Chat agent tools by default
         \\  --ai-agent-permission <mode> Agent tool permission: confirm | full
@@ -1559,6 +1560,9 @@ const default_config_template =
     \\# copy-on-select = false
     \\# right-click-action = copy   # ignore | copy | paste | copy-or-paste
     \\# url-open-mode = embedded    # embedded | system-browser
+    \\
+    \\# UI language (auto follows the system locale; restart required)
+    \\# language = auto             # auto | en | zh-CN
     \\
     \\# SSH compatibility for older bastions/servers.
     \\# Adds ssh-rsa/ssh-dss and legacy KEX/cipher options to profile/helper SSH.
