@@ -3986,7 +3986,9 @@ fn terminalListTool(request: *const ChatRequest) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(request.allocator);
     const selected = selectedWriteContext(request);
-    try out.print(request.allocator, "active_tab={d}\n", .{snapshot.active_tab});
+    // tab/active_tab are shown one-based to match the tab numbers the user sees
+    // in the UI (the internal tab_index is zero-based).
+    try out.print(request.allocator, "active_tab={d}\n", .{snapshot.active_tab + 1});
     if (selected) |id| {
         try out.print(request.allocator, "selected_context={s}\n", .{id});
     } else {
@@ -3996,7 +3998,7 @@ fn terminalListTool(request: *const ChatRequest) ![]u8 {
         const is_selected = if (selected) |id| std.mem.eql(u8, id, surface.id) else false;
         try out.print(request.allocator, "- id={s} tab={d} focused={} selected={} kind={s} title=\"{s}\" cwd=\"{s}\"", .{
             surface.id,
-            surface.tab_index,
+            surface.tab_index + 1,
             surface.focused,
             is_selected,
             toolSurfaceKind(surface),
@@ -4056,7 +4058,7 @@ fn terminalSelectTool(request: *ChatRequest, surface_id: []const u8) ![]u8 {
         "selected surface_id={s} tab={d} focused={} kind={s} title=\"{s}\" cwd=\"{s}\"",
         .{
             surface.id,
-            surface.tab_index,
+            surface.tab_index + 1,
             surface.focused,
             toolSurfaceKind(surface),
             surface.title,
@@ -4652,7 +4654,7 @@ fn sshProfileConnectTool(request: *ChatRequest, profile_name: []const u8) ![]u8 
         .{
             profile_name,
             surface.id,
-            surface.tab_index,
+            surface.tab_index + 1,
             surface.focused,
             toolSurfaceKind(surface),
             surface.title,
@@ -4693,7 +4695,7 @@ fn tabNewTool(request: *ChatRequest, kind: []const u8, command: ?[]const u8) ![]
         .{
             if (trimmed_kind.len > 0) trimmed_kind else "default",
             surface.id,
-            surface.tab_index,
+            surface.tab_index + 1,
             surface.focused,
             toolSurfaceKind(surface),
             surface.title,
@@ -4717,7 +4719,7 @@ fn tabCloseTool(request: *ChatRequest, tab_index: ?usize, surface_id: ?[]const u
     else if (title) |text|
         std.fmt.bufPrint(&selector_buf, "title={s}", .{text}) catch "title"
     else if (tab_index) |idx|
-        std.fmt.bufPrint(&selector_buf, "tab_index={d}", .{idx}) catch "tab_index"
+        std.fmt.bufPrint(&selector_buf, "tab={d}", .{idx + 1}) catch "tab"
     else
         "active terminal tab";
 
@@ -4741,7 +4743,7 @@ fn tabCloseTool(request: *ChatRequest, tab_index: ?usize, surface_id: ?[]const u
     const out = try std.fmt.allocPrint(
         request.allocator,
         "closed tab={d} title=\"{s}\" active_tab={d}",
-        .{ closed.tab_index, closed.title, closed.active_tab },
+        .{ closed.tab_index + 1, closed.title, closed.active_tab + 1 },
     );
     return truncateOwned(request.allocator, out);
 }
@@ -4820,7 +4822,7 @@ fn ensureWriteContext(request: *ChatRequest, surface: ToolSurface) !?[]u8 {
         const message = try std.fmt.allocPrint(
             request.allocator,
             "Refusing to write to surface_id={s} tab={d} title=\"{s}\" because no agent terminal context is selected. Call terminal_select with the intended surface_id before writing.",
-            .{ surface.id, surface.tab_index, surface.title },
+            .{ surface.id, surface.tab_index + 1, surface.title },
         );
         return message;
     };
@@ -4831,7 +4833,7 @@ fn ensureWriteContext(request: *ChatRequest, surface: ToolSurface) !?[]u8 {
         "Refusing to write to surface_id={s} tab={d} title=\"{s}\" because selected agent terminal context is surface_id={s}. Call terminal_select with the intended surface_id before writing to another panel.",
         .{
             surface.id,
-            surface.tab_index,
+            surface.tab_index + 1,
             surface.title,
             context,
         },
@@ -6862,6 +6864,70 @@ test "ai chat write context requires explicit selection and can switch surfaces"
     const switched = (try ensureWriteContext(&request, snapshot.surfaces[1])).?;
     defer allocator.free(switched);
     try std.testing.expect(std.mem.indexOf(u8, switched, "selected agent terminal context is surface_id=surface-a") != null);
+}
+
+test "terminal_list shows one-based tab numbers matching the UI" {
+    const allocator = std.testing.allocator;
+    var surfaces = try allocator.alloc(ToolSurface, 2);
+    surfaces[0] = .{
+        .id = try allocator.dupe(u8, "surface-a"),
+        .title = try allocator.dupe(u8, "panel1"),
+        .cwd = try allocator.dupe(u8, "/tmp"),
+        .snapshot = try allocator.dupe(u8, ""),
+        .tab_index = 0,
+        .focused = true,
+        .is_ssh = false,
+        .is_wsl = false,
+        .agent_app = .none,
+        .agent_state = .none,
+        .agent_confidence = 0,
+        .ptr = @ptrFromInt(1),
+    };
+    surfaces[1] = .{
+        .id = try allocator.dupe(u8, "surface-b"),
+        .title = try allocator.dupe(u8, "panel2"),
+        .cwd = try allocator.dupe(u8, "/tmp"),
+        .snapshot = try allocator.dupe(u8, ""),
+        .tab_index = 1,
+        .focused = false,
+        .is_ssh = false,
+        .is_wsl = false,
+        .agent_app = .none,
+        .agent_state = .none,
+        .agent_confidence = 0,
+        .ptr = @ptrFromInt(2),
+    };
+    const snapshot = ToolSnapshot{ .surfaces = surfaces, .active_tab = 0 };
+    defer snapshot.deinit(allocator);
+
+    var messages = [_]RequestMessage{};
+    const request = ChatRequest{
+        .allocator = allocator,
+        .session = undefined,
+        .base_url = @constCast(""),
+        .api_key = @constCast(""),
+        .model = @constCast(""),
+        .system_prompt = @constCast(""),
+        .messages = messages[0..],
+        .thinking_enabled = true,
+        .reasoning_effort = @constCast(""),
+        .stream = false,
+        .agent_enabled = true,
+        .tool_host = null,
+        .tool_snapshot = snapshot,
+        .started_ms = 0,
+    };
+
+    const out = try terminalListTool(&request);
+    defer allocator.free(out);
+
+    // The first tab is shown as 1 and the second as 2, even though they are
+    // internally zero-based (tab_index 0 and 1) — matching the UI tab numbers.
+    try std.testing.expect(std.mem.indexOf(u8, out, "active_tab=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "id=surface-a tab=1 ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "id=surface-b tab=2 ") != null);
+    // The zero-based index must never leak into the user-facing listing.
+    try std.testing.expect(std.mem.indexOf(u8, out, "tab=0") == null);
 }
 
 test "copilot session pre-targets the bound surface in its request" {
