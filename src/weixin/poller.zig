@@ -9,7 +9,10 @@ const control_mod = @import("control.zig");
 const reply_progress = @import("reply_progress.zig");
 
 pub const SESSION_EXPIRED_ERRCODE: i64 = -14;
-const AI_REPLY_CHECKPOINTS_MS = [_]u64{ 10_000, 30_000, 60_000, 120_000 };
+/// Elapsed times at which an in-progress AI follow-up pings the user so a slow
+/// task visibly stays alive: 30s, then 2m, 5m, 10m, 20m. The ~30-minute mark is
+/// the context-token window edge, handled by the window-expired resend notice.
+const AI_REPLY_CHECKPOINTS_MS = [_]u64{ 30_000, 120_000, 300_000, 600_000, 1_200_000 };
 const AI_REPLY_POLL_MS: u64 = 1_000;
 const POLL_ERROR_BACKOFF_MS: u64 = 1_000;
 const SHUTDOWN_JOIN_TIMEOUT_MS: u32 = 1500;
@@ -19,14 +22,11 @@ const SHUTDOWN_JOIN_TIMEOUT_MS: u32 = 1500;
 /// bot just stops replying" for slow AI tasks. The follow-up must therefore
 /// finish (or hand back) within this window, regardless of reply_timeout_ms.
 const CONTEXT_TOKEN_WINDOW_MS: u64 = 30 * 60 * 1000;
-/// Send the final answer / heartbeat / resend notice this far before the hard
+/// Send the final answer / progress / resend notice this far before the hard
 /// expiry so it still goes out on a valid token.
 const EXPIRY_NOTICE_MARGIN_MS: u64 = 30 * 1000;
 /// Latest elapsed time at which the follow-up still sends on the original token.
 const AI_REPLY_DEADLINE_MS: u64 = CONTEXT_TOKEN_WINDOW_MS - EXPIRY_NOTICE_MARGIN_MS;
-/// After the dense early checkpoints, ping "still working" this often so the
-/// user knows a long-running task is alive.
-const AI_REPLY_HEARTBEAT_MS: u64 = 5 * 60 * 1000;
 /// Sent once when the window closes with no final answer: the token is about to
 /// expire, so a fresh inbound message is needed to keep the conversation going.
 const AI_REPLY_WINDOW_EXPIRED_NOTICE = "AI 处理已超过 30 分钟仍未完成，微信回复窗口即将关闭。请重新发送一条消息以继续接收回复。";
@@ -509,23 +509,19 @@ fn debugNowMs() i64 {
     return std.time.milliTimestamp();
 }
 
-/// Decides when an AI follow-up should ping progress: dense early checkpoints for
-/// quick feedback, then a steady heartbeat for long tasks. Pure and
-/// state-advancing so each checkpoint/heartbeat fires exactly once; the caller
-/// drives it with monotonically increasing `elapsed_ms` at AI_REPLY_POLL_MS steps.
+/// Decides when an AI follow-up should ping progress: a fixed, increasingly
+/// spaced set of checkpoints (30s, 2m, 5m, 10m, 20m). Pure and state-advancing
+/// so each checkpoint fires exactly once; the caller drives it with monotonically
+/// increasing `elapsed_ms` at AI_REPLY_POLL_MS steps. The ~30-minute window edge
+/// is covered separately by the window-expired resend notice.
 const ProgressSchedule = struct {
     checkpoint_index: usize = 0,
-    next_heartbeat_ms: u64 = AI_REPLY_HEARTBEAT_MS,
 
     fn pingDue(self: *ProgressSchedule, elapsed_ms: u64) bool {
         if (self.checkpoint_index < AI_REPLY_CHECKPOINTS_MS.len and
             elapsed_ms >= AI_REPLY_CHECKPOINTS_MS[self.checkpoint_index])
         {
             self.checkpoint_index += 1;
-            return true;
-        }
-        if (elapsed_ms >= self.next_heartbeat_ms) {
-            self.next_heartbeat_ms += AI_REPLY_HEARTBEAT_MS;
             return true;
         }
         return false;
@@ -873,7 +869,7 @@ test "ai reply window extends to the 30-minute context-token validity with a res
     try t.expectEqual(CONTEXT_TOKEN_WINDOW_MS - EXPIRY_NOTICE_MARGIN_MS, AI_REPLY_DEADLINE_MS);
 }
 
-test "progress schedule pings at dense early checkpoints then a steady heartbeat" {
+test "progress schedule pings at increasingly spaced checkpoints up to the window edge" {
     var sched = ProgressSchedule{};
     var pings: std.ArrayListUnmanaged(u64) = .empty;
     defer pings.deinit(t.allocator);
@@ -884,16 +880,13 @@ test "progress schedule pings at dense early checkpoints then a steady heartbeat
         if (sched.pingDue(elapsed_ms)) try pings.append(t.allocator, elapsed_ms);
     }
 
-    // Dense early feedback at the fixed checkpoints.
-    try t.expectEqual(@as(u64, 10_000), pings.items[0]);
-    try t.expectEqual(@as(u64, 30_000), pings.items[1]);
-    try t.expectEqual(@as(u64, 60_000), pings.items[2]);
-    try t.expectEqual(@as(u64, 120_000), pings.items[3]);
-    // Then a "still working" heartbeat every AI_REPLY_HEARTBEAT_MS (5 min).
-    try t.expectEqual(@as(u64, AI_REPLY_HEARTBEAT_MS), pings.items[4]);
-    try t.expectEqual(@as(u64, 2 * AI_REPLY_HEARTBEAT_MS), pings.items[5]);
-    // Heartbeats run right up to — but never past — the send deadline.
+    // Exactly the fixed cadence: 30s, 2m, 5m, 10m, 20m — each fires once and
+    // there is no extra heartbeat beyond the last checkpoint.
+    const expected = [_]u64{ 30_000, 120_000, 300_000, 600_000, 1_200_000 };
+    try t.expectEqual(expected.len, pings.items.len);
+    for (expected, pings.items) |want, got| try t.expectEqual(want, got);
+    // The ~30-minute window edge is handled by the resend notice, not a ping, so
+    // every checkpoint still lands well before the send deadline.
     const last = pings.items[pings.items.len - 1];
-    try t.expect(last <= AI_REPLY_DEADLINE_MS);
-    try t.expect(last + AI_REPLY_HEARTBEAT_MS > AI_REPLY_DEADLINE_MS);
+    try t.expect(last < AI_REPLY_DEADLINE_MS);
 }
