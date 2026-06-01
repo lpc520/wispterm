@@ -332,6 +332,41 @@ Prefer **(A)** unless call-site churn proves smaller for (B).
 
 ---
 
+## Execution outcome (2026-06-01, branch `worktree-feat-refactor`)
+
+Landed Phases 1–5 (+5b), one commit each; both suites green after every phase.
+
+| Phase | Commit | Fast tests |
+|---|---|---|
+| Baseline | — | 451 / ~5 s (incl. ai_chat dragged in via config) |
+| 1 config→ai_chat | `41dd703` | 315 / ~1.9 s |
+| 2 SshConnection | `3a5fef1` | 315 |
+| 3 g_active_tab + file_explorer/scp/file_backend | `c7d6c9c` | 367 |
+| 4 input terminal_link_action + preview_path | `2fa7dcb` | 378 |
+| 5 overlays profile_codec | `418d22c` | 384 |
+| 5b overlays transfer_toast + update_prompt models | `063b67c` | **410** / ~1.9 s cold, ~0.45 s incremental |
+
+Full suite throughout: **780/786 passed, 6 skipped, 0 failed**.
+
+New light modules: `ai_agent_config`, `ssh_connection`, `appwindow/active_tab`,
+`input/preview_path`, `input/terminal_link_action`, `renderer/overlays/{profile_codec,
+transfer_toast_model, update_prompt_model}`. Also relocated 5 AI default constants
+to `ai_chat_protocol`. ssh_tunnel stayed in test-full (uses the full `*Surface`).
+
+### Phase 6 (split_tree) — DEFERRED, not done
+
+Assessment after exploration: split_tree.zig's only heavy import is `Surface.zig`
+(session_persist is light). The clean fix is a concrete-alias generic —
+`pub const SplitTree = SplitTreeImpl(*Surface)` in split_tree.zig, with the generic
+`SplitTreeImpl(comptime Leaf)` + the 4 topology tests in a new Surface-free
+`split_tree_impl.zig`. This gives **zero caller churn** (the 113 `SplitTree*`
+references keep working against the concrete alias). **However**, it requires
+genericizing ~1000 lines of intricate tree topology (handle arithmetic, backtracking,
+zoom/resize/remove, fromSnapshot factory) — effectively a full rewrite of core
+window-management code — for only **4 tests**. Highest risk / lowest reward of the
+refactor; the brief itself ranked it last. Recommended as its own focused PR with
+review, not the tail of a batch.
+
 ## Self-Review notes
 
 - **Spec coverage:** Brief items #1 (input)→Phase 4, #2 (overlays)→Phase 5, #3 (SshConnection + file_explorer/scp)→Phases 2–3, #4 (split_tree)→Phase 6, #5 (config→ai_chat)→Phase 1. All five covered.
