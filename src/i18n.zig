@@ -10,6 +10,7 @@ pub const Lang = enum { en, zh_CN };
 /// 调用点直接替换的扁平文案。字段无默认值 → 任一 locale 漏填某字段编译期报错，
 /// 这是「方案 A」comptime 完整性保证的落地（无需手写 assert）。
 pub const Strings = struct {
+    /// 预留给未来的语言选择 UI；当前仅用于演示 catalog 与测试，生产代码暂未读取。
     language_name: []const u8,
     toast_wechat_not_connected: []const u8,
     toast_wechat_poller_started: []const u8,
@@ -82,6 +83,8 @@ pub const LanguageSetting = enum {
 
 /// 把 locale 标签（如 "zh_CN.UTF-8" / "en_US" / "zh"）映射到支持的语言。
 /// 以 "zh" 开头（不分大小写）→ zh_CN；其余 → en。
+/// 注意：这里对 `zh*` 是宽松前缀匹配（自动检测应尽量识别中文，含 zh_TW），
+/// 与 `LanguageSetting.parse` 的严格匹配（显式 `zh-TW` 视为非法并告警）有意不同。
 pub fn langFromLocaleTag(tag: []const u8) Lang {
     if (tag.len >= 2) {
         const a = tag[0];
@@ -176,6 +179,8 @@ pub fn commandTitle(action: CommandAction) ?[]const u8 {
 }
 
 /// 命令中心详情的本地化覆盖。约定同 commandTitle。
+/// 注意：命令面板当前只渲染 title，不渲染 detail —— 这些译文仅用于过滤匹配
+///（让 zh 用户能用中文搜索命中），UI 上不直接显示。
 pub fn commandDetail(action: CommandAction) ?[]const u8 {
     if (active_lang != .zh_CN) return null;
     return switch (action) {

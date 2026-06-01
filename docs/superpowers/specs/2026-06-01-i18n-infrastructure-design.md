@@ -181,6 +181,7 @@ showStatusToast(i18n.s().toast_wechat_login_failed);
 ## 10. 后续工作（追踪，不在本 PR）
 
 - 分批迁移其余界面文案（AI agent 对话框、AI 设置面板、菜单、文件浏览器、错误信息…）。
+- 迁移 `overlays.zig` 中尚未本地化的其余状态 toast（v1 仅迁移 4 条作样板；同一批 WeChat 提示里仍有英文兄弟串，如 "WeChat start failed" / "WeChat direct is not active" 等 —— **这是有意的范围控制，非遗漏**，zh 模式下这些会暂显英文）。
 - macOS 用 `NSLocale.preferredLanguages` 优化 auto 检测。
 - 视需要扩展：运行时热切换、繁体中文 / 更多语言、复数与日期本地化。
 - README / docs / 官网中文（#97 第 2 点，另开任务）。
