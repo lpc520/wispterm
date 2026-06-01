@@ -40,6 +40,7 @@ const thread_message = @import("appwindow/thread_message.zig");
 const render_diagnostics = @import("render_diagnostics.zig");
 const ime_caret = @import("ime_caret.zig");
 pub const ai_chat = @import("ai_chat.zig");
+pub const ai_history_source = @import("ai_history_source.zig");
 pub const tab = @import("appwindow/tab.zig");
 const active_tab_state = @import("appwindow/active_tab.zig");
 pub const font = @import("font/manager.zig");
@@ -66,6 +67,7 @@ pub const browser_panel = if (build_options.webview)
 else
     @import("browser_panel_stub.zig");
 pub const ai_chat_renderer = @import("renderer/ai_chat_renderer.zig");
+pub const ai_history_renderer = @import("renderer/ai_history_renderer.zig");
 const ai_sidebar = @import("ai_sidebar.zig");
 pub const ui_perf = @import("ui_perf.zig");
 const log = std.log.scoped(.app_window);
@@ -586,6 +588,30 @@ fn renderAiChatFrame(fb_width: c_int, fb_height: c_int, titlebar_offset: f32, le
     }
 }
 
+fn aiHistoryContentWidth(fb_width: c_int, left_panels_w: f32, right_panels_w: f32) f32 {
+    return @max(0, @as(f32, @floatFromInt(fb_width)) - left_panels_w - right_panels_w);
+}
+
+fn renderAiHistoryFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_int, titlebar_offset: f32, left_panels_w: f32, right_panels_w: f32) void {
+    gpu.state.setViewport(0, 0, @intCast(fb_width), @intCast(fb_height));
+    gpu.gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
+    clearWithBackground(fb_width, fb_height);
+    titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+    titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+    markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
+    file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+    if (active_tab.ai_history_session) |session| {
+        ai_history_renderer.render(
+            session,
+            @floatFromInt(fb_width),
+            @floatFromInt(fb_height),
+            titlebar_offset,
+            left_panels_w,
+            aiHistoryContentWidth(fb_width, left_panels_w, right_panels_w),
+        );
+    }
+}
+
 fn renderAiCopilotPanel(fb_width: c_int, fb_height: c_int, titlebar_offset: f32) void {
     if (!aiCopilotVisible()) return;
     const session = ensureActiveCopilotSession() orelse return;
@@ -1088,6 +1114,13 @@ pub fn spawnAiChatTab(
     return true;
 }
 
+pub fn spawnAiHistoryTab(source: ai_history_source.Source) bool {
+    const allocator = g_allocator orelse return false;
+    if (!tab.spawnAiHistoryTab(allocator, source)) return false;
+    clearUiStateOnTabChange();
+    return true;
+}
+
 pub fn reopenAiChatTabFromHistorySessionId(session_id: []const u8) bool {
     if (tab.switchToAiTabBySessionId(session_id)) {
         clearUiStateOnTabChange();
@@ -1517,6 +1550,8 @@ fn onPlatformResize(width: i32, height: i32) void {
         if (split_count <= 1) {
             if (active_tab.kind == .ai_chat) {
                 renderAiChatFrame(fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
+            } else if (active_tab.kind == .ai_history) {
+                renderAiHistoryFrame(active_tab, fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
             } else if (activeSurface()) |surface| {
                 // Single surface: simple render path
                 const rend = &surface.surface_renderer;
@@ -2041,6 +2076,10 @@ fn buildRemoteLayoutJson(allocator: std.mem.Allocator, out: *std.ArrayListUnmana
             try appendRemoteAiChatTabJson(allocator, out, tab_state, tab_index);
             continue;
         }
+        if (tab_state.kind == .ai_history) {
+            try appendRemoteAiHistoryTabJson(allocator, out, tab_state, tab_index);
+            continue;
+        }
 
         try out.appendSlice(allocator, "{\"index\":");
         try out.print(allocator, "{d}", .{tab_index});
@@ -2120,6 +2159,12 @@ fn buildRemoteLayoutJson(allocator: std.mem.Allocator, out: *std.ArrayListUnmana
 fn remoteAiSurfaceId(tab_index: usize) [16]u8 {
     var id: [16]u8 = undefined;
     _ = std.fmt.bufPrint(&id, "aichat{d:0>10}", .{tab_index}) catch unreachable;
+    return id;
+}
+
+fn remoteAiHistorySurfaceId(tab_index: usize) [16]u8 {
+    var id: [16]u8 = undefined;
+    _ = std.fmt.bufPrint(&id, "aihist{d:0>10}", .{tab_index}) catch unreachable;
     return id;
 }
 
@@ -2229,6 +2274,36 @@ fn appendRemoteAiChatTabJson(
     try out.appendSlice(allocator, ",\"requestStopping\":");
     try out.appendSlice(allocator, if (request_state.stopping) "true" else "false");
     try out.appendSlice(allocator, ",\"x\":0,\"y\":0,\"w\":1,\"h\":1}]}");
+}
+
+fn appendRemoteAiHistoryTabJson(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    tab_state: *tab.TabState,
+    tab_index: usize,
+) !void {
+    const surface_id = remoteAiHistorySurfaceId(tab_index);
+    const title_text = tab_state.getTitle();
+
+    try out.appendSlice(allocator, "{\"index\":");
+    try out.print(allocator, "{d}", .{tab_index});
+    try out.appendSlice(allocator, ",\"title\":\"");
+    try remote.appendJsonString(out, allocator, title_text);
+    try out.appendSlice(allocator, "\",\"focusedSurfaceId\":\"");
+    try remote.appendJsonString(out, allocator, surface_id[0..]);
+    try out.append(allocator, '"');
+    try appendAgentDetectionJson(allocator, out, null);
+    try out.appendSlice(allocator, ",\"surfaces\":[{\"id\":\"");
+    try remote.appendJsonString(out, allocator, surface_id[0..]);
+    try out.appendSlice(allocator, "\",\"title\":\"");
+    try remote.appendJsonString(out, allocator, title_text);
+    try out.appendSlice(allocator, "\",\"focused\":true");
+    try appendAgentDetectionJson(allocator, out, null);
+    // AI History is read-only in remote layouts. Keep it terminal-style so the
+    // remote client does not show AI Chat composer/input affordances.
+    try out.appendSlice(allocator, ",\"kind\":\"terminal\",\"readOnly\":true,\"cols\":120,\"rows\":30,\"cursorX\":0,\"cursorY\":0,\"snapshot\":\"AI History\\n");
+    try remote.appendJsonString(out, allocator, title_text);
+    try out.appendSlice(allocator, "\",\"x\":0,\"y\":0,\"w\":1,\"h\":1}]}");
 }
 
 fn handleRemoteAiInputRequest(request: *RemoteAiInputRequest) void {
@@ -4156,7 +4231,7 @@ fn runMainLoop(self: *AppWindow) !void {
             const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, font.cell_width, font.cell_height);
             syncRemoteLayout(allocator);
             syncImeCaretPosition(win, split_count);
-            if (active_tab.kind != .ai_chat and synchronizedOutputPendingForVisibleSplits(split_count)) {
+            if (active_tab.kind != .ai_chat and active_tab.kind != .ai_history and synchronizedOutputPendingForVisibleSplits(split_count)) {
                 std.Thread.sleep(std.time.ns_per_ms);
                 continue;
             }
@@ -4165,6 +4240,8 @@ fn runMainLoop(self: *AppWindow) !void {
             // GL rendering
             if (active_tab.kind == .ai_chat) {
                 renderAiChatFrame(fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
+            } else if (active_tab.kind == .ai_history) {
+                renderAiHistoryFrame(active_tab, fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
             } else if (post_process.g_post_enabled) {
                 // Post-processing path: only render focused surface for now
                 if (activeSurface()) |surface| {
@@ -4370,4 +4447,47 @@ test "appwindow: syncDefaultShellCommandFromConfig refreshes tab default shell" 
     const expected_len = platform_pty_command.resolveShellCommandLine(&expected_buf, test_shell);
     const CommandUnit = @TypeOf(expected_buf[0]);
     try testing.expectEqualSlices(CommandUnit, expected_buf[0..expected_len], tab.getShellCmd());
+}
+
+test "appwindow: ai history content width accounts for right panels" {
+    try std.testing.expectEqual(@as(f32, 700), aiHistoryContentWidth(1000, 200, 100));
+    try std.testing.expectEqual(@as(f32, 0), aiHistoryContentWidth(250, 200, 100));
+}
+
+test "appwindow: remote layout serializes ai_history as non-terminal surface" {
+    const allocator = std.testing.allocator;
+    for (0..tab.MAX_TABS) |idx| tab.g_tabs[idx] = null;
+    tab.g_tab_count = 0;
+    active_tab_state.g_active_tab = 0;
+    defer {
+        for (0..tab.MAX_TABS) |idx| tab.g_tabs[idx] = null;
+        tab.g_tab_count = 0;
+        active_tab_state.g_active_tab = 0;
+    }
+
+    var session = @import("ai_history_session.zig").Session.init(allocator, .{
+        .id = "local-history",
+        .name = "Local History",
+        .target = .local,
+    });
+    defer session.deinit();
+    var tab_state = tab.TabState{
+        .kind = .ai_history,
+        .tree = .empty,
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = &session,
+        .copilot_session = null,
+    };
+    tab.g_tabs[0] = &tab_state;
+    tab.g_tab_count = 1;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+    try buildRemoteLayoutJson(allocator, &out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"terminal\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"ai_chat\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"readOnly\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"surfaces\":[]") == null);
 }

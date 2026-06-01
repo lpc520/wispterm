@@ -437,6 +437,29 @@ pub fn spawnAiChatTabFromHistoryRecord(allocator: std.mem.Allocator, record: age
     return true;
 }
 
+pub fn spawnAiHistoryTab(allocator: std.mem.Allocator, source: ai_history_source.Source) bool {
+    if (g_tab_count >= MAX_TABS) return false;
+    const session_ptr = allocator.create(ai_history_session.Session) catch return false;
+    session_ptr.* = ai_history_session.Session.init(allocator, source);
+
+    const t = allocator.create(TabState) catch {
+        session_ptr.deinit();
+        allocator.destroy(session_ptr);
+        return false;
+    };
+    t.kind = .ai_history;
+    t.tree = .empty;
+    t.focused = .root;
+    t.ai_chat_session = null;
+    t.copilot_session = null;
+    t.ai_history_session = session_ptr;
+
+    g_tabs[g_tab_count] = t;
+    active_tab_state.g_active_tab = g_tab_count;
+    g_tab_count += 1;
+    return true;
+}
+
 /// Close the tab at the given index.
 /// The caller is responsible for clearing selection state and setting rebuild flags.
 pub fn closeTab(idx: usize, allocator: std.mem.Allocator) void {
@@ -1506,6 +1529,51 @@ test "tab: restoreTab skips an ai_history tab when no restore hook is installed"
     };
     try std.testing.expect(!restoreTab(std.testing.allocator, &snap, 80, 24, .block, false));
     try std.testing.expectEqual(@as(usize, 0), g_tab_count);
+}
+
+test "tab: spawnAiHistoryTab creates active ai_history tab" {
+    resetTestTabGlobals();
+    const allocator = std.testing.allocator;
+    defer {
+        for (0..g_tab_count) |idx| {
+            if (g_tabs[idx]) |tab_state| {
+                tab_state.deinit(allocator);
+                allocator.destroy(tab_state);
+                g_tabs[idx] = null;
+            }
+        }
+        resetTestTabGlobals();
+    }
+
+    try std.testing.expect(spawnAiHistoryTab(allocator, .{
+        .id = "local-history",
+        .name = "Local History",
+        .target = .local,
+    }));
+
+    try std.testing.expectEqual(@as(usize, 1), g_tab_count);
+    try std.testing.expectEqual(@as(usize, 0), active_tab_state.g_active_tab);
+    const active = activeTab() orelse return error.ExpectedActiveTab;
+    try std.testing.expectEqual(TabState.Kind.ai_history, active.kind);
+    const session = active.ai_history_session orelse return error.ExpectedAiHistorySession;
+    try std.testing.expectEqualStrings("local-history", session.source.id);
+}
+
+test "tab: spawnAiHistoryTab rolls back when tab allocation fails" {
+    resetTestTabGlobals();
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 1,
+    });
+
+    try std.testing.expect(!spawnAiHistoryTab(failing_allocator.allocator(), .{
+        .id = "local-history",
+        .name = "Local History",
+        .target = .local,
+    }));
+
+    try std.testing.expect(failing_allocator.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), g_tab_count);
+    try std.testing.expect(g_tabs[0] == null);
 }
 
 test "tab: snapshotTab persists a live ai_history tab" {
