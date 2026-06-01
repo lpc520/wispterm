@@ -4394,13 +4394,22 @@ fn terminalReplExecTool(request: *ChatRequest, surface_id: []const u8, repl_name
     return switch (repl) {
         .r => rSessionEvalTool(request, host, surface, code, timeout_ms),
         .python => pythonSessionEvalTool(request, host, surface, code, timeout_ms),
-        .codex, .claude_code => plainReplInputTool(request, host, surface, code, timeout_ms),
-        .plain => plainReplInputTool(request, host, surface, code, timeout_ms),
+        .codex, .claude_code => plainReplInputTool(request, host, surface, repl, code, timeout_ms),
+        .plain => plainReplInputTool(request, host, surface, repl, code, timeout_ms),
     };
 }
 
-fn plainReplInputTool(request: *const ChatRequest, host: ToolHost, surface: ToolSurface, text: []const u8, timeout_ms: u32) ![]u8 {
-    const input = try std.fmt.allocPrint(request.allocator, "{s}\r", .{text});
+fn plainReplSubmitKey(repl: ReplKind, surface: ToolSurface) []const u8 {
+    if (repl == .codex and surface.agent_state == .running) return "\t";
+    return "\r";
+}
+
+fn allocPlainReplInput(allocator: std.mem.Allocator, repl: ReplKind, surface: ToolSurface, text: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ text, plainReplSubmitKey(repl, surface) });
+}
+
+fn plainReplInputTool(request: *const ChatRequest, host: ToolHost, surface: ToolSurface, repl: ReplKind, text: []const u8, timeout_ms: u32) ![]u8 {
+    const input = try allocPlainReplInput(request.allocator, repl, surface, text);
     defer request.allocator.free(input);
 
     if (!host.writeSurface(host.ctx, surface.ptr, input)) {
@@ -6893,6 +6902,34 @@ test "ai chat REPL kind parses Python Codex and Claude Code aliases" {
     try std.testing.expectEqual(ReplKind.codex, ReplKind.parse("codex").?);
     try std.testing.expectEqual(ReplKind.claude_code, ReplKind.parse("claude").?);
     try std.testing.expectEqual(ReplKind.claude_code, ReplKind.parse("claude-code").?);
+}
+
+test "ai chat Codex running REPL input queues with tab instead of enter" {
+    const allocator = std.testing.allocator;
+    const surface = ToolSurface{
+        .id = @constCast("surface-1"),
+        .title = @constCast("codex"),
+        .cwd = @constCast(""),
+        .snapshot = @constCast("Working (5m 16s - esc to interrupt)\ntab to queue message"),
+        .tab_index = 0,
+        .focused = true,
+        .is_ssh = false,
+        .is_wsl = false,
+        .agent_app = .codex,
+        .agent_state = .running,
+        .agent_confidence = 82,
+        .ptr = @ptrFromInt(1),
+    };
+
+    const input = try allocPlainReplInput(allocator, .codex, surface, "/status");
+    defer allocator.free(input);
+    try std.testing.expectEqualStrings("/status\t", input);
+
+    var idle_surface = surface;
+    idle_surface.agent_state = .done;
+    const idle_input = try allocPlainReplInput(allocator, .codex, idle_surface, "/status");
+    defer allocator.free(idle_input);
+    try std.testing.expectEqualStrings("/status\r", idle_input);
 }
 
 test "ai chat Python string literal escapes code for REPL eval" {
