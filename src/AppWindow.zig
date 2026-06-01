@@ -2862,6 +2862,18 @@ fn rememberQuakeFrame(win: *window_backend.Window) void {
     g_quake_frame = frame;
 }
 
+/// Record the window's top-left while it is in a normal windowed state, so the
+/// save-on-close path can persist a real position when the window is closed while
+/// maximized or fullscreen (those report a maximized rect, not the user's windowed
+/// origin). Skipped in quake mode, which manages its own frame.
+fn rememberWindowedPosition(win: *window_backend.Window) void {
+    if (g_quake_mode) return;
+    if (window_backend.isMinimized(win) or window_backend.isMaximized(win) or window_backend.isFullscreen(win)) return;
+    const rect = window_backend.windowRect(win) orelse return;
+    platform_window_state.g_windowed_x = rect.left;
+    platform_window_state.g_windowed_y = rect.top;
+}
+
 fn applyQuakeFrame(win: *window_backend.Window, use_cached_frame: bool) void {
     const work_area = quakeWorkAreaForWindow(win) orelse return;
     const frame = if (use_cached_frame) frame: {
@@ -3627,6 +3639,11 @@ fn runMainLoop(self: *AppWindow) !void {
         if (saved_state) |s| {
             if (init_x == null) init_x = s.x;
             if (init_y == null) init_y = s.y;
+            // Seed the last-windowed position so a session that stays maximized the
+            // whole time still persists a real origin on close (otherwise (0,0)).
+            // rememberWindowedPosition overwrites this on the first windowed frame.
+            platform_window_state.g_windowed_x = s.x;
+            platform_window_state.g_windowed_y = s.y;
             if (restore_saved_size) {
                 saved_fb_w = s.width;
                 saved_fb_h = s.height;
@@ -4065,6 +4082,10 @@ fn runMainLoop(self: *AppWindow) !void {
 
         // Process all queued input events (keyboard, mouse, resize)
         input.processEvents(win);
+
+        // Track the last windowed position so a maximized/fullscreen close still
+        // persists where the window was, not (0,0).
+        rememberWindowedPosition(win);
 
         // Update focus state
         const focused = window_backend.isFocused(win);

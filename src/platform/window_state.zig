@@ -18,9 +18,12 @@ pub const WindowState = struct {
     height: ?i32 = null,
 };
 
-// Saved windowed position for restore (used by window state persistence)
-pub threadlocal var g_windowed_x: c_int = 0;
-pub threadlocal var g_windowed_y: c_int = 0;
+// Last known windowed (non-maximized/fullscreen) top-left, in screen coords.
+// Updated each frame while the window is windowed (see rememberWindowedPosition
+// in AppWindow.zig) so the save-on-close path has a real position to persist when
+// the window is closed while maximized or fullscreen.
+pub threadlocal var g_windowed_x: i32 = 0;
+pub threadlocal var g_windowed_y: i32 = 0;
 
 /// Return the state file path in the platform config directory.
 pub fn stateFilePath(allocator: std.mem.Allocator) ?[]const u8 {
