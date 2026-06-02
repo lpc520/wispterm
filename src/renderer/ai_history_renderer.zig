@@ -432,8 +432,10 @@ fn renderList(
     var visible_index: usize = 0;
     var rendered: usize = 0;
     for (session.rows.items) |row| {
-        if (!types.categoryMatches(session.category, row.provider)) continue;
-        if (!metadataMatches(row, query)) continue;
+        // Use the same visibility predicate as visibleCount/selectedVisible/
+        // listWindowStart so the rendered rows, the selection index, and the
+        // hit-test all agree (category AND date AND text query).
+        if (!session.rowVisible(row, query)) continue;
         if (visible_index < start) {
             visible_index += 1;
             continue;
