@@ -43,6 +43,15 @@ pub const ScannerHost = struct {
     loadTranscript: *const fn (*anyopaque, std.mem.Allocator, types.SessionMeta) anyerror![]types.TranscriptMessage,
 };
 
+/// Owned unit of background scan work. `run` performs the blocking scan; `destroy`
+/// frees the context (`ctx`). Both run on the worker thread. `ctx` must own
+/// everything `run` needs and contain no pointers into threadlocal UI state.
+pub const ScanWork = struct {
+    ctx: *anyopaque,
+    run: *const fn (*anyopaque, std.mem.Allocator, source_mod.Source) anyerror!ScanResult,
+    destroy: *const fn (*anyopaque, std.mem.Allocator) void,
+};
+
 pub const RemoteExecHost = struct {
     ctx: *anyopaque,
     exec: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror![]u8,
@@ -296,6 +305,47 @@ pub const Session = struct {
         }
     }
 
+    /// Start a background scan. UI-thread only. Joins any prior scan worker first
+    /// (at most one in flight per session), flips to `.scanning`, bumps the
+    /// generation, and spawns the worker. Returns immediately.
+    pub fn scanAsync(self: *Session, work: ScanWork) void {
+        if (self.scan_thread) |t| {
+            t.join();
+            self.scan_thread = null;
+        }
+        self.mutex.lock();
+        self.state = .scanning;
+        self.status = "Scanning";
+        self.scan_generation +%= 1;
+        const generation = self.scan_generation;
+        self.mutex.unlock();
+
+        const thread = std.Thread.spawn(.{}, scanWorkerMain, .{ self, work, generation }) catch {
+            self.mutex.lock();
+            if (generation == self.scan_generation) {
+                self.state = .failed;
+                self.status = "Scan failed";
+            }
+            self.mutex.unlock();
+            work.destroy(work.ctx, self.allocator);
+            return;
+        };
+        self.scan_thread = thread;
+    }
+
+    /// Test-only: wait for in-flight workers to finish so results can be asserted
+    /// deterministically. Not called in production (deinit joins instead).
+    pub fn joinForTest(self: *Session) void {
+        if (self.scan_thread) |t| {
+            t.join();
+            self.scan_thread = null;
+        }
+        if (self.transcript_thread) |t| {
+            t.join();
+            self.transcript_thread = null;
+        }
+    }
+
     pub fn loadSelectedTranscript(self: *Session, host: ScannerHost) !void {
         const selected = self.selectedVisible() orelse return error.NoSelection;
         self.clearTranscript();
@@ -425,6 +475,15 @@ pub const Session = struct {
         return null;
     }
 };
+
+fn scanWorkerMain(session: *Session, work: ScanWork, generation: u64) void {
+    defer work.destroy(work.ctx, session.allocator);
+    const result = work.run(work.ctx, session.allocator, session.source) catch {
+        session.publishScanFailure(generation);
+        return;
+    };
+    session.publishScanResult(generation, result);
+}
 
 fn previousUtf8Boundary(bytes: []const u8, from: usize) usize {
     if (from == 0) return 0;
@@ -1799,4 +1858,40 @@ test "ai_history_session: publishScanResult discards stale generation" {
     session.publishScanResult(4, .{ .rows = rows, .owns_row_strings = true });
 
     try std.testing.expectEqual(@as(usize, 0), session.rows.items.len);
+}
+
+test "ai_history_session: scanAsync publishes rows then joins clean" {
+    const allocator = std.testing.allocator;
+
+    const Ctx = struct {
+        destroyed: bool = false,
+        fn run(ptr: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) anyerror!ScanResult {
+            _ = ptr;
+            const rows = try alloc.alloc(types.SessionMeta, 1);
+            rows[0] = .{
+                .provider = .codex,
+                .session_id = try alloc.dupe(u8, "async-id"),
+                .title = try alloc.dupe(u8, "Async"),
+                .source_path = try alloc.dupe(u8, "async.jsonl"),
+                .resume_kind = .codex_resume,
+            };
+            return .{ .rows = rows, .owns_row_strings = true };
+        }
+        fn destroy(ptr: *anyopaque, _: std.mem.Allocator) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.destroyed = true;
+        }
+    };
+
+    var ctx = Ctx{};
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+
+    session.scanAsync(.{ .ctx = &ctx, .run = Ctx.run, .destroy = Ctx.destroy });
+    session.joinForTest();
+
+    try std.testing.expectEqual(LoadState.ready, session.state);
+    try std.testing.expectEqual(@as(usize, 1), session.rows.items.len);
+    try std.testing.expectEqualStrings("async-id", session.rows.items[0].session_id);
+    try std.testing.expect(ctx.destroyed);
 }
