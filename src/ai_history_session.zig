@@ -93,10 +93,9 @@ pub const LocalScannerHost = struct {
         };
     }
 
-    fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source, _: ?ScanSink) !ScanResult {
+    fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source, sink: ?ScanSink) !ScanResult {
         const self: *LocalScannerHost = @ptrCast(@alignCast(ctx));
-        if (self.cache) |cache| return try scanLocalFilesystemWithCache(allocator, source, self.home, .{}, cache);
-        return try scanLocalFilesystem(allocator, source, self.home);
+        return try scanLocalFilesystemWithCacheSink(allocator, source, self.home, .{}, self.cache, sink);
     }
 
     fn loadTranscript(_: *anyopaque, allocator: std.mem.Allocator, meta: types.SessionMeta) ![]types.TranscriptMessage {
@@ -668,11 +667,23 @@ pub fn scanLocalFilesystemWithCache(
     budget: ScanBudget,
     cache: ?ai_history_cache.CacheFile,
 ) !ScanResult {
+    return scanLocalFilesystemWithCacheSink(allocator, source, home, budget, cache, null);
+}
+
+pub fn scanLocalFilesystemWithCacheSink(
+    allocator: std.mem.Allocator,
+    source: source_mod.Source,
+    home: []const u8,
+    budget: ScanBudget,
+    cache: ?ai_history_cache.CacheFile,
+    sink: ?ScanSink,
+) !ScanResult {
     var scanner = LocalScan{
         .allocator = allocator,
         .source = source,
         .budget = budget,
         .cache = cache,
+        .emitter = .{ .allocator = allocator, .sink = sink },
     };
     errdefer scanner.deinit();
 
@@ -705,8 +716,12 @@ pub fn scanLocalFilesystemWithCache(
         try scanner.scanProviderRoot(root.provider, root.path);
     }
     try scanner.processCandidates();
+    try scanner.emitter.flush();
 
-    const rows = try scanner.rows.toOwnedSlice(allocator);
+    const rows = if (sink == null)
+        try scanner.emitter.rows.toOwnedSlice(allocator)
+    else
+        try allocator.alloc(types.SessionMeta, 0);
     errdefer {
         freeRows(allocator, rows);
         allocator.free(rows);
@@ -715,6 +730,7 @@ pub fn scanLocalFilesystemWithCache(
     scanner.freeCandidates();
     return .{
         .rows = rows,
+        .authoritative = (sink == null),
         .warning_count = scanner.warning_count,
         .owns_row_strings = true,
         .cache_update = .{
@@ -825,6 +841,47 @@ pub fn freeTranscript(allocator: std.mem.Allocator, provider: types.ProviderId, 
     }
 }
 
+/// Collects scanned rows. With a sink it flushes batches for live display
+/// (streaming mode); without a sink it accumulates into `rows` for the final
+/// ScanResult. Takes ownership of each emitted row (frees it on its own error).
+const RowEmitter = struct {
+    allocator: std.mem.Allocator,
+    sink: ?ScanSink,
+    rows: std.ArrayListUnmanaged(types.SessionMeta) = .empty,
+    pending: std.ArrayListUnmanaged(types.SessionMeta) = .empty,
+    aborted: bool = false,
+    const BATCH = 12;
+
+    fn emit(self: *RowEmitter, row: types.SessionMeta) !void {
+        if (self.sink == null) {
+            self.rows.append(self.allocator, row) catch |e| {
+                freeMetadata(self.allocator, row);
+                return e;
+            };
+            return;
+        }
+        self.pending.append(self.allocator, row) catch |e| {
+            freeMetadata(self.allocator, row);
+            return e;
+        };
+        if (self.pending.items.len >= BATCH) try self.flush();
+    }
+
+    fn flush(self: *RowEmitter) !void {
+        if (self.pending.items.len == 0) return;
+        const batch = try self.pending.toOwnedSlice(self.allocator);
+        const sink = self.sink.?;
+        if (!sink.publish(sink.ctx, batch)) self.aborted = true;
+    }
+
+    fn deinit(self: *RowEmitter) void {
+        freeRows(self.allocator, self.rows.items);
+        self.rows.deinit(self.allocator);
+        freeRows(self.allocator, self.pending.items);
+        self.pending.deinit(self.allocator);
+    }
+};
+
 const LocalScan = struct {
     const Candidate = struct {
         provider: types.ProviderId,
@@ -837,7 +894,7 @@ const LocalScan = struct {
     source: source_mod.Source,
     budget: ScanBudget,
     cache: ?ai_history_cache.CacheFile = null,
-    rows: std.ArrayListUnmanaged(types.SessionMeta) = .empty,
+    emitter: RowEmitter,
     candidates: std.ArrayListUnmanaged(Candidate) = .empty,
     cache_records: std.ArrayListUnmanaged(ai_history_cache.CacheRecord) = .empty,
     warning_count: u32 = 0,
@@ -845,8 +902,7 @@ const LocalScan = struct {
     fn deinit(self: *LocalScan) void {
         ai_history_cache.freeRecords(self.allocator, self.cache_records.items);
         self.cache_records.deinit(self.allocator);
-        freeRows(self.allocator, self.rows.items);
-        self.rows.deinit(self.allocator);
+        self.emitter.deinit();
         self.freeCandidates();
     }
 
@@ -940,6 +996,7 @@ const LocalScan = struct {
             try self.scanCandidate(candidate);
             parsed_files += 1;
             parsed_bytes += candidate.size;
+            if (self.emitter.aborted) break;
         }
 
         if (budget_exceeded) self.warning_count += 1;
@@ -950,9 +1007,11 @@ const LocalScan = struct {
         if (self.cache) |cache| {
             if (ai_history_cache.findRecord(cache, self.source.id, candidate.provider, candidate.path, stamp)) |record| {
                 const cached_meta = try cloneMetadata(self.allocator, record.meta);
-                errdefer freeMetadata(self.allocator, cached_meta);
-                try self.rows.append(self.allocator, cached_meta);
-                try self.appendCacheRecord(candidate, record.meta);
+                {
+                    errdefer freeMetadata(self.allocator, cached_meta);
+                    try self.appendCacheRecord(candidate, record.meta);
+                }
+                try self.emitter.emit(cached_meta);
                 return;
             }
         }
@@ -980,10 +1039,11 @@ const LocalScan = struct {
             self.warning_count += 1;
             return;
         }
-        errdefer freeMetadata(self.allocator, meta);
-
-        try self.appendCacheRecord(candidate, meta);
-        try self.rows.append(self.allocator, meta);
+        {
+            errdefer freeMetadata(self.allocator, meta);
+            try self.appendCacheRecord(candidate, meta);
+        }
+        try self.emitter.emit(meta);
     }
 
     fn appendCacheRecord(self: *LocalScan, candidate: Candidate, meta: types.SessionMeta) !void {
@@ -2291,4 +2351,61 @@ test "ai_history_session: replaceRows preserves selection by session id" {
     try session.replaceRows(&second);
     // New behavior follows "a" to index 1; old reset-to-0 behavior would give 0.
     try std.testing.expectEqual(@as(usize, 1), session.selected);
+}
+
+const TestCollectSink = struct {
+    allocator: std.mem.Allocator,
+    rows: std.ArrayListUnmanaged(types.SessionMeta) = .empty,
+
+    fn sink(self: *TestCollectSink) ScanSink {
+        return .{ .ctx = self, .publish = publish };
+    }
+    fn publish(ctx: *anyopaque, rows: []types.SessionMeta) bool {
+        const self: *TestCollectSink = @ptrCast(@alignCast(ctx));
+        self.rows.appendSlice(self.allocator, rows) catch {
+            freeRows(self.allocator, rows);
+            self.allocator.free(rows);
+            return true;
+        };
+        self.allocator.free(rows); // structs moved in
+        return true;
+    }
+    fn deinit(self: *TestCollectSink) void {
+        freeRows(self.allocator, self.rows.items);
+        self.rows.deinit(self.allocator);
+    }
+};
+
+test "ai_history_session: local scan with sink streams rows and returns empty non-authoritative result" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".codex/sessions");
+    try tmp.dir.writeFile(.{
+        .sub_path = ".codex/sessions/one.jsonl",
+        .data =
+        \\{"type":"session_meta","timestamp":"2026-05-31T10:00:00Z","payload":{"id":"codex-one","cwd":"/tmp/project"}}
+        \\{"type":"response_item","timestamp":"2026-05-31T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}
+        \\
+        ,
+    });
+
+    var collect = TestCollectSink{ .allocator = allocator };
+    defer collect.deinit();
+
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &home_buf);
+    const result = try scanLocalFilesystemWithCacheSink(allocator, .{
+        .id = "local",
+        .name = "Local",
+        .target = .local,
+        .providers = .{ .codex = true, .claude = false },
+    }, home, .{}, null, collect.sink());
+    defer freeScanResult(allocator, result);
+
+    try std.testing.expect(!result.authoritative);
+    try std.testing.expectEqual(@as(usize, 0), result.rows.len);
+    try std.testing.expectEqual(@as(usize, 1), collect.rows.items.len);
+    try std.testing.expectEqualStrings("codex-one", collect.rows.items[0].session_id);
 }
