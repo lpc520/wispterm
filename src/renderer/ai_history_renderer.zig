@@ -35,6 +35,29 @@ pub const Hit = union(enum) {
     row: usize,
 };
 
+pub const LeftColumnLayout = struct {
+    source_name_top: f32,
+    target_top: f32,
+    status_label_top: f32,
+    status_value_top: f32,
+    retry_text_top: f32,
+};
+
+fn leftColumnLayout(top: f32, cell_h: f32) LeftColumnLayout {
+    const source_name_top = top + HEADER_H + 18;
+    const target_top = source_name_top + cell_h + 8;
+    const status_label_top = target_top + cell_h + 18;
+    const status_value_top = status_label_top + cell_h + 5;
+    const retry_text_top = status_value_top + cell_h + 18;
+    return .{
+        .source_name_top = source_name_top,
+        .target_top = target_top,
+        .status_label_top = status_label_top,
+        .status_value_top = status_value_top,
+        .retry_text_top = retry_text_top,
+    };
+}
+
 pub fn computeLayout(x: f32, width: f32) Layout {
     const available = @max(0, width);
     if (available == 0) {
@@ -185,16 +208,12 @@ fn renderLeftColumn(
     draw.fillQuad(layout.left_x, yFromTop(window_height, top + HEADER_H, 1), layout.left_w, 1, line);
     _ = draw.renderTextLimited("AI History", layout.left_x + PAD_X, yTextFromTop(draw, window_height, top + 11), fg, layout.left_w - PAD_X * 2);
 
-    var y = top + HEADER_H + 18;
-    _ = draw.renderTextLimited(session.source.name, layout.left_x + PAD_X, yTextFromTop(draw, window_height, y), fg, layout.left_w - PAD_X * 2);
-    y += draw.cell_h + 8;
-    _ = draw.renderTextLimited(targetLabel(session.source.target), layout.left_x + PAD_X, yTextFromTop(draw, window_height, y), muted, layout.left_w - PAD_X * 2);
-    y += draw.cell_h + 18;
-    _ = draw.renderTextLimited("Status", layout.left_x + PAD_X, yTextFromTop(draw, window_height, y), muted, layout.left_w - PAD_X * 2);
-    y += draw.cell_h + 5;
-    _ = draw.renderTextLimited(statusText(session), layout.left_x + PAD_X, yTextFromTop(draw, window_height, y), accent, layout.left_w - PAD_X * 2);
-    y += draw.cell_h + 18;
-    _ = draw.renderTextLimited("r  Retry scan", layout.left_x + PAD_X, yTextFromTop(draw, window_height, y), muted, layout.left_w - PAD_X * 2);
+    const lc = leftColumnLayout(top, draw.cell_h);
+    _ = draw.renderTextLimited(session.source.name, layout.left_x + PAD_X, yTextFromTop(draw, window_height, lc.source_name_top), fg, layout.left_w - PAD_X * 2);
+    _ = draw.renderTextLimited(targetLabel(session.source.target), layout.left_x + PAD_X, yTextFromTop(draw, window_height, lc.target_top), muted, layout.left_w - PAD_X * 2);
+    _ = draw.renderTextLimited("Status", layout.left_x + PAD_X, yTextFromTop(draw, window_height, lc.status_label_top), muted, layout.left_w - PAD_X * 2);
+    _ = draw.renderTextLimited(statusText(session), layout.left_x + PAD_X, yTextFromTop(draw, window_height, lc.status_value_top), accent, layout.left_w - PAD_X * 2);
+    _ = draw.renderTextLimited("r  Retry scan", layout.left_x + PAD_X, yTextFromTop(draw, window_height, lc.retry_text_top), muted, layout.left_w - PAD_X * 2);
 
     const footer = "Enter resumes  Space previews";
     _ = draw.renderTextLimited(footer, layout.left_x + PAD_X, 12, muted, layout.left_w - PAD_X * 2);
@@ -430,11 +449,7 @@ fn buttonHeight(cell_h: f32) f32 {
 }
 
 fn refreshButtonTop(top: f32, cell_h: f32) f32 {
-    return top + HEADER_H + 18 +
-        (cell_h + 8) +
-        (cell_h + 18) +
-        (cell_h + 5) +
-        (cell_h + 18) - BUTTON_PAD_Y;
+    return leftColumnLayout(top, cell_h).retry_text_top - BUTTON_PAD_Y;
 }
 
 fn resumeButtonTop(top: f32, cell_h: f32) f32 {
@@ -522,4 +537,13 @@ test "ai_history_renderer: interaction hit test maps buttons and row offset" {
     );
     const row_hit = interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.list_x + 8, top + FILTER_H + ROW_H + 2);
     try std.testing.expectEqual(@as(usize, 4), row_hit.row);
+}
+
+test "ai_history_renderer: left column layout is ordered top to bottom" {
+    const lc = leftColumnLayout(40, 16);
+    try std.testing.expect(lc.source_name_top < lc.target_top);
+    try std.testing.expect(lc.target_top < lc.status_label_top);
+    try std.testing.expect(lc.status_label_top < lc.status_value_top);
+    try std.testing.expect(lc.status_value_top < lc.retry_text_top);
+    try std.testing.expectEqual(lc.retry_text_top - BUTTON_PAD_Y, refreshButtonTop(40, 16));
 }
