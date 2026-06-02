@@ -2,8 +2,57 @@ const std = @import("std");
 const types = @import("ai_history_types.zig");
 const source_mod = @import("ai_history_source.zig");
 const session_persist = @import("session_persist.zig");
+const codex_provider = @import("ai_history_provider_codex.zig");
+const claude_provider = @import("ai_history_provider_claude.zig");
 
 pub const LoadState = enum { idle, scanning, ready, failed };
+pub const MAX_METADATA_FILE_BYTES = 2 * 1024 * 1024;
+pub const MAX_SCAN_METADATA_FILES: usize = 256;
+pub const MAX_SCAN_METADATA_BYTES: u64 = 48 * 1024 * 1024;
+
+pub const ScanBudget = struct {
+    max_files: usize = MAX_SCAN_METADATA_FILES,
+    max_bytes: u64 = MAX_SCAN_METADATA_BYTES,
+};
+
+pub const FileEntry = struct {
+    provider: types.ProviderId,
+    path: []const u8,
+    bytes: []const u8,
+};
+
+pub const ScanResult = struct {
+    rows: []types.SessionMeta,
+    warning_count: u32 = 0,
+    owns_row_strings: bool = false,
+};
+
+pub const ScannerHost = struct {
+    ctx: *anyopaque,
+    scan: *const fn (*anyopaque, std.mem.Allocator, source_mod.Source) anyerror!ScanResult,
+    loadTranscript: *const fn (*anyopaque, std.mem.Allocator, types.SessionMeta) anyerror![]types.TranscriptMessage,
+};
+
+pub const LocalScannerHost = struct {
+    home: []const u8,
+
+    pub fn scannerHost(self: *LocalScannerHost) ScannerHost {
+        return .{
+            .ctx = self,
+            .scan = scan,
+            .loadTranscript = loadTranscript,
+        };
+    }
+
+    fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source) !ScanResult {
+        const self: *LocalScannerHost = @ptrCast(@alignCast(ctx));
+        return try scanLocalFilesystem(allocator, source, self.home);
+    }
+
+    fn loadTranscript(_: *anyopaque, allocator: std.mem.Allocator, meta: types.SessionMeta) ![]types.TranscriptMessage {
+        return try loadLocalTranscript(allocator, meta);
+    }
+};
 
 pub const Session = struct {
     /// Allocator used for row storage. Do not change while rows are live.
@@ -12,8 +61,7 @@ pub const Session = struct {
     source: source_mod.Source,
     source_owned: bool = false,
     state: LoadState = .idle,
-    /// Rows shallow-copy SessionMeta values. All string slices inside each row
-    /// are borrowed and must outlive these rows until replacement or deinit.
+    /// Rows own duplicated SessionMeta string fields.
     rows: std.ArrayListUnmanaged(types.SessionMeta) = .empty,
     selected: usize = 0,
     filter: [128]u8 = undefined,
@@ -36,6 +84,7 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
+        freeRows(self.allocator, self.rows.items);
         self.rows.deinit(self.allocator);
         if (self.source_owned) {
             freeOwnedSource(self.allocator, &self.source);
@@ -69,20 +118,45 @@ pub const Session = struct {
         self.status = "Scanning";
     }
 
-    /// Replaces rows with shallow copies of `rows`. SessionMeta string slices
-    /// remain borrowed; callers must keep them alive until replacement/deinit.
+    /// Replaces rows with owned copies of `rows`. Callers may pass static or
+    /// temporary metadata; Session owns its stored strings after this returns.
     pub fn replaceRows(self: *Session, rows: []const types.SessionMeta) !void {
         var next: std.ArrayListUnmanaged(types.SessionMeta) = .empty;
-        errdefer next.deinit(self.allocator);
+        errdefer {
+            freeRows(self.allocator, next.items);
+            next.deinit(self.allocator);
+        }
 
-        try next.appendSlice(self.allocator, rows);
+        try next.ensureTotalCapacity(self.allocator, rows.len);
+        for (rows) |row| {
+            next.appendAssumeCapacity(try cloneMetadata(self.allocator, row));
+        }
         std.mem.sort(types.SessionMeta, next.items, {}, types.lessRecent);
 
+        freeRows(self.allocator, self.rows.items);
         self.rows.deinit(self.allocator);
         self.rows = next;
         self.selected = 0;
         self.state = .ready;
         self.status = "Ready";
+    }
+
+    pub fn scanNow(self: *Session, host: ScannerHost) !void {
+        self.beginScan();
+        errdefer {
+            self.state = .failed;
+            self.status = "Scan failed";
+        }
+        const result = try host.scan(host.ctx, self.allocator, self.source);
+        defer freeScanResult(self.allocator, result);
+
+        try self.replaceRows(result.rows);
+        self.status = if (result.warning_count == 0) "Ready" else "Ready with warnings";
+    }
+
+    pub fn loadSelectedTranscript(self: *Session, host: ScannerHost) ![]types.TranscriptMessage {
+        const selected = self.selectedVisible() orelse return error.NoSelection;
+        return try host.loadTranscript(host.ctx, self.allocator, selected);
     }
 
     pub fn setFilter(self: *Session, text: []const u8) void {
@@ -113,6 +187,289 @@ pub const Session = struct {
         return null;
     }
 };
+
+pub fn scanLocalFilesystem(
+    allocator: std.mem.Allocator,
+    source: source_mod.Source,
+    home: []const u8,
+) !ScanResult {
+    return scanLocalFilesystemWithBudget(allocator, source, home, .{});
+}
+
+pub fn scanLocalFilesystemWithBudget(
+    allocator: std.mem.Allocator,
+    source: source_mod.Source,
+    home: []const u8,
+    budget: ScanBudget,
+) !ScanResult {
+    var scanner = LocalScan{
+        .allocator = allocator,
+        .budget = budget,
+    };
+    errdefer scanner.deinit();
+
+    if (source.providers.codex) {
+        if (source.codex_root_override) |root| {
+            try scanner.scanProviderRoot(.codex, root);
+        } else {
+            var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (source_mod.defaultRoot(.codex, home, &root_buf)) |root| {
+                try scanner.scanProviderRoot(.codex, root);
+            } else {
+                scanner.warning_count += 1;
+            }
+        }
+    }
+    if (source.providers.claude) {
+        if (source.claude_root_override) |root| {
+            try scanner.scanProviderRoot(.claude, root);
+        } else {
+            var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (source_mod.defaultRoot(.claude, home, &root_buf)) |root| {
+                try scanner.scanProviderRoot(.claude, root);
+            } else {
+                scanner.warning_count += 1;
+            }
+        }
+    }
+    for (source.extra_roots) |root| {
+        if (!providerEnabled(source, root.provider)) continue;
+        try scanner.scanProviderRoot(root.provider, root.path);
+    }
+    try scanner.processCandidates();
+
+    const rows = try scanner.rows.toOwnedSlice(allocator);
+    scanner.freeCandidates();
+    return .{
+        .rows = rows,
+        .warning_count = scanner.warning_count,
+        .owns_row_strings = true,
+    };
+}
+
+pub fn loadLocalTranscript(allocator: std.mem.Allocator, meta: types.SessionMeta) ![]types.TranscriptMessage {
+    const bytes = if (std.fs.path.isAbsolute(meta.source_path)) blk: {
+        const file = try std.fs.openFileAbsolute(meta.source_path, .{});
+        defer file.close();
+        break :blk try file.readToEndAlloc(allocator, MAX_METADATA_FILE_BYTES);
+    } else try std.fs.cwd().readFileAlloc(allocator, meta.source_path, MAX_METADATA_FILE_BYTES);
+    defer allocator.free(bytes);
+
+    return switch (meta.provider) {
+        .codex => try codex_provider.parseTranscript(allocator, bytes),
+        .claude => try claude_provider.parseTranscript(allocator, bytes),
+    };
+}
+
+pub fn freeScanResult(allocator: std.mem.Allocator, result: ScanResult) void {
+    if (result.owns_row_strings) freeRows(allocator, result.rows);
+    allocator.free(result.rows);
+}
+
+pub fn freeTranscript(allocator: std.mem.Allocator, provider: types.ProviderId, messages: []types.TranscriptMessage) void {
+    switch (provider) {
+        .codex => codex_provider.freeTranscript(allocator, messages),
+        .claude => claude_provider.freeTranscript(allocator, messages),
+    }
+}
+
+const LocalScan = struct {
+    const Candidate = struct {
+        provider: types.ProviderId,
+        path: []const u8,
+        size: u64,
+        mtime: i128,
+    };
+
+    allocator: std.mem.Allocator,
+    budget: ScanBudget,
+    rows: std.ArrayListUnmanaged(types.SessionMeta) = .empty,
+    candidates: std.ArrayListUnmanaged(Candidate) = .empty,
+    warning_count: u32 = 0,
+
+    fn deinit(self: *LocalScan) void {
+        freeRows(self.allocator, self.rows.items);
+        self.rows.deinit(self.allocator);
+        self.freeCandidates();
+    }
+
+    fn freeCandidates(self: *LocalScan) void {
+        for (self.candidates.items) |candidate| {
+            self.allocator.free(candidate.path);
+        }
+        self.candidates.deinit(self.allocator);
+        self.candidates = .empty;
+    }
+
+    fn scanProviderRoot(self: *LocalScan, provider: types.ProviderId, root: []const u8) !void {
+        var dir = std.fs.openDirAbsolute(root, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return,
+            else => {
+                self.warning_count += 1;
+                return;
+            },
+        };
+        defer dir.close();
+
+        try self.walkDir(provider, root, dir);
+    }
+
+    fn walkDir(self: *LocalScan, provider: types.ProviderId, abs_path: []const u8, dir: std.fs.Dir) !void {
+        var it = dir.iterate();
+        while (it.next() catch {
+            self.warning_count += 1;
+            return;
+        }) |entry| {
+            switch (entry.kind) {
+                .directory => {
+                    const child_path = try std.fs.path.join(self.allocator, &.{ abs_path, entry.name });
+                    defer self.allocator.free(child_path);
+
+                    var child = dir.openDir(entry.name, .{ .iterate = true }) catch |err| switch (err) {
+                        error.FileNotFound, error.NotDir => continue,
+                        else => {
+                            self.warning_count += 1;
+                            continue;
+                        },
+                    };
+                    defer child.close();
+                    try self.walkDir(provider, child_path, child);
+                },
+                .file => {
+                    if (!std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
+                    try self.collectFile(provider, abs_path, dir, entry.name);
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn collectFile(self: *LocalScan, provider: types.ProviderId, abs_dir: []const u8, dir: std.fs.Dir, name: []const u8) !void {
+        const stat = dir.statFile(name) catch {
+            self.warning_count += 1;
+            return;
+        };
+        if (stat.size > MAX_METADATA_FILE_BYTES) {
+            self.warning_count += 1;
+            return;
+        }
+
+        const source_path = try std.fs.path.join(self.allocator, &.{ abs_dir, name });
+        errdefer self.allocator.free(source_path);
+
+        try self.candidates.append(self.allocator, .{
+            .provider = provider,
+            .path = source_path,
+            .size = stat.size,
+            .mtime = stat.mtime,
+        });
+    }
+
+    fn processCandidates(self: *LocalScan) !void {
+        std.mem.sort(Candidate, self.candidates.items, {}, candidateMoreRecent);
+
+        var parsed_files: usize = 0;
+        var parsed_bytes: u64 = 0;
+        var budget_exceeded = false;
+
+        for (self.candidates.items) |candidate| {
+            if (parsed_files >= self.budget.max_files or
+                parsed_bytes + candidate.size > self.budget.max_bytes)
+            {
+                budget_exceeded = true;
+                continue;
+            }
+
+            try self.scanCandidate(candidate);
+            parsed_files += 1;
+            parsed_bytes += candidate.size;
+        }
+
+        if (budget_exceeded) self.warning_count += 1;
+    }
+
+    fn scanCandidate(self: *LocalScan, candidate: Candidate) !void {
+        const file = std.fs.openFileAbsolute(candidate.path, .{}) catch {
+            self.warning_count += 1;
+            return;
+        };
+        defer file.close();
+
+        const bytes = file.readToEndAlloc(self.allocator, MAX_METADATA_FILE_BYTES) catch {
+            self.warning_count += 1;
+            return;
+        };
+        defer self.allocator.free(bytes);
+
+        const meta = (switch (candidate.provider) {
+            .codex => codex_provider.parseMetadata(self.allocator, candidate.path, bytes),
+            .claude => claude_provider.parseMetadata(self.allocator, candidate.path, bytes),
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        if (!metadataHasUsableSignal(meta)) {
+            freeMetadata(self.allocator, meta);
+            self.warning_count += 1;
+            return;
+        }
+        errdefer freeMetadata(self.allocator, meta);
+
+        try self.rows.append(self.allocator, meta);
+    }
+
+    fn candidateMoreRecent(_: void, lhs: Candidate, rhs: Candidate) bool {
+        if (lhs.mtime == rhs.mtime) return std.mem.lessThan(u8, lhs.path, rhs.path);
+        return lhs.mtime > rhs.mtime;
+    }
+};
+
+fn providerEnabled(source: source_mod.Source, provider: types.ProviderId) bool {
+    return switch (provider) {
+        .codex => source.providers.codex,
+        .claude => source.providers.claude,
+    };
+}
+
+fn metadataHasUsableSignal(meta: types.SessionMeta) bool {
+    return meta.session_id.len > 0 and meta.message_count > 0;
+}
+
+fn cloneMetadata(allocator: std.mem.Allocator, meta: types.SessionMeta) !types.SessionMeta {
+    var cloned = types.SessionMeta{
+        .provider = meta.provider,
+        .session_id = "",
+        .title = "",
+        .summary = "",
+        .project_dir = "",
+        .created_at_ms = meta.created_at_ms,
+        .last_active_at_ms = meta.last_active_at_ms,
+        .source_path = "",
+        .resume_kind = meta.resume_kind,
+        .message_count = meta.message_count,
+        .scan_status = meta.scan_status,
+    };
+    errdefer freeMetadata(allocator, cloned);
+
+    cloned.session_id = try cloneSlice(allocator, meta.session_id);
+    cloned.title = try cloneSlice(allocator, meta.title);
+    cloned.summary = try cloneSlice(allocator, meta.summary);
+    cloned.project_dir = try cloneSlice(allocator, meta.project_dir);
+    cloned.source_path = try cloneSlice(allocator, meta.source_path);
+
+    return cloned;
+}
+
+fn freeRows(allocator: std.mem.Allocator, rows: []types.SessionMeta) void {
+    for (rows) |row| freeMetadata(allocator, row);
+}
+
+fn freeMetadata(allocator: std.mem.Allocator, meta: types.SessionMeta) void {
+    freeSlice(allocator, meta.session_id);
+    freeSlice(allocator, meta.title);
+    freeSlice(allocator, meta.summary);
+    freeSlice(allocator, meta.project_dir);
+    freeSlice(allocator, meta.source_path);
+}
 
 fn cloneSource(allocator: std.mem.Allocator, source: source_mod.Source) !source_mod.Source {
     var cloned = source_mod.Source{
@@ -344,7 +701,7 @@ test "ai_history_session: metadata filter controls visible rows" {
 
 test "ai_history_session: replace rows preserves existing state on allocation failure" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{
-        .fail_index = 1,
+        .fail_index = 4,
     });
     var session = Session.init(failing_allocator.allocator(), .{ .id = "local", .name = "Local", .target = .local });
     defer session.deinit();
@@ -430,4 +787,290 @@ test "ai_history_session: filter truncates to fixed buffer length" {
 
     try std.testing.expectEqual(@as(usize, 128), session.filter_len);
     try std.testing.expectEqualSlices(u8, long_filter[0..128], session.filter[0..session.filter_len]);
+}
+
+test "ai_history_session: scan host replaces rows and marks ready" {
+    const allocator = std.testing.allocator;
+    var fake = struct {
+        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+            const rows = try alloc.alloc(types.SessionMeta, 1);
+            rows[0] = .{
+                .provider = .codex,
+                .session_id = "abc",
+                .title = "A",
+                .source_path = "a.jsonl",
+                .resume_kind = .codex_resume,
+                .last_active_at_ms = 1,
+            };
+            return .{ .rows = rows };
+        }
+        fn load(_: *anyopaque, alloc: std.mem.Allocator, _: types.SessionMeta) ![]types.TranscriptMessage {
+            const rows = try alloc.alloc(types.TranscriptMessage, 1);
+            rows[0] = .{ .role = .user, .content = "hello" };
+            return rows;
+        }
+    }{};
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    const host: ScannerHost = .{ .ctx = &fake, .scan = @TypeOf(fake).scan, .loadTranscript = @TypeOf(fake).load };
+
+    try session.scanNow(host);
+
+    try std.testing.expectEqual(LoadState.ready, session.state);
+    try std.testing.expectEqualStrings("Ready", session.status);
+    try std.testing.expectEqualStrings("abc", session.rows.items[0].session_id);
+}
+
+test "ai_history_session: scan host warning count marks ready with warnings" {
+    const allocator = std.testing.allocator;
+    var fake = struct {
+        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+            const rows = try alloc.alloc(types.SessionMeta, 1);
+            rows[0] = .{
+                .provider = .codex,
+                .session_id = "warn",
+                .title = "Warning",
+                .source_path = "warn.jsonl",
+                .resume_kind = .codex_resume,
+            };
+            return .{ .rows = rows, .warning_count = 1 };
+        }
+        fn load(_: *anyopaque, alloc: std.mem.Allocator, _: types.SessionMeta) ![]types.TranscriptMessage {
+            return try alloc.alloc(types.TranscriptMessage, 0);
+        }
+    }{};
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    const host: ScannerHost = .{ .ctx = &fake, .scan = @TypeOf(fake).scan, .loadTranscript = @TypeOf(fake).load };
+
+    try session.scanNow(host);
+
+    try std.testing.expectEqual(LoadState.ready, session.state);
+    try std.testing.expectEqualStrings("Ready with warnings", session.status);
+}
+
+test "ai_history_session: scan host rows are owned after provider result is freed" {
+    const allocator = std.testing.allocator;
+    var fake = struct {
+        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+            const rows = try alloc.alloc(types.SessionMeta, 1);
+            errdefer alloc.free(rows);
+
+            rows[0] = .{
+                .provider = .codex,
+                .session_id = try alloc.dupe(u8, "owned-abc"),
+                .title = try alloc.dupe(u8, "Owned Title"),
+                .project_dir = try alloc.dupe(u8, "/tmp/project"),
+                .source_path = try alloc.dupe(u8, "/tmp/a.jsonl"),
+                .resume_kind = .codex_resume,
+            };
+            return .{ .rows = rows, .owns_row_strings = true };
+        }
+        fn load(_: *anyopaque, alloc: std.mem.Allocator, _: types.SessionMeta) ![]types.TranscriptMessage {
+            return try alloc.alloc(types.TranscriptMessage, 0);
+        }
+    }{};
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    const host: ScannerHost = .{ .ctx = &fake, .scan = @TypeOf(fake).scan, .loadTranscript = @TypeOf(fake).load };
+
+    try session.scanNow(host);
+
+    try std.testing.expectEqualStrings("owned-abc", session.rows.items[0].session_id);
+    try std.testing.expectEqualStrings("Owned Title", session.rows.items[0].title);
+    try std.testing.expectEqualStrings("/tmp/project", session.rows.items[0].project_dir);
+    try std.testing.expectEqualStrings("/tmp/a.jsonl", session.rows.items[0].source_path);
+}
+
+test "ai_history_session: loadSelectedTranscript returns fake transcript for selected row" {
+    const allocator = std.testing.allocator;
+    var fake = struct {
+        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+            const rows = try alloc.alloc(types.SessionMeta, 1);
+            rows[0] = .{
+                .provider = .codex,
+                .session_id = "abc",
+                .title = "A",
+                .source_path = "a.jsonl",
+                .resume_kind = .codex_resume,
+            };
+            return .{ .rows = rows };
+        }
+        fn load(_: *anyopaque, alloc: std.mem.Allocator, meta: types.SessionMeta) ![]types.TranscriptMessage {
+            try std.testing.expectEqualStrings("abc", meta.session_id);
+            const messages = try alloc.alloc(types.TranscriptMessage, 1);
+            messages[0] = .{ .role = .user, .content = "hello" };
+            return messages;
+        }
+    }{};
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    const host: ScannerHost = .{ .ctx = &fake, .scan = @TypeOf(fake).scan, .loadTranscript = @TypeOf(fake).load };
+    try session.scanNow(host);
+
+    const transcript = try session.loadSelectedTranscript(host);
+    defer allocator.free(transcript);
+
+    try std.testing.expectEqual(@as(usize, 1), transcript.len);
+    try std.testing.expectEqual(types.MessageRole.user, transcript[0].role);
+    try std.testing.expectEqualStrings("hello", transcript[0].content);
+}
+
+test "ai_history_session: loadSelectedTranscript returns NoSelection without visible row" {
+    const allocator = std.testing.allocator;
+    var fake = struct {
+        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+            return .{ .rows = try alloc.alloc(types.SessionMeta, 0) };
+        }
+        fn load(_: *anyopaque, alloc: std.mem.Allocator, _: types.SessionMeta) ![]types.TranscriptMessage {
+            return try alloc.alloc(types.TranscriptMessage, 0);
+        }
+    }{};
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    const host: ScannerHost = .{ .ctx = &fake, .scan = @TypeOf(fake).scan, .loadTranscript = @TypeOf(fake).load };
+
+    try std.testing.expectError(error.NoSelection, session.loadSelectedTranscript(host));
+}
+
+test "ai_history_session: scanLocalFilesystem reads codex and claude jsonl files" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".codex/sessions");
+    try tmp.dir.makePath(".claude/projects/demo");
+    try tmp.dir.writeFile(.{
+        .sub_path = ".codex/sessions/a.jsonl",
+        .data =
+        \\{"type":"session_meta","timestamp":"2026-05-31T10:00:00Z","payload":{"id":"codex-abc","cwd":"/tmp/project"}}
+        \\{"type":"response_item","timestamp":"2026-05-31T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the renderer crash"}]}}
+        \\
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = ".claude/projects/demo/b.jsonl",
+        .data =
+        \\{"sessionId":"claude-abc","cwd":"/tmp/project","timestamp":"2026-05-31T10:00:00Z","message":{"role":"user","content":"Explain the tests"}}
+        \\{"sessionId":"claude-abc","cwd":"/tmp/project","timestamp":"2026-05-31T10:01:00Z","message":{"role":"assistant","content":"They pass."}}
+        \\
+        ,
+    });
+
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &home_buf);
+    const result = try scanLocalFilesystem(allocator, .{ .id = "local", .name = "Local", .target = .local }, home);
+    defer freeScanResult(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+    try std.testing.expectEqual(@as(u32, 0), result.warning_count);
+    var codex_count: usize = 0;
+    var claude_count: usize = 0;
+    for (result.rows) |row| {
+        switch (row.provider) {
+            .codex => codex_count += 1,
+            .claude => claude_count += 1,
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), codex_count);
+    try std.testing.expectEqual(@as(usize, 1), claude_count);
+}
+
+test "ai_history_session: scanNow failure marks failed and preserves existing rows" {
+    const allocator = std.testing.allocator;
+    var fake = struct {
+        fn scan(_: *anyopaque, _: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+            return error.Boom;
+        }
+        fn load(_: *anyopaque, alloc: std.mem.Allocator, _: types.SessionMeta) ![]types.TranscriptMessage {
+            return try alloc.alloc(types.TranscriptMessage, 0);
+        }
+    }{};
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    const existing = [_]types.SessionMeta{.{
+        .provider = .codex,
+        .session_id = "kept",
+        .title = "Kept",
+        .source_path = "kept.jsonl",
+        .resume_kind = .codex_resume,
+    }};
+    try session.replaceRows(&existing);
+
+    const host: ScannerHost = .{ .ctx = &fake, .scan = @TypeOf(fake).scan, .loadTranscript = @TypeOf(fake).load };
+    try std.testing.expectError(error.Boom, session.scanNow(host));
+
+    try std.testing.expectEqual(LoadState.failed, session.state);
+    try std.testing.expectEqualStrings("Scan failed", session.status);
+    try std.testing.expectEqual(@as(usize, 1), session.rows.items.len);
+    try std.testing.expectEqualStrings("kept", session.rows.items[0].session_id);
+}
+
+test "ai_history_session: scanLocalFilesystem skips unusable metadata with warning" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".codex/sessions");
+    try tmp.dir.writeFile(.{
+        .sub_path = ".codex/sessions/good.jsonl",
+        .data =
+        \\{"type":"session_meta","timestamp":"2026-05-31T10:00:00Z","payload":{"id":"codex-good","cwd":"/tmp/project"}}
+        \\{"type":"response_item","timestamp":"2026-05-31T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Keep this"}]}}
+        \\
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = ".codex/sessions/bad.jsonl",
+        .data =
+        \\{"type":"unrelated","value":1}
+        \\
+        ,
+    });
+
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &home_buf);
+    const result = try scanLocalFilesystem(allocator, .{
+        .id = "local",
+        .name = "Local",
+        .target = .local,
+        .providers = .{ .codex = true, .claude = false },
+    }, home);
+    defer freeScanResult(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqual(@as(u32, 1), result.warning_count);
+    try std.testing.expectEqualStrings("codex-good", result.rows[0].session_id);
+}
+
+test "ai_history_session: scanLocalFilesystem budget returns partial rows with warning" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".codex/sessions");
+    for (0..3) |idx| {
+        var path_buf: [64]u8 = undefined;
+        const sub_path = try std.fmt.bufPrint(&path_buf, ".codex/sessions/{d}.jsonl", .{idx});
+        var data_buf: [512]u8 = undefined;
+        const data = try std.fmt.bufPrint(&data_buf,
+            \\{{"type":"session_meta","timestamp":"2026-05-31T10:00:0{d}Z","payload":{{"id":"codex-{d}","cwd":"/tmp/project"}}}}
+            \\{{"type":"response_item","timestamp":"2026-05-31T10:01:0{d}Z","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"Prompt {d}"}}]}}}}
+            \\
+        , .{ idx, idx, idx, idx });
+        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = data });
+    }
+
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &home_buf);
+    const result = try scanLocalFilesystemWithBudget(allocator, .{
+        .id = "local",
+        .name = "Local",
+        .target = .local,
+        .providers = .{ .codex = true, .claude = false },
+    }, home, .{ .max_files = 1, .max_bytes = 1024 * 1024 });
+    defer freeScanResult(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqual(@as(u32, 1), result.warning_count);
 }
