@@ -1060,11 +1060,17 @@ pub fn snapshotTab(arena: std.mem.Allocator, t: *const TabState) !session_persis
     const zoomed_leaf: ?u32 = if (t.tree.zoomed) |z| computeFocusedLeafIndex(&t.tree, z) else null;
 
     return session_persist.TabSnap{
-        .title_override = null,
+        .title_override = try snapshotFocusedTitleOverride(arena, t),
         .focused_leaf = focused_leaf,
         .zoomed_leaf = zoomed_leaf,
         .tree = tree,
     };
+}
+
+fn snapshotFocusedTitleOverride(arena: std.mem.Allocator, t: *const TabState) !?[]const u8 {
+    const surface = t.focusedSurface() orelse return null;
+    if (surface.title_override_len == 0) return null;
+    return try arena.dupe(u8, surface.title_override[0..surface.title_override_len]);
 }
 
 fn snapshotNode(
@@ -1094,12 +1100,9 @@ fn snapshotNode(
 }
 
 fn snapshotSurface(arena: std.mem.Allocator, surface: *const Surface) !session_persist.SurfaceSnap {
-    const cwd_opt: ?[]const u8 = surface.getCwd() orelse surface.getInitialCwd();
-    const cwd_dup: ?[]const u8 = if (cwd_opt) |c| try arena.dupe(u8, c) else null;
-
     return switch (surface.surfaceKind()) {
         .local_shell => .{ .local_shell = .{
-            .cwd = cwd_dup,
+            .cwd = try snapshotOptionalCwd(arena, surface.getCwd() orelse surface.getInitialCwd()),
             .command = null,
         } },
         .ssh => blk: {
@@ -1111,7 +1114,7 @@ fn snapshotSurface(arena: std.mem.Allocator, surface: *const Surface) !session_p
             else
                 std.fmt.parseInt(u16, port_str, 10) catch 22;
             break :blk .{ .ssh = .{
-                .cwd = cwd_dup,
+                .cwd = try snapshotOptionalCwd(arena, surface.getCwd()),
                 .user = try arena.dupe(u8, conn.user()),
                 .host = try arena.dupe(u8, conn.host()),
                 .port = port_num,
@@ -1119,6 +1122,10 @@ fn snapshotSurface(arena: std.mem.Allocator, surface: *const Surface) !session_p
             } };
         },
     };
+}
+
+fn snapshotOptionalCwd(arena: std.mem.Allocator, cwd: ?[]const u8) !?[]const u8 {
+    return if (cwd) |c| try arena.dupe(u8, c) else null;
 }
 
 fn computeFocusedLeafIndex(tree: *const SplitTree, target: SplitTree.Node.Handle) u32 {
@@ -1305,11 +1312,25 @@ pub fn restoreTab(
     t.ai_chat_session = null;
     t.ai_history_session = null;
     t.copilot_session = null;
+    applyRestoredTabMetadata(t, snap);
 
     g_tabs[g_tab_count] = t;
     active_tab_state.g_active_tab = g_tab_count;
     g_tab_count += 1;
     return true;
+}
+
+fn applyRestoredTabMetadata(t: *TabState, snap: *const session_persist.TabSnap) void {
+    const title = snap.title_override orelse return;
+    switch (t.kind) {
+        .terminal => if (t.focusedSurface()) |surface| {
+            surface.setTitleOverride(title);
+        },
+        .ai_chat => if (t.ai_chat_session) |session| {
+            session.setTitle(title);
+        },
+        .ai_history => {},
+    }
 }
 
 fn handleOfNthLeaf(tree: *const SplitTree, target_idx: u32) ?SplitTree.Node.Handle {
@@ -1538,6 +1559,143 @@ test "tab: restoreTab skips an ai_history tab when no restore hook is installed"
     };
     try std.testing.expect(!restoreTab(std.testing.allocator, &snap, 80, 24, .block, false));
     try std.testing.expectEqual(@as(usize, 0), g_tab_count);
+}
+
+test "tab: snapshotTab persists focused surface title override" {
+    const allocator = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    @memcpy(surface.title_override[0..3], "GLM");
+    surface.title_override_len = 3;
+
+    var tree = try SplitTree.init(allocator, &surface);
+    defer tree.deinit();
+
+    const tab_state = TabState{
+        .kind = .terminal,
+        .tree = tree,
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .copilot_session = null,
+    };
+
+    const snap = try snapshotTab(allocator, &tab_state);
+    defer if (snap.title_override) |title| allocator.free(title);
+
+    try std.testing.expectEqualStrings("GLM", snap.title_override.?);
+}
+
+test "tab: restored title override applies to focused surface" {
+    const allocator = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    var tree = try SplitTree.init(allocator, &surface);
+    defer tree.deinit();
+
+    var tab_state = TabState{
+        .kind = .terminal,
+        .tree = tree,
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .copilot_session = null,
+    };
+    const snap = session_persist.TabSnap{
+        .title_override = "GLM",
+        .focused_leaf = 0,
+        .tree = .{ .leaf = .{ .surface = .{ .local_shell = .{} } } },
+    };
+
+    applyRestoredTabMetadata(&tab_state, &snap);
+
+    try std.testing.expectEqualStrings("GLM", tab_state.focusedSurface().?.getTitle());
+}
+
+test "tab: snapshotTab does not use local launch cwd as ssh remote cwd" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.cwd_path_len = 0;
+    @memcpy(surface.initial_cwd_path[0..6], "/local");
+    surface.initial_cwd_path_len = 6;
+    surface.title_override_len = 0;
+    surface.setSshConnection("root", "server.test", "22", "", "", false, false);
+
+    var tree = try SplitTree.init(allocator, &surface);
+    defer tree.deinit();
+
+    const tab_state = TabState{
+        .kind = .terminal,
+        .tree = tree,
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .copilot_session = null,
+    };
+
+    const snap = try snapshotTab(arena.allocator(), &tab_state);
+    const ssh = switch (snap.tree) {
+        .leaf => |leaf| switch (leaf.surface) {
+            .ssh => |s| s,
+            .local_shell => return error.UnexpectedShell,
+        },
+        .split => return error.UnexpectedSplit,
+    };
+
+    try std.testing.expect(ssh.cwd == null);
+}
+
+test "tab: snapshotTab persists ssh cwd only when remote cwd is known" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    @memcpy(surface.cwd_path[0..4], "/srv");
+    surface.cwd_path_len = 4;
+    @memcpy(surface.initial_cwd_path[0..6], "/local");
+    surface.initial_cwd_path_len = 6;
+    surface.title_override_len = 0;
+    surface.setSshConnection("root", "server.test", "22", "", "", false, false);
+
+    var tree = try SplitTree.init(allocator, &surface);
+    defer tree.deinit();
+
+    const tab_state = TabState{
+        .kind = .terminal,
+        .tree = tree,
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .copilot_session = null,
+    };
+
+    const snap = try snapshotTab(arena.allocator(), &tab_state);
+    const ssh = switch (snap.tree) {
+        .leaf => |leaf| switch (leaf.surface) {
+            .ssh => |s| s,
+            .local_shell => return error.UnexpectedShell,
+        },
+        .split => return error.UnexpectedSplit,
+    };
+
+    try std.testing.expectEqualStrings("/srv", ssh.cwd.?);
 }
 
 test "tab: SSH restore command accepts the longest persisted connection fields and cwd" {
