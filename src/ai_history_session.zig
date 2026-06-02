@@ -53,7 +53,7 @@ pub const ScanSink = struct {
 
 pub const ScannerHost = struct {
     ctx: *anyopaque,
-    scan: *const fn (*anyopaque, std.mem.Allocator, source_mod.Source) anyerror!ScanResult,
+    scan: *const fn (*anyopaque, std.mem.Allocator, source_mod.Source, ?ScanSink) anyerror!ScanResult,
     loadTranscript: *const fn (*anyopaque, std.mem.Allocator, types.SessionMeta) anyerror![]types.TranscriptMessage,
 };
 
@@ -62,7 +62,7 @@ pub const ScannerHost = struct {
 /// everything `run` needs and contain no pointers into threadlocal UI state.
 pub const ScanWork = struct {
     ctx: *anyopaque,
-    run: *const fn (*anyopaque, std.mem.Allocator, source_mod.Source) anyerror!ScanResult,
+    run: *const fn (*anyopaque, std.mem.Allocator, source_mod.Source, ?ScanSink) anyerror!ScanResult,
     destroy: *const fn (*anyopaque, std.mem.Allocator) void,
 };
 
@@ -93,7 +93,7 @@ pub const LocalScannerHost = struct {
         };
     }
 
-    fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source) !ScanResult {
+    fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source, _: ?ScanSink) !ScanResult {
         const self: *LocalScannerHost = @ptrCast(@alignCast(ctx));
         if (self.cache) |cache| return try scanLocalFilesystemWithCache(allocator, source, self.home, .{}, cache);
         return try scanLocalFilesystem(allocator, source, self.home);
@@ -117,7 +117,7 @@ pub const WslScannerHost = struct {
         return remote_file.wslExec(allocator, command) orelse error.RemoteExecFailed;
     }
 
-    fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source) !ScanResult {
+    fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source, _: ?ScanSink) !ScanResult {
         const host = RemoteExecHost{ .ctx = ctx, .exec = exec };
         return try scanRemoteFilesystem(allocator, source, host);
     }
@@ -144,7 +144,7 @@ pub const SshScannerHost = struct {
         return try remote_file.sshExecCapture(allocator, self.conn, command);
     }
 
-    fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source) !ScanResult {
+    fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source, _: ?ScanSink) !ScanResult {
         const host = RemoteExecHost{ .ctx = ctx, .exec = exec };
         return try scanRemoteFilesystem(allocator, source, host);
     }
@@ -284,7 +284,7 @@ pub const Session = struct {
             self.state = .failed;
             self.status = "Scan failed";
         }
-        const result = try host.scan(host.ctx, self.allocator, self.source);
+        const result = try host.scan(host.ctx, self.allocator, self.source, null);
         defer freeScanResult(self.allocator, result);
 
         try self.replaceRows(result.rows);
@@ -608,9 +608,20 @@ pub const Session = struct {
     }
 };
 
+const StreamCtx = struct {
+    session: *Session,
+    generation: u64,
+    fn publish(ctx: *anyopaque, rows: []types.SessionMeta) bool {
+        const self: *StreamCtx = @ptrCast(@alignCast(ctx));
+        return self.session.appendScanRows(self.generation, rows);
+    }
+};
+
 fn scanThreadMain(session: *Session, work: ScanWork, generation: u64) void {
     defer work.destroy(work.ctx, session.allocator);
-    const result = work.run(work.ctx, session.allocator, session.source) catch {
+    var stream = StreamCtx{ .session = session, .generation = generation };
+    const sink = ScanSink{ .ctx = &stream, .publish = StreamCtx.publish };
+    const result = work.run(work.ctx, session.allocator, session.source, sink) catch {
         session.publishScanFailure(generation);
         return;
     };
@@ -1217,7 +1228,7 @@ const TestTranscriptHost = struct {
         };
     }
 
-    fn scan(_: *anyopaque, allocator: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+    fn scan(_: *anyopaque, allocator: std.mem.Allocator, _: source_mod.Source, _: ?ScanSink) !ScanResult {
         return .{ .rows = try allocator.alloc(types.SessionMeta, 0) };
     }
 
@@ -1614,7 +1625,7 @@ test "ai_history_session: filter truncates to fixed buffer length" {
 test "ai_history_session: scan host replaces rows and marks ready" {
     const allocator = std.testing.allocator;
     var fake = struct {
-        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source, _: ?ScanSink) !ScanResult {
             const rows = try alloc.alloc(types.SessionMeta, 1);
             rows[0] = .{
                 .provider = .codex,
@@ -1646,7 +1657,7 @@ test "ai_history_session: scan host replaces rows and marks ready" {
 test "ai_history_session: scan host warning count marks ready with warnings" {
     const allocator = std.testing.allocator;
     var fake = struct {
-        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source, _: ?ScanSink) !ScanResult {
             const rows = try alloc.alloc(types.SessionMeta, 1);
             rows[0] = .{
                 .provider = .codex,
@@ -1674,7 +1685,7 @@ test "ai_history_session: scan host warning count marks ready with warnings" {
 test "ai_history_session: scan host rows are owned after provider result is freed" {
     const allocator = std.testing.allocator;
     var fake = struct {
-        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source, _: ?ScanSink) !ScanResult {
             const rows = try alloc.alloc(types.SessionMeta, 1);
             errdefer alloc.free(rows);
 
@@ -1707,7 +1718,7 @@ test "ai_history_session: scan host rows are owned after provider result is free
 test "ai_history_session: loadSelectedTranscript stores fake transcript for selected row" {
     const allocator = std.testing.allocator;
     var fake = struct {
-        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source, _: ?ScanSink) !ScanResult {
             const rows = try alloc.alloc(types.SessionMeta, 1);
             rows[0] = .{
                 .provider = .codex,
@@ -1742,7 +1753,7 @@ test "ai_history_session: loadSelectedTranscript stores fake transcript for sele
 test "ai_history_session: loadSelectedTranscript returns NoSelection without visible row" {
     const allocator = std.testing.allocator;
     var fake = struct {
-        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+        fn scan(_: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source, _: ?ScanSink) !ScanResult {
             return .{ .rows = try alloc.alloc(types.SessionMeta, 0) };
         }
         fn load(_: *anyopaque, alloc: std.mem.Allocator, _: types.SessionMeta) ![]types.TranscriptMessage {
@@ -1802,7 +1813,7 @@ test "ai_history_session: scanLocalFilesystem reads codex and claude jsonl files
 test "ai_history_session: scanNow failure marks failed and preserves existing rows" {
     const allocator = std.testing.allocator;
     var fake = struct {
-        fn scan(_: *anyopaque, _: std.mem.Allocator, _: source_mod.Source) !ScanResult {
+        fn scan(_: *anyopaque, _: std.mem.Allocator, _: source_mod.Source, _: ?ScanSink) !ScanResult {
             return error.Boom;
         }
         fn load(_: *anyopaque, alloc: std.mem.Allocator, _: types.SessionMeta) ![]types.TranscriptMessage {
@@ -2006,7 +2017,7 @@ test "ai_history_session: scanAsync publishes rows then joins clean" {
 
     const Ctx = struct {
         destroyed: bool = false,
-        fn run(ptr: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) anyerror!ScanResult {
+        fn run(ptr: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source, _: ?ScanSink) anyerror!ScanResult {
             _ = ptr;
             const rows = try alloc.alloc(types.SessionMeta, 1);
             rows[0] = .{
@@ -2041,7 +2052,7 @@ test "ai_history_session: scanAsync marks failed when run errors" {
     const allocator = std.testing.allocator;
     const Ctx = struct {
         destroyed: bool = false,
-        fn run(_: *anyopaque, _: std.mem.Allocator, _: source_mod.Source) anyerror!ScanResult {
+        fn run(_: *anyopaque, _: std.mem.Allocator, _: source_mod.Source, _: ?ScanSink) anyerror!ScanResult {
             return error.ScanFailed;
         }
         fn destroy(ptr: *anyopaque, _: std.mem.Allocator) void {
@@ -2150,7 +2161,7 @@ test "ai_history_session: deinit joins an in-flight scan worker" {
 
     const Ctx = struct {
         gate: std.Thread.ResetEvent = .{},
-        fn run(ptr: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source) anyerror!ScanResult {
+        fn run(ptr: *anyopaque, alloc: std.mem.Allocator, _: source_mod.Source, _: ?ScanSink) anyerror!ScanResult {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.gate.wait(); // block until the test releases us
             const rows = try alloc.alloc(types.SessionMeta, 1);
