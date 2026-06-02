@@ -11,6 +11,7 @@ pub fn isDelimiter(cp: u21) bool {
     if (cp == 0 or cp <= 0x20) return true;
     return switch (cp) {
         '"', '\'', '`', '<', '>', '(', ')', '[', ']', '{', '}', '|', '\t', '\r', '\n' => true,
+        0xFF08, 0xFF09 => true, // fullwidth parentheses
         else => false,
     };
 }
@@ -71,6 +72,7 @@ fn isLeadingTrimCodepoint(cp: u21) bool {
         0x201C, // left double quotation mark
         0x300C, // left corner bracket
         0x300E, // left white corner bracket
+        0xFF08, // fullwidth left parenthesis
         0xFF02, // fullwidth quotation mark
         0xFF07, // fullwidth apostrophe
         => true,
@@ -89,6 +91,7 @@ fn isTrailingTrimCodepoint(cp: u21) bool {
         ')',
         ']',
         '}',
+        '(',
         '"',
         '\'',
         '`',
@@ -102,6 +105,7 @@ fn isTrailingTrimCodepoint(cp: u21) bool {
         0x3011, // right black lenticular bracket
         0x3015, // right tortoise shell bracket
         0xFF01, // fullwidth exclamation mark
+        0xFF08, // fullwidth left parenthesis
         0xFF09, // fullwidth right parenthesis
         0xFF0C, // fullwidth comma
         0xFF0E, // fullwidth full stop
@@ -125,6 +129,15 @@ test "trim drops Chinese sentence punctuation after markdown path" {
         "docs/superpowers/specs/2026-05-12-github-pages-docs-design.md",
         trim(token),
     );
+}
+
+test "fullwidth parentheses bound preview path tokens" {
+    try std.testing.expect(isDelimiter(0xFF08)); // fullwidth left parenthesis
+    try std.testing.expect(isDelimiter(0xFF09)); // fullwidth right parenthesis
+}
+
+test "trim drops paired fullwidth parentheses after markdown path" {
+    try std.testing.expectEqualStrings("./TODO.md", trim("./TODO.md\xEF\xBC\x88\xEF\xBC\x89"));
 }
 
 test "trim preserves internal Unicode punctuation" {
