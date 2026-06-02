@@ -320,7 +320,7 @@ pub const Session = struct {
         const generation = self.scan_generation;
         self.mutex.unlock();
 
-        const thread = std.Thread.spawn(.{}, scanWorkerMain, .{ self, work, generation }) catch {
+        const thread = std.Thread.spawn(.{}, scanThreadMain, .{ self, work, generation }) catch {
             self.mutex.lock();
             if (generation == self.scan_generation) {
                 self.state = .failed;
@@ -476,7 +476,7 @@ pub const Session = struct {
     }
 };
 
-fn scanWorkerMain(session: *Session, work: ScanWork, generation: u64) void {
+fn scanThreadMain(session: *Session, work: ScanWork, generation: u64) void {
     defer work.destroy(work.ctx, session.allocator);
     const result = work.run(work.ctx, session.allocator, session.source) catch {
         session.publishScanFailure(generation);
@@ -1893,5 +1893,26 @@ test "ai_history_session: scanAsync publishes rows then joins clean" {
     try std.testing.expectEqual(LoadState.ready, session.state);
     try std.testing.expectEqual(@as(usize, 1), session.rows.items.len);
     try std.testing.expectEqualStrings("async-id", session.rows.items[0].session_id);
+    try std.testing.expect(ctx.destroyed);
+}
+
+test "ai_history_session: scanAsync marks failed when run errors" {
+    const allocator = std.testing.allocator;
+    const Ctx = struct {
+        destroyed: bool = false,
+        fn run(_: *anyopaque, _: std.mem.Allocator, _: source_mod.Source) anyerror!ScanResult {
+            return error.ScanFailed;
+        }
+        fn destroy(ptr: *anyopaque, _: std.mem.Allocator) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.destroyed = true;
+        }
+    };
+    var ctx = Ctx{};
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    session.scanAsync(.{ .ctx = &ctx, .run = Ctx.run, .destroy = Ctx.destroy });
+    session.joinForTest();
+    try std.testing.expectEqual(LoadState.failed, session.state);
     try std.testing.expect(ctx.destroyed);
 }
