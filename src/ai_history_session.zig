@@ -2017,6 +2017,28 @@ test "ai_history_session: loadTranscriptAsync publishes messages then joins clea
     try std.testing.expectEqual(TranscriptState.ready, session.transcript_state);
     try std.testing.expectEqual(@as(usize, 1), session.transcript.len);
     try std.testing.expectEqualStrings("async-hello", session.transcript[0].content);
+    try std.testing.expectEqual(@as(?types.ProviderId, .codex), session.transcript_provider);
+}
+
+test "ai_history_session: loadTranscriptAsync marks failed when run errors" {
+    const allocator = std.testing.allocator;
+    const Ctx = struct {
+        destroyed: bool = false,
+        fn run(_: *anyopaque, _: std.mem.Allocator) anyerror![]types.TranscriptMessage {
+            return error.TranscriptFailed;
+        }
+        fn destroy(ptr: *anyopaque, _: std.mem.Allocator) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.destroyed = true;
+        }
+    };
+    var ctx = Ctx{};
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    session.loadTranscriptAsync(.{ .ctx = &ctx, .provider = .codex, .run = Ctx.run, .destroy = Ctx.destroy });
+    session.joinForTest();
+    try std.testing.expectEqual(TranscriptState.failed, session.transcript_state);
+    try std.testing.expect(ctx.destroyed);
 }
 
 test "ai_history_session: publishTranscript discards stale generation" {
