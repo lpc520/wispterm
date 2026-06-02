@@ -4823,7 +4823,10 @@ fn runMainLoop(self: *AppWindow) !void {
         }
         if (window_backend.closeRequested(win)) {
             window_backend.clearCloseRequested(win);
-            if (!window_backend.closeRequestPromptsConfirmation()) {
+            const running_program = anyTabHasRunningProgram();
+            const confirm_for_program = close_confirm.shouldConfirm(g_confirm_close_running_program, running_program);
+            const want_confirm = window_backend.closeRequestPromptsConfirmation() or confirm_for_program;
+            if (!want_confirm) {
                 // Backend tears the window down immediately with no in-app
                 // prompt; closing this window does not necessarily end the app
                 // session (the backend owns process lifecycle).
@@ -4831,7 +4834,8 @@ fn runMainLoop(self: *AppWindow) !void {
                 running = false;
                 continue;
             }
-            overlays.windowCloseConfirmOpen();
+            const variant: overlays.CloseConfirmVariant = if (confirm_for_program) .running_program else .window_generic;
+            overlays.closeConfirmOpen(.window, variant);
             g_force_rebuild = true;
             g_cells_valid = false;
         }
