@@ -377,10 +377,6 @@ pub fn closeConfirmOpen(action: close_confirm.PendingClose, variant: CloseConfir
     g_window_close_confirm_visible = true;
 }
 
-pub fn windowCloseConfirmOpen() void {
-    closeConfirmOpen(.window, .window_generic);
-}
-
 pub fn windowCloseConfirmClose() void {
     g_window_close_confirm_visible = false;
 }
