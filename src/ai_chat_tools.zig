@@ -989,6 +989,26 @@ fn doubleQuotedStringLiteral(allocator: std.mem.Allocator, text: []const u8) ![]
     return out.toOwnedSlice(allocator);
 }
 
+const AGENT_START_PREFIX = "__WISPTERM_AGENT_START_";
+
+/// Whether the surface's most recent agent command is still running: find the
+/// last START marker, read its nonce, and report true if no completed END
+/// (`__WISPTERM_AGENT_END_<nonce>__:<digit>`) appears after it. If the start has
+/// scrolled out of the snapshot we report false (idle) — an acceptable
+/// false-negative; a stale false-positive self-heals via <ctrl-c> + retry.
+fn hasPendingAgentCommand(snapshot: []const u8) bool {
+    const last_start = std.mem.lastIndexOf(u8, snapshot, AGENT_START_PREFIX) orelse return false;
+    const nonce_start = last_start + AGENT_START_PREFIX.len;
+    var i = nonce_start;
+    while (i < snapshot.len and std.ascii.isDigit(snapshot[i])) : (i += 1) {}
+    const nonce = snapshot[nonce_start..i];
+    if (nonce.len == 0) return false;
+
+    var buf: [64]u8 = undefined;
+    const end_marker = std.fmt.bufPrint(&buf, "__WISPTERM_AGENT_END_{s}__", .{nonce}) catch return false;
+    return findCompletedEnd(snapshot[last_start..], end_marker) == null;
+}
+
 fn unixSessionExecTool(ctx: *ToolContext, kind: UnixSessionKind, surface_id: []const u8, command: []const u8, timeout_ms: u32) ![]u8 {
     if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
     const dangerous = isDangerousCommand(command);
@@ -1012,6 +1032,17 @@ fn unixSessionExecTool(ctx: *ToolContext, kind: UnixSessionKind, surface_id: []c
     }
     if (try shellExecAgentAppRefusal(ctx.allocator, kind, surface)) |message| return message;
     if (try shellExecInteractiveAgentCommandRefusal(ctx.allocator, kind, command)) |message| return message;
+
+    // Refuse to inject a new command while the previous one is still running:
+    // interleaved sentinels confuse parsing and the model tends to re-issue,
+    // duplicating side effects (e.g. a second git clone). A fresh snapshot is
+    // authoritative; the cached surface snapshot may be stale.
+    if (host.surfaceSnapshot(host.ctx, ctx.allocator, surface.ptr) catch null) |guard_snapshot| {
+        defer ctx.allocator.free(guard_snapshot);
+        if (hasPendingAgentCommand(guard_snapshot)) {
+            return std.fmt.allocPrint(ctx.allocator, "A previous command is still running in this {s} terminal. Do not start another command. Wait and re-check with terminal_snapshot, or interrupt it first with terminal_repl_exec repl=plain code=<ctrl-c>.", .{kind.label()});
+        }
+    }
 
     const nonce = std.time.milliTimestamp();
     // Keep the agent's injected command out of the user's shell history. We
@@ -1731,6 +1762,24 @@ test "ai chat Python string literal escapes code for REPL eval" {
     defer allocator.free(literal);
 
     try std.testing.expectEqualStrings("\"print(\\\"hello\\\")\\npath = \\\"C:\\\\\\\\tmp\\\"\"", literal);
+}
+
+test "agent exec detects a still-pending previous command" {
+    // Real START present, no completed END -> pending.
+    const pending = "__WISPTERM_AGENT_START_222__\nCloning into 'x'...\n";
+    try std.testing.expect(hasPendingAgentCommand(pending));
+
+    // Echo end (:%s) only, no real :<digit> -> still pending.
+    const echo_only =
+        "$  printf '\\n__WISPTERM_AGENT_END_222__:%s\\n'\n__WISPTERM_AGENT_START_222__\nfoo\n";
+    try std.testing.expect(hasPendingAgentCommand(echo_only));
+
+    // Completed END present -> not pending.
+    const done = "__WISPTERM_AGENT_START_222__\nhi\n__WISPTERM_AGENT_END_222__:0\n$ ";
+    try std.testing.expect(!hasPendingAgentCommand(done));
+
+    // No agent markers at all -> not pending.
+    try std.testing.expect(!hasPendingAgentCommand("(base) u@h:~$ "));
 }
 
 test "agent exec timeout message says still running, do not re-issue" {
