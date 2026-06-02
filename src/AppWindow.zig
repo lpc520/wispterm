@@ -682,22 +682,7 @@ pub fn aiHistoryMoveSelection(delta: isize) bool {
 pub fn aiHistoryPreviewSelectedTranscript() bool {
     const session = activeAiHistory() orelse return false;
     const allocator = g_allocator orelse return false;
-    const home = localHomeForAiHistory(allocator) catch |err| {
-        log.warn("failed to resolve local home for AI History transcript load: {}", .{err});
-        session.transcript_state = .failed;
-        session.transcript_status = "Home unavailable";
-        markUiDirty();
-        return true;
-    };
-    defer allocator.free(home);
-
-    var host_state = ai_history_session.LocalScannerHost{ .home = home };
-    const host = host_state.scannerHost();
-    session.loadSelectedTranscript(host) catch |err| {
-        log.warn("failed to load AI History transcript: {}", .{err});
-    };
-    markUiDirty();
-    return true;
+    return withAiHistoryScannerHost(allocator, session, .preview, PreviewTranscriptRunner.run);
 }
 
 pub fn aiHistoryLoadSelectedTranscript() bool {
@@ -771,24 +756,79 @@ fn failAiHistoryResumePathUnavailable() bool {
 
 pub fn aiHistoryScanLocalNow() bool {
     const session = activeAiHistory() orelse return false;
-    if (session.source.target != .local) return false;
     const allocator = g_allocator orelse return false;
-    const home = localHomeForAiHistory(allocator) catch |err| {
-        log.warn("failed to resolve local home for AI History scan: {}", .{err});
-        session.state = .failed;
-        session.status = "Home unavailable";
+    return withAiHistoryScannerHost(allocator, session, .scan, ScanRunner.run);
+}
+
+const AiHistoryHostAction = enum { scan, preview };
+const AiHistoryHostRunner = *const fn (*ai_history_session.Session, ai_history_session.ScannerHost) bool;
+
+const PreviewTranscriptRunner = struct {
+    fn run(session: *ai_history_session.Session, host: ai_history_session.ScannerHost) bool {
+        session.loadSelectedTranscript(host) catch |err| {
+            log.warn("failed to load AI History transcript: {}", .{err});
+            session.transcript_state = .failed;
+            session.transcript_status = "Transcript failed";
+            markUiDirty();
+            return true;
+        };
         markUiDirty();
         return true;
-    };
-    defer allocator.free(home);
+    }
+};
 
-    var host_state = ai_history_session.LocalScannerHost{ .home = home };
-    const host = host_state.scannerHost();
-    session.scanNow(host) catch |err| {
-        log.warn("failed to scan local AI History: {}", .{err});
-    };
-    markUiDirty();
-    return true;
+const ScanRunner = struct {
+    fn run(session: *ai_history_session.Session, host: ai_history_session.ScannerHost) bool {
+        session.scanNow(host) catch |err| {
+            log.warn("failed to scan AI History: {}", .{err});
+            markUiDirty();
+            return true;
+        };
+        markUiDirty();
+        return true;
+    }
+};
+
+fn withAiHistoryScannerHost(allocator: std.mem.Allocator, session: *ai_history_session.Session, action: AiHistoryHostAction, runner: AiHistoryHostRunner) bool {
+    switch (session.source.target) {
+        .local => {
+            const home = localHomeForAiHistory(allocator) catch |err| {
+                log.warn("failed to resolve local home for AI History scan: {}", .{err});
+                failAiHistoryHostUnavailable(session, action, "Home unavailable");
+                markUiDirty();
+                return true;
+            };
+            defer allocator.free(home);
+            var host_state = ai_history_session.LocalScannerHost{ .home = home };
+            return runner(session, host_state.scannerHost());
+        },
+        .wsl => {
+            var host_state = ai_history_session.WslScannerHost{};
+            return runner(session, host_state.scannerHost());
+        },
+        .ssh => |ssh| {
+            const conn = overlays.aiHistorySshConnection(ssh.profile_name) orelse {
+                failAiHistoryHostUnavailable(session, action, "SSH profile unavailable");
+                markUiDirty();
+                return true;
+            };
+            var host_state = ai_history_session.SshScannerHost{ .conn = conn };
+            return runner(session, host_state.scannerHost());
+        },
+    }
+}
+
+fn failAiHistoryHostUnavailable(session: *ai_history_session.Session, action: AiHistoryHostAction, status: []const u8) void {
+    switch (action) {
+        .scan => {
+            session.state = .failed;
+            session.status = status;
+        },
+        .preview => {
+            session.transcript_state = .failed;
+            session.transcript_status = status;
+        },
+    }
 }
 
 pub fn aiHistoryHandleMousePress(xpos: f64, ypos: f64) bool {

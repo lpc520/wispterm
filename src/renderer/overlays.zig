@@ -18,6 +18,7 @@ const Config = @import("../config.zig");
 const themes_embed = @import("../themes.zig");
 const input_key = @import("../input/key.zig");
 const ssh_prompt = @import("../ssh_prompt.zig");
+const ssh_connection = @import("../ssh_connection.zig");
 const app_metadata = @import("../app_metadata.zig");
 const command_center_state = @import("../command_center_state.zig");
 const command_palette_model = @import("../command_palette_model.zig");
@@ -2100,6 +2101,36 @@ pub fn aiHistoryConnectSshProfile(identifier: []const u8, remote_command: []cons
     const idx = findSshProfileIndex(identifier) orelse return .not_found;
     const surface = connectSshProfileReturningSurfaceWithCommand(idx, remote_command) orelse return .failed;
     return .{ .connected = surface };
+}
+
+pub fn aiHistorySshConnection(identifier: []const u8) ?ssh_connection.SshConnection {
+    const idx = findSshProfileIndex(identifier) orelse return null;
+    if (idx >= g_ssh_profile_count) return null;
+    const profile = &g_ssh_profiles[idx];
+    const ip = profileField(profile, .ip);
+    const user = profileField(profile, .user);
+    const port = profileField(profile, .port);
+    const password = profileField(profile, .password);
+    const proxy_jump = profileField(profile, .proxy_jump);
+    if (ip.len == 0 or user.len == 0) return null;
+    if (!isSshTokenSafe(ip) or !isSshTokenSafe(user)) return null;
+    if (port.len > 0 and !isPortTokenSafe(port)) return null;
+    if (!command_palette_model.isProxyJumpSafe(proxy_jump)) return null;
+
+    var conn: ssh_connection.SshConnection = .{};
+    conn.user_len = @min(user.len, conn.user_buf.len);
+    conn.host_len = @min(ip.len, conn.host_buf.len);
+    conn.port_len = @min(port.len, conn.port_buf.len);
+    conn.password_len = @min(password.len, conn.password_buf.len);
+    conn.proxy_jump_len = @min(proxy_jump.len, conn.proxy_jump_buf.len);
+    @memcpy(conn.user_buf[0..conn.user_len], user[0..conn.user_len]);
+    @memcpy(conn.host_buf[0..conn.host_len], ip[0..conn.host_len]);
+    @memcpy(conn.port_buf[0..conn.port_len], port[0..conn.port_len]);
+    @memcpy(conn.password_buf[0..conn.password_len], password[0..conn.password_len]);
+    @memcpy(conn.proxy_jump_buf[0..conn.proxy_jump_len], proxy_jump[0..conn.proxy_jump_len]);
+    conn.password_auth = password.len > 0;
+    conn.legacy_algorithms = AppWindow.g_ssh_legacy_algorithms;
+    return conn;
 }
 
 const copySshProfileField = profile_codec.copySshProfileField;

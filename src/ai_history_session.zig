@@ -4,6 +4,8 @@ const source_mod = @import("ai_history_source.zig");
 const session_persist = @import("session_persist.zig");
 const codex_provider = @import("ai_history_provider_codex.zig");
 const claude_provider = @import("ai_history_provider_claude.zig");
+const remote_file = @import("platform/remote_file.zig");
+const ssh_connection = @import("ssh_connection.zig");
 
 pub const LoadState = enum { idle, scanning, ready, failed };
 pub const TranscriptState = enum { idle, loading, ready, failed };
@@ -34,6 +36,11 @@ pub const ScannerHost = struct {
     loadTranscript: *const fn (*anyopaque, std.mem.Allocator, types.SessionMeta) anyerror![]types.TranscriptMessage,
 };
 
+pub const RemoteExecHost = struct {
+    ctx: *anyopaque,
+    exec: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror![]u8,
+};
+
 pub const LocalScannerHost = struct {
     home: []const u8,
 
@@ -52,6 +59,57 @@ pub const LocalScannerHost = struct {
 
     fn loadTranscript(_: *anyopaque, allocator: std.mem.Allocator, meta: types.SessionMeta) ![]types.TranscriptMessage {
         return try loadLocalTranscript(allocator, meta);
+    }
+};
+
+pub const WslScannerHost = struct {
+    pub fn scannerHost(self: *WslScannerHost) ScannerHost {
+        return .{
+            .ctx = self,
+            .scan = scan,
+            .loadTranscript = loadTranscript,
+        };
+    }
+
+    fn exec(_: *anyopaque, allocator: std.mem.Allocator, command: []const u8) ![]u8 {
+        return remote_file.wslExec(allocator, command) orelse error.RemoteExecFailed;
+    }
+
+    fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source) !ScanResult {
+        const host = RemoteExecHost{ .ctx = ctx, .exec = exec };
+        return try scanRemoteFilesystem(allocator, source, host);
+    }
+
+    fn loadTranscript(ctx: *anyopaque, allocator: std.mem.Allocator, meta: types.SessionMeta) ![]types.TranscriptMessage {
+        const host = RemoteExecHost{ .ctx = ctx, .exec = exec };
+        return try loadRemoteTranscript(allocator, host, meta);
+    }
+};
+
+pub const SshScannerHost = struct {
+    conn: ssh_connection.SshConnection,
+
+    pub fn scannerHost(self: *SshScannerHost) ScannerHost {
+        return .{
+            .ctx = self,
+            .scan = scan,
+            .loadTranscript = loadTranscript,
+        };
+    }
+
+    fn exec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) ![]u8 {
+        const self: *SshScannerHost = @ptrCast(@alignCast(ctx));
+        return try remote_file.sshExecCapture(allocator, self.conn, command);
+    }
+
+    fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source) !ScanResult {
+        const host = RemoteExecHost{ .ctx = ctx, .exec = exec };
+        return try scanRemoteFilesystem(allocator, source, host);
+    }
+
+    fn loadTranscript(ctx: *anyopaque, allocator: std.mem.Allocator, meta: types.SessionMeta) ![]types.TranscriptMessage {
+        const host = RemoteExecHost{ .ctx = ctx, .exec = exec };
+        return try loadRemoteTranscript(allocator, host, meta);
     }
 };
 
@@ -373,6 +431,80 @@ pub fn loadLocalTranscript(allocator: std.mem.Allocator, meta: types.SessionMeta
     };
 }
 
+pub fn providerFindCommand(provider: types.ProviderId, root: []const u8, out: []u8) ![]const u8 {
+    _ = provider;
+    var quoted_buf: [1024]u8 = undefined;
+    const quoted = remote_file.shellQuote(&quoted_buf, root) orelse return error.CommandTooLong;
+    return std.fmt.bufPrint(out, "find {s} -type f -name '*.jsonl' -size -2048k | head -500", .{quoted}) catch error.CommandTooLong;
+}
+
+pub fn remoteCatCommand(path: []const u8, out: []u8) ![]const u8 {
+    var quoted_buf: [1024]u8 = undefined;
+    const quoted = remote_file.shellQuote(&quoted_buf, path) orelse return error.CommandTooLong;
+    return std.fmt.bufPrint(out, "cat {s}", .{quoted}) catch error.CommandTooLong;
+}
+
+pub fn scanRemoteFilesystem(allocator: std.mem.Allocator, source: source_mod.Source, host: RemoteExecHost) !ScanResult {
+    const home_raw = try host.exec(host.ctx, allocator, remote_file.wslHomeCommand());
+    defer allocator.free(home_raw);
+    const home = std.mem.trim(u8, home_raw, " \t\r\n");
+    if (home.len == 0) return error.NoHomeDirectory;
+
+    var scanner = RemoteScan{
+        .allocator = allocator,
+        .host = host,
+    };
+    errdefer scanner.deinit();
+
+    if (source.providers.codex) {
+        if (source.codex_root_override) |root| {
+            try scanner.scanProviderRoot(.codex, root);
+        } else {
+            var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (source_mod.defaultRoot(.codex, home, &root_buf)) |root| {
+                try scanner.scanProviderRoot(.codex, root);
+            } else {
+                scanner.warning_count += 1;
+            }
+        }
+    }
+    if (source.providers.claude) {
+        if (source.claude_root_override) |root| {
+            try scanner.scanProviderRoot(.claude, root);
+        } else {
+            var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (source_mod.defaultRoot(.claude, home, &root_buf)) |root| {
+                try scanner.scanProviderRoot(.claude, root);
+            } else {
+                scanner.warning_count += 1;
+            }
+        }
+    }
+    for (source.extra_roots) |root| {
+        if (!providerEnabled(source, root.provider)) continue;
+        try scanner.scanProviderRoot(root.provider, root.path);
+    }
+
+    const rows = try scanner.rows.toOwnedSlice(allocator);
+    return .{
+        .rows = rows,
+        .warning_count = scanner.warning_count,
+        .owns_row_strings = true,
+    };
+}
+
+pub fn loadRemoteTranscript(allocator: std.mem.Allocator, host: RemoteExecHost, meta: types.SessionMeta) ![]types.TranscriptMessage {
+    var command_buf: [2048]u8 = undefined;
+    const command = try remoteCatCommand(meta.source_path, command_buf[0..]);
+    const bytes = try host.exec(host.ctx, allocator, command);
+    defer allocator.free(bytes);
+
+    return switch (meta.provider) {
+        .codex => try codex_provider.parseTranscript(allocator, bytes),
+        .claude => try claude_provider.parseTranscript(allocator, bytes),
+    };
+}
+
 pub fn freeScanResult(allocator: std.mem.Allocator, result: ScanResult) void {
     if (result.owns_row_strings) freeRows(allocator, result.rows);
     allocator.free(result.rows);
@@ -535,6 +667,76 @@ const LocalScan = struct {
     }
 };
 
+const RemoteScan = struct {
+    allocator: std.mem.Allocator,
+    host: RemoteExecHost,
+    rows: std.ArrayListUnmanaged(types.SessionMeta) = .empty,
+    warning_count: u32 = 0,
+
+    fn deinit(self: *RemoteScan) void {
+        freeRows(self.allocator, self.rows.items);
+        self.rows.deinit(self.allocator);
+    }
+
+    fn scanProviderRoot(self: *RemoteScan, provider: types.ProviderId, root: []const u8) !void {
+        var find_buf: [2048]u8 = undefined;
+        const find_cmd = providerFindCommand(provider, root, find_buf[0..]) catch {
+            self.warning_count += 1;
+            return;
+        };
+        const listing = self.host.exec(self.host.ctx, self.allocator, find_cmd) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                self.warning_count += 1;
+                return;
+            },
+        };
+        defer self.allocator.free(listing);
+
+        var lines = std.mem.splitScalar(u8, listing, '\n');
+        while (lines.next()) |line_raw| {
+            const path = std.mem.trim(u8, line_raw, " \t\r\n");
+            if (path.len == 0) continue;
+            try self.scanPath(provider, path);
+        }
+    }
+
+    fn scanPath(self: *RemoteScan, provider: types.ProviderId, path: []const u8) !void {
+        var cat_buf: [2048]u8 = undefined;
+        const cat_cmd = remoteCatCommand(path, cat_buf[0..]) catch {
+            self.warning_count += 1;
+            return;
+        };
+        const bytes = self.host.exec(self.host.ctx, self.allocator, cat_cmd) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                self.warning_count += 1;
+                return;
+            },
+        };
+        defer self.allocator.free(bytes);
+        if (bytes.len > MAX_METADATA_FILE_BYTES) {
+            self.warning_count += 1;
+            return;
+        }
+
+        const meta = (switch (provider) {
+            .codex => codex_provider.parseMetadata(self.allocator, path, bytes),
+            .claude => claude_provider.parseMetadata(self.allocator, path, bytes),
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        if (!metadataHasUsableSignal(meta)) {
+            freeMetadata(self.allocator, meta);
+            self.warning_count += 1;
+            return;
+        }
+        errdefer freeMetadata(self.allocator, meta);
+
+        try self.rows.append(self.allocator, meta);
+    }
+};
+
 fn providerEnabled(source: source_mod.Source, provider: types.ProviderId) bool {
     return switch (provider) {
         .codex => source.providers.codex,
@@ -683,6 +885,43 @@ const TestTranscriptHost = struct {
             .content = try allocator.dupe(u8, "hello"),
         };
         return messages;
+    }
+};
+
+const FakeRemoteHost = struct {
+    const codex_path = "/home/me/.codex/sessions/codex-abc.jsonl";
+    const claude_path = "/home/me/.claude/projects/project/claude-abc.jsonl";
+    const codex_jsonl =
+        \\{"type":"session_meta","id":"codex-abc","cwd":"/home/me/project","timestamp":"2026-05-31T10:00:00Z"}
+        \\{"type":"response_item","role":"user","content":[{"type":"input_text","text":"Fix remote renderer"}],"timestamp":"2026-05-31T10:01:00Z"}
+        \\
+    ;
+    const claude_jsonl =
+        \\{"sessionId":"claude-abc","cwd":"/home/me/project","timestamp":"2026-05-31T10:00:00.000Z","type":"user","message":{"role":"user","content":"Fix remote tests"}}
+        \\
+    ;
+
+    pub fn remoteExecHost(self: *FakeRemoteHost) RemoteExecHost {
+        return .{ .ctx = self, .exec = exec };
+    }
+
+    fn exec(_: *anyopaque, allocator: std.mem.Allocator, command: []const u8) ![]u8 {
+        if (std.mem.eql(u8, command, remote_file.wslHomeCommand())) {
+            return try allocator.dupe(u8, "/home/me\n");
+        }
+        if (std.mem.eql(u8, command, "find '/home/me/.codex' -type f -name '*.jsonl' -size -2048k | head -500")) {
+            return try allocator.dupe(u8, codex_path ++ "\n");
+        }
+        if (std.mem.eql(u8, command, "find '/home/me/.claude' -type f -name '*.jsonl' -size -2048k | head -500")) {
+            return try allocator.dupe(u8, claude_path ++ "\n");
+        }
+        if (std.mem.eql(u8, command, "cat '" ++ codex_path ++ "'")) {
+            return try allocator.dupe(u8, codex_jsonl);
+        }
+        if (std.mem.eql(u8, command, "cat '" ++ claude_path ++ "'")) {
+            return try allocator.dupe(u8, claude_jsonl);
+        }
+        return error.UnexpectedCommand;
     }
 };
 
@@ -864,6 +1103,52 @@ test "ai_history_session: loading selected transcript stores and clears owned me
     try std.testing.expectEqual(TranscriptState.idle, session.transcript_state);
     try std.testing.expectEqual(@as(?types.ProviderId, null), session.transcript_provider);
     try std.testing.expectEqual(@as(usize, 0), session.transcript.len);
+}
+
+test "ai_history_session: remote provider find command quotes root" {
+    var out: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "find '/home/me/it'\\''s/.codex' -type f -name '*.jsonl' -size -2048k | head -500",
+        try providerFindCommand(.codex, "/home/me/it's/.codex", &out),
+    );
+}
+
+test "ai_history_session: remote scan uses fake host JSONL bytes" {
+    const allocator = std.testing.allocator;
+    var fake = FakeRemoteHost{};
+    const result = try scanRemoteFilesystem(allocator, .{
+        .id = "wsl",
+        .name = "WSL",
+        .target = .{ .wsl = .{} },
+    }, fake.remoteExecHost());
+    defer freeScanResult(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+    try std.testing.expectEqual(@as(u32, 0), result.warning_count);
+    try std.testing.expectEqual(types.ProviderId.codex, result.rows[0].provider);
+    try std.testing.expectEqualStrings("codex-abc", result.rows[0].session_id);
+    try std.testing.expectEqualStrings("/home/me/project", result.rows[0].project_dir);
+    try std.testing.expectEqual(types.ProviderId.claude, result.rows[1].provider);
+    try std.testing.expectEqualStrings("claude-abc", result.rows[1].session_id);
+}
+
+test "ai_history_session: remote transcript loads from fake host" {
+    const allocator = std.testing.allocator;
+    var fake = FakeRemoteHost{};
+    const meta: types.SessionMeta = .{
+        .provider = .codex,
+        .session_id = "codex-abc",
+        .title = "Remote",
+        .project_dir = "/home/me/project",
+        .source_path = FakeRemoteHost.codex_path,
+        .resume_kind = .codex_resume,
+    };
+    const messages = try loadRemoteTranscript(allocator, fake.remoteExecHost(), meta);
+    defer freeTranscript(allocator, .codex, messages);
+
+    try std.testing.expectEqual(@as(usize, 1), messages.len);
+    try std.testing.expectEqual(types.MessageRole.user, messages[0].role);
+    try std.testing.expectEqualStrings("Fix remote renderer", messages[0].content);
 }
 
 test "ai_history_session: replace rows preserves existing state on allocation failure" {
