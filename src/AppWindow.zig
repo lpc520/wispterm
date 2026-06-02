@@ -490,7 +490,11 @@ fn logFrameGeometryIfChanged(win: *window_backend.Window, fb_width: c_int, fb_he
 }
 
 fn glDiagString(name: gpu.c.GLenum) []const u8 {
-    const ptr = gpu.glTable().GetString.?(name);
+    // The Metal backend hands back a stub GlTable whose fn pointers are null
+    // (see renderer/gpu/metal/GlTable.zig). Guard the fn pointer itself, not
+    // just its return value, so render diagnostics don't panic on macOS.
+    const get_string = gpu.glTable().GetString orelse return "(unavailable)";
+    const ptr = get_string(name);
     if (ptr == null) return "(null)";
     return std.mem.span(@as([*:0]const u8, @ptrCast(ptr)));
 }
@@ -528,16 +532,22 @@ threadlocal var g_diag_last_swap_client_h: i32 = -1;
 fn logSwapDiagnosticsIfChanged(win: *window_backend.Window, fb_width: c_int, fb_height: c_int) void {
     if (!render_diagnostics.enabled()) return;
     const gl = gpu.glTable();
+    // Metal backend's GlTable is a stub with null fn pointers (see GlTable.zig);
+    // skip the GL-specific swap diagnostics there instead of panicking on `.?`.
+    // Geometry/DPI diagnostics are emitted by logFrameGeometryIfChanged, which
+    // doesn't touch GL, so the DPI log we care about for #90 still works.
+    const get_integerv = gl.GetIntegerv orelse return;
+    const is_enabled = gl.IsEnabled orelse return;
 
     var vp: [4]gpu.c.GLint = undefined;
-    gl.GetIntegerv.?(gpu.c.GL_VIEWPORT, &vp);
+    get_integerv(gpu.c.GL_VIEWPORT, &vp);
 
     var blend: [5]gpu.c.GLint = undefined;
-    blend[0] = @intFromBool(gl.IsEnabled.?(gpu.c.GL_BLEND) != 0);
-    gl.GetIntegerv.?(gpu.c.GL_BLEND_SRC_RGB, &blend[1]);
-    gl.GetIntegerv.?(gpu.c.GL_BLEND_DST_RGB, &blend[2]);
-    gl.GetIntegerv.?(gpu.c.GL_BLEND_SRC_ALPHA, &blend[3]);
-    gl.GetIntegerv.?(gpu.c.GL_BLEND_DST_ALPHA, &blend[4]);
+    blend[0] = @intFromBool(is_enabled(gpu.c.GL_BLEND) != 0);
+    get_integerv(gpu.c.GL_BLEND_SRC_RGB, &blend[1]);
+    get_integerv(gpu.c.GL_BLEND_DST_RGB, &blend[2]);
+    get_integerv(gpu.c.GL_BLEND_SRC_ALPHA, &blend[3]);
+    get_integerv(gpu.c.GL_BLEND_DST_ALPHA, &blend[4]);
 
     const client = window_backend.clientSize(win);
     const vp_matches_client = (vp[2] == client.width and vp[3] == client.height);
