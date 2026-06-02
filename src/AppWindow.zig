@@ -625,6 +625,8 @@ fn renderAiHistoryFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_int
             .fillQuadAlpha = ui_pipeline.fillQuadAlpha,
             .renderTextLimited = titlebar.renderTextLimited,
         };
+        session.mutex.lock();
+        defer session.mutex.unlock();
         ai_history_renderer.render(
             draw,
             session,
@@ -671,22 +673,28 @@ pub fn aiHistoryInsertCodepoint(codepoint: u21) bool {
     if (codepoint < 0x20 or codepoint == 0x7f) return false;
     var buf: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(codepoint, &buf) catch return false;
+    session.mutex.lock();
     session.appendFilterBytes(buf[0..len]);
+    session.mutex.unlock();
     markUiDirty();
     return true;
 }
 
 pub fn aiHistoryBackspaceFilter() bool {
     const session = activeAiHistory() orelse return false;
+    session.mutex.lock();
     session.backspaceFilter();
+    session.mutex.unlock();
     markUiDirty();
     return true;
 }
 
 pub fn aiHistoryMoveSelection(delta: isize) bool {
     const session = activeAiHistory() orelse return false;
+    session.mutex.lock();
     session.moveSelection(delta);
     session.ensureSelectionVisible(aiHistoryListVisibleRowsForWindow());
+    session.mutex.unlock();
     markUiDirty();
     return true;
 }
@@ -706,7 +714,18 @@ pub fn resumeAiHistorySelection() bool {
     const active = tab.activeTab() orelse return false;
     if (active.kind != .ai_history) return false;
     const session = active.ai_history_session orelse return false;
-    const meta = session.selectedVisible() orelse return false;
+    const allocator = g_allocator orelse return false;
+
+    session.mutex.lock();
+    const selected = session.selectedVisible();
+    const meta_clone: ?ai_history_types.SessionMeta = if (selected) |m|
+        (ai_history_session.cloneMetadata(allocator, m) catch null)
+    else
+        null;
+    session.mutex.unlock();
+
+    const meta = meta_clone orelse return false;
+    defer ai_history_session.freeMetadata(allocator, meta);
     return spawnResumeTerminal(session.source.target, meta);
 }
 
@@ -931,6 +950,8 @@ pub fn aiHistoryHandleMousePress(xpos: f64, ypos: f64) bool {
     const right = rightPanelsWidthForWindow(fb.width);
     const width = @as(f32, @floatFromInt(fb.width)) - left - right;
     const visible_rows = ai_history_renderer.listVisibleCapacity(@floatFromInt(fb.height), currentTitlebarHeight());
+
+    session.mutex.lock();
     const hit = ai_history_renderer.interactionHitTest(
         session,
         @floatFromInt(fb.width),
@@ -942,6 +963,8 @@ pub fn aiHistoryHandleMousePress(xpos: f64, ypos: f64) bool {
         xpos,
         ypos,
     );
+    session.mutex.unlock();
+
     switch (hit) {
         .none => {},
         .refresh => {
@@ -954,8 +977,10 @@ pub fn aiHistoryHandleMousePress(xpos: f64, ypos: f64) bool {
             return true;
         },
         .row => |visible_index| {
+            session.mutex.lock();
             session.selectVisibleIndex(visible_index);
             session.ensureSelectionVisible(visible_rows);
+            session.mutex.unlock();
             markUiDirty();
             return true;
         },
