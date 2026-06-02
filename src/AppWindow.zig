@@ -624,6 +624,7 @@ fn renderAiHistoryFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_int
             .fillQuad = ui_pipeline.fillQuad,
             .fillQuadAlpha = ui_pipeline.fillQuadAlpha,
             .renderTextLimited = titlebar.renderTextLimited,
+            .glyphAdvance = titlebar.titlebarGlyphAdvance,
         };
         session.mutex.lock();
         defer session.mutex.unlock();
@@ -699,10 +700,29 @@ pub fn aiHistoryMoveSelection(delta: isize) bool {
     return true;
 }
 
+pub fn aiHistoryCycleCategory(delta: isize) bool {
+    const session = activeAiHistory() orelse return false;
+    session.cycleCategory(delta);
+    session.ensureSelectionVisible(aiHistoryListVisibleRowsForWindow());
+    markUiDirty();
+    return true;
+}
+
 pub fn aiHistoryPreviewSelectedTranscript() bool {
     const session = activeAiHistory() orelse return false;
     const allocator = g_allocator orelse return false;
     startAiHistoryTranscript(allocator, session);
+    return true;
+}
+
+/// Scroll the transcript preview by `delta` wrapped visual lines (negative
+/// scrolls up). The renderer clamps the offset against the content height.
+pub fn aiHistoryScrollTranscript(delta: isize) bool {
+    const session = activeAiHistory() orelse return false;
+    session.mutex.lock();
+    session.scrollTranscriptBy(delta);
+    session.mutex.unlock();
+    markUiDirty();
     return true;
 }
 
@@ -973,6 +993,12 @@ pub fn aiHistoryHandleMousePress(xpos: f64, ypos: f64) bool {
         },
         .@"resume" => {
             _ = resumeAiHistorySelection();
+            markUiDirty();
+            return true;
+        },
+        .category => |cat| {
+            session.setCategory(cat);
+            session.ensureSelectionVisible(visible_rows);
             markUiDirty();
             return true;
         },

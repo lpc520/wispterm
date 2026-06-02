@@ -1,5 +1,6 @@
 const std = @import("std");
 const ai_history_session = @import("../ai_history_session.zig");
+const types = @import("../ai_history_types.zig");
 
 const HEADER_H: f32 = 54;
 const FILTER_H: f32 = 42;
@@ -18,6 +19,9 @@ pub const DrawContext = struct {
     fillQuad: *const fn (f32, f32, f32, f32, [3]f32) void,
     fillQuadAlpha: *const fn (f32, f32, f32, f32, [3]f32, f32) void,
     renderTextLimited: *const fn ([]const u8, f32, f32, [3]f32, f32) f32,
+    // Advance width (px) of a single glyph in the UI font, used to wrap
+    // transcript text. Must use the same metric as renderTextLimited.
+    glyphAdvance: *const fn (u32) f32,
 };
 
 pub const Layout = struct {
@@ -33,8 +37,49 @@ pub const Hit = union(enum) {
     none,
     refresh,
     @"resume",
+    category: types.CategoryFilter,
     row: usize,
 };
+
+pub const LeftColumnLayout = struct {
+    source_name_top: f32,
+    target_top: f32,
+    status_label_top: f32,
+    status_value_top: f32,
+    category_heading_top: f32,
+    category_rows_top: f32,
+    category_row_h: f32,
+    retry_text_top: f32,
+};
+
+pub fn leftColumnLayout(top: f32, cell_h: f32) LeftColumnLayout {
+    var y = top + headerHeight(cell_h) + 18;
+    const source_name_top = y;
+    y += cell_h + 8;
+    const target_top = y;
+    y += cell_h + 18;
+    const status_label_top = y;
+    y += cell_h + 5;
+    const status_value_top = y;
+    y += cell_h + 18;
+    const category_heading_top = y;
+    y += cell_h + 8;
+    const category_rows_top = y;
+    const category_row_h = cell_h + 10;
+    y += category_row_h * 3;
+    y += 12;
+    const retry_text_top = y;
+    return .{
+        .source_name_top = source_name_top,
+        .target_top = target_top,
+        .status_label_top = status_label_top,
+        .status_value_top = status_value_top,
+        .category_heading_top = category_heading_top,
+        .category_rows_top = category_rows_top,
+        .category_row_h = category_row_h,
+        .retry_text_top = retry_text_top,
+    };
+}
 
 pub fn computeLayout(x: f32, width: f32) Layout {
     const available = @max(0, width);
@@ -140,6 +185,15 @@ pub fn interactionHitTest(
     const mx: f32 = @floatCast(mouse_x);
     const my: f32 = @floatCast(mouse_y);
 
+    const lc = leftColumnLayout(top, cell_h);
+    const categories = [_]types.CategoryFilter{ .all, .codex, .claude };
+    for (categories, 0..) |cat, i| {
+        const cat_top = lc.category_rows_top + @as(f32, @floatFromInt(i)) * lc.category_row_h;
+        if (rectContains(mx, my, layout.left_x, cat_top, layout.left_w, lc.category_row_h)) {
+            return .{ .category = cat };
+        }
+    }
+
     const refresh_top = refreshButtonTop(top, cell_h);
     if (rectContains(mx, my, layout.left_x + PAD_X, refresh_top, @max(0, layout.left_w - PAD_X * 2), buttonHeight(cell_h))) {
         return .refresh;
@@ -218,21 +272,47 @@ fn renderLeftColumn(
     draw.fillQuad(layout.left_x, yFromTop(window_height, top + header_h, 1), layout.left_w, 1, line);
     _ = draw.renderTextLimited("AI History", layout.left_x + PAD_X, yTextFromTop(draw, window_height, top + 11), fg, layout.left_w - PAD_X * 2);
 
-    var y = top + header_h + 18;
-    _ = draw.renderTextLimited(session.source.name, layout.left_x + PAD_X, yTextFromTop(draw, window_height, y), fg, layout.left_w - PAD_X * 2);
-    y += draw.cell_h + 8;
-    _ = draw.renderTextLimited(targetLabel(session.source.target), layout.left_x + PAD_X, yTextFromTop(draw, window_height, y), muted, layout.left_w - PAD_X * 2);
-    y += draw.cell_h + 18;
-    _ = draw.renderTextLimited("Status", layout.left_x + PAD_X, yTextFromTop(draw, window_height, y), muted, layout.left_w - PAD_X * 2);
-    y += draw.cell_h + 5;
+    const lc = leftColumnLayout(top, draw.cell_h);
+    _ = draw.renderTextLimited(session.source.name, layout.left_x + PAD_X, yTextFromTop(draw, window_height, lc.source_name_top), fg, layout.left_w - PAD_X * 2);
+    _ = draw.renderTextLimited(targetLabel(session.source.target), layout.left_x + PAD_X, yTextFromTop(draw, window_height, lc.target_top), muted, layout.left_w - PAD_X * 2);
+    _ = draw.renderTextLimited("Status", layout.left_x + PAD_X, yTextFromTop(draw, window_height, lc.status_label_top), muted, layout.left_w - PAD_X * 2);
     var status_buf: [48]u8 = undefined;
     const status_label = if (session.state == .scanning)
         ai_history_session.scanningStatusLabel(&status_buf, session.rows.items.len)
     else
         statusText(session);
-    _ = draw.renderTextLimited(status_label, layout.left_x + PAD_X, yTextFromTop(draw, window_height, y), accent, layout.left_w - PAD_X * 2);
-    y += draw.cell_h + 18;
-    _ = draw.renderTextLimited("r  Retry scan", layout.left_x + PAD_X, yTextFromTop(draw, window_height, y), muted, layout.left_w - PAD_X * 2);
+    _ = draw.renderTextLimited(status_label, layout.left_x + PAD_X, yTextFromTop(draw, window_height, lc.status_value_top), accent, layout.left_w - PAD_X * 2);
+    _ = draw.renderTextLimited("CATEGORY", layout.left_x + PAD_X, yTextFromTop(draw, window_height, lc.category_heading_top), muted, layout.left_w - PAD_X * 2);
+
+    const query = session.filter[0..session.filter_len];
+    const counts = session.categoryCounts(query);
+    const selected_bg = mixColor(draw.bg, accent, 0.18);
+    const categories = [_]types.CategoryFilter{ .all, .codex, .claude };
+    for (categories, 0..) |cat, i| {
+        const row_top = lc.category_rows_top + @as(f32, @floatFromInt(i)) * lc.category_row_h;
+        const active = session.category == cat;
+        if (active) {
+            const row_y = yFromTop(window_height, row_top, lc.category_row_h);
+            draw.fillQuadAlpha(layout.left_x, row_y, layout.left_w, lc.category_row_h, selected_bg, 0.92);
+            draw.fillQuad(layout.left_x, row_y, 3, lc.category_row_h, accent);
+        }
+        const text_top = row_top + (lc.category_row_h - draw.cell_h) / 2;
+        const label_color = if (active) fg else muted;
+        const count = switch (cat) {
+            .all => counts.all,
+            .codex => counts.codex,
+            .claude => counts.claude,
+        };
+        var num_buf: [16]u8 = undefined;
+        const num_text = std.fmt.bufPrint(&num_buf, "{d}", .{count}) catch "";
+        const count_w: f32 = 44;
+        const count_x = layout.left_x + layout.left_w - PAD_X - count_w;
+        const label_x = layout.left_x + PAD_X + 6;
+        _ = draw.renderTextLimited(categoryLabelText(cat), label_x, yTextFromTop(draw, window_height, text_top), label_color, @max(0, count_x - label_x - 6));
+        _ = draw.renderTextLimited(num_text, count_x, yTextFromTop(draw, window_height, text_top), muted, count_w);
+    }
+
+    _ = draw.renderTextLimited("r  Retry scan", layout.left_x + PAD_X, yTextFromTop(draw, window_height, lc.retry_text_top), muted, layout.left_w - PAD_X * 2);
 
     const footer = "Enter resumes  Space previews";
     _ = draw.renderTextLimited(footer, layout.left_x + PAD_X, 12, muted, layout.left_w - PAD_X * 2);
@@ -271,6 +351,7 @@ fn renderList(
     var visible_index: usize = 0;
     var rendered: usize = 0;
     for (session.rows.items) |row| {
+        if (!types.categoryMatches(session.category, row.provider)) continue;
         if (!metadataMatches(row, query)) continue;
         if (visible_index < start) {
             visible_index += 1;
@@ -304,8 +385,11 @@ fn renderList(
             "Scanning AI history..."
         else if (session.rows.items.len == 0)
             "No Codex or Claude Code history found"
-        else
-            "No sessions match filter";
+        else switch (session.category) {
+            .all => "No sessions match filter",
+            .codex => "No Codex sessions",
+            .claude => "No Claude Code sessions",
+        };
         _ = draw.renderTextLimited(empty, layout.list_x + PAD_X, yTextFromTop(draw, window_height, row_top + 24), muted, layout.list_w - PAD_X * 2);
     }
 }
@@ -355,8 +439,97 @@ fn renderDetail(
         .idle => _ = draw.renderTextLimited("Press Space to load transcript", layout.detail_x + PAD_X, yTextFromTop(draw, window_height, y), muted, layout.detail_w - PAD_X * 2),
         .loading => _ = draw.renderTextLimited("Loading transcript", layout.detail_x + PAD_X, yTextFromTop(draw, window_height, y), muted, layout.detail_w - PAD_X * 2),
         .failed => _ = draw.renderTextLimited("Transcript failed to load - press Space to retry", layout.detail_x + PAD_X, yTextFromTop(draw, window_height, y), accent, layout.detail_w - PAD_X * 2),
-        .ready => renderTranscriptMessages(draw, session.transcript, layout, window_height, y, content_h, fg, muted, accent),
+        .ready => {
+            // Clamp the stored scroll against the actual wrapped height every
+            // frame so it self-corrects (e.g. after the window or font resizes),
+            // then render from that offset. Safe to write back: render runs while
+            // the session mutex is held.
+            const line_h = draw.cell_h + 4;
+            const wrap_w = @max(1.0, layout.detail_w - PAD_X * 2 - 12);
+            const total = transcriptLineTotal(session.transcript, wrap_w, draw.glyphAdvance);
+            const visible: usize = @intFromFloat(@max(0, @floor((window_height - y) / line_h)));
+            const scroll = clampScroll(session.transcript_scroll, total, visible);
+            session.transcript_scroll = scroll;
+            renderTranscriptMessages(draw, session.transcript, layout, window_height, y, content_h, fg, muted, accent, scroll);
+        },
     }
+}
+
+// Wraps a single message's text into visual lines that each fit within `max_w`,
+// using the caller-supplied glyph advance metric. Breaks on explicit '\n' and,
+// when a line overflows, at the last space if one exists (word wrap) or at the
+// codepoint boundary otherwise (hard wrap). At least one glyph is emitted per
+// line so an oversized glyph can never stall iteration.
+const LineWrap = struct {
+    text: []const u8,
+    max_w: f32,
+    advance: *const fn (u32) f32,
+    pos: usize = 0,
+
+    fn next(self: *LineWrap) ?[]const u8 {
+        if (self.max_w <= 0) return null;
+        if (self.pos >= self.text.len) return null;
+
+        const start = self.pos;
+        var i = start;
+        var width: f32 = 0;
+        var last_space: ?usize = null;
+        while (i < self.text.len) {
+            const seq_len = std.unicode.utf8ByteSequenceLength(self.text[i]) catch 1;
+            const end = @min(i + seq_len, self.text.len);
+            const cp = std.unicode.utf8Decode(self.text[i..end]) catch 0xFFFD;
+
+            if (cp == '\n') {
+                self.pos = i + 1;
+                return self.text[start..i];
+            }
+
+            const adv = self.advance(cp);
+            if (width + adv > self.max_w and i > start) {
+                if (last_space) |sp| {
+                    if (sp > start) {
+                        self.pos = sp + 1;
+                        return self.text[start..sp];
+                    }
+                }
+                self.pos = i;
+                return self.text[start..i];
+            }
+
+            if (cp == ' ') last_space = i;
+            width += adv;
+            i = end;
+        }
+
+        self.pos = self.text.len;
+        return self.text[start..];
+    }
+};
+
+fn wrappedLineCount(text: []const u8, max_w: f32, advance: *const fn (u32) f32) usize {
+    var it = LineWrap{ .text = text, .max_w = max_w, .advance = advance };
+    var count: usize = 0;
+    while (it.next()) |_| count += 1;
+    return count;
+}
+
+// Total visual lines a transcript occupies: one role-label line plus the
+// wrapped content lines for every message. Matches the line accounting in
+// renderTranscriptMessages so scroll offsets stay consistent.
+fn transcriptLineTotal(messages: anytype, wrap_w: f32, advance: *const fn (u32) f32) usize {
+    var total: usize = 0;
+    for (messages) |msg| {
+        total += 1 + wrappedLineCount(msg.content, wrap_w, advance);
+    }
+    return total;
+}
+
+// Clamp a requested scroll offset (in visual lines) to the range that keeps at
+// least `visible` lines on screen; returns 0 when everything already fits.
+fn clampScroll(requested: usize, total: usize, visible: usize) usize {
+    if (total <= visible) return 0;
+    const max_scroll = total - visible;
+    return @min(requested, max_scroll);
 }
 
 fn renderTranscriptMessages(
@@ -369,24 +542,49 @@ fn renderTranscriptMessages(
     fg: [3]f32,
     muted: [3]f32,
     accent: [3]f32,
+    scroll_lines: usize,
 ) void {
     if (messages.len == 0) {
         _ = draw.renderTextLimited("Transcript is empty", layout.detail_x + PAD_X, yTextFromTop(draw, window_height, start_top), muted, layout.detail_w - PAD_X * 2);
         return;
     }
 
-    const row_h = draw.cell_h + 8;
     _ = content_h;
-    const max_rows = transcriptPreviewRowCapacity(window_height, start_top, row_h);
-    const count = @min(messages.len, max_rows);
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        const msg = messages[i];
-        const y = yTextFromTop(draw, window_height, start_top + @as(f32, @floatFromInt(i)) * row_h);
-        const role_text = roleLabel(msg.role);
-        const role_color = if (msg.role == .assistant) accent else muted;
-        const role_end = draw.renderTextLimited(role_text, layout.detail_x + PAD_X, y, role_color, 78);
-        _ = draw.renderTextLimited(msg.content, role_end + SMALL_GAP, y, fg, layout.detail_w - (role_end - layout.detail_x) - PAD_X - SMALL_GAP);
+    const line_h = draw.cell_h + 4;
+    const text_x = layout.detail_x + PAD_X;
+    const content_w = @max(1.0, layout.detail_w - PAD_X * 2);
+    const indent: f32 = 12;
+    const wrap_w = @max(1.0, content_w - indent);
+
+    // Draw messages top-to-bottom, wrapping each message's content across as
+    // many visual lines as it needs. The role label gets its own full-width
+    // line so it is never truncated. `scroll_lines` visual lines are skipped
+    // from the top; drawing stops once we run out of vertical space. The line
+    // accounting here must match transcriptLineTotal.
+    var vis_index: usize = 0;
+    var top_px = start_top;
+    var drew_any = false;
+    for (messages) |msg| {
+        if (vis_index >= scroll_lines) {
+            if (top_px + line_h > window_height) return;
+            const role_color = if (msg.role == .assistant) accent else muted;
+            _ = draw.renderTextLimited(roleLabel(msg.role), text_x, yTextFromTop(draw, window_height, top_px), role_color, content_w);
+            top_px += line_h;
+            drew_any = true;
+        }
+        vis_index += 1;
+
+        var it = LineWrap{ .text = msg.content, .max_w = wrap_w, .advance = draw.glyphAdvance };
+        while (it.next()) |line| {
+            if (vis_index >= scroll_lines) {
+                if (top_px + line_h > window_height) return;
+                _ = draw.renderTextLimited(line, text_x + indent, yTextFromTop(draw, window_height, top_px), fg, wrap_w);
+                top_px += line_h;
+                drew_any = true;
+            }
+            vis_index += 1;
+        }
+        if (drew_any) top_px += SMALL_GAP;
     }
 }
 
@@ -415,6 +613,10 @@ fn targetLabel(target: anytype) []const u8 {
         .wsl => "WSL",
         .ssh => "SSH",
     };
+}
+
+fn categoryLabelText(category: types.CategoryFilter) []const u8 {
+    return types.categoryLabel(category);
 }
 
 fn roleLabel(role: anytype) []const u8 {
@@ -474,11 +676,7 @@ fn buttonHeight(cell_h: f32) f32 {
 }
 
 fn refreshButtonTop(top: f32, cell_h: f32) f32 {
-    return top + headerHeight(cell_h) + 18 +
-        (cell_h + 8) +
-        (cell_h + 18) +
-        (cell_h + 5) +
-        (cell_h + 18) - BUTTON_PAD_Y;
+    return leftColumnLayout(top, cell_h).retry_text_top - BUTTON_PAD_Y;
 }
 
 fn resumeButtonTop(top: f32, cell_h: f32) f32 {
@@ -493,11 +691,6 @@ fn rectContains(x: f32, y: f32, left: f32, top: f32, width: f32, height: f32) bo
     return width > 0 and height > 0 and
         x >= left and x < left + width and
         y >= top and y < top + height;
-}
-
-fn transcriptPreviewRowCapacity(window_height: f32, start_top: f32, row_h: f32) usize {
-    if (row_h <= 0) return 0;
-    return @intFromFloat(@max(0, @floor(@max(0, window_height - start_top) / row_h)));
 }
 
 test "ai_history_renderer: list row lines never overlap as ui font grows" {
@@ -547,11 +740,6 @@ test "ai_history_renderer: zero width layout has no columns" {
     try std.testing.expectEqual(@as(f32, 20), layout.detail_x);
 }
 
-test "ai_history_renderer: transcript row capacity uses absolute window bottom" {
-    try std.testing.expectEqual(@as(usize, 10), transcriptPreviewRowCapacity(600, 300, 30));
-    try std.testing.expectEqual(@as(usize, 0), transcriptPreviewRowCapacity(300, 300, 30));
-}
-
 test "ai_history_renderer: interaction hit test maps buttons and row offset" {
     const FakeSession = struct {
         fn visibleCount(_: @This()) usize {
@@ -578,4 +766,120 @@ test "ai_history_renderer: interaction hit test maps buttons and row offset" {
     );
     const row_hit = interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.list_x + 8, top + FILTER_H + ROW_H + 2);
     try std.testing.expectEqual(@as(usize, 4), row_hit.row);
+}
+
+// A fixed-advance metric so wrapping tests are deterministic without a font.
+fn tenPxAdvance(_: u32) f32 {
+    return 10;
+}
+
+fn collectWrapped(text: []const u8, max_w: f32, out: *std.ArrayList([]const u8)) !void {
+    var it = LineWrap{ .text = text, .max_w = max_w, .advance = tenPxAdvance };
+    while (it.next()) |line| try out.append(std.testing.allocator, line);
+}
+
+test "ai_history_renderer: LineWrap hard-wraps when text exceeds width" {
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(std.testing.allocator);
+    // max_w 35 fits three 10px glyphs (30) but not four (40).
+    try collectWrapped("abcdefg", 35, &lines);
+    try std.testing.expectEqual(@as(usize, 3), lines.items.len);
+    try std.testing.expectEqualStrings("abc", lines.items[0]);
+    try std.testing.expectEqualStrings("def", lines.items[1]);
+    try std.testing.expectEqualStrings("g", lines.items[2]);
+}
+
+test "ai_history_renderer: LineWrap breaks on explicit newlines" {
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(std.testing.allocator);
+    try collectWrapped("ab\n\ncd", 1000, &lines);
+    try std.testing.expectEqual(@as(usize, 3), lines.items.len);
+    try std.testing.expectEqualStrings("ab", lines.items[0]);
+    try std.testing.expectEqualStrings("", lines.items[1]);
+    try std.testing.expectEqualStrings("cd", lines.items[2]);
+}
+
+test "ai_history_renderer: LineWrap prefers a space boundary when wrapping" {
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(std.testing.allocator);
+    // "ab cd ef" at max_w 55: "ab cd " would need 60px, so break at the first space.
+    try collectWrapped("ab cd ef", 55, &lines);
+    try std.testing.expectEqual(@as(usize, 2), lines.items.len);
+    try std.testing.expectEqualStrings("ab", lines.items[0]);
+    try std.testing.expectEqualStrings("cd ef", lines.items[1]);
+}
+
+test "ai_history_renderer: LineWrap always advances past an oversized glyph" {
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(std.testing.allocator);
+    // max_w smaller than one glyph must still emit one glyph per line, not loop.
+    try collectWrapped("abc", 5, &lines);
+    try std.testing.expectEqual(@as(usize, 3), lines.items.len);
+}
+
+test "ai_history_renderer: LineWrap counts wrapped lines" {
+    try std.testing.expectEqual(@as(usize, 3), wrappedLineCount("abcdefg", 35, tenPxAdvance));
+    try std.testing.expectEqual(@as(usize, 1), wrappedLineCount("ab", 1000, tenPxAdvance));
+    try std.testing.expectEqual(@as(usize, 0), wrappedLineCount("", 1000, tenPxAdvance));
+}
+
+test "ai_history_renderer: transcriptLineTotal counts a role line plus wrapped content per message" {
+    const Msg = struct { content: []const u8 };
+    const msgs = [_]Msg{
+        .{ .content = "abcdefg" }, // 1 role + 3 wrapped = 4
+        .{ .content = "ab" }, // 1 role + 1 wrapped = 2
+        .{ .content = "" }, // 1 role + 0 content = 1
+    };
+    try std.testing.expectEqual(@as(usize, 7), transcriptLineTotal(&msgs, 35, tenPxAdvance));
+}
+
+test "ai_history_renderer: clampScroll keeps scroll within the scrollable range" {
+    try std.testing.expectEqual(@as(usize, 0), clampScroll(5, 3, 10)); // everything fits
+    try std.testing.expectEqual(@as(usize, 2), clampScroll(5, 12, 10)); // clamped to max
+    try std.testing.expectEqual(@as(usize, 1), clampScroll(1, 12, 10)); // within range
+    try std.testing.expectEqual(@as(usize, 0), clampScroll(0, 12, 10));
+}
+
+test "ai_history_renderer: left column layout is ordered top to bottom" {
+    const lc = leftColumnLayout(40, 16);
+    try std.testing.expect(lc.source_name_top < lc.target_top);
+    try std.testing.expect(lc.target_top < lc.status_label_top);
+    try std.testing.expect(lc.status_label_top < lc.status_value_top);
+    try std.testing.expect(lc.status_value_top < lc.retry_text_top);
+    try std.testing.expectEqual(lc.retry_text_top - BUTTON_PAD_Y, refreshButtonTop(40, 16));
+}
+
+test "ai_history_renderer: interaction hit test maps category rows" {
+    const FakeSession = struct {
+        fn visibleCount(_: @This()) usize {
+            return 0;
+        }
+        fn listWindowStart(_: @This(), _: usize) usize {
+            return 0;
+        }
+    };
+
+    const session = FakeSession{};
+    const layout = computeLayout(0, 1000);
+    const cell_h: f32 = 16;
+    const top: f32 = 40;
+    const lc = leftColumnLayout(top, cell_h);
+
+    const all_y = lc.category_rows_top + lc.category_row_h * 0.5;
+    try std.testing.expectEqual(
+        Hit{ .category = .all },
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.left_x + 10, all_y),
+    );
+
+    const codex_y = lc.category_rows_top + lc.category_row_h * 1.5;
+    try std.testing.expectEqual(
+        Hit{ .category = .codex },
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.left_x + 10, codex_y),
+    );
+
+    const claude_y = lc.category_rows_top + lc.category_row_h * 2.5;
+    try std.testing.expectEqual(
+        Hit{ .category = .claude },
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.left_x + 10, claude_y),
+    );
 }
