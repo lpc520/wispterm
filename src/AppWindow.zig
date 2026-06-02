@@ -892,6 +892,11 @@ pub fn aiHistoryHandleMousePress(xpos: f64, ypos: f64) bool {
             markUiDirty();
             return true;
         },
+        .category => |cat| {
+            session.setCategory(cat);
+            markUiDirty();
+            return true;
+        },
         .row => |visible_index| {
             session.selectVisibleIndex(visible_index);
             session.ensureSelectionVisible(visible_rows);
