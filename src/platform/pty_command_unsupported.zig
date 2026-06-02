@@ -191,7 +191,7 @@ fn appendPosixSingleQuotedArg(buf: []u8, pos: *usize, value: []const u8) bool {
 pub fn localShellInitialCommand(buf: []u8, current_shell: CommandLine, command: []const u8) ?[]const u8 {
     var pos: usize = 0;
     if (!appendAscii(buf, &pos, configuredLocalShellCommandForShell(current_shell))) return null;
-    if (!appendAscii(buf, &pos, " -lc ")) return null;
+    if (!appendAscii(buf, &pos, " -lic ")) return null;
     if (!appendPosixSingleQuotedArg(buf, &pos, command)) return null;
     return buf[0..pos];
 }

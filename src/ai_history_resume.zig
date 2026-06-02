@@ -58,6 +58,14 @@ pub fn checkedPosixResume(command: []const u8, project_dir: []const u8, out: []u
     return out[0..pos];
 }
 
+pub fn posixUserShellCommand(command: []const u8, out: []u8) ResumeError![]const u8 {
+    var pos: usize = 0;
+    try append(out, &pos, "wispterm_ai_history_cmd=");
+    try appendShellSingleQuote(out, &pos, command);
+    try append(out, &pos, "; if [ -n \"$SHELL\" ] && [ -x \"$SHELL\" ]; then case \"${SHELL##*/}\" in sh|dash) exec \"$SHELL\" -lc \"$wispterm_ai_history_cmd\" ;; *) exec \"$SHELL\" -lic \"$wispterm_ai_history_cmd\" ;; esac; else exec sh -lc \"$wispterm_ai_history_cmd\"; fi");
+    return out[0..pos];
+}
+
 pub fn checkedPowerShellResume(meta: types.SessionMeta, out: []u8) ResumeError![]const u8 {
     if (meta.project_dir.len == 0) return error.MissingProjectDir;
     var pos: usize = 0;
@@ -300,6 +308,19 @@ test "ai_history_resume: checked POSIX resume quotes single quotes and reports m
 
     var tiny: [16]u8 = undefined;
     try std.testing.expectError(error.CommandTooLong, checkedPosixResume("codex resume abc", "/home/me/project", &tiny));
+}
+
+test "ai_history_resume: wraps POSIX resume in user shell for PATH setup" {
+    var out: [768]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "wispterm_ai_history_cmd='test -d '\\''/home/me/project'\\'' && cd '\\''/home/me/project'\\'' && codex resume abc'; if [ -n \"$SHELL\" ] && [ -x \"$SHELL\" ]; then case \"${SHELL##*/}\" in sh|dash) exec \"$SHELL\" -lc \"$wispterm_ai_history_cmd\" ;; *) exec \"$SHELL\" -lic \"$wispterm_ai_history_cmd\" ;; esac; else exec sh -lc \"$wispterm_ai_history_cmd\"; fi",
+        try posixUserShellCommand("test -d '/home/me/project' && cd '/home/me/project' && codex resume abc", &out),
+    );
+}
+
+test "ai_history_resume: user shell wrapper reports command too long" {
+    var tiny: [16]u8 = undefined;
+    try std.testing.expectError(error.CommandTooLong, posixUserShellCommand("codex resume abc", &tiny));
 }
 
 test "ai_history_resume: checked PowerShell resume checks directory before resume" {

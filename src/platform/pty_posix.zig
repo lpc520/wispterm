@@ -369,8 +369,10 @@ fn shellBasenameForLogin(arg0: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Splits `command_line` on ASCII whitespace into NUL-terminated argv entries
-/// written into `storage`. Returns the argument count (0 if empty / overflow).
+/// Splits `command_line` into NUL-terminated argv entries written into
+/// `storage`. The parser understands the shell-style quoting used by
+/// platform/pty_command_unsupported.zig, but intentionally does not expand
+/// variables, globs, or command substitutions.
 fn parseArgv(
     command_line: []const u8,
     storage: *[ARG_BUF]u8,
@@ -387,11 +389,39 @@ fn parseArgv(
         if (argc >= MAX_ARGV) return 0;
 
         const arg_start = write_pos;
-        while (i < n and !std.ascii.isWhitespace(command_line[i])) : (i += 1) {
-            if (write_pos + 1 >= storage.len) return 0;
-            storage[write_pos] = command_line[i];
-            write_pos += 1;
+        var saw_part = false;
+        while (i < n and !std.ascii.isWhitespace(command_line[i])) {
+            saw_part = true;
+            const ch = command_line[i];
+            if (ch == '\'') {
+                i += 1;
+                while (i < n and command_line[i] != '\'') : (i += 1) {
+                    if (!appendArgByte(storage, &write_pos, command_line[i])) return 0;
+                }
+                if (i >= n) return 0;
+                i += 1;
+            } else if (ch == '"') {
+                i += 1;
+                while (i < n and command_line[i] != '"') {
+                    if (command_line[i] == '\\' and i + 1 < n) {
+                        i += 1;
+                    }
+                    if (!appendArgByte(storage, &write_pos, command_line[i])) return 0;
+                    i += 1;
+                }
+                if (i >= n) return 0;
+                i += 1;
+            } else if (ch == '\\') {
+                i += 1;
+                if (i >= n) return 0;
+                if (!appendArgByte(storage, &write_pos, command_line[i])) return 0;
+                i += 1;
+            } else {
+                if (!appendArgByte(storage, &write_pos, ch)) return 0;
+                i += 1;
+            }
         }
+        if (!saw_part) return 0;
         if (write_pos + 1 > storage.len) return 0;
         storage[write_pos] = 0;
         write_pos += 1;
@@ -400,6 +430,13 @@ fn parseArgv(
         argc += 1;
     }
     return argc;
+}
+
+fn appendArgByte(storage: *[ARG_BUF]u8, write_pos: *usize, ch: u8) bool {
+    if (write_pos.* + 1 >= storage.len) return false;
+    storage[write_pos.*] = ch;
+    write_pos.* += 1;
+    return true;
 }
 
 const backend_facade = @import("pty.zig");
@@ -412,6 +449,39 @@ test "shellBasenameForLogin recognises known interactive shells" {
     try std.testing.expect(shellBasenameForLogin("ssh") == null);
     try std.testing.expect(shellBasenameForLogin("/usr/bin/ssh") == null);
     try std.testing.expect(shellBasenameForLogin("/bin/echo") == null);
+}
+
+test "parseArgv keeps shell -lc scripts intact for AI History resume" {
+    var storage: [ARG_BUF]u8 = undefined;
+    var argv: [MAX_ARGV + 1]?[*:0]const u8 = undefined;
+    const line = "zsh -lc 'test -d '\\''/Users/xzg/project/atacseq-2026-0527'\\'' && cd '\\''/Users/xzg/project/atacseq-2026-0527'\\'' && claude --resume b28d4653-55b3-4658-bf76-359970c29318'";
+
+    const argc = parseArgv(line, &storage, &argv);
+
+    try std.testing.expectEqual(@as(usize, 3), argc);
+    try std.testing.expectEqualStrings("zsh", std.mem.sliceTo(argv[0].?, 0));
+    try std.testing.expectEqualStrings("-lc", std.mem.sliceTo(argv[1].?, 0));
+    try std.testing.expectEqualStrings(
+        "test -d '/Users/xzg/project/atacseq-2026-0527' && cd '/Users/xzg/project/atacseq-2026-0527' && claude --resume b28d4653-55b3-4658-bf76-359970c29318",
+        std.mem.sliceTo(argv[2].?, 0),
+    );
+}
+
+test "parseArgv keeps SSH remote resume command as one argument" {
+    var storage: [ARG_BUF]u8 = undefined;
+    var argv: [MAX_ARGV + 1]?[*:0]const u8 = undefined;
+    const line = "ssh -tt xzg@guotosky.vip 'test -d '\\''/home/data/xzg/project/atacseq-2026-0527'\\'' && cd '\\''/home/data/xzg/project/atacseq-2026-0527'\\'' && claude --resume b28d4653-55b3-4658-bf76-359970c29318'";
+
+    const argc = parseArgv(line, &storage, &argv);
+
+    try std.testing.expectEqual(@as(usize, 4), argc);
+    try std.testing.expectEqualStrings("ssh", std.mem.sliceTo(argv[0].?, 0));
+    try std.testing.expectEqualStrings("-tt", std.mem.sliceTo(argv[1].?, 0));
+    try std.testing.expectEqualStrings("xzg@guotosky.vip", std.mem.sliceTo(argv[2].?, 0));
+    try std.testing.expectEqualStrings(
+        "test -d '/home/data/xzg/project/atacseq-2026-0527' && cd '/home/data/xzg/project/atacseq-2026-0527' && claude --resume b28d4653-55b3-4658-bf76-359970c29318",
+        std.mem.sliceTo(argv[3].?, 0),
+    );
 }
 
 test "posix backend selected for linux + macos; bsd/wasi unsupported" {

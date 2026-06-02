@@ -658,7 +658,7 @@ test "platform pty command builds shell command lines for AI History resume" {
             try std.testing.expect(std.mem.indexOf(u8, local_command, checked_resume) != null);
         },
         .unsupported => {
-            try std.testing.expect(std.mem.indexOf(u8, local_command, " -lc ") != null);
+            try std.testing.expect(std.mem.indexOf(u8, local_command, " -lic ") != null);
             try std.testing.expect(std.mem.indexOf(u8, local_command, "codex resume abc") != null);
         },
     }

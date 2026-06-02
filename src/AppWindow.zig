@@ -867,7 +867,7 @@ pub fn spawnResumeTerminal(target: ai_history_source.Target, meta: ai_history_ty
         return failAiHistoryResumePathUnavailable();
     };
 
-    var command_buf: [4096]u8 = undefined;
+    var command_buf: [8192]u8 = undefined;
     switch (target) {
         .local => {
             var native_checked_buf: [2048]u8 = undefined;
@@ -884,13 +884,23 @@ pub fn spawnResumeTerminal(target: ai_history_source.Target, meta: ai_history_ty
             return false;
         },
         .wsl => {
-            const command = platform_pty_command.wslShellCommand(command_buf[0..], checked_cmd) orelse return failAiHistoryResumePathUnavailable();
+            var user_shell_buf: [4096]u8 = undefined;
+            const user_shell_cmd = ai_history_resume.posixUserShellCommand(checked_cmd, &user_shell_buf) catch |err| {
+                log.warn("failed to build AI History WSL user-shell resume command for {s}: {}", .{ meta.session_id, err });
+                return failAiHistoryResumePathUnavailable();
+            };
+            const command = platform_pty_command.wslShellCommand(command_buf[0..], user_shell_cmd) orelse return failAiHistoryResumePathUnavailable();
             if (spawnTabWithCommandUtf8(command)) return true;
             overlays.showStatusToast("AI History resume failed");
             return false;
         },
         .ssh => |ssh| {
-            return switch (overlays.aiHistoryConnectSshProfile(ssh.profile_name, checked_cmd)) {
+            var user_shell_buf: [4096]u8 = undefined;
+            const user_shell_cmd = ai_history_resume.posixUserShellCommand(checked_cmd, &user_shell_buf) catch |err| {
+                log.warn("failed to build AI History SSH user-shell resume command for {s}: {}", .{ meta.session_id, err });
+                return failAiHistoryResumePathUnavailable();
+            };
+            return switch (overlays.aiHistoryConnectSshProfile(ssh.profile_name, user_shell_cmd)) {
                 .connected => true,
                 .not_found => {
                     overlays.showStatusToast("AI History resume failed: SSH profile unavailable");

@@ -2393,7 +2393,7 @@ fn connectSshProfileReturningSurfaceWithCommand(idx: usize, remote_command: []co
     if (port.len > 0 and !isPortTokenSafe(port)) return null;
     if (!command_palette_model.isProxyJumpSafe(proxy_jump)) return null;
 
-    var command_buf: [4096]u8 = undefined;
+    var command_buf: [8192]u8 = undefined;
     const command = platform_pty_command.sshInteractiveCommand(command_buf[0..], .{
         .user = user,
         .host = ip,

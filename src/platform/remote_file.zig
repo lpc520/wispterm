@@ -10,10 +10,7 @@ pub fn wslHomeCommand() []const u8 {
 /// Run a command inside the default WSL distro and capture stdout.
 pub fn wslExec(allocator: std.mem.Allocator, command: []const u8) ?[]u8 {
     const argv = pty_command.wslExecArgv(command);
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+    var child = initHiddenCaptureChild(&argv, allocator);
     child.spawn() catch return null;
 
     var output: std.ArrayListUnmanaged(u8) = .empty;
@@ -38,6 +35,15 @@ pub fn wslExec(allocator: std.mem.Allocator, command: []const u8) ?[]u8 {
     if (!ok) return null;
 
     return output.toOwnedSlice(allocator) catch null;
+}
+
+fn initHiddenCaptureChild(argv: []const []const u8, allocator: std.mem.Allocator) std.process.Child {
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    child.create_no_window = true;
+    return child;
 }
 
 pub fn sshExecCapture(allocator: std.mem.Allocator, conn: anytype, command: []const u8) ![]u8 {
@@ -246,6 +252,15 @@ test "platform remote file exposes WSL command helpers" {
     try std.testing.expect(exec_info.params[0].type.? == std.mem.Allocator);
     try std.testing.expect(exec_info.params[1].type.? == []const u8);
     try std.testing.expect(exec_info.return_type.? == ?[]u8);
+}
+
+test "platform remote file hides WSL capture helper windows" {
+    const argv = pty_command.wslExecArgv("true");
+    const child = initHiddenCaptureChild(&argv, std.testing.allocator);
+    try std.testing.expect(child.create_no_window);
+    try std.testing.expectEqual(std.process.Child.StdIo.Ignore, child.stdin_behavior);
+    try std.testing.expectEqual(std.process.Child.StdIo.Pipe, child.stdout_behavior);
+    try std.testing.expectEqual(std.process.Child.StdIo.Ignore, child.stderr_behavior);
 }
 
 test "platform remote file adapts local paste paths by terminal launch kind" {
