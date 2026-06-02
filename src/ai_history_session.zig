@@ -596,6 +596,8 @@ pub const Session = struct {
         var claude: usize = 0;
         for (self.rows.items) |row| {
             if (!types.metadataMatches(row, query)) continue;
+            const key = types.dateKeyFromMs(row.last_active_at_ms, self.tz_offset_seconds);
+            if (!types.dateMatches(self.date_filter, key)) continue;
             all += 1;
             switch (row.provider) {
                 .codex => codex += 1,
@@ -603,6 +605,46 @@ pub const Session = struct {
             }
         }
         return .{ .all = all, .codex = codex, .claude = claude };
+    }
+
+    /// Fill `buf` with the distinct local days present under the current
+    /// category + text query (the date filter itself is NOT applied, so every
+    /// day stays selectable), descending by date with per-day counts. Rows are
+    /// recency-sorted, so same-day rows are contiguous and a running dedup is
+    /// correct. Returns the filled prefix; stops at `buf.len`.
+    pub fn buildDateBuckets(self: *const Session, buf: []types.DateBucket) []types.DateBucket {
+        const query = self.filter[0..self.filter_len];
+        var n: usize = 0;
+        var have_last = false;
+        for (self.rows.items) |row| {
+            if (!types.categoryMatches(self.category, row.provider)) continue;
+            if (!types.metadataMatches(row, query)) continue;
+            const key = types.dateKeyFromMs(row.last_active_at_ms, self.tz_offset_seconds);
+            if (key == 0) continue; // no timestamp -> only under "All dates"
+            if (have_last and buf[n - 1].key == key) {
+                buf[n - 1].count += 1;
+                continue;
+            }
+            if (n >= buf.len) break;
+            buf[n] = .{ .key = key, .count = 1 };
+            n += 1;
+            have_last = true;
+        }
+        return buf[0..n];
+    }
+
+    /// Count of rows under the current category + query, ignoring the date
+    /// filter (the "All dates" navigator total). Includes rows with no
+    /// timestamp, which appear only under "All dates".
+    pub fn dateAllCount(self: *const Session) usize {
+        const query = self.filter[0..self.filter_len];
+        var count: usize = 0;
+        for (self.rows.items) |row| {
+            if (!types.categoryMatches(self.category, row.provider)) continue;
+            if (!types.metadataMatches(row, query)) continue;
+            count += 1;
+        }
+        return count;
     }
 };
 
@@ -2312,4 +2354,70 @@ test "ai_history_session: scrollDateBy saturates at zero" {
     try std.testing.expectEqual(@as(usize, 4), session.date_offset);
     session.scrollDateBy(-1);
     try std.testing.expectEqual(@as(usize, 3), session.date_offset);
+}
+
+test "ai_history_session: buildDateBuckets groups distinct local days descending" {
+    var session = Session.init(std.testing.allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    const day1: i64 = 1780315200000; // 2026-06-01 12:00 UTC
+    const day2: i64 = day1 + 86400000; // 2026-06-02
+    const rows = [_]types.SessionMeta{
+        .{ .provider = .codex, .session_id = "a", .title = "A", .source_path = "a.jsonl", .resume_kind = .codex_resume, .last_active_at_ms = day2 },
+        .{ .provider = .claude, .session_id = "b", .title = "B", .source_path = "b.jsonl", .resume_kind = .claude_resume, .last_active_at_ms = day1 + 3600000 },
+        .{ .provider = .codex, .session_id = "c", .title = "C", .source_path = "c.jsonl", .resume_kind = .codex_resume, .last_active_at_ms = day1 },
+        .{ .provider = .codex, .session_id = "d", .title = "D", .source_path = "d.jsonl", .resume_kind = .codex_resume, .last_active_at_ms = 0 }, // no timestamp
+    };
+    try session.replaceRows(&rows);
+
+    var buf: [8]types.DateBucket = undefined;
+    const all = session.buildDateBuckets(&buf);
+    try std.testing.expectEqual(@as(usize, 2), all.len);
+    try std.testing.expectEqual(@as(types.DateKey, 20260602), all[0].key);
+    try std.testing.expectEqual(@as(usize, 1), all[0].count);
+    try std.testing.expectEqual(@as(types.DateKey, 20260601), all[1].key);
+    try std.testing.expectEqual(@as(usize, 2), all[1].count); // b + c, no-timestamp d excluded
+    try std.testing.expectEqual(@as(usize, 4), session.dateAllCount()); // includes d
+
+    // Cross-filter: with category = Codex, day 20260601 has only c.
+    session.setCategory(.codex);
+    const codex = session.buildDateBuckets(&buf);
+    try std.testing.expectEqual(@as(usize, 2), codex.len);
+    try std.testing.expectEqual(@as(types.DateKey, 20260601), codex[1].key);
+    try std.testing.expectEqual(@as(usize, 1), codex[1].count);
+}
+
+test "ai_history_session: categoryCounts honors the active date filter" {
+    var session = Session.init(std.testing.allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    const day1: i64 = 1780315200000;
+    const day2: i64 = day1 + 86400000;
+    const rows = [_]types.SessionMeta{
+        .{ .provider = .codex, .session_id = "a", .title = "A", .source_path = "a.jsonl", .resume_kind = .codex_resume, .last_active_at_ms = day1 },
+        .{ .provider = .claude, .session_id = "b", .title = "B", .source_path = "b.jsonl", .resume_kind = .claude_resume, .last_active_at_ms = day1 },
+        .{ .provider = .codex, .session_id = "c", .title = "C", .source_path = "c.jsonl", .resume_kind = .codex_resume, .last_active_at_ms = day2 },
+    };
+    try session.replaceRows(&rows);
+
+    const all = session.categoryCounts("");
+    try std.testing.expectEqual(@as(usize, 3), all.all);
+
+    session.setDateFilter(20260601);
+    const d1 = session.categoryCounts("");
+    try std.testing.expectEqual(@as(usize, 2), d1.all);
+    try std.testing.expectEqual(@as(usize, 1), d1.codex);
+    try std.testing.expectEqual(@as(usize, 1), d1.claude);
+}
+
+test "ai_history_session: buildDateBuckets respects the buffer cap" {
+    var session = Session.init(std.testing.allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    const base: i64 = 1780315200000;
+    var rows: [4]types.SessionMeta = undefined;
+    for (&rows, 0..) |*r, i| {
+        r.* = .{ .provider = .codex, .session_id = "x", .title = "X", .source_path = "x.jsonl", .resume_kind = .codex_resume, .last_active_at_ms = base + @as(i64, @intCast(i)) * 86400000 };
+    }
+    try session.replaceRows(&rows);
+    var small: [2]types.DateBucket = undefined;
+    const capped = session.buildDateBuckets(&small);
+    try std.testing.expectEqual(@as(usize, 2), capped.len); // 4 distinct days clipped to 2
 }
