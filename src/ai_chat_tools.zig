@@ -1041,6 +1041,17 @@ fn unixSessionExecTool(ctx: *ToolContext, kind: UnixSessionKind, surface_id: []c
     return waitForSentinelResult(ctx, host, surface, kind.label(), start_marker, end_marker, timeout_ms);
 }
 
+/// Timeout result for a sentinel command that never reported completion. Frames
+/// it as "still running, do not re-issue" with recovery hints, so the model
+/// waits/re-checks instead of re-running the command (which duplicates side
+/// effects, e.g. a second git clone).
+fn allocStillRunningTimeout(allocator: std.mem.Allocator, label: []const u8, elapsed_s: i64, snapshot: ?[]const u8) ![]u8 {
+    if (snapshot) |text| {
+        return std.fmt.allocPrint(allocator, "The {s} command has not returned after {d}s; it is most likely still running. Do NOT re-issue it. Re-check later with terminal_snapshot, or interrupt with terminal_repl_exec repl=plain code=<ctrl-c>.\nLatest snapshot:\n{s}", .{ label, elapsed_s, text });
+    }
+    return std.fmt.allocPrint(allocator, "The {s} command has not returned after {d}s; it is most likely still running. Do NOT re-issue it. Re-check later with terminal_snapshot, or interrupt with terminal_repl_exec repl=plain code=<ctrl-c>.", .{ label, elapsed_s });
+}
+
 fn waitForSentinelResult(
     ctx: *const ToolContext,
     host: ToolHost,
@@ -1050,7 +1061,8 @@ fn waitForSentinelResult(
     end_marker: []const u8,
     timeout_ms: u32,
 ) ![]u8 {
-    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(@max(timeout_ms, 1000)));
+    const started = std.time.milliTimestamp();
+    const deadline = started + @as(i64, @intCast(@max(timeout_ms, 1000)));
     var last: ?[]u8 = null;
     defer if (last) |text| ctx.allocator.free(text);
 
@@ -1059,17 +1071,15 @@ fn waitForSentinelResult(
         if (last) |old| ctx.allocator.free(old);
         last = host.surfaceSnapshot(host.ctx, ctx.allocator, surface.ptr) catch null;
         if (last) |text| {
-            if (std.mem.indexOf(u8, text, end_marker) != null) {
+            if (findCompletedEnd(text, end_marker) != null) {
                 return extractUnixCommandResult(ctx.allocator, text, start_marker, end_marker);
             }
         }
         std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 
-    if (last) |text| {
-        return std.fmt.allocPrint(ctx.allocator, "Timed out waiting for {s} command sentinel.\nLatest snapshot:\n{s}", .{ label, text });
-    }
-    return std.fmt.allocPrint(ctx.allocator, "Timed out waiting for {s} command sentinel.", .{label});
+    const elapsed_s = @divFloor(std.time.milliTimestamp() - started, 1000);
+    return allocStillRunningTimeout(ctx.allocator, label, elapsed_s, last);
 }
 
 // ---------------------------------------------------------------------------
@@ -1721,6 +1731,16 @@ test "ai chat Python string literal escapes code for REPL eval" {
     defer allocator.free(literal);
 
     try std.testing.expectEqualStrings("\"print(\\\"hello\\\")\\npath = \\\"C:\\\\\\\\tmp\\\"\"", literal);
+}
+
+test "agent exec timeout message says still running, do not re-issue" {
+    const allocator = std.testing.allocator;
+    const msg = try allocStillRunningTimeout(allocator, "SSH", 60, "Cloning into 'x'...");
+    defer allocator.free(msg);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "still running") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "Do NOT re-issue") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "code=<ctrl-c>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "Cloning into 'x'...") != null);
 }
 
 test "agent exec sentinel ignores the echoed command line" {
