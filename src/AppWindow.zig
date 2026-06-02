@@ -430,7 +430,7 @@ threadlocal var g_requested_weight: font_backend.FontWeight = .NORMAL;
 threadlocal var g_shader_path: ?[]const u8 = null;
 threadlocal var g_start_maximize: bool = false;
 threadlocal var g_start_fullscreen: bool = false;
-threadlocal var g_quake_mode: bool = true;
+threadlocal var g_quake_mode: bool = false;
 threadlocal var g_quake_hidden: bool = false;
 threadlocal var g_quake_frame: ?quick_terminal.Frame = null;
 threadlocal var g_quake_hotkey_registered: bool = false;
@@ -1933,6 +1933,8 @@ pub threadlocal var window_focused: bool = true; // Track window focus state
 // Window state persistence.
 const loadWindowState = platform_window_state.loadWindowState;
 const saveWindowGeometry = platform_window_state.saveWindowGeometry;
+const loadQuakeFrame = platform_window_state.loadQuakeFrame;
+const saveQuakeFrame = platform_window_state.saveQuakeFrame;
 
 // Pending resize state (resize is deferred to main loop to avoid PageList integrity issues)
 // Ghostty coalesces resize events with a 25ms timer to batch rapid resizes
@@ -2221,6 +2223,7 @@ fn onPlatformResize(width: i32, height: i32) void {
     overlays.renderTransferCancelConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderUpdatePrompt(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderWindowCloseConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
+    overlays.renderRestoreDefaultsConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
 
     render_diagnostics.log(
         "platform-resize swap fb={}x{} term={}x{} draw_calls={}",
@@ -4543,7 +4546,14 @@ fn runMainLoop(self: *AppWindow) !void {
     const target_fb_height: i32 = @intFromFloat(desired_grid_height + total_height_padding);
 
     if (g_quake_mode) {
-        applyQuakeFrame(&backend_window, false);
+        // Seed the remembered frame from disk so the drop-down reopens at the
+        // user's last size/position. applyQuakeFrame(.., true) validates it
+        // against the current monitor work area and falls back to the default
+        // frame if it no longer fits (resolution / monitor change).
+        if (loadQuakeFrame(allocator)) |qf| {
+            g_quake_frame = .{ .x = qf.x, .y = qf.y, .width = qf.width, .height = qf.height };
+        }
+        applyQuakeFrame(&backend_window, true);
     } else if (size_from_config and term_cols > 0 and term_rows > 0) {
         window_backend.resizeClientArea(&backend_window, target_fb_width, target_fb_height);
     } else if (saved_fb_w) |sw| {
@@ -4957,6 +4967,7 @@ fn runMainLoop(self: *AppWindow) !void {
         overlays.renderTransferCancelConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderUpdatePrompt(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderWindowCloseConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
+        overlays.renderRestoreDefaultsConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
         renderImePreedit(win, fb_width, fb_height);
 
         logSwapDiagnosticsIfChanged(win, fb_width, fb_height);
@@ -4965,9 +4976,17 @@ fn runMainLoop(self: *AppWindow) !void {
     }
 
     // Save window position + size for next session
-    if (!g_quake_mode and g_window != null) {
-        const w = g_window.?;
-        if (window_backend.windowRect(w)) |rect| {
+    if (g_window) |w| {
+        if (g_quake_mode) {
+            // Persist the drop-down outer frame so it reopens where the user left
+            // it. rememberQuakeFrame refreshes g_quake_frame from the live window
+            // (skipping degenerate / off-work-area frames); persist whatever it
+            // leaves, falling back to a frame captured on the last hide.
+            rememberQuakeFrame(w);
+            if (g_quake_frame) |f| {
+                saveQuakeFrame(allocator, f.x, f.y, f.width, f.height);
+            }
+        } else if (window_backend.windowRect(w)) |rect| {
             const is_maximized = window_backend.isMaximized(w);
             if (!is_maximized and !window_backend.isFullscreen(w)) {
                 const fb = window_backend.framebufferSize(w);
