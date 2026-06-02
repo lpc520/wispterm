@@ -2096,6 +2096,12 @@ pub fn agentConnectSshProfile(identifier: []const u8) AgentSshConnectResult {
     return .{ .connected = surface };
 }
 
+pub fn aiHistoryConnectSshProfile(identifier: []const u8, remote_command: []const u8) AgentSshConnectResult {
+    const idx = findSshProfileIndex(identifier) orelse return .not_found;
+    const surface = connectSshProfileReturningSurfaceWithCommand(idx, remote_command) orelse return .failed;
+    return .{ .connected = surface };
+}
+
 const copySshProfileField = profile_codec.copySshProfileField;
 
 const makeSshProfile = profile_codec.makeSshProfile;
@@ -2286,6 +2292,10 @@ fn connectSshProfile(idx: usize) void {
 }
 
 fn connectSshProfileReturningSurface(idx: usize) ?*Surface {
+    return connectSshProfileReturningSurfaceWithCommand(idx, "");
+}
+
+fn connectSshProfileReturningSurfaceWithCommand(idx: usize, remote_command: []const u8) ?*Surface {
     if (idx >= g_ssh_profile_count) return null;
     const profile = &g_ssh_profiles[idx];
     const ip = profileField(profile, .ip);
@@ -2299,7 +2309,7 @@ fn connectSshProfileReturningSurface(idx: usize) ?*Surface {
     if (port.len > 0 and !isPortTokenSafe(port)) return null;
     if (!command_palette_model.isProxyJumpSafe(proxy_jump)) return null;
 
-    var command_buf: [512]u8 = undefined;
+    var command_buf: [4096]u8 = undefined;
     const command = platform_pty_command.sshInteractiveCommand(command_buf[0..], .{
         .user = user,
         .host = ip,
@@ -2307,6 +2317,7 @@ fn connectSshProfileReturningSurface(idx: usize) ?*Surface {
         .password_auth = password.len > 0,
         .legacy_algorithms = AppWindow.g_ssh_legacy_algorithms,
         .proxy_jump = proxy_jump,
+        .remote_command = remote_command,
     }) orelse return null;
 
     sessionLauncherClose();

@@ -196,7 +196,7 @@ fn renderLeftColumn(
     y += draw.cell_h + 18;
     _ = draw.renderTextLimited("r  Refresh local", layout.left_x + PAD_X, yTextFromTop(draw, window_height, y), muted, layout.left_w - PAD_X * 2);
 
-    const footer = "Enter previews transcript";
+    const footer = "Enter resumes  Space previews";
     _ = draw.renderTextLimited(footer, layout.left_x + PAD_X, 12, muted, layout.left_w - PAD_X * 2);
     _ = content_h;
 }
@@ -302,7 +302,7 @@ fn renderDetail(
     y += 14;
 
     switch (session.transcript_state) {
-        .idle => _ = draw.renderTextLimited("Press Enter to load transcript", layout.detail_x + PAD_X, yTextFromTop(draw, window_height, y), muted, layout.detail_w - PAD_X * 2),
+        .idle => _ = draw.renderTextLimited("Press Space to load transcript", layout.detail_x + PAD_X, yTextFromTop(draw, window_height, y), muted, layout.detail_w - PAD_X * 2),
         .loading => _ = draw.renderTextLimited("Loading transcript", layout.detail_x + PAD_X, yTextFromTop(draw, window_height, y), muted, layout.detail_w - PAD_X * 2),
         .failed => _ = draw.renderTextLimited("Transcript failed to load", layout.detail_x + PAD_X, yTextFromTop(draw, window_height, y), accent, layout.detail_w - PAD_X * 2),
         .ready => renderTranscriptMessages(draw, session.transcript, layout, window_height, y, content_h, fg, muted, accent),

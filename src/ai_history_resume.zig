@@ -46,6 +46,38 @@ pub fn posixDirectoryTest(project_dir: []const u8, out: []u8) ResumeError![]cons
     return out[0..pos];
 }
 
+pub fn checkedPosixResume(command: []const u8, project_dir: []const u8, out: []u8) ResumeError![]const u8 {
+    if (project_dir.len == 0) return error.MissingProjectDir;
+    var pos: usize = 0;
+    try append(out, &pos, "test -d ");
+    try appendShellSingleQuote(out, &pos, project_dir);
+    try append(out, &pos, " && cd ");
+    try appendShellSingleQuote(out, &pos, project_dir);
+    try append(out, &pos, " && ");
+    try append(out, &pos, command);
+    return out[0..pos];
+}
+
+pub fn checkedPowerShellResume(meta: types.SessionMeta, out: []u8) ResumeError![]const u8 {
+    if (meta.project_dir.len == 0) return error.MissingProjectDir;
+    var pos: usize = 0;
+    try append(out, &pos, "if (Test-Path -LiteralPath ");
+    try appendPowerShellSingleQuote(out, &pos, meta.project_dir);
+    try append(out, &pos, " -PathType Container) { Set-Location -LiteralPath ");
+    try appendPowerShellSingleQuote(out, &pos, meta.project_dir);
+    try append(out, &pos, "; ");
+    switch (meta.resume_kind) {
+        .codex_resume => try append(out, &pos, "codex resume "),
+        .claude_resume => try append(out, &pos, "claude --resume "),
+        .unavailable => return error.UnsupportedProvider,
+    }
+    try appendPowerShellSingleQuote(out, &pos, meta.session_id);
+    try append(out, &pos, " } else { Write-Error ");
+    try appendPowerShellSingleQuote(out, &pos, "AI History resume failed: project path unavailable");
+    try append(out, &pos, " }");
+    return out[0..pos];
+}
+
 fn append(out: []u8, pos: *usize, value: []const u8) ResumeError!void {
     if (value.len > out.len - pos.*) return error.CommandTooLong;
     @memcpy(out[pos.*..][0..value.len], value);
@@ -63,6 +95,18 @@ fn appendShellSingleQuote(out: []u8, pos: *usize, value: []const u8) ResumeError
     for (value) |ch| {
         if (ch == '\'') {
             try append(out, pos, "'\\''");
+        } else {
+            try appendByte(out, pos, ch);
+        }
+    }
+    try appendByte(out, pos, '\'');
+}
+
+fn appendPowerShellSingleQuote(out: []u8, pos: *usize, value: []const u8) ResumeError!void {
+    try appendByte(out, pos, '\'');
+    for (value) |ch| {
+        if (ch == '\'') {
+            try append(out, pos, "''");
         } else {
             try appendByte(out, pos, ch);
         }
@@ -225,6 +269,78 @@ test "ai_history_resume: quotes project dir before shell commands" {
         "cd '/home/me/space dir' && codex resume abc",
         try posixCdThen("codex resume abc", "/home/me/space dir", &out),
     );
+}
+
+test "ai_history_resume: local shell command checks directory before resume" {
+    var resume_buf: [128]u8 = undefined;
+    var out: [512]u8 = undefined;
+    const meta: types.SessionMeta = .{
+        .provider = .codex,
+        .session_id = "abc",
+        .title = "A",
+        .project_dir = "/home/me/project",
+        .source_path = "a.jsonl",
+        .resume_kind = .codex_resume,
+    };
+    const resume_cmd = try resumeCommand(meta, &resume_buf);
+    try std.testing.expectEqualStrings(
+        "test -d '/home/me/project' && cd '/home/me/project' && codex resume abc",
+        try checkedPosixResume(resume_cmd, meta.project_dir, &out),
+    );
+}
+
+test "ai_history_resume: checked POSIX resume quotes single quotes and reports missing or long commands" {
+    var out: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "test -d '/home/me/it'\\''s/project' && cd '/home/me/it'\\''s/project' && codex resume 'abc def'",
+        try checkedPosixResume("codex resume 'abc def'", "/home/me/it's/project", &out),
+    );
+
+    try std.testing.expectError(error.MissingProjectDir, checkedPosixResume("codex resume abc", "", &out));
+
+    var tiny: [16]u8 = undefined;
+    try std.testing.expectError(error.CommandTooLong, checkedPosixResume("codex resume abc", "/home/me/project", &tiny));
+}
+
+test "ai_history_resume: checked PowerShell resume checks directory before resume" {
+    var out: [512]u8 = undefined;
+    const meta: types.SessionMeta = .{
+        .provider = .codex,
+        .session_id = "abc def",
+        .title = "A",
+        .project_dir = "C:\\Users\\me\\it's project",
+        .source_path = "a.jsonl",
+        .resume_kind = .codex_resume,
+    };
+    try std.testing.expectEqualStrings(
+        "if (Test-Path -LiteralPath 'C:\\Users\\me\\it''s project' -PathType Container) { Set-Location -LiteralPath 'C:\\Users\\me\\it''s project'; codex resume 'abc def' } else { Write-Error 'AI History resume failed: project path unavailable' }",
+        try checkedPowerShellResume(meta, &out),
+    );
+}
+
+test "ai_history_resume: checked PowerShell resume reports missing unsupported and long commands" {
+    var out: [512]u8 = undefined;
+    const missing: types.SessionMeta = .{
+        .provider = .codex,
+        .session_id = "abc",
+        .title = "A",
+        .source_path = "a.jsonl",
+        .resume_kind = .codex_resume,
+    };
+    try std.testing.expectError(error.MissingProjectDir, checkedPowerShellResume(missing, &out));
+
+    const unsupported: types.SessionMeta = .{
+        .provider = .codex,
+        .session_id = "abc",
+        .title = "A",
+        .project_dir = "C:\\Project",
+        .source_path = "a.jsonl",
+        .resume_kind = .unavailable,
+    };
+    try std.testing.expectError(error.UnsupportedProvider, checkedPowerShellResume(unsupported, &out));
+
+    var tiny: [16]u8 = undefined;
+    try std.testing.expectError(error.CommandTooLong, checkedPowerShellResume(unsupported, &tiny));
 }
 
 test "ai_history_resume: cd then preserves command from same output buffer" {

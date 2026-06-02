@@ -1162,6 +1162,10 @@ fn handleKey(ev: platform_input.KeyEvent) void {
                 _ = AppWindow.aiHistoryLoadSelectedTranscript();
                 return;
             },
+            0x20 => if (plain) {
+                _ = AppWindow.aiHistoryPreviewSelectedTranscript();
+                return;
+            },
             0x52 => if (plain and !ev.shift) {
                 g_ai_history_suppress_refresh_char = AppWindow.aiHistoryScanLocalNow();
                 return;

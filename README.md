@@ -129,7 +129,8 @@ Use `keybind = clear` before custom bindings if you want to remove all defaults 
 | Delete the selected saved Agent session | **D** / **Delete** in Agent History | **D** / **Delete** in Agent History |
 | Edit AI History filter | Type / Backspace in AI History | Type / Backspace in AI History |
 | Move selected AI History session | Up / Down in AI History | Up / Down in AI History |
-| Preview selected AI History transcript | Enter in AI History | Enter in AI History |
+| Resume selected AI History session | Enter in AI History | Enter in AI History |
+| Preview selected AI History transcript | Space in AI History | Space in AI History |
 | Refresh local AI History scan | **R** in local AI History | **R** in local AI History |
 | Edit AI Chat input cursor | Left/Right/Home/End/Delete/Backspace | Left/Right/Home/End/Delete/Backspace |
 | Stop in-flight AI Chat or Agent request | **Esc** in AI Chat while working | **Esc** in AI Chat while working |

@@ -40,6 +40,8 @@ const thread_message = @import("appwindow/thread_message.zig");
 const render_diagnostics = @import("render_diagnostics.zig");
 const ime_caret = @import("ime_caret.zig");
 pub const ai_chat = @import("ai_chat.zig");
+const ai_history_resume = @import("ai_history_resume.zig");
+const ai_history_types = @import("ai_history_types.zig");
 pub const ai_history_session = @import("ai_history_session.zig");
 pub const ai_history_source = @import("ai_history_source.zig");
 pub const tab = @import("appwindow/tab.zig");
@@ -653,6 +655,7 @@ pub fn activeAiHistory() ?*ai_history_session.Session {
 
 pub fn aiHistoryInsertCodepoint(codepoint: u21) bool {
     const session = activeAiHistory() orelse return false;
+    if (codepoint == ' ') return aiHistoryPreviewSelectedTranscript();
     if (codepoint < 0x20 or codepoint == 0x7f) return false;
     var buf: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(codepoint, &buf) catch return false;
@@ -676,7 +679,7 @@ pub fn aiHistoryMoveSelection(delta: isize) bool {
     return true;
 }
 
-pub fn aiHistoryLoadSelectedTranscript() bool {
+pub fn aiHistoryPreviewSelectedTranscript() bool {
     const session = activeAiHistory() orelse return false;
     const allocator = g_allocator orelse return false;
     const home = localHomeForAiHistory(allocator) catch |err| {
@@ -695,6 +698,75 @@ pub fn aiHistoryLoadSelectedTranscript() bool {
     };
     markUiDirty();
     return true;
+}
+
+pub fn aiHistoryLoadSelectedTranscript() bool {
+    return resumeAiHistorySelection();
+}
+
+pub fn resumeAiHistorySelection() bool {
+    const active = tab.activeTab() orelse return false;
+    if (active.kind != .ai_history) return false;
+    const session = active.ai_history_session orelse return false;
+    const meta = session.selectedVisible() orelse return false;
+    return spawnResumeTerminal(session.source.target, meta);
+}
+
+pub fn spawnResumeTerminal(target: ai_history_source.Target, meta: ai_history_types.SessionMeta) bool {
+    var resume_buf: [512]u8 = undefined;
+    const resume_cmd = ai_history_resume.resumeCommand(meta, &resume_buf) catch |err| {
+        log.warn("failed to build AI History provider resume command for {s}: {}", .{ meta.session_id, err });
+        return failAiHistoryResumePathUnavailable();
+    };
+
+    var checked_buf: [2048]u8 = undefined;
+    const checked_cmd = ai_history_resume.checkedPosixResume(resume_cmd, meta.project_dir, &checked_buf) catch |err| {
+        log.warn("failed to build AI History checked resume command for {s}: {}", .{ meta.session_id, err });
+        return failAiHistoryResumePathUnavailable();
+    };
+
+    var command_buf: [4096]u8 = undefined;
+    switch (target) {
+        .local => {
+            var native_checked_buf: [2048]u8 = undefined;
+            const local_checked_cmd = switch (platform_pty_command.backend()) {
+                .windows => ai_history_resume.checkedPowerShellResume(meta, &native_checked_buf) catch |err| {
+                    log.warn("failed to build AI History PowerShell resume command for {s}: {}", .{ meta.session_id, err });
+                    return failAiHistoryResumePathUnavailable();
+                },
+                .unsupported => checked_cmd,
+            };
+            const command = platform_pty_command.localShellInitialCommand(command_buf[0..], tab.getShellCmd(), local_checked_cmd) orelse return failAiHistoryResumePathUnavailable();
+            if (spawnTabWithCommandUtf8(command)) return true;
+            overlays.showStatusToast("AI History resume failed");
+            return false;
+        },
+        .wsl => {
+            const command = platform_pty_command.wslShellCommand(command_buf[0..], checked_cmd) orelse return failAiHistoryResumePathUnavailable();
+            if (spawnTabWithCommandUtf8(command)) return true;
+            overlays.showStatusToast("AI History resume failed");
+            return false;
+        },
+        .ssh => |ssh| {
+            return switch (overlays.aiHistoryConnectSshProfile(ssh.profile_name, checked_cmd)) {
+                .connected => true,
+                .not_found => {
+                    overlays.showStatusToast("AI History resume failed: SSH profile unavailable");
+                    return false;
+                },
+                .failed => {
+                    overlays.showStatusToast("AI History resume failed");
+                    return false;
+                },
+            };
+        },
+    }
+}
+
+fn failAiHistoryResumePathUnavailable() bool {
+    overlays.showStatusToast("AI History resume failed: project path unavailable");
+    markUiDirty();
+    return false;
 }
 
 pub fn aiHistoryScanLocalNow() bool {
@@ -745,8 +817,7 @@ pub fn aiHistoryHandleMousePress(xpos: f64, ypos: f64) bool {
             return true;
         },
         .@"resume" => {
-            // Resume is wired in the next task; consume the click so AI History
-            // tabs never fall through to terminal mouse handling.
+            _ = resumeAiHistorySelection();
             markUiDirty();
             return true;
         },

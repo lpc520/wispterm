@@ -358,8 +358,16 @@ pub fn wslInteractiveCommand(buf: []u8, cwd: ?[]const u8) ?[]const u8 {
     return impl.wslInteractiveCommand(buf, cwd);
 }
 
+pub fn wslShellCommand(buf: []u8, command: []const u8) ?[]const u8 {
+    return impl.wslShellCommand(buf, command);
+}
+
 pub fn wslExecArgv(command: []const u8) [5][]const u8 {
     return impl.wslExecArgv(command);
+}
+
+pub fn localShellInitialCommand(buf: []u8, current_shell: CommandLine, command: []const u8) ?[]const u8 {
+    return impl.localShellInitialCommand(buf, current_shell, command);
 }
 
 pub fn sshLauncherDetail() []const u8 {
@@ -635,6 +643,50 @@ test "platform pty command exposes session launcher layout by target OS" {
 test "platform pty command exposes OpenSSH helper executable names" {
     try std.testing.expect(sshExecutableName().len > 0);
     try std.testing.expect(scpExecutableName().len > 0);
+}
+
+test "platform pty command builds shell command lines for AI History resume" {
+    var buf: [1024]u8 = undefined;
+    const checked_resume = "test -d '/home/me/project' && cd '/home/me/project' && codex resume abc";
+
+    const current_shell_owned = try allocCommandLineFromUtf8(std.testing.allocator, "pwsh.exe");
+    defer freeCommandLine(std.testing.allocator, current_shell_owned);
+    const local_command = localShellInitialCommand(&buf, commandLineFromOwned(current_shell_owned), checked_resume) orelse return error.ExpectedCommand;
+    switch (backendForOs(builtin.os.tag)) {
+        .windows => {
+            try std.testing.expect(std.mem.startsWith(u8, local_command, "pwsh.exe -NoLogo -NoExit -Command "));
+            try std.testing.expect(std.mem.indexOf(u8, local_command, checked_resume) != null);
+        },
+        .unsupported => {
+            try std.testing.expect(std.mem.indexOf(u8, local_command, " -lc ") != null);
+            try std.testing.expect(std.mem.indexOf(u8, local_command, "codex resume abc") != null);
+        },
+    }
+
+    if (builtin.os.tag == .windows) {
+        const cmd_owned = try allocCommandLineFromUtf8(std.testing.allocator, "cmd.exe");
+        defer freeCommandLine(std.testing.allocator, cmd_owned);
+        try std.testing.expect(localShellInitialCommand(&buf, commandLineFromOwned(cmd_owned), checked_resume) == null);
+    }
+
+    const wsl_command = wslShellCommand(&buf, checked_resume);
+    switch (backendForOs(builtin.os.tag)) {
+        .windows => {
+            try std.testing.expect(wsl_command != null);
+            try std.testing.expect(std.mem.startsWith(u8, wsl_command.?, "wsl.exe --exec sh -lc "));
+            try std.testing.expect(std.mem.indexOf(u8, wsl_command.?, checked_resume) != null);
+        },
+        .unsupported => try std.testing.expect(wsl_command == null),
+    }
+
+    const ssh_command = sshInteractiveCommand(&buf, .{
+        .user = "user",
+        .host = "example.test",
+        .remote_command = checked_resume,
+    }) orelse return error.ExpectedCommand;
+    try std.testing.expect(std.mem.indexOf(u8, ssh_command, "ssh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ssh_command, "user@example.test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ssh_command, "codex resume abc") != null);
 }
 
 test "platform pty command selects backend by target OS" {
