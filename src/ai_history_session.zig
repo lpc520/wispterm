@@ -141,6 +141,16 @@ pub const Session = struct {
     transcript_provider: ?types.ProviderId = null,
     transcript: []types.TranscriptMessage = &.{},
 
+    // Async scan/transcript support. `mutex` guards state/status/rows/selected/
+    // list_offset/transcript*/generation fields. Workers run host I/O without the
+    // lock and take it only to publish. `closing` + join-on-deinit give UAF safety.
+    mutex: std.Thread.Mutex = .{},
+    scan_thread: ?std.Thread = null,
+    transcript_thread: ?std.Thread = null,
+    closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    scan_generation: u64 = 0,
+    transcript_generation: u64 = 0,
+
     pub fn init(allocator: std.mem.Allocator, source: source_mod.Source) Session {
         return .{
             .allocator = allocator,
@@ -242,6 +252,39 @@ pub const Session = struct {
         try self.replaceRows(result.rows);
         self.status = if (result.warning_count == 0) "Ready" else "Ready with warnings";
         return result;
+    }
+
+    /// Publish scan rows if `generation` is still current and we are not closing,
+    /// otherwise discard. Always frees `result`. Called from the scan worker.
+    pub fn publishScanResult(self: *Session, generation: u64, result: ScanResult) void {
+        var published = false;
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (!self.closing.load(.acquire) and generation == self.scan_generation) {
+                if (self.replaceRows(result.rows)) |_| {
+                    self.status = if (result.warning_count == 0) "Ready" else "Ready with warnings";
+                    published = true;
+                } else |_| {
+                    self.state = .failed;
+                    self.status = "Scan failed";
+                }
+            }
+        }
+        if (published and result.cache_update.records.len > 0) {
+            ai_history_cache.saveDefault(self.allocator, .{ .records = result.cache_update.records }) catch {};
+        }
+        freeScanResult(self.allocator, result);
+    }
+
+    /// Mark the scan failed if `generation` is still current and not closing.
+    pub fn publishScanFailure(self: *Session, generation: u64) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (!self.closing.load(.acquire) and generation == self.scan_generation) {
+            self.state = .failed;
+            self.status = "Scan failed";
+        }
     }
 
     pub fn loadSelectedTranscript(self: *Session, host: ScannerHost) !void {
@@ -840,7 +883,7 @@ fn metadataHasUsableSignal(meta: types.SessionMeta) bool {
     return meta.session_id.len > 0 and meta.message_count > 0;
 }
 
-fn cloneMetadata(allocator: std.mem.Allocator, meta: types.SessionMeta) !types.SessionMeta {
+pub fn cloneMetadata(allocator: std.mem.Allocator, meta: types.SessionMeta) !types.SessionMeta {
     var cloned = types.SessionMeta{
         .provider = meta.provider,
         .session_id = "",
@@ -869,7 +912,7 @@ fn freeRows(allocator: std.mem.Allocator, rows: []types.SessionMeta) void {
     for (rows) |row| freeMetadata(allocator, row);
 }
 
-fn freeMetadata(allocator: std.mem.Allocator, meta: types.SessionMeta) void {
+pub fn freeMetadata(allocator: std.mem.Allocator, meta: types.SessionMeta) void {
     freeSlice(allocator, meta.session_id);
     freeSlice(allocator, meta.title);
     freeSlice(allocator, meta.summary);
@@ -1705,4 +1748,45 @@ test "ai_history_session: scanLocalFilesystem reuses unchanged cached metadata" 
     try std.testing.expectEqualStrings("Cached title", result.rows[0].title);
     try std.testing.expectEqual(@as(usize, 1), result.cache_update.records.len);
     try std.testing.expectEqualStrings("codex-cached", result.cache_update.records[0].meta.session_id);
+}
+
+test "ai_history_session: publishScanResult applies rows when generation current" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    session.scan_generation = 7;
+
+    const rows = try allocator.alloc(types.SessionMeta, 1);
+    rows[0] = .{
+        .provider = .codex,
+        .session_id = try allocator.dupe(u8, "live"),
+        .title = try allocator.dupe(u8, "Live"),
+        .source_path = try allocator.dupe(u8, "live.jsonl"),
+        .resume_kind = .codex_resume,
+    };
+    session.publishScanResult(7, .{ .rows = rows, .owns_row_strings = true });
+
+    try std.testing.expectEqual(LoadState.ready, session.state);
+    try std.testing.expectEqual(@as(usize, 1), session.rows.items.len);
+    try std.testing.expectEqualStrings("live", session.rows.items[0].session_id);
+}
+
+test "ai_history_session: publishScanResult discards stale generation" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    session.scan_generation = 9;
+
+    const rows = try allocator.alloc(types.SessionMeta, 1);
+    rows[0] = .{
+        .provider = .codex,
+        .session_id = try allocator.dupe(u8, "stale"),
+        .title = try allocator.dupe(u8, "Stale"),
+        .source_path = try allocator.dupe(u8, "stale.jsonl"),
+        .resume_kind = .codex_resume,
+    };
+    // generation 4 != current 9 -> discarded and freed (testing allocator checks no leak)
+    session.publishScanResult(4, .{ .rows = rows, .owns_row_strings = true });
+
+    try std.testing.expectEqual(@as(usize, 0), session.rows.items.len);
 }
