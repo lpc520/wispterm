@@ -104,6 +104,8 @@ pub const LocalScannerHost = struct {
 };
 
 pub const WslScannerHost = struct {
+    cache: ?ai_history_cache.CacheFile = null,
+
     pub fn scannerHost(self: *WslScannerHost) ScannerHost {
         return .{
             .ctx = self,
@@ -117,8 +119,9 @@ pub const WslScannerHost = struct {
     }
 
     fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source, sink: ?ScanSink) !ScanResult {
+        const self: *WslScannerHost = @ptrCast(@alignCast(ctx));
         const host = RemoteExecHost{ .ctx = ctx, .exec = exec };
-        return try scanRemoteFilesystemSink(allocator, source, host, sink);
+        return try scanRemoteFilesystemSink(allocator, source, host, self.cache, sink);
     }
 
     fn loadTranscript(ctx: *anyopaque, allocator: std.mem.Allocator, meta: types.SessionMeta) ![]types.TranscriptMessage {
@@ -129,6 +132,7 @@ pub const WslScannerHost = struct {
 
 pub const SshScannerHost = struct {
     conn: ssh_connection.SshConnection,
+    cache: ?ai_history_cache.CacheFile = null,
 
     pub fn scannerHost(self: *SshScannerHost) ScannerHost {
         return .{
@@ -144,8 +148,9 @@ pub const SshScannerHost = struct {
     }
 
     fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source, sink: ?ScanSink) !ScanResult {
+        const self: *SshScannerHost = @ptrCast(@alignCast(ctx));
         const host = RemoteExecHost{ .ctx = ctx, .exec = exec };
-        return try scanRemoteFilesystemSink(allocator, source, host, sink);
+        return try scanRemoteFilesystemSink(allocator, source, host, self.cache, sink);
     }
 
     fn loadTranscript(ctx: *anyopaque, allocator: std.mem.Allocator, meta: types.SessionMeta) ![]types.TranscriptMessage {
@@ -870,20 +875,25 @@ pub fn remoteCatCommand(path: []const u8, out: []u8) ![]const u8 {
 }
 
 pub fn scanRemoteFilesystem(allocator: std.mem.Allocator, source: source_mod.Source, host: RemoteExecHost) !ScanResult {
-    return scanRemoteFilesystemSink(allocator, source, host, null);
+    return scanRemoteFilesystemSink(allocator, source, host, null, null);
 }
 
-pub fn scanRemoteFilesystemSink(allocator: std.mem.Allocator, source: source_mod.Source, host: RemoteExecHost, sink: ?ScanSink) !ScanResult {
+pub fn scanRemoteFilesystemSink(allocator: std.mem.Allocator, source: source_mod.Source, host: RemoteExecHost, cache: ?ai_history_cache.CacheFile, sink: ?ScanSink) !ScanResult {
     const home_raw = try host.exec(host.ctx, allocator, remote_file.wslHomeCommand());
     defer allocator.free(home_raw);
     const home = std.mem.trim(u8, home_raw, " \t\r\n");
     if (home.len == 0) return error.NoHomeDirectory;
 
+    const prov = try emitProvisionalBatch(allocator, cache, source.id, sink);
+
     var scanner = RemoteScan{
         .allocator = allocator,
         .host = host,
-        .emitter = .{ .allocator = allocator, .sink = sink },
+        .source = source,
+        .cache = cache,
+        .emitter = .{ .allocator = allocator, .sink = prov.emitter_sink },
     };
+    if (prov.aborted) scanner.emitter.aborted = true;
     errdefer scanner.deinit();
 
     if (source.providers.codex) {
@@ -916,15 +926,25 @@ pub fn scanRemoteFilesystemSink(allocator: std.mem.Allocator, source: source_mod
     }
     try scanner.emitter.flush();
 
-    const rows = if (sink == null)
+    const authoritative = (sink == null) or prov.warm;
+    const rows = if (authoritative)
         try scanner.emitter.rows.toOwnedSlice(allocator)
     else
         try allocator.alloc(types.SessionMeta, 0);
+    errdefer {
+        freeRows(allocator, rows);
+        allocator.free(rows);
+    }
+    const cache_update = try scanner.cache_records.toOwnedSlice(allocator);
     return .{
         .rows = rows,
-        .authoritative = (sink == null),
+        .authoritative = authoritative,
         .warning_count = scanner.warning_count,
         .owns_row_strings = true,
+        .cache_update = .{
+            .records = cache_update,
+            .owns_record_strings = true,
+        },
     };
 }
 
@@ -1243,10 +1263,15 @@ fn providerRootForPath(source: source_mod.Source, provider: types.ProviderId, so
 const RemoteScan = struct {
     allocator: std.mem.Allocator,
     host: RemoteExecHost,
+    source: source_mod.Source,
+    cache: ?ai_history_cache.CacheFile = null,
     emitter: RowEmitter,
+    cache_records: std.ArrayListUnmanaged(ai_history_cache.CacheRecord) = .empty,
     warning_count: u32 = 0,
 
     fn deinit(self: *RemoteScan) void {
+        ai_history_cache.freeRecords(self.allocator, self.cache_records.items);
+        self.cache_records.deinit(self.allocator);
         self.emitter.deinit();
     }
 
@@ -1293,7 +1318,18 @@ const RemoteScan = struct {
     }
 
     fn scanPath(self: *RemoteScan, provider: types.ProviderId, path: []const u8, stamp: ai_history_cache.FileStamp) !void {
-        _ = stamp; // used in Task 5 (cache lookup)
+        if (self.cache) |cache| {
+            if (ai_history_cache.findRecord(cache, self.source.id, provider, path, stamp)) |record| {
+                const cached_meta = try cloneMetadata(self.allocator, record.meta);
+                {
+                    errdefer freeMetadata(self.allocator, cached_meta);
+                    try self.appendCacheRecord(provider, path, stamp, record.meta);
+                }
+                try self.emitter.emit(cached_meta);
+                return; // skipped the cat
+            }
+        }
+
         var cat_buf: [2048]u8 = undefined;
         const cat_cmd = remoteCatCommand(path, cat_buf[0..]) catch {
             self.warning_count += 1;
@@ -1323,8 +1359,29 @@ const RemoteScan = struct {
             self.warning_count += 1;
             return;
         }
-
+        {
+            errdefer freeMetadata(self.allocator, meta);
+            try self.appendCacheRecord(provider, path, stamp, meta);
+        }
         try self.emitter.emit(meta);
+    }
+
+    fn appendCacheRecord(self: *RemoteScan, provider: types.ProviderId, path: []const u8, stamp: ai_history_cache.FileStamp, meta: types.SessionMeta) !void {
+        const root_path = providerRootForPath(self.source, provider, path);
+        const record: ai_history_cache.CacheRecord = .{
+            .source_id = self.source.id,
+            .provider = provider,
+            .root_path = root_path,
+            .source_path = path,
+            .stamp = stamp,
+            .meta = meta,
+        };
+        const cloned = try ai_history_cache.cloneRecord(self.allocator, record);
+        errdefer {
+            var mutable = cloned;
+            ai_history_cache.freeRecord(self.allocator, &mutable);
+        }
+        try self.cache_records.append(self.allocator, cloned);
     }
 };
 
@@ -2685,7 +2742,7 @@ test "ai_history_session: remote scan with sink streams rows and returns empty n
         .name = "WSL",
         .target = .{ .wsl = .{} },
         .providers = .{ .codex = true, .claude = false },
-    }, host, collect.sink());
+    }, host, null, collect.sink());
     defer freeScanResult(allocator, result);
 
     try std.testing.expect(!result.authoritative);
@@ -2817,4 +2874,42 @@ test "ai_history_session: parseRemoteStamp parses tab fields and tolerates plain
     try std.testing.expectEqualStrings("/p/b.jsonl", b.path);
     try std.testing.expectEqual(@as(u64, 0), b.stamp.size);
     try std.testing.expectEqual(@as(i128, 0), b.stamp.mtime_ns);
+}
+
+test "ai_history_session: remote scan skips cat on cache hit" {
+    const allocator = std.testing.allocator;
+
+    // Host that errors if asked to cat — proving the cache hit skipped it.
+    const Host = struct {
+        fn exec(_: *anyopaque, alloc: std.mem.Allocator, command: []const u8) anyerror![]u8 {
+            if (std.mem.eql(u8, command, remote_file.wslHomeCommand())) return try alloc.dupe(u8, "/home/me\n");
+            if (std.mem.startsWith(u8, command, "find")) {
+                if (std.mem.indexOf(u8, command, "/home/me/.codex") != null)
+                    return try alloc.dupe(u8, "/home/me/.codex/sessions/c.jsonl\n");
+                return try alloc.dupe(u8, "");
+            }
+            return error.UnexpectedCat; // cat must NOT be called
+        }
+    };
+    var host_byte: u8 = 0;
+    const host = RemoteExecHost{ .ctx = &host_byte, .exec = Host.exec };
+
+    const cached_meta: types.SessionMeta = .{ .provider = .codex, .session_id = "codex-cached", .title = "Cached", .source_path = "/home/me/.codex/sessions/c.jsonl", .resume_kind = .codex_resume, .last_active_at_ms = 9 };
+    var records = [_]ai_history_cache.CacheRecord{
+        .{ .source_id = "wsl", .provider = .codex, .root_path = "/home/me/.codex", .source_path = "/home/me/.codex/sessions/c.jsonl", .stamp = .{ .size = 0, .mtime_ns = 0 }, .meta = cached_meta },
+    };
+    const cache: ai_history_cache.CacheFile = .{ .records = &records };
+
+    // sink == null so the scan accumulates the authoritative set into result.rows.
+    const result = try scanRemoteFilesystemSink(allocator, .{
+        .id = "wsl",
+        .name = "WSL",
+        .target = .{ .wsl = .{} },
+        .providers = .{ .codex = true, .claude = false },
+    }, host, cache, null);
+    defer freeScanResult(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqualStrings("codex-cached", result.rows[0].session_id);
+    try std.testing.expectEqual(@as(usize, 1), result.cache_update.records.len);
 }

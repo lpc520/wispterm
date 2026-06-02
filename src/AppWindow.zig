@@ -841,12 +841,21 @@ const AiHistoryScanJob = struct {
                 return host.scan(host.ctx, allocator, source, sink);
             },
             .wsl => {
-                var host_state = ai_history_session.WslScannerHost{};
+                var parsed_cache = ai_history_cache.loadDefault(allocator) catch null;
+                defer if (parsed_cache) |*cache| cache.deinit();
+                var host_state = ai_history_session.WslScannerHost{
+                    .cache = if (parsed_cache) |cache| cache.value else null,
+                };
                 const host = host_state.scannerHost();
                 return host.scan(host.ctx, allocator, source, sink);
             },
             .ssh => |conn| {
-                var host_state = ai_history_session.SshScannerHost{ .conn = conn };
+                var parsed_cache = ai_history_cache.loadDefault(allocator) catch null;
+                defer if (parsed_cache) |*cache| cache.deinit();
+                var host_state = ai_history_session.SshScannerHost{
+                    .conn = conn,
+                    .cache = if (parsed_cache) |cache| cache.value else null,
+                };
                 const host = host_state.scannerHost();
                 return host.scan(host.ctx, allocator, source, sink);
             },
