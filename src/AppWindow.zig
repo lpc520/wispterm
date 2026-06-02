@@ -40,6 +40,7 @@ const thread_message = @import("appwindow/thread_message.zig");
 const render_diagnostics = @import("render_diagnostics.zig");
 const ime_caret = @import("ime_caret.zig");
 pub const ai_chat = @import("ai_chat.zig");
+const ai_history_cache = @import("ai_history_cache.zig");
 const ai_history_resume = @import("ai_history_resume.zig");
 const ai_history_types = @import("ai_history_types.zig");
 pub const ai_history_session = @import("ai_history_session.zig");
@@ -779,11 +780,13 @@ const PreviewTranscriptRunner = struct {
 
 const ScanRunner = struct {
     fn run(session: *ai_history_session.Session, host: ai_history_session.ScannerHost) bool {
-        session.scanNow(host) catch |err| {
+        const result = session.scanNowReturningResult(host) catch |err| {
             log.warn("failed to scan AI History: {}", .{err});
             markUiDirty();
             return true;
         };
+        defer ai_history_session.freeScanResult(session.allocator, result);
+        saveAiHistoryMetadataCache(session.allocator, result.cache_update);
         markUiDirty();
         return true;
     }
@@ -799,7 +802,18 @@ fn withAiHistoryScannerHost(allocator: std.mem.Allocator, session: *ai_history_s
                 return true;
             };
             defer allocator.free(home);
-            var host_state = ai_history_session.LocalScannerHost{ .home = home };
+            var parsed_cache: ?std.json.Parsed(ai_history_cache.CacheFile) = null;
+            if (action == .scan) {
+                parsed_cache = ai_history_cache.loadDefault(allocator) catch |err| blk: {
+                    log.warn("failed to load AI History metadata cache: {}", .{err});
+                    break :blk null;
+                };
+            }
+            defer if (parsed_cache) |*cache| cache.deinit();
+            var host_state = ai_history_session.LocalScannerHost{
+                .home = home,
+                .cache = if (parsed_cache) |cache| cache.value else null,
+            };
             return runner(session, host_state.scannerHost());
         },
         .wsl => {
@@ -816,6 +830,13 @@ fn withAiHistoryScannerHost(allocator: std.mem.Allocator, session: *ai_history_s
             return runner(session, host_state.scannerHost());
         },
     }
+}
+
+fn saveAiHistoryMetadataCache(allocator: std.mem.Allocator, cache_update: ai_history_session.CacheUpdate) void {
+    if (cache_update.records.len == 0) return;
+    ai_history_cache.saveDefault(allocator, .{ .records = cache_update.records }) catch |err| {
+        log.warn("failed to save AI History metadata cache: {}", .{err});
+    };
 }
 
 fn failAiHistoryHostUnavailable(session: *ai_history_session.Session, action: AiHistoryHostAction, status: []const u8) void {

@@ -6,6 +6,7 @@ const codex_provider = @import("ai_history_provider_codex.zig");
 const claude_provider = @import("ai_history_provider_claude.zig");
 const remote_file = @import("platform/remote_file.zig");
 const ssh_connection = @import("ssh_connection.zig");
+const ai_history_cache = @import("ai_history_cache.zig");
 
 pub const LoadState = enum { idle, scanning, ready, failed };
 pub const TranscriptState = enum { idle, loading, ready, failed };
@@ -18,6 +19,11 @@ pub const ScanBudget = struct {
     max_bytes: u64 = MAX_SCAN_METADATA_BYTES,
 };
 
+pub const CacheUpdate = struct {
+    records: []ai_history_cache.CacheRecord = &.{},
+    owns_record_strings: bool = false,
+};
+
 pub const FileEntry = struct {
     provider: types.ProviderId,
     path: []const u8,
@@ -28,6 +34,7 @@ pub const ScanResult = struct {
     rows: []types.SessionMeta,
     warning_count: u32 = 0,
     owns_row_strings: bool = false,
+    cache_update: CacheUpdate = .{},
 };
 
 pub const ScannerHost = struct {
@@ -43,6 +50,7 @@ pub const RemoteExecHost = struct {
 
 pub const LocalScannerHost = struct {
     home: []const u8,
+    cache: ?ai_history_cache.CacheFile = null,
 
     pub fn scannerHost(self: *LocalScannerHost) ScannerHost {
         return .{
@@ -54,6 +62,7 @@ pub const LocalScannerHost = struct {
 
     fn scan(ctx: *anyopaque, allocator: std.mem.Allocator, source: source_mod.Source) !ScanResult {
         const self: *LocalScannerHost = @ptrCast(@alignCast(ctx));
+        if (self.cache) |cache| return try scanLocalFilesystemWithCache(allocator, source, self.home, .{}, cache);
         return try scanLocalFilesystem(allocator, source, self.home);
     }
 
@@ -221,6 +230,20 @@ pub const Session = struct {
         self.status = if (result.warning_count == 0) "Ready" else "Ready with warnings";
     }
 
+    pub fn scanNowReturningResult(self: *Session, host: ScannerHost) !ScanResult {
+        self.beginScan();
+        errdefer {
+            self.state = .failed;
+            self.status = "Scan failed";
+        }
+        const result = try host.scan(host.ctx, self.allocator, self.source);
+        errdefer freeScanResult(self.allocator, result);
+
+        try self.replaceRows(result.rows);
+        self.status = if (result.warning_count == 0) "Ready" else "Ready with warnings";
+        return result;
+    }
+
     pub fn loadSelectedTranscript(self: *Session, host: ScannerHost) !void {
         const selected = self.selectedVisible() orelse return error.NoSelection;
         self.clearTranscript();
@@ -372,9 +395,21 @@ pub fn scanLocalFilesystemWithBudget(
     home: []const u8,
     budget: ScanBudget,
 ) !ScanResult {
+    return scanLocalFilesystemWithCache(allocator, source, home, budget, null);
+}
+
+pub fn scanLocalFilesystemWithCache(
+    allocator: std.mem.Allocator,
+    source: source_mod.Source,
+    home: []const u8,
+    budget: ScanBudget,
+    cache: ?ai_history_cache.CacheFile,
+) !ScanResult {
     var scanner = LocalScan{
         .allocator = allocator,
+        .source = source,
         .budget = budget,
+        .cache = cache,
     };
     errdefer scanner.deinit();
 
@@ -409,11 +444,20 @@ pub fn scanLocalFilesystemWithBudget(
     try scanner.processCandidates();
 
     const rows = try scanner.rows.toOwnedSlice(allocator);
+    errdefer {
+        freeRows(allocator, rows);
+        allocator.free(rows);
+    }
+    const cache_update = try scanner.cache_records.toOwnedSlice(allocator);
     scanner.freeCandidates();
     return .{
         .rows = rows,
         .warning_count = scanner.warning_count,
         .owns_row_strings = true,
+        .cache_update = .{
+            .records = cache_update,
+            .owns_record_strings = true,
+        },
     };
 }
 
@@ -506,6 +550,7 @@ pub fn loadRemoteTranscript(allocator: std.mem.Allocator, host: RemoteExecHost, 
 }
 
 pub fn freeScanResult(allocator: std.mem.Allocator, result: ScanResult) void {
+    if (result.cache_update.owns_record_strings) ai_history_cache.freeRecords(allocator, result.cache_update.records) else allocator.free(result.cache_update.records);
     if (result.owns_row_strings) freeRows(allocator, result.rows);
     allocator.free(result.rows);
 }
@@ -526,12 +571,17 @@ const LocalScan = struct {
     };
 
     allocator: std.mem.Allocator,
+    source: source_mod.Source,
     budget: ScanBudget,
+    cache: ?ai_history_cache.CacheFile = null,
     rows: std.ArrayListUnmanaged(types.SessionMeta) = .empty,
     candidates: std.ArrayListUnmanaged(Candidate) = .empty,
+    cache_records: std.ArrayListUnmanaged(ai_history_cache.CacheRecord) = .empty,
     warning_count: u32 = 0,
 
     fn deinit(self: *LocalScan) void {
+        ai_history_cache.freeRecords(self.allocator, self.cache_records.items);
+        self.cache_records.deinit(self.allocator);
         freeRows(self.allocator, self.rows.items);
         self.rows.deinit(self.allocator);
         self.freeCandidates();
@@ -633,6 +683,17 @@ const LocalScan = struct {
     }
 
     fn scanCandidate(self: *LocalScan, candidate: Candidate) !void {
+        const stamp: ai_history_cache.FileStamp = .{ .size = candidate.size, .mtime_ns = candidate.mtime };
+        if (self.cache) |cache| {
+            if (ai_history_cache.findRecord(cache, self.source.id, candidate.provider, candidate.path, stamp)) |record| {
+                const cached_meta = try cloneMetadata(self.allocator, record.meta);
+                errdefer freeMetadata(self.allocator, cached_meta);
+                try self.rows.append(self.allocator, cached_meta);
+                try self.appendCacheRecord(candidate, record.meta);
+                return;
+            }
+        }
+
         const file = std.fs.openFileAbsolute(candidate.path, .{}) catch {
             self.warning_count += 1;
             return;
@@ -658,7 +719,26 @@ const LocalScan = struct {
         }
         errdefer freeMetadata(self.allocator, meta);
 
+        try self.appendCacheRecord(candidate, meta);
         try self.rows.append(self.allocator, meta);
+    }
+
+    fn appendCacheRecord(self: *LocalScan, candidate: Candidate, meta: types.SessionMeta) !void {
+        const root_path = providerRootForPath(self.source, candidate.provider, candidate.path);
+        const record: ai_history_cache.CacheRecord = .{
+            .source_id = self.source.id,
+            .provider = candidate.provider,
+            .root_path = root_path,
+            .source_path = candidate.path,
+            .stamp = .{ .size = candidate.size, .mtime_ns = candidate.mtime },
+            .meta = meta,
+        };
+        const cloned = try ai_history_cache.cloneRecord(self.allocator, record);
+        errdefer {
+            var mutable = cloned;
+            ai_history_cache.freeRecord(self.allocator, &mutable);
+        }
+        try self.cache_records.append(self.allocator, cloned);
     }
 
     fn candidateMoreRecent(_: void, lhs: Candidate, rhs: Candidate) bool {
@@ -666,6 +746,18 @@ const LocalScan = struct {
         return lhs.mtime > rhs.mtime;
     }
 };
+
+fn providerRootForPath(source: source_mod.Source, provider: types.ProviderId, source_path: []const u8) []const u8 {
+    const explicit = switch (provider) {
+        .codex => source.codex_root_override,
+        .claude => source.claude_root_override,
+    };
+    if (explicit) |root| return root;
+    for (source.extra_roots) |root| {
+        if (root.provider == provider and std.mem.startsWith(u8, source_path, root.path)) return root.path;
+    }
+    return "";
+}
 
 const RemoteScan = struct {
     allocator: std.mem.Allocator,
@@ -1552,4 +1644,57 @@ test "ai_history_session: scanLocalFilesystem budget returns partial rows with w
 
     try std.testing.expectEqual(@as(usize, 1), result.rows.len);
     try std.testing.expectEqual(@as(u32, 1), result.warning_count);
+}
+
+test "ai_history_session: scanLocalFilesystem reuses unchanged cached metadata" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".codex/sessions");
+    try tmp.dir.writeFile(.{
+        .sub_path = ".codex/sessions/a.jsonl",
+        .data =
+        \\{"type":"session_meta","timestamp":"2026-05-31T10:00:00Z","payload":{"id":"codex-live","cwd":"/tmp/project"}}
+        \\{"type":"response_item","timestamp":"2026-05-31T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Live title"}]}}
+        \\
+        ,
+    });
+
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &home_buf);
+    const path = try std.fs.path.join(allocator, &.{ home, ".codex", "sessions", "a.jsonl" });
+    defer allocator.free(path);
+    const stat = try tmp.dir.statFile(".codex/sessions/a.jsonl");
+    const cached_meta: types.SessionMeta = .{
+        .provider = .codex,
+        .session_id = "codex-cached",
+        .title = "Cached title",
+        .project_dir = "/tmp/cached",
+        .source_path = path,
+        .resume_kind = .codex_resume,
+        .message_count = 1,
+    };
+    const records = [_]ai_history_cache.CacheRecord{.{
+        .source_id = "local",
+        .provider = .codex,
+        .root_path = "",
+        .source_path = path,
+        .stamp = .{ .size = stat.size, .mtime_ns = stat.mtime },
+        .meta = cached_meta,
+    }};
+
+    const result = try scanLocalFilesystemWithCache(allocator, .{
+        .id = "local",
+        .name = "Local",
+        .target = .local,
+        .providers = .{ .codex = true, .claude = false },
+    }, home, .{}, .{ .records = @constCast(&records) });
+    defer freeScanResult(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqualStrings("codex-cached", result.rows[0].session_id);
+    try std.testing.expectEqualStrings("Cached title", result.rows[0].title);
+    try std.testing.expectEqual(@as(usize, 1), result.cache_update.records.len);
+    try std.testing.expectEqualStrings("codex-cached", result.cache_update.records[0].meta.session_id);
 }
