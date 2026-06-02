@@ -739,13 +739,16 @@ pub fn scanLocalFilesystemWithCacheSink(
     cache: ?ai_history_cache.CacheFile,
     sink: ?ScanSink,
 ) !ScanResult {
+    const prov = try emitProvisionalBatch(allocator, cache, source.id, sink);
+
     var scanner = LocalScan{
         .allocator = allocator,
         .source = source,
         .budget = budget,
         .cache = cache,
-        .emitter = .{ .allocator = allocator, .sink = sink },
+        .emitter = .{ .allocator = allocator, .sink = prov.emitter_sink },
     };
+    if (prov.aborted) scanner.emitter.aborted = true;
     errdefer scanner.deinit();
 
     if (source.providers.codex) {
@@ -779,7 +782,8 @@ pub fn scanLocalFilesystemWithCacheSink(
     try scanner.processCandidates();
     try scanner.emitter.flush();
 
-    const rows = if (sink == null)
+    const authoritative = (sink == null) or prov.warm;
+    const rows = if (authoritative)
         try scanner.emitter.rows.toOwnedSlice(allocator)
     else
         try allocator.alloc(types.SessionMeta, 0);
@@ -791,7 +795,7 @@ pub fn scanLocalFilesystemWithCacheSink(
     scanner.freeCandidates();
     return .{
         .rows = rows,
-        .authoritative = (sink == null),
+        .authoritative = authoritative,
         .warning_count = scanner.warning_count,
         .owns_row_strings = true,
         .cache_update = .{
@@ -926,6 +930,36 @@ pub fn rowsForSource(allocator: std.mem.Allocator, cache: ai_history_cache.Cache
         try list.append(allocator, try cloneMetadata(allocator, record.meta));
     }
     return list.toOwnedSlice(allocator);
+}
+
+/// Outcome of the provisional (instant-reopen) phase, consumed by the local and
+/// remote scanners.
+const ProvisionalScan = struct {
+    /// true when cached rows existed and were published as batch 0; the scan
+    /// should then accumulate the authoritative set and `replaceRows` at finalize.
+    warm: bool,
+    /// The sink the row emitter should use: the real sink in cold streaming mode,
+    /// or null in warm/sync mode (accumulate the authoritative set instead).
+    emitter_sink: ?ScanSink,
+    /// true when the provisional publish reported a stale/closing scan.
+    aborted: bool,
+};
+
+/// Instant-reopen: if a sink and cache are present and the cache has rows for
+/// `source_id`, publish them (sorted, most-recent-first) as a provisional batch 0
+/// for instant display, and signal warm mode. Otherwise signal cold/sync mode.
+/// Takes ownership of the cached rows by handing them to `sink.publish`.
+fn emitProvisionalBatch(allocator: std.mem.Allocator, cache: ?ai_history_cache.CacheFile, source_id: []const u8, sink: ?ScanSink) !ProvisionalScan {
+    const real_sink = sink orelse return .{ .warm = false, .emitter_sink = null, .aborted = false };
+    const c = cache orelse return .{ .warm = false, .emitter_sink = real_sink, .aborted = false };
+    const cached = try rowsForSource(allocator, c, source_id);
+    if (cached.len == 0) {
+        allocator.free(cached);
+        return .{ .warm = false, .emitter_sink = real_sink, .aborted = false };
+    }
+    std.mem.sort(types.SessionMeta, cached, {}, types.lessRecent);
+    const keep = real_sink.publish(real_sink.ctx, cached); // sink takes ownership
+    return .{ .warm = true, .emitter_sink = null, .aborted = !keep };
 }
 
 /// Collects scanned rows. With a sink it flushes batches for live display
@@ -2654,4 +2688,49 @@ test "ai_history_session: rowsForSource clones only matching source rows" {
     }
     try std.testing.expectEqual(@as(usize, 1), rows.len);
     try std.testing.expectEqualStrings("a", rows[0].session_id);
+}
+
+test "ai_history_session: local scan warm cache publishes provisional batch then authoritative result" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // One real on-disk codex session (the authoritative walk will find this).
+    try tmp.dir.makePath(".codex/sessions");
+    try tmp.dir.writeFile(.{
+        .sub_path = ".codex/sessions/real.jsonl",
+        .data =
+        \\{"type":"session_meta","timestamp":"2026-05-31T10:00:00Z","payload":{"id":"codex-real","cwd":"/tmp/project"}}
+        \\{"type":"response_item","timestamp":"2026-05-31T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}
+        \\
+        ,
+    });
+
+    // A cache that knows about a (now stale) prior row for this source.
+    const cached_meta: types.SessionMeta = .{ .provider = .codex, .session_id = "codex-prior", .title = "Prior", .source_path = "/old/prior.jsonl", .resume_kind = .codex_resume, .last_active_at_ms = 5 };
+    var records = [_]ai_history_cache.CacheRecord{
+        .{ .source_id = "local", .provider = .codex, .root_path = "/old", .source_path = "/old/prior.jsonl", .stamp = .{ .size = 1, .mtime_ns = 1 }, .meta = cached_meta },
+    };
+    const cache: ai_history_cache.CacheFile = .{ .records = &records };
+
+    var collect = TestCollectSink{ .allocator = allocator };
+    defer collect.deinit();
+
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &home_buf);
+    const result = try scanLocalFilesystemWithCacheSink(allocator, .{
+        .id = "local",
+        .name = "Local",
+        .target = .local,
+        .providers = .{ .codex = true, .claude = false },
+    }, home, .{}, cache, collect.sink());
+    defer freeScanResult(allocator, result);
+
+    // Warm: provisional batch 0 streamed the cached "prior" row...
+    try std.testing.expectEqual(@as(usize, 1), collect.rows.items.len);
+    try std.testing.expectEqualStrings("codex-prior", collect.rows.items[0].session_id);
+    // ...and the authoritative result is the real on-disk row, to be swapped in by finishScan.
+    try std.testing.expect(result.authoritative);
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqualStrings("codex-real", result.rows[0].session_id);
 }
