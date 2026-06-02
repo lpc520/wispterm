@@ -912,6 +912,22 @@ pub fn freeTranscript(allocator: std.mem.Allocator, provider: types.ProviderId, 
     }
 }
 
+/// Clone every cached SessionMeta belonging to `source_id`. Caller owns the
+/// returned slice (free with `freeRows` + `allocator.free`). Used to show the
+/// previous scan instantly on reopen before the filesystem walk runs.
+pub fn rowsForSource(allocator: std.mem.Allocator, cache: ai_history_cache.CacheFile, source_id: []const u8) ![]types.SessionMeta {
+    var list: std.ArrayListUnmanaged(types.SessionMeta) = .empty;
+    errdefer {
+        freeRows(allocator, list.items);
+        list.deinit(allocator);
+    }
+    for (cache.records) |record| {
+        if (!std.mem.eql(u8, record.source_id, source_id)) continue;
+        try list.append(allocator, try cloneMetadata(allocator, record.meta));
+    }
+    return list.toOwnedSlice(allocator);
+}
+
 /// Collects scanned rows. With a sink it flushes batches for live display
 /// (streaming mode); without a sink it accumulates into `rows` for the final
 /// ScanResult. Takes ownership of each emitted row (frees it on its own error).
@@ -2619,4 +2635,23 @@ test "ai_history_session: scanAsync streams batches via sink then finalizes read
     try std.testing.expectEqual(@as(usize, 2), session.rows.items.len);
     try std.testing.expectEqualStrings("s2", session.rows.items[0].session_id); // sorted desc by last_active
     try std.testing.expectEqualStrings("s1", session.rows.items[1].session_id);
+}
+
+test "ai_history_session: rowsForSource clones only matching source rows" {
+    const allocator = std.testing.allocator;
+    const meta_a: types.SessionMeta = .{ .provider = .codex, .session_id = "a", .title = "A", .source_path = "a.jsonl", .resume_kind = .codex_resume, .last_active_at_ms = 10 };
+    const meta_b: types.SessionMeta = .{ .provider = .claude, .session_id = "b", .title = "B", .source_path = "b.jsonl", .resume_kind = .claude_resume, .last_active_at_ms = 20 };
+    var records = [_]ai_history_cache.CacheRecord{
+        .{ .source_id = "local", .provider = .codex, .root_path = "/r", .source_path = "a.jsonl", .stamp = .{ .size = 1, .mtime_ns = 1 }, .meta = meta_a },
+        .{ .source_id = "wsl", .provider = .claude, .root_path = "/r", .source_path = "b.jsonl", .stamp = .{ .size = 1, .mtime_ns = 1 }, .meta = meta_b },
+    };
+    const cache: ai_history_cache.CacheFile = .{ .records = &records };
+
+    const rows = try rowsForSource(allocator, cache, "local");
+    defer {
+        freeRows(allocator, rows);
+        allocator.free(rows);
+    }
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqualStrings("a", rows[0].session_id);
 }
