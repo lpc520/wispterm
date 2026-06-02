@@ -260,15 +260,22 @@ pub const Session = struct {
         }
         std.mem.sort(types.SessionMeta, next.items, {}, types.lessRecent);
 
+        // Capture the selected session id (duped) before we free the old rows.
+        var selected_id_buf: ?[]u8 = null;
+        defer if (selected_id_buf) |b| self.allocator.free(b);
+        if (self.selectedVisible()) |sel| {
+            selected_id_buf = self.allocator.dupe(u8, sel.session_id) catch null;
+        }
+
         freeRows(self.allocator, self.rows.items);
         self.rows.deinit(self.allocator);
         self.rows = next;
-        self.selected = 0;
         self.list_offset = 0;
         self.clearTranscript();
         self.transcript_generation +%= 1;
         self.state = .ready;
         self.status = "Ready";
+        self.selected = if (selected_id_buf) |b| (self.visibleIndexOfSessionId(b) orelse 0) else 0;
     }
 
     pub fn scanNow(self: *Session, host: ScannerHost) !void {
@@ -284,20 +291,29 @@ pub const Session = struct {
         self.status = if (result.warning_count == 0) "Ready" else "Ready with warnings";
     }
 
-    /// Publish scan rows if `generation` is still current and we are not closing,
-    /// otherwise discard. Always frees `result`. Called from the scan worker.
-    pub fn publishScanResult(self: *Session, generation: u64, result: ScanResult) void {
+    /// Finalize a scan. `authoritative` results replace the row set (sync / warm
+    /// path); non-authoritative results were streamed already, so we only sort. If
+    /// `generation` is stale or we are closing, the result is discarded. Always frees
+    /// `result`. Called from the scan worker.
+    pub fn finishScan(self: *Session, generation: u64, result: ScanResult) void {
         var published = false;
         {
             self.mutex.lock();
             defer self.mutex.unlock();
             if (!self.closing.load(.acquire) and generation == self.scan_generation) {
-                if (self.replaceRows(result.rows)) |_| {
+                if (result.authoritative) {
+                    if (self.replaceRows(result.rows)) |_| {
+                        self.status = if (result.warning_count == 0) "Ready" else "Ready with warnings";
+                        published = true;
+                    } else |_| {
+                        self.state = .failed;
+                        self.status = "Scan failed";
+                    }
+                } else {
+                    self.sortRowsInPlacePreservingSelection();
+                    self.state = .ready;
                     self.status = if (result.warning_count == 0) "Ready" else "Ready with warnings";
                     published = true;
-                } else |_| {
-                    self.state = .failed;
-                    self.status = "Scan failed";
                 }
             }
         }
@@ -552,6 +568,32 @@ pub const Session = struct {
         return count;
     }
 
+    /// Visible index (filter-aware) of the row whose session_id == id, or null.
+    fn visibleIndexOfSessionId(self: *const Session, id: []const u8) ?usize {
+        const query = self.filter[0..self.filter_len];
+        var visible_index: usize = 0;
+        for (self.rows.items) |row| {
+            if (!types.metadataMatches(row, query)) continue;
+            if (std.mem.eql(u8, row.session_id, id)) return visible_index;
+            visible_index += 1;
+        }
+        return null;
+    }
+
+    /// Sort rows by recency in place, keeping the current selection on the same
+    /// session id. Used by the streaming finalize (rows are already in self.rows).
+    fn sortRowsInPlacePreservingSelection(self: *Session) void {
+        var selected_id_buf: ?[]u8 = null;
+        defer if (selected_id_buf) |b| self.allocator.free(b);
+        if (self.selectedVisible()) |sel| {
+            selected_id_buf = self.allocator.dupe(u8, sel.session_id) catch null;
+        }
+        std.mem.sort(types.SessionMeta, self.rows.items, {}, types.lessRecent);
+        if (selected_id_buf) |b| {
+            self.selected = self.visibleIndexOfSessionId(b) orelse self.selected;
+        }
+    }
+
     /// Returns a shallow SessionMeta copy. Its string slices are borrowed from
     /// the stored rows and follow the same replacement/deinit lifetime.
     pub fn selectedVisible(self: *const Session) ?types.SessionMeta {
@@ -572,7 +614,7 @@ fn scanThreadMain(session: *Session, work: ScanWork, generation: u64) void {
         session.publishScanFailure(generation);
         return;
     };
-    session.publishScanResult(generation, result);
+    session.finishScan(generation, result);
 }
 
 fn transcriptThreadMain(session: *Session, work: TranscriptWork, generation: u64) void {
@@ -1917,7 +1959,7 @@ test "ai_history_session: scanLocalFilesystem reuses unchanged cached metadata" 
     try std.testing.expectEqualStrings("codex-cached", result.cache_update.records[0].meta.session_id);
 }
 
-test "ai_history_session: publishScanResult applies rows when generation current" {
+test "ai_history_session: finishScan applies rows when generation current" {
     const allocator = std.testing.allocator;
     var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
     defer session.deinit();
@@ -1931,7 +1973,7 @@ test "ai_history_session: publishScanResult applies rows when generation current
         .source_path = try allocator.dupe(u8, "live.jsonl"),
         .resume_kind = .codex_resume,
     };
-    session.publishScanResult(7, .{ .rows = rows, .owns_row_strings = true });
+    session.finishScan(7, .{ .rows = rows, .owns_row_strings = true });
 
     try std.testing.expectEqual(LoadState.ready, session.state);
     try std.testing.expectEqualStrings("Ready", session.status);
@@ -1939,7 +1981,7 @@ test "ai_history_session: publishScanResult applies rows when generation current
     try std.testing.expectEqualStrings("live", session.rows.items[0].session_id);
 }
 
-test "ai_history_session: publishScanResult discards stale generation" {
+test "ai_history_session: finishScan discards stale generation" {
     const allocator = std.testing.allocator;
     var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
     defer session.deinit();
@@ -1954,7 +1996,7 @@ test "ai_history_session: publishScanResult discards stale generation" {
         .resume_kind = .codex_resume,
     };
     // generation 4 != current 9 -> discarded and freed (testing allocator checks no leak)
-    session.publishScanResult(4, .{ .rows = rows, .owns_row_strings = true });
+    session.finishScan(4, .{ .rows = rows, .owns_row_strings = true });
 
     try std.testing.expectEqual(@as(usize, 0), session.rows.items.len);
 }
@@ -2082,7 +2124,7 @@ test "ai_history_session: publishTranscript discards stale generation" {
     try std.testing.expectEqual(@as(usize, 0), session.transcript.len);
 }
 
-test "ai_history_session: publishScanResult discards when closing" {
+test "ai_history_session: finishScan discards when closing" {
     const allocator = std.testing.allocator;
     var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
     defer session.deinit();
@@ -2098,7 +2140,7 @@ test "ai_history_session: publishScanResult discards when closing" {
         .resume_kind = .codex_resume,
     };
     // closing is set -> result is discarded and freed (testing allocator checks no leak)
-    session.publishScanResult(2, .{ .rows = rows, .owns_row_strings = true });
+    session.finishScan(2, .{ .rows = rows, .owns_row_strings = true });
 
     try std.testing.expectEqual(@as(usize, 0), session.rows.items.len);
 }
@@ -2191,4 +2233,51 @@ test "ai_history_session: appendScanRows discards when closing" {
     rows[0] = try testMakeRow(allocator, "x");
     try std.testing.expect(!session.appendScanRows(1, rows));
     try std.testing.expectEqual(@as(usize, 0), session.rows.items.len);
+}
+
+test "ai_history_session: finishScan non-authoritative sorts streamed rows in place" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    session.scan_generation = 1;
+
+    // Simulate streamed rows already appended out of order.
+    const r = try allocator.alloc(types.SessionMeta, 2);
+    r[0] = try testMakeRow(allocator, "old");
+    r[0].last_active_at_ms = 100;
+    r[1] = try testMakeRow(allocator, "new");
+    r[1].last_active_at_ms = 200;
+    try std.testing.expect(session.appendScanRows(1, r));
+
+    const empty = try allocator.alloc(types.SessionMeta, 0);
+    session.finishScan(1, .{ .rows = empty, .authoritative = false, .owns_row_strings = true });
+
+    try std.testing.expectEqual(LoadState.ready, session.state);
+    try std.testing.expectEqual(@as(usize, 2), session.rows.items.len);
+    try std.testing.expectEqualStrings("new", session.rows.items[0].session_id); // desc by last_active
+    try std.testing.expectEqualStrings("old", session.rows.items[1].session_id);
+}
+
+test "ai_history_session: replaceRows preserves selection by session id" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+
+    const first = [_]types.SessionMeta{
+        .{ .provider = .codex, .session_id = "a", .title = "A", .source_path = "a", .resume_kind = .codex_resume, .last_active_at_ms = 300 },
+        .{ .provider = .codex, .session_id = "b", .title = "B", .source_path = "b", .resume_kind = .codex_resume, .last_active_at_ms = 200 },
+        .{ .provider = .codex, .session_id = "c", .title = "C", .source_path = "c", .resume_kind = .codex_resume, .last_active_at_ms = 100 },
+    };
+    try session.replaceRows(&first);
+    session.selected = 0; // "a" (most-recent in `first`, index 0)
+
+    // Replace with a reordered set; "b" jumps to most-recent so "a" moves to index 1.
+    const second = [_]types.SessionMeta{
+        .{ .provider = .codex, .session_id = "b", .title = "B", .source_path = "b", .resume_kind = .codex_resume, .last_active_at_ms = 900 },
+        .{ .provider = .codex, .session_id = "a", .title = "A", .source_path = "a", .resume_kind = .codex_resume, .last_active_at_ms = 300 },
+        .{ .provider = .codex, .session_id = "c", .title = "C", .source_path = "c", .resume_kind = .codex_resume, .last_active_at_ms = 100 },
+    };
+    try session.replaceRows(&second);
+    // New behavior follows "a" to index 1; old reset-to-0 behavior would give 0.
+    try std.testing.expectEqual(@as(usize, 1), session.selected);
 }
