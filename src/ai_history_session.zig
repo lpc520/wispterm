@@ -32,9 +32,23 @@ pub const FileEntry = struct {
 
 pub const ScanResult = struct {
     rows: []types.SessionMeta,
+    /// true  = `rows` is the complete, canonical set (sync / non-streaming);
+    ///         the finalize REPLACES the session's rows with it.
+    /// false = rows were streamed to the sink already and `rows` is empty;
+    ///         the finalize only sorts what is already in the session.
+    authoritative: bool = true,
     warning_count: u32 = 0,
     owns_row_strings: bool = false,
     cache_update: CacheUpdate = .{},
+};
+
+/// Streaming seam: the scan worker hands batches of freshly-scanned rows to the
+/// sink for live display. The sink takes ownership of `rows` (slice + row string
+/// fields) regardless of the return value. Returns false when this scan
+/// generation is stale or the session is closing — the worker should stop early.
+pub const ScanSink = struct {
+    ctx: *anyopaque,
+    publish: *const fn (ctx: *anyopaque, rows: []types.SessionMeta) bool,
 };
 
 pub const ScannerHost = struct {
@@ -291,6 +305,31 @@ pub const Session = struct {
             ai_history_cache.saveDefault(self.allocator, .{ .records = result.cache_update.records }) catch {};
         }
         freeScanResult(self.allocator, result);
+    }
+
+    /// Worker-thread entry for streaming. If `generation` is current and we are not
+    /// closing, move `rows` into `self.rows` (the row structs are copied; their
+    /// strings — allocated with `self.allocator` — live on, now owned by `self.rows`)
+    /// and return true; the next frame shows them. Otherwise free `rows` and return
+    /// false so the worker can stop early. Does not touch `self.selected`.
+    pub fn appendScanRows(self: *Session, generation: u64, rows: []types.SessionMeta) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.closing.load(.acquire) or generation != self.scan_generation) {
+            freeRows(self.allocator, rows);
+            self.allocator.free(rows);
+            return false;
+        }
+        self.rows.appendSlice(self.allocator, rows) catch {
+            // Out of memory: drop this batch but keep scanning (not stale).
+            freeRows(self.allocator, rows);
+            self.allocator.free(rows);
+            return true;
+        };
+        self.allocator.free(rows); // structs moved into self.rows; free only the slice array
+        self.state = .scanning;
+        self.status = "Scanning";
+        return true;
     }
 
     /// Mark the scan failed if `generation` is still current and not closing.
@@ -2101,4 +2140,55 @@ test "ai_history_session: deinit joins an in-flight scan worker" {
 
     session.deinit(); // sets closing, joins the worker — must not leak or crash
     releaser.join();
+}
+
+fn testMakeRow(allocator: std.mem.Allocator, id: []const u8) !types.SessionMeta {
+    return .{
+        .provider = .codex,
+        .session_id = try allocator.dupe(u8, id),
+        .title = try allocator.dupe(u8, id),
+        .source_path = try allocator.dupe(u8, id),
+        .resume_kind = .codex_resume,
+    };
+}
+
+test "ai_history_session: appendScanRows appends for current generation" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    session.scan_generation = 3;
+
+    const rows = try allocator.alloc(types.SessionMeta, 2);
+    rows[0] = try testMakeRow(allocator, "a");
+    rows[1] = try testMakeRow(allocator, "b");
+
+    try std.testing.expect(session.appendScanRows(3, rows));
+    try std.testing.expectEqual(@as(usize, 2), session.rows.items.len);
+    try std.testing.expectEqual(LoadState.scanning, session.state);
+}
+
+test "ai_history_session: appendScanRows discards stale generation" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    session.scan_generation = 9;
+
+    const rows = try allocator.alloc(types.SessionMeta, 1);
+    rows[0] = try testMakeRow(allocator, "stale");
+    // generation 4 != current 9 -> freed, not appended (testing allocator checks no leak)
+    try std.testing.expect(!session.appendScanRows(4, rows));
+    try std.testing.expectEqual(@as(usize, 0), session.rows.items.len);
+}
+
+test "ai_history_session: appendScanRows discards when closing" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    session.scan_generation = 1;
+    session.closing.store(true, .release);
+
+    const rows = try allocator.alloc(types.SessionMeta, 1);
+    rows[0] = try testMakeRow(allocator, "x");
+    try std.testing.expect(!session.appendScanRows(1, rows));
+    try std.testing.expectEqual(@as(usize, 0), session.rows.items.len);
 }
