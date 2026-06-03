@@ -53,10 +53,14 @@ pub const AccessRules = struct {
 };
 
 pub fn parseRules(allocator: std.mem.Allocator, contents: []const u8, home: []const u8) !AccessRules {
-    _ = contents;
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();
+
+    var allow: List = .empty;
+    var deny: List = .empty;
+    var names: List = .empty;
+
     // All arena allocations must happen *before* the struct literal so the
     // arena's buffer_list is fully populated when the struct value is copied
     // into the caller. Struct fields evaluate in declaration order, so an
@@ -64,13 +68,59 @@ pub fn parseRules(allocator: std.mem.Allocator, contents: []const u8, home: []co
     // `.arena = arena` has already copied the (then-empty) arena — leaving the
     // returned struct's arena with a stale buffer_list and leaking the buffer.
     const home_copy = try a.dupe(u8, home);
+
+    for (BUILTIN_DENY) |entry| {
+        try addDenyEntry(a, &deny, &names, entry, home_copy);
+    }
+
+    var lines = std.mem.tokenizeAny(u8, contents, "\r\n");
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (parseKeyword(line, "allow")) |rest| {
+            // Skip a bare `allow` with no path: it would normalize to "." and
+            // silently whitelist the whole cwd once evaluate() consults it.
+            if (rest.len != 0) {
+                const norm = try normalizeEntry(a, rest, home_copy);
+                if (norm.len != 0) try allow.append(a, norm);
+            }
+        } else if (parseKeyword(line, "deny")) |rest| {
+            try addDenyEntry(a, &deny, &names, rest, home_copy);
+        } else {
+            std.log.warn("agent-access: ignoring malformed rule line: {s}", .{line});
+        }
+    }
+
     return .{
         .arena = arena,
         .home = home_copy,
-        .allow_roots = &.{},
-        .deny_roots = &.{},
-        .deny_names = &.{},
+        .allow_roots = try allow.toOwnedSlice(a),
+        .deny_roots = try deny.toOwnedSlice(a),
+        .deny_names = try names.toOwnedSlice(a),
     };
+}
+
+fn parseKeyword(line: []const u8, kw: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, line, kw)) return null;
+    if (line.len == kw.len) return "";
+    if (line[kw.len] != ' ' and line[kw.len] != '\t') return null;
+    return std.mem.trim(u8, line[kw.len..], " \t");
+}
+
+fn addDenyEntry(a: std.mem.Allocator, deny: *List, names: *List, entry: []const u8, home: []const u8) !void {
+    const e = std.mem.trim(u8, entry, " \t");
+    if (e.len == 0) return;
+    if (std.mem.indexOfScalar(u8, e, '/') == null and e[0] != '~') {
+        try names.append(a, try a.dupe(u8, e));
+    } else {
+        const norm = try normalizeEntry(a, e, home);
+        if (norm.len != 0) try deny.append(a, norm);
+    }
+}
+
+fn normalizeEntry(a: std.mem.Allocator, raw: []const u8, home: []const u8) ![]const u8 {
+    const expanded = try expandHome(a, raw, home);
+    return lexicalNormalize(a, expanded);
 }
 
 pub fn loadRules(allocator: std.mem.Allocator, file_path: []const u8, home: []const u8) !AccessRules {
@@ -196,7 +246,8 @@ test "module scaffold compiles and parseRules yields a valid struct" {
     var rules = try parseRules(std.testing.allocator, "", "/home/u");
     defer rules.deinit();
     try std.testing.expectEqualStrings("/home/u", rules.home);
-    try std.testing.expectEqual(@as(usize, 0), rules.deny_roots.len);
+    // deny_roots is populated by BUILTIN_DENY defaults (path-shaped entries)
+    try std.testing.expect(rules.deny_roots.len > 0);
 }
 
 test "globMatch handles wildcards and exact names" {
@@ -259,4 +310,53 @@ test "looksLikePath recognizes path-shaped tokens" {
     try std.testing.expect(looksLikePath(".env"));
     try std.testing.expect(!looksLikePath("grep"));
     try std.testing.expect(!looksLikePath("-rf"));
+}
+
+test "parseRules loads built-in deny defaults" {
+    var rules = try parseRules(std.testing.allocator, "", "/home/u");
+    defer rules.deinit();
+    var found_ssh = false;
+    for (rules.deny_roots) |r| {
+        if (std.mem.eql(u8, r, "/home/u/.ssh")) found_ssh = true;
+    }
+    try std.testing.expect(found_ssh);
+    var found_pem = false;
+    for (rules.deny_names) |n| {
+        if (std.mem.eql(u8, n, "*.pem")) found_pem = true;
+    }
+    try std.testing.expect(found_pem);
+}
+
+test "parseRules reads allow/deny lines and ignores comments" {
+    const contents =
+        \\# private rules
+        \\allow ~/project
+        \\deny  ~/secrets
+        \\deny  *.key
+        \\garbage line
+        \\
+    ;
+    var rules = try parseRules(std.testing.allocator, contents, "/home/u");
+    defer rules.deinit();
+    var found_allow = false;
+    for (rules.allow_roots) |r| {
+        if (std.mem.eql(u8, r, "/home/u/project")) found_allow = true;
+    }
+    try std.testing.expect(found_allow);
+    var found_secrets = false;
+    for (rules.deny_roots) |r| {
+        if (std.mem.eql(u8, r, "/home/u/secrets")) found_secrets = true;
+    }
+    try std.testing.expect(found_secrets);
+    var found_key = false;
+    for (rules.deny_names) |n| {
+        if (std.mem.eql(u8, n, "*.key")) found_key = true;
+    }
+    try std.testing.expect(found_key);
+}
+
+test "parseRules ignores a bare allow with no path" {
+    var rules = try parseRules(std.testing.allocator, "allow\nallow   \n", "/home/u");
+    defer rules.deinit();
+    try std.testing.expectEqual(@as(usize, 0), rules.allow_roots.len);
 }
