@@ -40,10 +40,15 @@ Suites: fast `zig build test` ≈ 604 passed; full `zig build test-full` ≈ 25/
 
 **Done — tmux management via a launcher entry** (spec `specs/2026-06-03-tmux-management-launcher-entry-design.md`, plan `plans/2026-06-03-tmux-management-launcher-entry.md`): replaced the per-profile `tmux` field with a top-level launcher row "Connect with tmux" that reuses the SSH profile list (`SshListMode.tmux_connect`, mirrors AI History); session name `wispterm-<profile>` (`tmuxSessionName`, unit-tested); sidebar "+" in a tmux tab opens a new tmux window; `WISPTERM_AUTOCONNECT_TMUX=<profile>` dev hook (`1d782b8`, `f3f734e`). Log-verified end-to-end (`tmux -CC new -A -s wispterm-NGS00` → reconciled tab); launcher-row *visual* check pending (screenshot perm glitch — eyeball: row sits between SSH and AI Agent).
 
+**Done — #3c multi-pane size-sync** (`71f7ad6`): syncSize forwards `AppWindow.term_cols/term_rows` (the content-area cell grid, sidebar/padding already excluded) via `tickAll`, so tmux fits any pane count; updates on window resize. Dropped the Surface dep + single-pane special-case.
+
+**Done — #2 capture-pane scrollback seed** (`e63e6c2`): activated. The garble was the **staircase effect** — capture rows are joined by `\n` only, and the terminal's line feed moves down without returning to column 0. `block_end` now repaints clear+home and translates LF→CRLF, using `capture-pane -p` (no `-J`, one line per visible row ≤ width). GUI-verified: a reattached pane shows its prior screen (ls listing + prompt) cleanly.
+
+**Done — #4a auto-reconnect** (`a9afded`): transport drop (EOF/HUP) → keep tabs/surfaces, re-spawn `ssh … tmux -CC -A` with backoff (0.5→5s), reconcile reuses surfaces by pane id → layout/state preserved. `Session.resetForReconnect` resets parser/cmd/capture state. GUI-verified by killing the ssh child mid-session.
+
 **Remaining:**
-- **#2 — `capture-pane` scrollback seed (still dormant).** Plumbing in `Session` (`capturePane` + `block_end` routing, `ff36ecb`). Even with size-sync it garbles — the capture reply collides with the resize-triggered live `%output` redraw, and `-J` logical lines don't map to visible rows. Needs grid-level cell placement (iTerm2-style) or suppressing live output during the seed. Activate `self.session.capturePane(pane_id)` in the bridge factory once solved.
-- **#3c — multi-pane size-sync.** `syncSize` is single-pane only; for ≥2 panes the client size is the content-area bounding box, not one pane's grid.
-- **#4 — lifecycle.** Detach/reconnect overlay + backoff; close-confirm before `kill-window`; `session_persist` re-attach.
+- **#4b — close-confirm before kill.** Closing a tmux pane already drives `kill-pane`; gate it behind the close-confirm modal when a TUI is running (reuse `close_confirm`).
+- **#4c — `session_persist` re-attach.** Persist that a tab is a tmux session (host/user/port/session-name); on app restart re-attach via the controller instead of a plain-ssh leaf. Touches `session_persist.zig` + the restore path.
 - **#5 — minor.** A non-tmux restored tab showed a `????` title in testing — unrelated decode glitch.
 
 Study targets for #3: `AppWindow.zig` render loop (`computeSplitLayout`, `content_w/content_h`, the platform-resize grid math ~2221–2253), `Surface.setScreenSize` (`Surface.zig:679`), `src/appwindow/tmux_controller_posix.zig` (the pump — where to read pane surface grid + call `resizeClient`), `Session.resizeClient`.
