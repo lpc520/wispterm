@@ -137,7 +137,48 @@ pub fn evaluate(allocator: std.mem.Allocator, rules: *const AccessRules, command
 }
 
 pub fn isReadOnlyCommand(command: []const u8) bool {
-    _ = command;
+    if (std.mem.indexOfScalar(u8, command, '>') != null) return false; // output redirect
+    if (std.mem.indexOf(u8, command, "$(") != null) return false; // command substitution
+    if (std.mem.indexOfScalar(u8, command, '`') != null) return false; // command substitution
+    // find(1) action predicates run commands or delete files, turning an
+    // otherwise read-only verb destructive. Substring scan over-triggers
+    // safely (worst case is one extra approval prompt).
+    if (std.mem.indexOf(u8, command, "-exec") != null) return false;
+    if (std.mem.indexOf(u8, command, "-delete") != null) return false;
+    var segs = std.mem.tokenizeAny(u8, command, ";|&");
+    var any = false;
+    while (segs.next()) |seg| {
+        const verb = firstVerb(seg) orelse return false;
+        any = true;
+        if (!isReadVerb(verb)) return false;
+    }
+    return any;
+}
+
+fn firstVerb(seg: []const u8) ?[]const u8 {
+    var words = std.mem.tokenizeAny(u8, seg, " \t");
+    while (words.next()) |w| {
+        if (isAssignment(w)) continue;
+        if (std.mem.eql(u8, w, "sudo") or std.mem.eql(u8, w, "command") or std.mem.eql(u8, w, "\\")) continue;
+        if (w[0] == '(' or w[0] == '{') {
+            if (w.len == 1) continue;
+            return std.fs.path.basename(w[1..]);
+        }
+        return std.fs.path.basename(w);
+    }
+    return null;
+}
+
+fn isAssignment(w: []const u8) bool {
+    const eq = std.mem.indexOfScalar(u8, w, '=') orelse return false;
+    const slash = std.mem.indexOfScalar(u8, w, '/') orelse w.len;
+    return eq > 0 and eq < slash;
+}
+
+fn isReadVerb(verb: []const u8) bool {
+    for (READ_ONLY_VERBS) |v| {
+        if (std.mem.eql(u8, v, verb)) return true;
+    }
     return false;
 }
 
@@ -359,4 +400,28 @@ test "parseRules ignores a bare allow with no path" {
     var rules = try parseRules(std.testing.allocator, "allow\nallow   \n", "/home/u");
     defer rules.deinit();
     try std.testing.expectEqual(@as(usize, 0), rules.allow_roots.len);
+}
+
+test "isReadOnlyCommand accepts read verbs and pipelines" {
+    try std.testing.expect(isReadOnlyCommand("cat foo.txt"));
+    try std.testing.expect(isReadOnlyCommand("cat a | grep b"));
+    try std.testing.expect(isReadOnlyCommand("FOO=1 ls -la"));
+    try std.testing.expect(isReadOnlyCommand("/bin/cat foo"));
+    try std.testing.expect(isReadOnlyCommand("grep x a && head b"));
+}
+
+test "isReadOnlyCommand rejects writes and unknown verbs" {
+    try std.testing.expect(!isReadOnlyCommand("rm foo"));
+    try std.testing.expect(!isReadOnlyCommand("cat foo > bar"));
+    try std.testing.expect(!isReadOnlyCommand("cat a | tee b"));
+    try std.testing.expect(!isReadOnlyCommand("echo `cat secret`"));
+    try std.testing.expect(!isReadOnlyCommand("cat $(find / -name id_rsa)"));
+    try std.testing.expect(!isReadOnlyCommand(""));
+}
+
+test "isReadOnlyCommand rejects find with side-effecting predicates" {
+    try std.testing.expect(!isReadOnlyCommand("find / -exec rm {} +"));
+    try std.testing.expect(!isReadOnlyCommand("find . -exec cp {} /dst \\;"));
+    try std.testing.expect(!isReadOnlyCommand("find . -delete"));
+    try std.testing.expect(isReadOnlyCommand("find . -name '*.zig'"));
 }
