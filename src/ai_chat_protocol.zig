@@ -768,16 +768,95 @@ pub fn parseApiResponse(allocator: std.mem.Allocator, body: []const u8, protocol
 pub fn parseApiErrorResult(allocator: std.mem.Allocator, root: std.json.Value) !?ApiResult {
     if (root != .object) return null;
     if (root.object.get("error")) |err_value| {
-        if (err_value == .object) {
-            if (err_value.object.get("message")) |message_value| {
-                if (message_value == .string) {
-                    return ApiResult{ .content = try allocator.dupe(u8, message_value.string) };
-                }
-            }
-        }
-        return ApiResult{ .content = try allocator.dupe(u8, "API returned an error") };
+        if (err_value == .null) return null;
+        return ApiResult{ .content = try formatApiError(allocator, root, err_value) };
     }
     return null;
+}
+
+fn formatApiError(allocator: std.mem.Allocator, root: std.json.Value, err_value: std.json.Value) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    if (jsonStringValue(err_value)) |message| {
+        if (message.len > 0) try out.appendSlice(allocator, message);
+    } else if (err_value == .object) {
+        if (jsonStringValue(err_value.object.get("message"))) |message| {
+            if (message.len > 0) try out.appendSlice(allocator, message);
+        } else if (jsonStringValue(root.object.get("message"))) |message| {
+            if (message.len > 0) try out.appendSlice(allocator, message);
+        }
+    }
+
+    var wrote_meta = false;
+    if (err_value == .object) {
+        try appendApiErrorMeta(allocator, &out, &wrote_meta, "type", err_value.object.get("type"));
+        try appendApiErrorMeta(allocator, &out, &wrote_meta, "code", err_value.object.get("code"));
+        try appendApiErrorMeta(allocator, &out, &wrote_meta, "param", err_value.object.get("param"));
+        try appendApiErrorMeta(allocator, &out, &wrote_meta, "status", err_value.object.get("status"));
+        try appendApiErrorMeta(allocator, &out, &wrote_meta, "status_code", err_value.object.get("status_code"));
+    }
+    try appendApiErrorMeta(allocator, &out, &wrote_meta, "response_status", root.object.get("status"));
+    if (wrote_meta) try out.append(allocator, ')');
+
+    if (out.items.len == 0) {
+        const json = try std.json.Stringify.valueAlloc(allocator, err_value, .{});
+        defer allocator.free(json);
+        if (json.len > 0) {
+            try out.appendSlice(allocator, "API error: ");
+            try out.appendSlice(allocator, json);
+        }
+    }
+
+    if (out.items.len == 0) try out.appendSlice(allocator, "API returned an error");
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendApiErrorMeta(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    wrote_meta: *bool,
+    label: []const u8,
+    value_opt: ?std.json.Value,
+) !void {
+    const value = value_opt orelse return;
+    switch (value) {
+        .string => |text| {
+            if (text.len == 0) return;
+            try appendApiErrorMetaPrefix(allocator, out, wrote_meta, label);
+            try out.appendSlice(allocator, text);
+        },
+        .integer => |number| {
+            try appendApiErrorMetaPrefix(allocator, out, wrote_meta, label);
+            try out.print(allocator, "{d}", .{number});
+        },
+        .float => |number| {
+            try appendApiErrorMetaPrefix(allocator, out, wrote_meta, label);
+            try out.print(allocator, "{d}", .{number});
+        },
+        .bool => |flag| {
+            try appendApiErrorMetaPrefix(allocator, out, wrote_meta, label);
+            try out.appendSlice(allocator, if (flag) "true" else "false");
+        },
+        else => {},
+    }
+}
+
+fn appendApiErrorMetaPrefix(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    wrote_meta: *bool,
+    label: []const u8,
+) !void {
+    if (!wrote_meta.*) {
+        if (out.items.len == 0) try out.appendSlice(allocator, "API error");
+        try out.appendSlice(allocator, " (");
+        wrote_meta.* = true;
+    } else {
+        try out.appendSlice(allocator, ", ");
+    }
+    try out.appendSlice(allocator, label);
+    try out.append(allocator, '=');
 }
 
 fn parseChatCompletionsResponse(allocator: std.mem.Allocator, root: std.json.Value) !ApiResult {
@@ -1233,6 +1312,46 @@ test "parseApiResponse surfaces an error object as content" {
     var result = try parseApiResponse(a, body, .chat_completions);
     defer result.deinit(a);
     try std.testing.expectEqualStrings("boom", result.content);
+}
+
+test "parseApiResponse surfaces an error string as content" {
+    const a = std.testing.allocator;
+    const body =
+        \\{"error":"model unavailable"}
+    ;
+    var result = try parseApiResponse(a, body, .responses);
+    defer result.deinit(a);
+    try std.testing.expectEqualStrings("model unavailable", result.content);
+}
+
+test "parseApiResponse surfaces error metadata without a message" {
+    const a = std.testing.allocator;
+    const body =
+        \\{"error":{"type":"invalid_request_error","code":"model_not_found","param":"model"}}
+    ;
+    var result = try parseApiResponse(a, body, .responses);
+    defer result.deinit(a);
+    try std.testing.expectEqualStrings("API error (type=invalid_request_error, code=model_not_found, param=model)", result.content);
+}
+
+test "parseApiResponse surfaces responses failed error metadata" {
+    const a = std.testing.allocator;
+    const body =
+        \\{"status":"failed","error":{"code":"unsupported_model","status_code":400}}
+    ;
+    var result = try parseApiResponse(a, body, .responses);
+    defer result.deinit(a);
+    try std.testing.expectEqualStrings("API error (code=unsupported_model, status_code=400, response_status=failed)", result.content);
+}
+
+test "parseApiResponse ignores null error on completed responses result" {
+    const a = std.testing.allocator;
+    const body =
+        \\{"status":"completed","error":null,"output_text":"hello"}
+    ;
+    var result = try parseApiResponse(a, body, .responses);
+    defer result.deinit(a);
+    try std.testing.expectEqualStrings("hello", result.content);
 }
 
 test "isDeepSeekBaseUrl" {

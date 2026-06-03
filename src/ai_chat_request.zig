@@ -211,7 +211,7 @@ fn runChatRequestForMessages(request: *const ChatRequest, messages: []const Requ
         },
         .extra_headers = if (is_anthropic) &anthropic_headers else &.{},
         .response_writer = &resp_buf.writer,
-    }) catch return error.RequestFailed;
+    }) catch |err| return networkFailureResult(allocator, endpoint, err);
     if (ai_chat.requestCancelled(request)) return error.Canceled;
 
     var resp_list = resp_buf.toArrayList();
@@ -253,20 +253,29 @@ fn runChatRequestStreaming(request: *const ChatRequest) !void {
         .{ .name = "anthropic-version", .value = "2023-06-01" },
     };
     const uri = try std.Uri.parse(endpoint);
-    var req = try client.request(.POST, uri, .{
+    var req = client.request(.POST, uri, .{
         .headers = .{
             .content_type = .{ .override = "application/json" },
             .authorization = if (is_anthropic) .omit else .{ .override = bearer },
         },
         .extra_headers = if (is_anthropic) &anthropic_headers else &.{},
         .keep_alive = false,
-    });
+    }) catch |err| {
+        try failStreamNetworkRequest(request, endpoint, "open request", err);
+        return;
+    };
     defer req.deinit();
 
-    try req.sendBodyComplete(body);
+    req.sendBodyComplete(body) catch |err| {
+        try failStreamNetworkRequest(request, endpoint, "send request", err);
+        return;
+    };
 
     var redirect_buffer: [8 * 1024]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buffer);
+    var response = req.receiveHead(&redirect_buffer) catch |err| {
+        try failStreamNetworkRequest(request, endpoint, "receive response", err);
+        return;
+    };
     if (ai_chat.requestCancelled(request)) return error.Canceled;
     var transfer_buffer: [16 * 1024]u8 = undefined;
     const reader = response.reader(&transfer_buffer);
@@ -304,6 +313,26 @@ fn runChatRequestStreaming(request: *const ChatRequest) !void {
         if (try ai_chat.applyApiStreamLineToSession(allocator, request.session, message_idx, line, &usage)) break;
     }
     ai_chat.finishAssistantStream(request.session, message_idx, request.started_ms, usage);
+}
+
+fn networkFailureResult(allocator: std.mem.Allocator, endpoint: []const u8, err: anyerror) !ApiResult {
+    return .{
+        .content = try std.fmt.allocPrint(
+            allocator,
+            "HTTP request failed before response: {s} ({s})",
+            .{ @errorName(err), endpoint },
+        ),
+    };
+}
+
+fn failStreamNetworkRequest(request: *const ChatRequest, endpoint: []const u8, stage: []const u8, err: anyerror) !void {
+    const msg = try std.fmt.allocPrint(
+        request.allocator,
+        "HTTP stream {s} failed before response: {s} ({s})",
+        .{ stage, @errorName(err), endpoint },
+    );
+    defer request.allocator.free(msg);
+    ai_chat.failAssistantStream(request.session, null, msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +501,16 @@ pub fn executeToolCall(request: *ChatRequest, call: ToolCall) ![]u8 {
 // ---------------------------------------------------------------------------
 // Tests for request JSON serialization (moved from ai_chat.zig)
 // ---------------------------------------------------------------------------
+
+test "ai chat network failure result includes endpoint and underlying error" {
+    const allocator = std.testing.allocator;
+    var result = try networkFailureResult(allocator, "https://api.example.test/v1/responses", error.UnknownHostName);
+    defer result.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "HTTP request failed before response: UnknownHostName (https://api.example.test/v1/responses)",
+        result.content,
+    );
+}
 
 test "ai chat request json includes deepseek thinking mode" {
     const allocator = std.testing.allocator;
