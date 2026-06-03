@@ -677,6 +677,7 @@ comptime {
     _ = @import("platform/pty.zig");
     if (@import("builtin").os.tag != .windows) {
         _ = @import("platform/pty_virtual_test.zig");
+        _ = @import("tmux/pane_io_test.zig");
     }
     _ = @import("platform/pty_command.zig");
     _ = @import("platform/remote_file.zig");
