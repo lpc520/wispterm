@@ -2457,7 +2457,6 @@ fn renderResizeFrame(width: i32, height: i32) void {
     overlays.renderDebugOverlay(@floatFromInt(fb_width));
     overlays.renderCloseShortcutConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
-    overlays.renderImagePasteToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderTransferToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderTransferCancelConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderUpdatePrompt(@floatFromInt(fb_width), @floatFromInt(fb_height));
@@ -5217,7 +5216,6 @@ fn runMainLoop(self: *AppWindow) !void {
         overlays.renderDebugOverlay(@floatFromInt(fb_width));
         overlays.renderCloseShortcutConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
-        overlays.renderImagePasteToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderTransferToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderTransferCancelConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderUpdatePrompt(@floatFromInt(fb_width), @floatFromInt(fb_height));

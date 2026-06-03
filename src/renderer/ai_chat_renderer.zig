@@ -120,9 +120,9 @@ fn titlebarTextWidth(text: []const u8) f32 {
     return total;
 }
 
-/// Draw a small right-aligned pill in the composer field's top corner showing
-/// how many images are pending (e.g. "2 images"). No-op when none are attached.
-/// Must be called inside the field clip so it never spills past the input box.
+/// Draw a reference pill above the composer field for pending image attachments.
+/// The label is meant to be copied mentally into the prompt, e.g.
+/// "look at [Image #1]".
 fn renderPendingImageBadge(session: *ai_chat.Session, layout: InputLayout, bg: [3]f32, fg: [3]f32, accent: [3]f32) void {
     var buf: [32]u8 = undefined;
     const label = composer_layout.pendingImageBadgeLabel(session.pendingImageCount(), &buf) orelse return;
@@ -130,11 +130,10 @@ fn renderPendingImageBadge(session: *ai_chat.Session, layout: InputLayout, bg: [
     const pad_x: f32 = 7;
     const badge_w = text_w + pad_x * 2;
     const badge_h = font.g_titlebar_cell_height + 6;
-    const badge_x = layout.field_x + layout.field_w - badge_w - 8;
-    const badge_y = layout.field_y + 6;
-    ui_pipeline.fillQuadAlpha(badge_x, badge_y, badge_w, badge_h, accent, 0.20);
-    ui_pipeline.fillQuadAlpha(badge_x, badge_y, badge_w, 1, accent, 0.5);
-    _ = titlebar.renderTextLimited(label, badge_x + pad_x, badge_y + 3, mixColor(bg, fg, 0.92), text_w + 2);
+    const rect = composer_layout.pendingImageBadgeRect(layout.field_x, layout.field_y, layout.field_h, badge_w, badge_h);
+    ui_pipeline.fillQuadAlpha(rect.x, rect.y, rect.w, rect.h, accent, 0.20);
+    ui_pipeline.fillQuadAlpha(rect.x, rect.y, rect.w, 1, accent, 0.5);
+    _ = titlebar.renderTextLimited(label, rect.x + pad_x, rect.y + 3, mixColor(bg, fg, 0.92), text_w + 2);
 }
 
 pub fn render(
@@ -276,8 +275,8 @@ pub fn render(
             }
         }
     }
-    renderPendingImageBadge(session, layout, bg, fg, accent);
     ui_pipeline.endClip();
+    renderPendingImageBadge(session, layout, bg, fg, accent);
 
     const approval = session.approvalView();
     const approval_h: f32 = if (approval) |view| approvalCardHeight(view) + APPROVAL_GAP else 0;

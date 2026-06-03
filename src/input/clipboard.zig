@@ -594,9 +594,6 @@ pub fn pasteImageIntoAiChat(chat: *AppWindow.ai_chat.Session) void {
                 return;
             };
             std.debug.print("Chat image paste: attached image ({d} bytes, {d} pending)\n", .{ bytes.len, chat.pendingImageCount() });
-            var buf: [48]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "Image attached ({d})", .{chat.pendingImageCount()}) catch "Image attached";
-            overlays.showStatusToast(msg);
             AppWindow.g_force_rebuild = true;
             AppWindow.g_cells_valid = false;
         },
@@ -611,9 +608,7 @@ pub fn pasteImageFromClipboard() void {
     const image_path = platform_clipboard.readImageAsPngTemp(allocator, owner) orelse return;
     defer allocator.free(image_path);
 
-    if (pasteSavedClipboardImage(surface, allocator, image_path)) {
-        overlays.showImagePasteToast();
-    }
+    _ = pasteSavedClipboardImage(surface, allocator, image_path);
 }
 
 pub fn writeTextToActivePty(text: []const u8) void {

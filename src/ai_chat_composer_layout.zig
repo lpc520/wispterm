@@ -12,6 +12,13 @@ pub const Field = struct {
     pub const pad_bottom: f32 = 10;
 };
 
+pub const Rect = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+};
+
 pub const input_min_h: f32 = 92;
 pub const input_max_h: f32 = 260;
 
@@ -44,15 +51,34 @@ pub fn visibleRows(field_h: f32, line_h: f32) usize {
 /// are no attachments. Writes into `buf` and returns the slice.
 pub fn pendingImageBadgeLabel(count: usize, buf: []u8) ?[]const u8 {
     if (count == 0) return null;
-    const suffix = if (count == 1) "image" else "images";
-    return std.fmt.bufPrint(buf, "{d} {s}", .{ count, suffix }) catch null;
+    if (count == 1) return std.fmt.bufPrint(buf, "[Image #1]", .{}) catch null;
+    return std.fmt.bufPrint(buf, "[Image #1] +{d}", .{count - 1}) catch null;
+}
+
+pub fn pendingImageBadgeRect(field_x: f32, field_y: f32, field_h: f32, badge_w: f32, badge_h: f32) Rect {
+    const margin_x: f32 = 8;
+    const gap_y: f32 = 3;
+    return .{
+        .x = @round(field_x + margin_x),
+        .y = @round(field_y + field_h + gap_y),
+        .w = @max(1.0, badge_w),
+        .h = @max(1.0, badge_h),
+    };
 }
 
 test "pendingImageBadgeLabel formats singular/plural and hides zero" {
     var buf: [32]u8 = undefined;
     try std.testing.expect(pendingImageBadgeLabel(0, &buf) == null);
-    try std.testing.expectEqualStrings("1 image", pendingImageBadgeLabel(1, &buf).?);
-    try std.testing.expectEqualStrings("3 images", pendingImageBadgeLabel(3, &buf).?);
+    try std.testing.expectEqualStrings("[Image #1]", pendingImageBadgeLabel(1, &buf).?);
+    try std.testing.expectEqualStrings("[Image #1] +2", pendingImageBadgeLabel(3, &buf).?);
+}
+
+test "pending image badge sits above the input field on the left" {
+    const rect = pendingImageBadgeRect(18, 16, 60, 120, 26);
+    try std.testing.expectApproxEqAbs(@as(f32, 26), rect.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 79), rect.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 120), rect.w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 26), rect.h, 0.01);
 }
 
 test "ai chat composer layout keeps original full-width field style" {
