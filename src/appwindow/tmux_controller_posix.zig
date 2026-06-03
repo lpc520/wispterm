@@ -25,11 +25,17 @@ const TmuxBridge = bridge_mod.TmuxBridge;
 /// all run on the main thread, so a thread-local list needs no synchronization.
 threadlocal var g_controllers: std.ArrayListUnmanaged(*TmuxController) = .empty;
 
+const INITIAL_BACKOFF_MS: i64 = 500;
+const MAX_BACKOFF_MS: i64 = 5000;
+
 pub const TmuxController = struct {
     alloc: Allocator,
     pty: Pty,
     command: pty_command.Command,
     bridge: *TmuxBridge,
+    /// The `ssh … tmux -CC …` command, kept so a dropped transport can be
+    /// re-spawned (reconnect). `-A` re-attaches the same server-side session.
+    ssh_cmd: []u8,
     password: [256]u8 = undefined,
     password_len: usize = 0,
     password_sent: bool = false,
@@ -45,39 +51,47 @@ pub const TmuxController = struct {
     /// Last client size forwarded to tmux, to avoid redundant refresh-client.
     last_cols: u16 = 0,
     last_rows: u16 = 0,
-    dead: bool = false,
+    /// Transport down (ssh/network dropped); retrying with backoff. Tabs and
+    /// surfaces are kept; on reconnect the same session re-attaches and the
+    /// bridge reuses the surfaces by pane id, so state is preserved.
+    reconnecting: bool = false,
+    next_retry_ms: i64 = 0,
+    backoff_ms: i64 = INITIAL_BACKOFF_MS,
 
     fn tick(self: *TmuxController, client_cols: u16, client_rows: u16) void {
-        if (self.dead) return;
+        if (self.reconnecting) {
+            self.tryReconnect();
+            return;
+        }
         var buf: [16384]u8 = undefined;
         var reads: usize = 0;
         // Cap reads/frame so a noisy pane can't starve rendering.
         while (reads < 64) : (reads += 1) {
             var fds = [1]std.posix.pollfd{.{ .fd = self.pty.master, .events = std.posix.POLL.IN, .revents = 0 }};
             const ready = std.posix.poll(&fds, 0) catch {
-                self.dead = true;
+                self.markDisconnected();
                 return;
             };
             if (ready == 0) break;
             if (fds[0].revents & std.posix.POLL.IN != 0) {
                 const n = std.posix.read(self.pty.master, &buf) catch {
-                    self.dead = true;
+                    self.markDisconnected();
                     return;
                 };
                 if (n == 0) {
-                    std.debug.print("tmux: transport EOF\n", .{});
-                    self.dead = true; // EOF: transport closed (ssh/tmux gone)
+                    self.markDisconnected(); // EOF: transport closed (ssh/tmux gone)
                     return;
                 }
                 const chunk = buf[0..n];
                 self.maybeInjectPassword(chunk);
                 if (!self.handshake_seen and std.mem.indexOf(u8, chunk, "\x1bP1000p") != null) {
                     self.handshake_seen = true;
+                    self.backoff_ms = INITIAL_BACKOFF_MS; // real connection — reset backoff
                     std.debug.print("tmux: control-mode handshake seen\n", .{});
                 }
                 self.bridge.session.feed(chunk) catch {};
             } else if (fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
-                self.dead = true;
+                self.markDisconnected();
                 return;
             } else break;
         }
@@ -93,6 +107,57 @@ pub const TmuxController = struct {
             self.pty.writeInput(cmds) catch {};
             self.bridge.session.clearCommands();
         }
+    }
+
+    /// Transport dropped: tear down the dead transport (but keep the bridge /
+    /// tabs / surfaces) and schedule a reconnect.
+    fn markDisconnected(self: *TmuxController) void {
+        if (self.reconnecting) return;
+        std.debug.print("tmux: transport lost — reconnecting…\n", .{});
+        self.command.deinit();
+        self.pty.deinit();
+        self.handshake_seen = false;
+        self.password_sent = false;
+        self.early_len = 0;
+        self.last_cols = 0;
+        self.last_rows = 0;
+        self.bridge.session.resetForReconnect();
+        self.reconnecting = true;
+        self.next_retry_ms = std.time.milliTimestamp() + self.backoff_ms;
+    }
+
+    /// Re-spawn the transport when the backoff elapses. On success the read loop
+    /// resumes; the list-windows reply reconciles onto the existing surfaces.
+    fn tryReconnect(self: *TmuxController) void {
+        if (std.time.milliTimestamp() < self.next_retry_ms) return;
+
+        const owned = pty_command.allocCommandLineFromUtf8(self.alloc, self.ssh_cmd) catch {
+            self.scheduleRetry();
+            return;
+        };
+        defer pty_command.freeCommandLine(self.alloc, owned);
+
+        var pty = Pty.open(.{ .ws_col = self.bridge.session.cols, .ws_row = self.bridge.session.rows }) catch {
+            self.scheduleRetry();
+            return;
+        };
+        var command: pty_command.Command = .{};
+        pty.startCommand(&command, pty_command.commandLineFromOwned(owned), null) catch {
+            pty.deinit();
+            self.scheduleRetry();
+            return;
+        };
+
+        self.pty = pty;
+        self.command = command;
+        self.bridge.session.start() catch {}; // re-queue bootstrap (sent post-handshake)
+        self.reconnecting = false;
+        std.debug.print("tmux: reconnect transport spawned\n", .{});
+    }
+
+    fn scheduleRetry(self: *TmuxController) void {
+        self.backoff_ms = @min(self.backoff_ms * 2, MAX_BACKOFF_MS);
+        self.next_retry_ms = std.time.milliTimestamp() + self.backoff_ms;
     }
 
     fn maybeInjectPassword(self: *TmuxController, chunk: []const u8) void {
@@ -122,10 +187,14 @@ pub const TmuxController = struct {
 
     fn destroy(self: *TmuxController) void {
         // Closing the transport PTY sends ssh SIGHUP, which detaches (not kills)
-        // the remote tmux session — the persistence we want.
+        // the remote tmux session — the persistence we want. Skip the transport
+        // teardown if we're mid-reconnect (it's already closed).
+        if (!self.reconnecting) {
+            self.command.deinit();
+            self.pty.deinit();
+        }
         self.bridge.destroy();
-        self.command.deinit();
-        self.pty.deinit();
+        self.alloc.free(self.ssh_cmd);
         self.alloc.destroy(self);
     }
 };
@@ -170,13 +239,21 @@ pub fn start(
         return false;
     };
 
-    const self = alloc.create(TmuxController) catch {
+    const ssh_cmd_dup = alloc.dupe(u8, ssh_cmd_utf8) catch {
         bridge.destroy();
         command.deinit();
         pty.deinit();
         return false;
     };
-    self.* = .{ .alloc = alloc, .pty = pty, .command = command, .bridge = bridge };
+
+    const self = alloc.create(TmuxController) catch {
+        alloc.free(ssh_cmd_dup);
+        bridge.destroy();
+        command.deinit();
+        pty.deinit();
+        return false;
+    };
+    self.* = .{ .alloc = alloc, .pty = pty, .command = command, .bridge = bridge, .ssh_cmd = ssh_cmd_dup };
     const plen = @min(password.len, self.password.len);
     @memcpy(self.password[0..plen], password[0..plen]);
     self.password_len = plen;
@@ -189,22 +266,13 @@ pub fn start(
     return true;
 }
 
-/// Pump every live controller once with the current client cell size (content
-/// area, sidebar/padding excluded). Dead controllers are torn down and removed.
+/// Pump every controller once with the current client cell size (content area,
+/// sidebar/padding excluded). Controllers persist across transport drops —
+/// they reconnect with backoff rather than being torn down; cleanup is
+/// shutdownAll (app quit).
 pub fn tickAll(alloc: Allocator, client_cols: u16, client_rows: u16) void {
     _ = alloc;
-    var i: usize = 0;
-    while (i < g_controllers.items.len) {
-        const c = g_controllers.items[i];
-        c.tick(client_cols, client_rows);
-        if (c.dead) {
-            _ = g_controllers.orderedRemove(i);
-            std.debug.print("tmux: controller ended ({d} left)\n", .{g_controllers.items.len});
-            c.destroy();
-        } else {
-            i += 1;
-        }
-    }
+    for (g_controllers.items) |c| c.tick(client_cols, client_rows);
 }
 
 pub fn shutdownAll(alloc: Allocator) void {

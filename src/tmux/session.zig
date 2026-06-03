@@ -100,6 +100,19 @@ pub const Session = struct {
         self.cmds.clearRetainingCapacity();
     }
 
+    /// Reset transient stream state for a transport reconnect: the byte parser
+    /// (the dropped stream may have left a partial line), the outbound command
+    /// queue, and the pending capture-pane FIFO. The window/pane model is kept —
+    /// the post-reconnect `list-windows` refreshes it and the bridge reuses the
+    /// same surfaces by pane id.
+    pub fn resetForReconnect(self: *Session) void {
+        self.parser.deinit();
+        self.parser = control.Parser.init(self.alloc);
+        self.cmds.clearRetainingCapacity();
+        self.capture_queue.clearRetainingCapacity();
+        self.exited = false;
+    }
+
     pub fn feed(self: *Session, bytes: []const u8) Allocator.Error!void {
         for (bytes) |b| {
             if (try self.parser.put(b)) |n| try self.handle(n);
