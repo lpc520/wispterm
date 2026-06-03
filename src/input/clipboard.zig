@@ -611,7 +611,9 @@ pub fn pasteImageFromClipboard() void {
     const image_path = platform_clipboard.readImageAsPngTemp(allocator, owner) orelse return;
     defer allocator.free(image_path);
 
-    _ = pasteSavedClipboardImage(surface, allocator, image_path);
+    if (pasteSavedClipboardImage(surface, allocator, image_path)) {
+        overlays.showImagePasteToast();
+    }
 }
 
 pub fn writeTextToActivePty(text: []const u8) void {

@@ -28,6 +28,7 @@ test {
     _ = @import("input/terminal_link_action.zig");
     _ = @import("input/file_drop_path.zig");
     _ = @import("renderer/overlays/profile_codec.zig");
+    _ = @import("renderer/overlays/image_paste_toast_model.zig");
     _ = @import("renderer/overlays/transfer_toast_model.zig");
     _ = @import("renderer/overlays/update_prompt_model.zig");
     _ = @import("close_confirm.zig");

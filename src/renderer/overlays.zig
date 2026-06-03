@@ -105,6 +105,9 @@ threadlocal var g_copy_toast_until_ms: i64 = 0;
 threadlocal var g_copy_toast_buf: [64]u8 = undefined;
 threadlocal var g_copy_toast_len: usize = 0;
 
+const IMAGE_PASTE_TOAST_DURATION_MS: i64 = 1500;
+threadlocal var g_image_paste_toast_until_ms: i64 = 0;
+
 const TRANSFER_TOAST_DURATION_MS: i64 = 2500;
 threadlocal var g_transfer_toast_until_ms: i64 = 0;
 threadlocal var g_transfer_toast_sticky: bool = false;
@@ -4441,10 +4444,17 @@ pub fn showStatusToast(message: []const u8) void {
     AppWindow.g_cells_valid = false;
 }
 
+pub fn showImagePasteToast() void {
+    g_image_paste_toast_until_ms = std.time.milliTimestamp() + IMAGE_PASTE_TOAST_DURATION_MS;
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+}
+
 const transferToastVerb = transfer_toast_model.transferToastVerb;
 
 const transfer_toast_model = @import("overlays/transfer_toast_model.zig");
 const formatTransferToast = transfer_toast_model.formatTransferToast;
+const image_paste_toast_model = @import("overlays/image_paste_toast_model.zig");
 
 pub fn showTransferToast(
     kind: AppWindow.file_explorer.TransferKind,
@@ -4934,6 +4944,31 @@ pub fn renderCopyToast(window_width: f32, window_height: f32) void {
     const y = bg_y + pad_v;
     const text_color: [3]f32 = .{ 0.55, 0.95, 0.55 };
     renderTitlebarText(text, x, y, text_color);
+}
+
+pub fn renderImagePasteToast(window_width: f32, window_height: f32) void {
+    const now = std.time.milliTimestamp();
+    if (now >= g_image_paste_toast_until_ms) return;
+
+    const text = "Image pasted";
+    const pad_h: f32 = 14;
+    const pad_v: f32 = 6;
+    const line_h = font.g_titlebar_cell_height + pad_v * 2;
+    const text_w = measureTitlebarText(text);
+    const rect = image_paste_toast_model.layout(
+        window_width,
+        window_height,
+        AppWindow.currentTitlebarHeight(),
+        text_w + pad_h * 2,
+        line_h,
+    );
+
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    ui_pipeline.fillQuadAlpha(rect.x, rect.y, rect.w, rect.h, mixColor(bg, accent, 0.20), 0.96);
+    ui_pipeline.fillQuadAlpha(rect.x, rect.y, 3, rect.h, accent, 0.74);
+    renderTitlebarText(text, rect.x + pad_h, rect.y + pad_v, mixColor(fg, accent, 0.18));
 }
 
 fn transferToastLayout(window_width: f32, text: []const u8) DebugLineRect {
