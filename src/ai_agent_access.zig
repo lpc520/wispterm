@@ -207,6 +207,26 @@ pub fn evaluate(allocator: std.mem.Allocator, rules: *const AccessRules, command
     return .{};
 }
 
+/// True if `path` — a single filesystem path, NOT a shell command — references
+/// a denied location. For tools that read a literal path argument (e.g. sending
+/// a file attachment) rather than running a shell command through `evaluate`.
+pub fn isPathDenied(allocator: std.mem.Allocator, rules: *const AccessRules, path: []const u8, cwd: ?[]const u8) bool {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t = stripQuotes(path);
+    if (t.len == 0) return false;
+    const base = std.fs.path.basename(t);
+    for (rules.deny_names) |pat| {
+        if (globMatch(pat, base)) return true;
+    }
+    const resolved = (resolveToken(a, t, rules.home, cwd) catch null) orelse return false;
+    for (rules.deny_roots) |root| {
+        if (matchesRoot(resolved, root)) return true;
+    }
+    return false;
+}
+
 pub fn isReadOnlyCommand(command: []const u8) bool {
     if (std.mem.indexOfScalar(u8, command, '>') != null) return false; // output redirect
     if (std.mem.indexOf(u8, command, "$(") != null) return false; // command substitution
@@ -560,6 +580,18 @@ test "evaluate: deny beats allow even when nested" {
     var rules = try parseRules(a, "allow ~/project\ndeny ~/project/.git\n", "/home/u");
     defer rules.deinit();
     try std.testing.expectEqual(Decision.blacklisted, evaluate(a, &rules, "cat ~/project/.git/config", null).decision);
+}
+
+test "isPathDenied flags protected file paths" {
+    const a = std.testing.allocator;
+    var rules = try parseRules(a, "", "/home/u");
+    defer rules.deinit();
+    try std.testing.expect(isPathDenied(a, &rules, "~/.ssh/id_rsa", null));
+    try std.testing.expect(isPathDenied(a, &rules, "/home/u/.aws/credentials", null));
+    try std.testing.expect(isPathDenied(a, &rules, "secret.pem", null));
+    try std.testing.expect(isPathDenied(a, &rules, "\"$HOME/.gnupg/secring.gpg\"", null));
+    try std.testing.expect(!isPathDenied(a, &rules, "/home/u/project/notes.txt", null));
+    try std.testing.expect(!isPathDenied(a, &rules, "report.txt", "/home/u/project"));
 }
 
 test "evaluate handles paths embedded in option flags" {

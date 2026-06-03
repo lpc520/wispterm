@@ -230,6 +230,19 @@ fn weixinSendAttachmentTool(
     const wx_ctx = ctx.weixin_reply_context orelse {
         return ctx.allocator.dupe(u8, "No active Weixin reply context; cannot send attachment.");
     };
+    // Sending an attachment reads the file off disk and uploads it to a remote
+    // user, so a protected path here is an exfiltration risk. Force approval for
+    // a denied path even in full-permission mode (deny list always wins).
+    if (ctx.settings.access_rules) |rules| {
+        if (ai_agent_access.isPathDenied(ctx.allocator, rules, path, null)) {
+            const bl_reason = allocBlacklistReason(ctx.allocator, path);
+            defer if (bl_reason) |r| ctx.allocator.free(r);
+            const reason = bl_reason orelse "Sends a protected file — confirm to allow";
+            if (!ctx.requestApproval("weixin_send_attachment", path, reason)) {
+                return deniedResult(ctx.allocator, path, "operator rejected sending a protected file");
+            }
+        }
+    }
     wx_ctx.sender.sendAttachment(kind, path, display_name, wx_ctx.to_user_id, wx_ctx.context_token) catch |err| {
         return std.fmt.allocPrint(ctx.allocator, "Failed to send {s} to Weixin: {}", .{ kind.name(), err });
     };
