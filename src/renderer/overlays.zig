@@ -2414,6 +2414,20 @@ fn connectSshProfile(idx: usize) void {
     _ = connectSshProfileReturningSurface(idx);
 }
 
+/// Connect the SSH profile with the given name (Phase 3d programmatic/test
+/// entry). Loads profiles if needed; returns false if no profile matches.
+pub fn connectProfileByName(name: []const u8) bool {
+    loadSshProfiles();
+    var idx: usize = 0;
+    while (idx < g_ssh_profile_count) : (idx += 1) {
+        if (std.mem.eql(u8, profileField(&g_ssh_profiles[idx], .name), name)) {
+            connectSshProfile(idx);
+            return true;
+        }
+    }
+    return false;
+}
+
 fn connectSshProfileReturningSurface(idx: usize) ?*Surface {
     return connectSshProfileReturningSurfaceWithCommand(idx, "");
 }
@@ -2431,6 +2445,27 @@ fn connectSshProfileReturningSurfaceWithCommand(idx: usize, remote_command: []co
     if (!isSshTokenSafe(ip) or !isSshTokenSafe(user)) return null;
     if (port.len > 0 and !isPortTokenSafe(port)) return null;
     if (!command_palette_model.isProxyJumpSafe(proxy_jump)) return null;
+
+    // Phase 3d: tmux control-mode gate. When enabled, route the connection
+    // through the tmux controller (`ssh … tmux -CC …`) instead of a normal
+    // terminal surface; the controller builds tabs/splits from the remote tmux
+    // windows/panes. MVP trigger is an env var; a per-profile toggle is the
+    // follow-up. Returns null (no surface) — the controller owns the tabs.
+    if (std.process.hasEnvVarConstant("WISPTERM_TMUX")) {
+        var tmux_buf: [8192]u8 = undefined;
+        const tmux_cmd = platform_pty_command.sshInteractiveCommand(tmux_buf[0..], .{
+            .user = user,
+            .host = ip,
+            .port = port,
+            .password_auth = password.len > 0,
+            .legacy_algorithms = AppWindow.g_ssh_legacy_algorithms,
+            .proxy_jump = proxy_jump,
+            .remote_command = "tmux -CC new -A -s wispterm",
+        }) orelse return null;
+        sessionLauncherClose();
+        _ = AppWindow.startTmuxSession(tmux_cmd, password);
+        return null;
+    }
 
     var command_buf: [8192]u8 = undefined;
     const command = platform_pty_command.sshInteractiveCommand(command_buf[0..], .{

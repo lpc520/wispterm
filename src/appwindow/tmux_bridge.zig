@@ -121,6 +121,8 @@ pub const TmuxBridge = struct {
 
         // 5. Resolve focus to the active pane's leaf, if in this tab.
         self.refocusActivePane(t);
+
+        std.debug.print("tmux: reconciled window @{d} -> tab, tree nodes={d}\n", .{ window_id, t.tree.nodes.len });
     }
 
     /// Per-pane Surface factory for `SplitTree.fromTmuxLayout`. Reuse → `ref()`;

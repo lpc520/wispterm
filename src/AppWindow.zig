@@ -51,6 +51,7 @@ pub const ai_history_source = @import("ai_history_source.zig");
 const ssh_connection = @import("ssh_connection.zig");
 pub const tab = @import("appwindow/tab.zig");
 const active_tab_state = @import("appwindow/active_tab.zig");
+const tmux_controller = @import("appwindow/tmux_controller.zig");
 pub const font = @import("font/manager.zig");
 pub const cell_renderer = @import("renderer/cell_renderer.zig");
 pub const cell_pipeline = @import("renderer/cell_pipeline.zig");
@@ -1680,6 +1681,25 @@ pub fn spawnTab(allocator: std.mem.Allocator) bool {
 
 pub fn spawnTabWithCommandUtf8(command: []const u8) bool {
     return spawnTabWithCommandUtf8ReturningSurface(command) != null;
+}
+
+/// Start a tmux control-mode session (Phase 3d). `ssh_cmd` is a full
+/// `ssh … tmux -CC …` command; `password` is injected at the SSH prompt (empty
+/// for key auth). The controller (pumped from the main loop) builds tabs/splits
+/// from the remote tmux windows/panes. Returns false if the transport could not
+/// be launched.
+pub fn startTmuxSession(ssh_cmd: []const u8, password: []const u8) bool {
+    const allocator = g_allocator orelse return false;
+    return tmux_controller.start(
+        allocator,
+        ssh_cmd,
+        password,
+        term_cols,
+        term_rows,
+        tab.g_scrollback_limit,
+        g_cursor_style,
+        g_cursor_blink,
+    );
 }
 
 pub fn spawnTabWithCommandUtf8ReturningSurface(command: []const u8) ?*Surface {
@@ -4777,6 +4797,18 @@ fn runMainLoop(self: *AppWindow) !void {
                 }
             },
         }
+
+        // Phase 3d test hook: when WISPTERM_TMUX names a profile, auto-connect it
+        // through the tmux controller so the control-mode pipeline runs end-to-end
+        // without a manual launcher click. The same env var gates the overlay
+        // connect path, so this routes to startTmuxSession.
+        if (std.process.getEnvVarOwned(allocator, "WISPTERM_TMUX")) |tmux_profile| {
+            defer allocator.free(tmux_profile);
+            if (tmux_profile.len > 0) {
+                std.debug.print("tmux: auto-connecting profile '{s}'\n", .{tmux_profile});
+                _ = overlays.connectProfileByName(tmux_profile);
+            }
+        } else |_| {}
     }
 
     gpu.state.setBlendEnabled(true);
@@ -4819,6 +4851,7 @@ fn runMainLoop(self: *AppWindow) !void {
     while (running) {
         // Check for config file changes
         if (config_watcher) |*w| checkConfigReload(allocator, w);
+        tmux_controller.tickAll(allocator);
         overlays.tickSessionLauncher();
         file_explorer.tickAsync();
         syncTransferToastFromFileExplorer();
