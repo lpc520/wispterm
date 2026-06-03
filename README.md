@@ -220,3 +220,9 @@ through the ghostty dependency).
 ## License
 
 MIT
+
+## Star History
+
+<a href="https://star-history.com/#xuzhougeng/wispterm&Date">
+  <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=xuzhougeng/wispterm&type=Date" />
+</a>
