@@ -10,5 +10,6 @@
 
 test {
     _ = @import("platform/pty_virtual_test.zig");
+    _ = @import("tmux/pane.zig");
     _ = @import("tmux/pane_io_test.zig");
 }
