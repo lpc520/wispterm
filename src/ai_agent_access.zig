@@ -133,22 +133,61 @@ pub fn evaluate(allocator: std.mem.Allocator, rules: *const AccessRules, command
     defer arena.deinit();
     const a = arena.allocator();
 
-    // Deny pass: generous, first hit wins.
+    // Deny pass: generous, first hit wins. Inspects the path-bearing substring
+    // of each token, including paths glued into option flags (`--file=/etc/x`,
+    // `-f/etc/x`), so deny is not bypassed by flag syntax.
     var tokens = std.mem.tokenizeAny(u8, command, " \t\r\n|&;<>()");
     while (tokens.next()) |tok| {
-        const t = stripQuotes(tok);
-        if (t.len == 0) continue;
-        const base = std.fs.path.basename(t);
+        const cand = pathCandidate(tok);
+        if (cand.len == 0) continue;
+        const base = std.fs.path.basename(cand);
         for (rules.deny_names) |pat| {
             if (globMatch(pat, base)) return .{ .decision = .blacklisted, .matched = tok };
         }
-        if (looksLikePath(tok)) {
-            const resolved = (resolveToken(a, tok, rules.home, cwd) catch null) orelse continue;
+        if (looksLikePath(cand)) {
+            const resolved = (resolveToken(a, cand, rules.home, cwd) catch null) orelse continue;
             for (rules.deny_roots) |root| {
                 if (matchesRoot(resolved, root)) return .{ .decision = .blacklisted, .matched = tok };
             }
         }
     }
+
+    // Allow pass: strict. Read-only, >=1 path token, and EVERY path token
+    // confined to an allow root. A single out-of-root path — including one
+    // embedded in an option flag — makes the whole command neutral, so deny
+    // continues to beat allow here.
+    if (!isReadOnlyCommand(command)) return .{};
+    var any_path = false;
+    var verb_skipped = false;
+    var toks2 = std.mem.tokenizeAny(u8, command, " \t\r\n|&;<>()");
+    while (toks2.next()) |tok| {
+        const cand = pathCandidate(tok);
+        if (cand.len == 0) continue;
+        // Skip the command's leading verb (and any env-assignment / `sudo`
+        // prefix before it) so e.g. `/usr/bin/cat <file>` isn't rejected on the
+        // binary's own path. Only the first verb is skipped; later pipeline
+        // verbs are harmlessly re-checked as (confined) path candidates.
+        if (!verb_skipped) {
+            if (isAssignment(cand) or std.mem.eql(u8, cand, "sudo") or std.mem.eql(u8, cand, "command")) continue;
+            verb_skipped = true;
+            continue;
+        }
+        if (!looksLikePath(cand)) {
+            if (cand[0] == '-') continue; // pure option flag, no embedded path
+            if (cwd == null) continue; // bare name with no cwd to anchor it
+        }
+        const resolved = (resolveToken(a, cand, rules.home, cwd) catch null) orelse continue;
+        any_path = true;
+        var confined = false;
+        for (rules.allow_roots) |root| {
+            if (matchesRoot(resolved, root)) {
+                confined = true;
+                break;
+            }
+        }
+        if (!confined) return .{};
+    }
+    if (any_path) return .{ .decision = .whitelisted_safe };
     return .{};
 }
 
@@ -258,6 +297,22 @@ fn resolveToken(a: std.mem.Allocator, token: []const u8, home: []const u8, cwd: 
         return try lexicalNormalize(a, joined);
     }
     return try lexicalNormalize(a, expanded);
+}
+
+/// The path-bearing substring of a shell token: the token itself, the value
+/// after `=` in an option flag (`--file=/etc/x`), or the path glued onto a
+/// short flag (`-f/etc/x`). Returned slice is a sub-slice of `tok` (after
+/// stripping surrounding quotes), so callers may still report it via `matched`.
+fn pathCandidate(tok: []const u8) []const u8 {
+    var t = stripQuotes(tok);
+    if (t.len != 0 and t[0] == '-') {
+        if (std.mem.indexOfScalar(u8, t, '=')) |eq| {
+            t = t[eq + 1 ..];
+        } else if (std.mem.indexOfScalar(u8, t, '/')) |slash| {
+            t = t[slash..];
+        }
+    }
+    return t;
 }
 
 fn matchesRoot(path: []const u8, root: []const u8) bool {
@@ -468,4 +523,38 @@ test "evaluate matched names the triggering token" {
     defer rules.deinit();
     const r = evaluate(a, &rules, "cat ~/.ssh/id_rsa", null);
     try std.testing.expectEqualStrings("~/.ssh/id_rsa", r.matched);
+}
+
+test "evaluate auto-approves read-only commands confined to allow roots" {
+    const a = std.testing.allocator;
+    var rules = try parseRules(a, "allow ~/project\n", "/home/u");
+    defer rules.deinit();
+    try std.testing.expectEqual(Decision.whitelisted_safe, evaluate(a, &rules, "cat ~/project/readme.md", null).decision);
+    try std.testing.expectEqual(Decision.whitelisted_safe, evaluate(a, &rules, "cat a.txt", "/home/u/project").decision);
+    // A path outside the allow root → not safe.
+    try std.testing.expectEqual(Decision.neutral, evaluate(a, &rules, "cat ~/project/a /etc/hosts", null).decision);
+    // Not read-only → not safe.
+    try std.testing.expectEqual(Decision.neutral, evaluate(a, &rules, "rm ~/project/a", null).decision);
+    // No path argument → not safe (avoid blanket auto-approve).
+    try std.testing.expectEqual(Decision.neutral, evaluate(a, &rules, "ls", "/home/u/project").decision);
+}
+
+test "evaluate: deny beats allow even when nested" {
+    const a = std.testing.allocator;
+    var rules = try parseRules(a, "allow ~/project\ndeny ~/project/.git\n", "/home/u");
+    defer rules.deinit();
+    try std.testing.expectEqual(Decision.blacklisted, evaluate(a, &rules, "cat ~/project/.git/config", null).decision);
+}
+
+test "evaluate handles paths embedded in option flags" {
+    const a = std.testing.allocator;
+    var rules = try parseRules(a, "allow ~/project\n", "/home/u");
+    defer rules.deinit();
+    // Deny still fires for a protected path glued into a flag value.
+    try std.testing.expectEqual(Decision.blacklisted, evaluate(a, &rules, "grep --file=$HOME/.ssh/known_hosts x ~/project/a", null).decision);
+    // An out-of-root flag path must NOT be auto-approved (no silent skip).
+    try std.testing.expectEqual(Decision.neutral, evaluate(a, &rules, "grep --file=/etc/passwd x ~/project/a", null).decision);
+    try std.testing.expectEqual(Decision.neutral, evaluate(a, &rules, "grep -f/etc/passwd ~/project/a", null).decision);
+    // A flag path inside the allow root stays safe.
+    try std.testing.expectEqual(Decision.whitelisted_safe, evaluate(a, &rules, "grep --file=~/project/patterns ~/project/a", null).decision);
 }
