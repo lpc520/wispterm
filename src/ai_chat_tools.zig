@@ -321,7 +321,18 @@ fn terminalSnapshotTool(ctx: *const ToolContext, surface_id: ?[]const u8) ![]u8 
             });
         }
         try out.append(ctx.allocator, '\n');
-        try out.appendSlice(ctx.allocator, surface.snapshot);
+
+        // For a specifically targeted surface, read the LIVE screen via the
+        // per-surface snapshot (mutex-protected, works on the worker thread)
+        // rather than the request-start pre-capture, which goes stale mid-turn.
+        var live: ?[]u8 = null;
+        defer if (live) |t| ctx.allocator.free(t);
+        if (surface_id != null) {
+            if (ctx.tool_host) |host| {
+                live = host.surfaceSnapshot(host.ctx, ctx.allocator, surface.ptr) catch null;
+            }
+        }
+        try out.appendSlice(ctx.allocator, live orelse surface.snapshot);
         try out.appendSlice(ctx.allocator, "\n---\n");
     }
     if (out.items.len == 0) try out.appendSlice(ctx.allocator, "No matching terminal surface.");
@@ -882,13 +893,6 @@ pub fn plainReplInputTool(ctx: *const ToolContext, host: ToolHost, surface: Tool
     return truncateOwned(ctx.allocator, ctx.settings, latest);
 }
 
-fn agentAppStateIsTerminal(state: agent_detector.State) bool {
-    return switch (state) {
-        .waiting_approval, .needs_input, .halted, .failed, .done => true,
-        .none, .running => false,
-    };
-}
-
 fn replSnapshotLooksBusy(repl: ReplKind, snapshot: []const u8) bool {
     return switch (repl) {
         .codex => std.ascii.indexOfIgnoreCase(snapshot, "working (") != null or
@@ -938,59 +942,48 @@ fn waitForAgentAppReplResult(ctx: *const ToolContext, host: ToolHost, surface: T
     const min_wait_ms: i64 = 750;
     const started = std.time.milliTimestamp();
     const deadline = started + @as(i64, @intCast(wait_ms));
+
+    // Read the live screen via the per-surface snapshot. It holds the surface's
+    // render mutex over heap-owned terminal state, so it works from the agent
+    // request worker thread. collectSnapshot() must NOT be used here: the tab
+    // model is thread-local to the UI thread and reads empty on the worker (see
+    // the pre-capture comment in ai_chat.zig), which previously left this wait
+    // blind and spinning to the full timeout while the model saw a stale screen.
+    var last_text = host.surfaceSnapshot(host.ctx, ctx.allocator, surface.ptr) catch
+        try ctx.allocator.dupe(u8, surface.snapshot);
+    defer ctx.allocator.free(last_text);
     var last_change_ms = started;
-    var changed_once = false;
-    var last_app = surface.agent_app;
-    var last_state = surface.agent_state;
-    var last_confidence = surface.agent_confidence;
-    var last_snapshot = try ctx.allocator.dupe(u8, surface.snapshot);
-    defer ctx.allocator.free(last_snapshot);
 
     while (std.time.milliTimestamp() < deadline) {
         if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
+        std.Thread.sleep(150 * std.time.ns_per_ms);
         const now = std.time.milliTimestamp();
-        const live = host.collectSnapshot(host.ctx, ctx.allocator) catch null;
-        if (live) |snapshot| {
-            defer snapshot.deinit(ctx.allocator);
-            if (findSurface(snapshot, surface.id)) |latest| {
-                last_app = latest.agent_app;
-                last_state = latest.agent_state;
-                last_confidence = latest.agent_confidence;
-                if (!std.mem.eql(u8, last_snapshot, latest.snapshot)) {
-                    const new_snapshot = try ctx.allocator.dupe(u8, latest.snapshot);
-                    ctx.allocator.free(last_snapshot);
-                    last_snapshot = new_snapshot;
-                    last_change_ms = now;
-                    changed_once = true;
-                }
-                if (agentAppStateIsTerminal(latest.agent_state)) {
-                    return allocAgentAppReplResult(
-                        ctx.allocator,
-                        ctx.settings,
-                        repl,
-                        latest.agent_app,
-                        latest.agent_state,
-                        latest.agent_confidence,
-                        "reported a terminal state",
-                        latest.snapshot,
-                    );
-                }
-                const settled = changed_once and now >= started + min_wait_ms and now - last_change_ms >= quiet_ms;
-                if (settled and !replSnapshotLooksBusy(repl, latest.snapshot)) {
-                    return allocAgentAppReplResult(
-                        ctx.allocator,
-                        ctx.settings,
-                        repl,
-                        latest.agent_app,
-                        latest.agent_state,
-                        latest.agent_confidence,
-                        "screen settled without an active busy marker",
-                        latest.snapshot,
-                    );
-                }
-            }
+
+        const text = host.surfaceSnapshot(host.ctx, ctx.allocator, surface.ptr) catch continue;
+        if (std.mem.eql(u8, last_text, text)) {
+            ctx.allocator.free(text);
+        } else {
+            ctx.allocator.free(last_text);
+            last_text = text;
+            last_change_ms = now;
         }
-        std.Thread.sleep(250 * std.time.ns_per_ms);
+
+        // Settle on a screen that has been stable for quiet_ms (after a min-wait
+        // floor) and shows no active busy marker. The busy-marker gate keeps us
+        // waiting while Codex/Claude Code is still working.
+        const settled = now - started >= min_wait_ms and now - last_change_ms >= quiet_ms;
+        if (settled and !replSnapshotLooksBusy(repl, last_text)) {
+            return allocAgentAppReplResult(
+                ctx.allocator,
+                ctx.settings,
+                repl,
+                surface.agent_app,
+                surface.agent_state,
+                surface.agent_confidence,
+                "screen settled without an active busy marker",
+                last_text,
+            );
+        }
     }
 
     const note = try std.fmt.allocPrint(
@@ -1003,11 +996,11 @@ fn waitForAgentAppReplResult(ctx: *const ToolContext, host: ToolHost, surface: T
         ctx.allocator,
         ctx.settings,
         repl,
-        last_app,
-        last_state,
-        last_confidence,
+        surface.agent_app,
+        surface.agent_state,
+        surface.agent_confidence,
         note,
-        last_snapshot,
+        last_text,
     );
 }
 
@@ -1676,6 +1669,46 @@ test "ai chat tools prefer request-local terminal snapshot" {
     try std.testing.expect(snapshot.surfaces[0].id.ptr != cached_snapshot.surfaces[0].id.ptr);
 }
 
+test "terminal_snapshot reads the live surface screen for a targeted surface" {
+    const allocator = std.testing.allocator;
+    var host_ctx = ReplWaitTestHost.Ctx{ .busy_until = 0, .settled_text = "LIVE-SCREEN-9999" };
+    var surfaces = try allocator.alloc(ToolSurface, 1);
+    surfaces[0] = .{
+        .id = try allocator.dupe(u8, "s1"),
+        .title = try allocator.dupe(u8, "Local Shell"),
+        .cwd = try allocator.dupe(u8, "/home/user"),
+        // The request-start pre-capture is stale; the live read must win.
+        .snapshot = try allocator.dupe(u8, "STALE-PRECAPTURE-0000"),
+        .tab_index = 0,
+        .focused = true,
+        .is_ssh = false,
+        .is_wsl = false,
+        .agent_app = .none,
+        .agent_state = .none,
+        .agent_confidence = 0,
+        .ptr = @ptrFromInt(1),
+    };
+    const cached = ToolSnapshot{ .surfaces = surfaces, .active_tab = 0 };
+    defer cached.deinit(allocator);
+
+    var dummy: u8 = 0;
+    const ctx = ToolContext{
+        .allocator = allocator,
+        .ctx = &dummy,
+        .tool_host = ReplWaitTestHost.host(&host_ctx),
+        .tool_snapshot = cached,
+        .settings = .{},
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+
+    const result = try terminalSnapshotTool(&ctx, "s1");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "LIVE-SCREEN-9999") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "STALE-PRECAPTURE") == null);
+    try std.testing.expectEqual(@as(usize, 1), host_ctx.snap_calls);
+}
+
 test "ai chat write context requires explicit selection and can switch surfaces" {
     const allocator = std.testing.allocator;
     var surfaces = try allocator.alloc(ToolSurface, 2);
@@ -2147,36 +2180,33 @@ test "weixin_send_attachment calls the active Weixin sender" {
 const ReplWaitTestHost = struct {
     const Ctx = struct {
         collect_calls: usize = 0,
+        snap_calls: usize = 0,
         write_calls: usize = 0,
-        done_after: usize = 2,
+        // Number of leading surface-snapshot reads that still look busy before
+        // the screen settles. The wait must settle off the *live* per-surface
+        // read, not collectSnapshot (which is empty on the worker thread).
+        busy_until: usize = 2,
+        settled_text: []const u8 = "Claude Code\nDone. result = 563894910\n> ",
         last_write: [256]u8 = undefined,
         last_write_len: usize = 0,
     };
 
+    // Simulates the real worker thread: the tab model is thread-local to the UI
+    // thread, so collectSnapshot reads empty here. Tools must not depend on it.
     fn collectSnapshot(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!ToolSnapshot {
         const ctx: *Ctx = @ptrCast(@alignCast(ctx_ptr));
         ctx.collect_calls += 1;
-        const done = ctx.collect_calls >= ctx.done_after;
-        var surfaces = try allocator.alloc(ToolSurface, 1);
-        surfaces[0] = .{
-            .id = try allocator.dupe(u8, "surface-claude"),
-            .title = try allocator.dupe(u8, "Claude Code"),
-            .cwd = try allocator.dupe(u8, "/home/xzg"),
-            .snapshot = try allocator.dupe(u8, if (done) "Claude Code\nFINISHED" else "Claude Code\nthinking"),
-            .tab_index = 0,
-            .focused = true,
-            .is_ssh = false,
-            .is_wsl = true,
-            .agent_app = .claude_code,
-            .agent_state = if (done) .done else .running,
-            .agent_confidence = 82,
-            .ptr = @ptrCast(ctx),
-        };
+        const surfaces = try allocator.alloc(ToolSurface, 0);
         return .{ .surfaces = surfaces, .active_tab = 0 };
     }
 
-    fn surfaceSnapshot(_: *anyopaque, allocator: std.mem.Allocator, _: *anyopaque) anyerror![]u8 {
-        return allocator.dupe(u8, "fallback snapshot");
+    // The per-surface snapshot holds the surface's render mutex and therefore
+    // works from the worker thread. It reports a busy screen, then a settled one.
+    fn surfaceSnapshot(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, _: *anyopaque) anyerror![]u8 {
+        const ctx: *Ctx = @ptrCast(@alignCast(ctx_ptr));
+        ctx.snap_calls += 1;
+        const busy = ctx.snap_calls <= ctx.busy_until;
+        return allocator.dupe(u8, if (busy) "Claude Code\nthinking… (esc to interrupt)" else ctx.settled_text);
     }
 
     fn writeSurface(ctx_ptr: *anyopaque, _: *anyopaque, data: []const u8) bool {
@@ -2267,9 +2297,9 @@ test "accessGate with no rules degrades to dangerous-only behavior" {
     try std.testing.expect(accessGate(&ctx, "rm foo.txt", null).force); // dangerous still forces
 }
 
-test "Claude Code REPL input waits for app state before returning" {
+test "Claude Code REPL input settles off the live surface snapshot, not the worker-empty collectSnapshot" {
     const allocator = std.testing.allocator;
-    var host_ctx = ReplWaitTestHost.Ctx{ .done_after = 2 };
+    var host_ctx = ReplWaitTestHost.Ctx{ .busy_until = 2 };
     var dummy: u8 = 0;
     const ctx = ToolContext{
         .allocator = allocator,
@@ -2295,11 +2325,16 @@ test "Claude Code REPL input waits for app state before returning" {
         .ptr = @ptrCast(&host_ctx),
     };
 
-    const result = try plainReplInputTool(&ctx, ReplWaitTestHost.host(&host_ctx), surface, .claude_code, "analyze system", 2000);
+    const result = try plainReplInputTool(&ctx, ReplWaitTestHost.host(&host_ctx), surface, .claude_code, "analyze system", 3000);
     defer allocator.free(result);
+    // The input was submitted with the Claude Code submit key.
     try std.testing.expectEqual(@as(usize, 1), host_ctx.write_calls);
-    try std.testing.expect(host_ctx.collect_calls >= 2);
     try std.testing.expectEqualStrings("analyze system\r", host_ctx.last_write[0..host_ctx.last_write_len]);
-    try std.testing.expect(std.mem.indexOf(u8, result, "reported a terminal state") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "FINISHED") != null);
+    // The wait read the live per-surface snapshot and ignored the worker-empty
+    // collectSnapshot path entirely.
+    try std.testing.expectEqual(@as(usize, 0), host_ctx.collect_calls);
+    try std.testing.expect(host_ctx.snap_calls > 0);
+    // It returned the settled live screen, not the stale pre-input snapshot.
+    try std.testing.expect(std.mem.indexOf(u8, result, "563894910") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "thinking") == null);
 }
