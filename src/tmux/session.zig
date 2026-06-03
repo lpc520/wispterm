@@ -109,6 +109,11 @@ pub const Session = struct {
                 self.sink.write(o.pane_id, self.scratch.items);
             },
             .layout_change => |lc| try self.applyLayout(lc.window_id, lc.layout),
+            // A command-reply block. On attach tmux does NOT emit %layout-change,
+            // so the initial windows/layouts are learned from the `list-windows`
+            // reply that arrives here as `@<id> <layout>` lines (Phase 3d
+            // bootstrap). Non-window-list bodies parse to nothing and are ignored.
+            .block_end => |body| try self.applyWindowList(body),
             .window_add => |w| _ = try self.ensureWindow(w.window_id),
             .window_renamed => |w| {
                 try self.renameWindow(w.window_id, w.name);
@@ -166,6 +171,24 @@ pub const Session = struct {
         // `tree` is still alive (its `deinit` runs at scope exit); the bridge
         // consumes `root` synchronously inside this call.
         self.events.onLayoutChange(self.events.ctx, window_id, &tree.root);
+    }
+
+    /// Parse a `list-windows -F "#{window_id} #{window_layout}"` reply body and
+    /// apply each `@<id> <layout>` line as a layout. Used to bootstrap the
+    /// model on attach, since tmux does not push %layout-change for existing
+    /// windows. Lines that are not a window-id + parseable layout are skipped,
+    /// so other command replies passing through here are harmless no-ops.
+    fn applyWindowList(self: *Session, body: []const u8) Allocator.Error!void {
+        var lines = std.mem.splitScalar(u8, body, '\n');
+        while (lines.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \r\t");
+            if (line.len < 2 or line[0] != '@') continue;
+            const sp = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+            const id = std.fmt.parseInt(usize, line[1..sp], 10) catch continue;
+            const layout_str = std.mem.trim(u8, line[sp + 1 ..], " \r\t");
+            if (layout_str.len == 0) continue;
+            try self.applyLayout(id, layout_str);
+        }
     }
 
     /// Enqueue the attach bootstrap: tell tmux our client size and ask for the
@@ -508,6 +531,26 @@ test "EventSink fires onActivePaneChanged" {
 
     try s.feed("%window-pane-changed @1 %9\n");
     try std.testing.expectEqual(@as(?usize, 9), log.active_pane);
+}
+
+test "block_end list-windows reply drives onLayoutChange per window (bootstrap)" {
+    var col = Collector{ .alloc = std.testing.allocator };
+    defer col.deinit();
+    var log = EventLog{ .alloc = std.testing.allocator };
+    defer log.deinit();
+    var s = Session.init(std.testing.allocator, col.sink(), 80, 24);
+    defer s.deinit();
+    s.events = log.eventSink();
+
+    // The reply tmux sends on attach to `list-windows -F "#{window_id} #{window_layout}"`.
+    try s.feed("%begin 1 1 0\n@1 b25e,80x24,0,0,1\n%end 1 1 0\n");
+    try std.testing.expectEqual(@as(?usize, 1), log.layout_window);
+    try std.testing.expectEqual(@as(usize, 1), log.layout_panes);
+    try std.testing.expectEqual(@as(usize, 1), s.windowCount());
+
+    // A non-window-list reply body must not create windows.
+    try s.feed("%begin 2 2 0\nsome other output\n%end 2 2 0\n");
+    try std.testing.expectEqual(@as(usize, 1), s.windowCount());
 }
 
 test "EventSink default is a silent no-op" {
