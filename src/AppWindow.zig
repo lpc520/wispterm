@@ -4839,14 +4839,20 @@ fn runMainLoop(self: *AppWindow) !void {
         }
 
         // Dev/automation hook: WISPTERM_AUTOCONNECT names an SSH profile to
-        // connect on launch (no manual launcher click). Whether it becomes a
-        // tmux control-mode session is decided per-profile by the profile's
-        // `tmux` field, not by this hook.
+        // connect (plain) on launch; WISPTERM_AUTOCONNECT_TMUX connects one in
+        // tmux control mode. No manual launcher click — for testing/automation.
         if (std.process.getEnvVarOwned(allocator, "WISPTERM_AUTOCONNECT")) |autoconnect_profile| {
             defer allocator.free(autoconnect_profile);
             if (autoconnect_profile.len > 0) {
                 std.debug.print("ssh: auto-connecting profile '{s}'\n", .{autoconnect_profile});
                 _ = overlays.connectProfileByName(autoconnect_profile);
+            }
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "WISPTERM_AUTOCONNECT_TMUX")) |p| {
+            defer allocator.free(p);
+            if (p.len > 0) {
+                std.debug.print("tmux: auto-connecting profile '{s}' (tmux)\n", .{p});
+                _ = overlays.connectProfileByNameTmux(p);
             }
         } else |_| {}
     }

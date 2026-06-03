@@ -2076,7 +2076,8 @@ fn handleSidebarPress(xpos: f64, ypos: f64) void {
     if (tab.g_tab_rename_active) tab.commitTabRename();
 
     if (hitTestSidebarPlusButton(xpos, ypos)) {
-        overlays.sessionLauncherOpen();
+        // In a tmux tab, "+" adds a tmux window (same session); else open the launcher.
+        if (!AppWindow.requestTmuxNewWindowForActiveTab()) overlays.sessionLauncherOpen();
         return;
     }
 
@@ -3332,7 +3333,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 plus_btn_pressed = false;
                 // Only fire if still in the + button area
                 if (hitTestSidebarPlusButton(xpos, ypos)) {
-                    overlays.sessionLauncherOpen();
+                    if (!AppWindow.requestTmuxNewWindowForActiveTab()) overlays.sessionLauncherOpen();
                 }
                 return;
             }
