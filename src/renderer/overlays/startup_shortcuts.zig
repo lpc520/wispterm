@@ -60,6 +60,7 @@ const STARTUP_SHORTCUT_ENTRIES = [_]StartupShortcut{
     .{ .keys = "Ctrl/double-click file", .keys_macos = "Cmd/double-click file", .action = "Preview file", .action_zh = "预览文件" },
     .{ .keys = "Ctrl+Shift-click SSH file", .keys_macos = "Cmd+Shift-click SSH file", .action = "Download file", .action_zh = "下载文件" },
     .{ .keys = "Ctrl+Shift+[ / Ctrl+Shift+]", .kind = .pair, .first = .focus_previous, .second = .focus_next, .action = "Previous / next panel", .action_zh = "上一个 / 下一个面板" },
+    .{ .keys = "Ctrl+1..9", .kind = .pair, .first = .focus_panel_1, .second = .focus_panel_9, .action = "Focus panel 1–9 by number", .action_zh = "按编号聚焦面板 (1–9)" },
     .{ .keys = "Alt+Left / Alt+Right / Alt+Up / Alt+Down", .kind = .quad, .first = .focus_left, .second = .focus_right, .third = .focus_up, .fourth = .focus_down, .action = "Focus panel", .action_zh = "聚焦面板" },
     .{ .keys = "Ctrl+Shift+Z", .kind = .action, .first = .equalize_splits, .action = "Equalize panels", .action_zh = "均分面板" },
     .{ .keys = "Ctrl+Shift+W", .kind = .action, .first = .close_panel_or_tab, .action = "Close panel / tab; confirm last", .action_zh = "关闭面板 / 标签页；最后一个需确认" },
