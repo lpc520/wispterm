@@ -45,6 +45,7 @@ extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 /// Raw `_exit(2)` — used in the forked child so we never run libc `atexit`
 /// handlers or flush stdio buffers inherited from the parent.
 extern "c" fn _exit(code: c_int) noreturn;
+extern "c" fn socketpair(domain: c_int, sock_type: c_int, protocol: c_int, sv: *[2]c_int) c_int;
 
 const SLAVE_PATH_MAX = 128;
 const MAX_ARGV = 64;
@@ -86,10 +87,12 @@ pub const Pty = struct {
     slave_path: [SLAVE_PATH_MAX]u8,
     size: winsize,
     cancel_pipe: [2]fd_t,
+    is_virtual: bool,
 
     pub fn open(size: winsize) !Pty {
         var self: Pty = undefined;
         self.size = size;
+        self.is_virtual = false;
 
         const open_flags = std.posix.O{ .ACCMODE = .RDWR, .NOCTTY = true };
         const o_int: c_int = @bitCast(open_flags);
@@ -117,6 +120,38 @@ pub const Pty = struct {
         return self;
     }
 
+    pub const VirtualPair = struct {
+        pty: Pty,
+        /// The controller's end of the socketpair. The caller owns it and must
+        /// `std.posix.close` it; `Pty.deinit` only closes the pty's own `master`.
+        controller_fd: fd_t,
+    };
+
+    /// Create a virtual PTY backed by a socketpair. The returned `pty` reads
+    /// what is written to `controller_fd` and vice-versa, so the tmux controller
+    /// can feed pane output in and read keystrokes back out. No child process.
+    pub fn openVirtual(size: winsize) !VirtualPair {
+        var sv: [2]c_int = undefined;
+        if (socketpair(
+            @intCast(std.posix.AF.UNIX),
+            @intCast(std.posix.SOCK.STREAM),
+            0,
+            &sv,
+        ) != 0) return error.SocketPairFailed;
+        errdefer {
+            _ = c.close(sv[0]);
+            _ = c.close(sv[1]);
+        }
+
+        var self: Pty = undefined;
+        self.master = sv[0];
+        self.is_virtual = true;
+        self.slave_path = std.mem.zeroes([SLAVE_PATH_MAX]u8);
+        self.size = size;
+        self.cancel_pipe = try std.posix.pipe();
+        return .{ .pty = self, .controller_fd = sv[1] };
+    }
+
     pub fn deinit(self: *Pty) void {
         if (self.master >= 0) {
             _ = c.close(self.master);
@@ -137,6 +172,12 @@ pub const Pty = struct {
     }
 
     pub fn setSize(self: *Pty, s: winsize) !void {
+        if (self.is_virtual) {
+            // A socketpair has no window size; the tmux controller owns sizing
+            // via refresh-client. Just record it for getSize.
+            self.size = s;
+            return;
+        }
         try setWindowSize(self.master, self.slavePathSlice(), s);
         self.size = s;
     }
