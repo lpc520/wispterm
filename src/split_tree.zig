@@ -889,6 +889,38 @@ pub const Spatial = struct {
     }
 };
 
+/// A leaf panel's handle plus its normalized top-left position (from `spatial`),
+/// used to order panels by on-screen reading order.
+pub const PanelPos = struct {
+    handle: Node.Handle,
+    x: f16,
+    y: f16,
+};
+
+/// Number of vertical buckets across the 1.0-tall grid. Panels whose `y` round
+/// to the same bucket are treated as the same visual row (then ordered by `x`).
+/// 64 ≈ 1.5% tolerance — fine because rows are separated by a meaningful
+/// fraction of the height. A quantized integer key keeps the comparison
+/// transitive (avoids the floating-epsilon-comparator hazard).
+const ROW_QUANTA: f32 = 64.0;
+
+fn rowKey(y: f16) i32 {
+    return @intFromFloat(@round(@as(f32, @floatCast(y)) * ROW_QUANTA));
+}
+
+fn readingOrderLessThan(_: void, a: PanelPos, b: PanelPos) bool {
+    const ay = rowKey(a.y);
+    const by = rowKey(b.y);
+    if (ay != by) return ay < by;
+    return a.x < b.x;
+}
+
+/// Sort panels into screen reading order: top-left → bottom-right (row-major).
+/// Stable (so exact ties keep tree order); N is the tiny panel count.
+pub fn sortReadingOrder(items: []PanelPos) void {
+    std.sort.insertion(PanelPos, items, {}, readingOrderLessThan);
+}
+
 /// Spatial representation of the split tree. This can be used to
 /// better understand the layout of the tree in a 2D space.
 ///
@@ -1280,4 +1312,42 @@ test "SplitTree: swapLeaves exchanges leaf surfaces and preserves topology" {
     tree.swapLeaves(a, b);
     try std.testing.expectEqual(surf_a, tree.nodes[1].leaf);
     try std.testing.expectEqual(surf_b, tree.nodes[2].leaf);
+}
+
+test "sortReadingOrder orders panels top-left to bottom-right" {
+    const at = struct {
+        fn h(i: u16) Node.Handle {
+            return @enumFromInt(i);
+        }
+    }.h;
+    // Shuffled input: BR, TL, BL, TR (2x2 grid positions).
+    var items = [_]PanelPos{
+        .{ .handle = at(6), .x = 0.5, .y = 0.5 }, // bottom-right
+        .{ .handle = at(2), .x = 0.0, .y = 0.0 }, // top-left
+        .{ .handle = at(5), .x = 0.0, .y = 0.5 }, // bottom-left
+        .{ .handle = at(3), .x = 0.5, .y = 0.0 }, // top-right
+    };
+    sortReadingOrder(&items);
+    try std.testing.expectEqual(@as(Node.Handle.Backing, 2), @intFromEnum(items[0].handle));
+    try std.testing.expectEqual(@as(Node.Handle.Backing, 3), @intFromEnum(items[1].handle));
+    try std.testing.expectEqual(@as(Node.Handle.Backing, 5), @intFromEnum(items[2].handle));
+    try std.testing.expectEqual(@as(Node.Handle.Backing, 6), @intFromEnum(items[3].handle));
+}
+
+test "sortReadingOrder: a tall left panel precedes a stacked right column" {
+    const at = struct {
+        fn h(i: u16) Node.Handle {
+            return @enumFromInt(i);
+        }
+    }.h;
+    // Left spans full height (top-left at y=0); right column split top (y=0) / bottom (y=0.5).
+    var items = [_]PanelPos{
+        .{ .handle = at(4), .x = 0.5, .y = 0.5 }, // right-bottom
+        .{ .handle = at(2), .x = 0.0, .y = 0.0 }, // left (tall)
+        .{ .handle = at(3), .x = 0.5, .y = 0.0 }, // right-top
+    };
+    sortReadingOrder(&items);
+    try std.testing.expectEqual(@as(Node.Handle.Backing, 2), @intFromEnum(items[0].handle)); // left (row 0, x 0)
+    try std.testing.expectEqual(@as(Node.Handle.Backing, 3), @intFromEnum(items[1].handle)); // right-top (row 0, x 0.5)
+    try std.testing.expectEqual(@as(Node.Handle.Backing, 4), @intFromEnum(items[2].handle)); // right-bottom (row 1)
 }
