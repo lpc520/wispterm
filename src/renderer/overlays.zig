@@ -531,6 +531,7 @@ fn executeCommand(action: CommandAction) void {
         .toggle_sidebar => AppWindow.input.toggleSidebar(),
         .toggle_file_explorer => AppWindow.input.toggleFileExplorer(),
         .toggle_browser_panel => AppWindow.input.toggleBrowserPanel(),
+        .open_jupyter_panel => AppWindow.input.openJupyterPanel(),
         .toggle_quake => AppWindow.toggleQuakeVisibility(),
         .open_settings => settingsPageOpen(),
         .show_shortcuts => startupShortcutsShow(),
@@ -1277,6 +1278,49 @@ fn renderTitlebarTextStrongLimited(text: []const u8, x_start: f32, y: f32, color
     renderTitlebarTextLimited(text, x + 1, y_aligned, color, max_w - 1);
 }
 
+const jupyter_picker = @import("../jupyter_picker.zig");
+
+/// Render the multi-server Jupyter picker overlay.
+pub fn renderJupyterPicker(window_width: f32, window_height: f32) void {
+    if (!jupyter_picker.isVisible()) return;
+    const n = jupyter_picker.count();
+    if (n == 0) return;
+
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const panel = mixColor(bg, fg, 0.05);
+    const border = mixColor(bg, fg, 0.18);
+    const sel_bg = mixColor(bg, accent, 0.5);
+    const text_color = mixColor(bg, fg, 0.88);
+
+    const row_h: f32 = @max(28.0, font.g_titlebar_cell_height + 12);
+    const box_w: f32 = @min(window_width - 80, 720);
+    const title_h: f32 = row_h;
+    const box_h: f32 = title_h + row_h * @as(f32, @floatFromInt(n)) + 16;
+    const box_x = @round((window_width - box_w) / 2);
+    const box_top = @round((window_height - box_h) / 2);
+    const box_y = @round(window_height - box_top - box_h);
+
+    ui_pipeline.fillQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.30);
+    renderRoundedQuadAlpha(box_x - 1, box_y - 1, box_w + 2, box_h + 2, 9, border, 0.5);
+    renderRoundedQuadAlpha(box_x, box_y, box_w, box_h, 8, panel, 0.99);
+
+    const title_y = @round(box_y + box_h - title_h + (title_h - font.g_titlebar_cell_height) / 2);
+    _ = titlebar.renderTextLimited("Select a Jupyter server (Up/Down, Enter, Esc)", box_x + 16, title_y, mixColor(bg, fg, 0.6), box_w - 32);
+
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const row_top_px = box_top + title_h + row_h * @as(f32, @floatFromInt(i));
+        const row_y = @round(window_height - row_top_px - row_h);
+        if (i == jupyter_picker.selectedIndex()) {
+            renderRoundedQuadAlpha(box_x + 8, row_y + 3, box_w - 16, row_h - 6, 5, sel_bg, 0.6);
+        }
+        const ty = @round(row_y + (row_h - font.g_titlebar_cell_height) / 2);
+        _ = titlebar.renderTextLimited(jupyter_picker.urlAt(i), box_x + 18, ty, text_color, box_w - 36);
+    }
+}
+
 pub fn renderBrowserUrlBar(window_width: f32, window_height: f32, top_offset: f32) void {
     if (!browser_panel.isVisibleForActiveTab()) return;
 
@@ -1350,6 +1394,29 @@ pub fn renderBrowserUrlBar(window_width: f32, window_height: f32, top_offset: f3
         ui_pipeline.fillQuadAlpha(close_x + 6, bar_y + @round((bar_h - 20) / 2), 20, 20, mixColor(bg, fg, 0.14), 0.95);
     }
     titlebar.renderCloseIcon(close_x, bar_y, close_btn_w, bar_h, if (close_hovered) fg else mixColor(bg, fg, 0.68));
+
+    if (hit_test.panelSecondButtonRect(close_layout)) |t| {
+        const t_left = @round(@as(f32, @floatCast(t.left)));
+        const toggle_hovered = blk: {
+            const win = AppWindow.g_window orelse break :blk false;
+            if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
+            break :blk hit_test.panelHeaderSecondButton(close_layout, @floatFromInt(win.mouse_x), @floatFromInt(win.mouse_y));
+        };
+        if (toggle_hovered) {
+            ui_pipeline.fillQuadAlpha(t_left + 6, bar_y + @round((bar_h - 20) / 2), 20, 20, mixColor(bg, fg, 0.14), 0.95);
+        }
+        const glyph_color = if (toggle_hovered) fg else mixColor(bg, fg, 0.68);
+        const gx = t_left + @as(f32, @floatCast(t.width)) / 2 - 6;
+        const gy = bar_y + bar_h / 2 - 6;
+        if (browser_panel.displayMode() == .full) {
+            ui_pipeline.fillQuadAlpha(gx, gy, 12, 12, glyph_color, 0.9);
+        } else {
+            ui_pipeline.fillQuadAlpha(gx, gy, 12, 1.5, glyph_color, 0.9);
+            ui_pipeline.fillQuadAlpha(gx, gy + 10.5, 12, 1.5, glyph_color, 0.9);
+            ui_pipeline.fillQuadAlpha(gx, gy, 1.5, 12, glyph_color, 0.9);
+            ui_pipeline.fillQuadAlpha(gx + 10.5, gy, 1.5, 12, glyph_color, 0.9);
+        }
+    }
 
     ui_pipeline.fillQuadAlpha(panel_x, bar_y, panel_w, 1, mixColor(bg, fg, 0.18), 0.55);
 }

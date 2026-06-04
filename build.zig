@@ -29,6 +29,7 @@ const windows_system_libraries = [_][]const u8{
 };
 
 const macos_app_frameworks = [_][]const u8{
+    "WebKit",
     "Metal",
     "QuartzCore",
     "AppKit",
@@ -59,6 +60,7 @@ const MacosBundleMetadata = struct {
 const EmbeddedBrowserBackend = enum {
     none,
     webview2,
+    webkit,
 
     fn isSupported(self: EmbeddedBrowserBackend) bool {
         return self != .none;
@@ -82,7 +84,12 @@ const PlatformFeatures = struct {
         const uses_macos_backend = os_tag == .macos;
         const has_desktop_backend = uses_windows_backend or uses_macos_backend;
         const has_app_bundle = os_tag == .macos;
-        const embedded_browser_backend: EmbeddedBrowserBackend = if (uses_windows_backend) .webview2 else .none;
+        const embedded_browser_backend: EmbeddedBrowserBackend = if (uses_windows_backend)
+            .webview2
+        else if (uses_macos_backend)
+            .webkit
+        else
+            .none;
         return .{
             .supports_desktop_exe = has_desktop_backend,
             .supports_embedded_browser = embedded_browser_backend.isSupported(),
@@ -196,6 +203,11 @@ fn macosInfoPlist(allocator: std.mem.Allocator, app_version: []const u8) []const
         \\    <string>{s}</string>
         \\    <key>NSHighResolutionCapable</key>
         \\    <true/>
+        \\    <key>NSAppTransportSecurity</key>
+        \\    <dict>
+        \\        <key>NSAllowsLocalNetworking</key>
+        \\        <true/>
+        \\    </dict>
         \\</dict>
         \\</plist>
         \\
@@ -222,6 +234,7 @@ fn supportsMacosAppTarget(os_tag: std.Target.Os.Tag, cpu_arch: std.Target.Cpu.Ar
 fn webviewBridgeSourcePath(features: PlatformFeatures) ?[]const u8 {
     return switch (features.embedded_browser_backend) {
         .webview2 => "src/platform/webview2_bridge.c",
+        .webkit => "src/platform/webview_macos_bridge.m",
         .none => null,
     };
 }
@@ -274,8 +287,8 @@ test "platform feature gates enable implemented desktop artifacts" {
 
     const macos = PlatformFeatures.forOs(.macos);
     try std.testing.expect(macos.supports_desktop_exe);
-    try std.testing.expect(!macos.supports_embedded_browser);
-    try std.testing.expectEqual(EmbeddedBrowserBackend.none, macos.embedded_browser_backend);
+    try std.testing.expect(macos.supports_embedded_browser);
+    try std.testing.expectEqual(EmbeddedBrowserBackend.webkit, macos.embedded_browser_backend);
     try std.testing.expect(!macos.supports_resource_manifest);
     try std.testing.expect(!macos.supports_gui_subsystem);
     try std.testing.expect(!macos.supports_remote_transport);
@@ -299,7 +312,8 @@ test "windows system libraries are gated by platform" {
 
 test "macOS platform advertises required app frameworks" {
     const frameworks = appFrameworksFor(PlatformFeatures.forOs(.macos));
-    try std.testing.expectEqual(@as(usize, 9), frameworks.len);
+    try std.testing.expectEqual(@as(usize, 10), frameworks.len);
+    try expectContainsString(frameworks, "WebKit");
     try expectContainsString(frameworks, "Metal");
     try expectContainsString(frameworks, "QuartzCore");
     try expectContainsString(frameworks, "AppKit");
@@ -320,7 +334,10 @@ test "webview bridge source is selected only for the webview platform backend" {
         webviewBridgeSourcePath(PlatformFeatures.forOs(.windows)).?,
     );
     try std.testing.expect(webviewBridgeSourcePath(PlatformFeatures.forOs(.linux)) == null);
-    try std.testing.expect(webviewBridgeSourcePath(PlatformFeatures.forOs(.macos)) == null);
+    try std.testing.expectEqualStrings(
+        "src/platform/webview_macos_bridge.m",
+        webviewBridgeSourcePath(PlatformFeatures.forOs(.macos)).?,
+    );
 }
 
 test "browser build option text does not expose concrete backend names" {
@@ -449,6 +466,8 @@ test "macOS Info.plist renders app bundle metadata and package type" {
     try expectSourceContains(plist, "<string>1.2.3</string>");
     try expectSourceContains(plist, "<key>CFBundleIconFile</key>");
     try expectSourceContains(plist, "<string>WispTerm</string>");
+    try expectSourceContains(plist, "NSAppTransportSecurity");
+    try expectSourceContains(plist, "NSAllowsLocalNetworking");
 }
 
 test "macOS app bundle links required native frameworks" {
@@ -930,9 +949,11 @@ fn createAppModuleWithRoot(
     }
 
     if (webview) {
+        const bridge_source = webviewBridgeSourcePath(platform).?;
         app_mod.addCSourceFile(.{
-            .file = b.path(webviewBridgeSourcePath(platform).?),
+            .file = b.path(bridge_source),
             .flags = &.{},
+            .language = if (std.mem.endsWith(u8, bridge_source, ".m")) .objective_c else .c,
         });
     }
 
@@ -957,7 +978,7 @@ fn addMacosAppBundle(
     platform: PlatformFeatures,
 ) *std.Build.Step.InstallDir {
     const metadata = macosBundleMetadata();
-    const macos_mod = createAppModule(b, target, optimize, app_version, platform, false);
+    const macos_mod = createAppModule(b, target, optimize, app_version, platform, platform.supports_embedded_browser);
 
     const exe = b.addExecutable(.{
         .name = metadata.executable_name,

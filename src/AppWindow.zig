@@ -2511,6 +2511,7 @@ fn renderResizeFrame(width: i32, height: i32) void {
 
     overlays.renderBrowserUrlBar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderCommandPalette(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+    overlays.renderJupyterPicker(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     weixin_qr_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
@@ -3424,6 +3425,11 @@ fn buildRemoteSurfaceSnapshot(allocator: std.mem.Allocator, surface: *Surface) !
         &surface.terminal,
         remote_snapshot.default_max_history_rows,
     );
+}
+
+pub fn activeSurfaceSnapshot(allocator: std.mem.Allocator) ?[]u8 {
+    const surface = activeSurface() orelse return null;
+    return buildRemoteSurfaceSnapshot(allocator, surface) catch null;
 }
 
 const AgentSurfaceLocation = struct {
@@ -5274,6 +5280,7 @@ fn runMainLoop(self: *AppWindow) !void {
         overlays.renderBrowserUrlBar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderStartupShortcutsOverlay(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderCommandPalette(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+        overlays.renderJupyterPicker(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         weixin_qr_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
