@@ -5046,7 +5046,7 @@ fn openWhatsNewRelease() void {
 /// so clicks never fall through to the terminal underneath).
 pub fn whatsNewExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_height: f32) bool {
     if (!g_whats_new_visible) return false;
-    const layout = whats_new_model.computeLayout(window_width, window_height, whatsNewLineHeight());
+    const layout = whatsNewLayout(window_width, window_height);
     const px: f32 = @floatCast(xpos);
     const py: f32 = @floatCast(ypos);
     switch (whats_new_model.buttonActionAt(layout, px, py)) {
@@ -5072,6 +5072,20 @@ fn whatsNewLineHeight() f32 {
     return @round(@max(@as(f32, 24), font.g_titlebar_cell_height + 6));
 }
 
+const WHATS_NEW_VIEW_LABEL = "View on GitHub";
+const WHATS_NEW_OK_LABEL = "OK";
+
+fn whatsNewButtonMetrics() whats_new_model.ButtonMetrics {
+    return .{
+        .view_w = @round(measureTitlebarText(WHATS_NEW_VIEW_LABEL) + 44),
+        .close_w = @round(measureTitlebarText(WHATS_NEW_OK_LABEL) + 42),
+    };
+}
+
+fn whatsNewLayout(window_width: f32, window_height: f32) whats_new_model.Layout {
+    return whats_new_model.computeLayoutWithButtons(window_width, window_height, whatsNewLineHeight(), whatsNewButtonMetrics());
+}
+
 fn topRectY(window_height: f32, rect: whats_new_model.Rect) f32 {
     return window_height - rect.y - rect.h;
 }
@@ -5081,12 +5095,12 @@ fn drawWhatsNewButton(rect: whats_new_model.Rect, label: []const u8, window_heig
     renderRoundedQuadAlpha(rect.x - 1, y_bu - 1, rect.w + 2, rect.h + 2, 8, border, 0.64);
     renderRoundedQuadAlpha(rect.x, y_bu, rect.w, rect.h, 7, fill, 0.96);
     const tw = measureTitlebarText(label);
-    const tx = rect.x + (rect.w - tw) / 2;
+    const tx = if (tw <= rect.w - 18) rect.x + (rect.w - tw) / 2 else rect.x + 12;
     const ty = rowTextY(y_bu, rect.h);
     if (strong) {
-        renderTitlebarTextStrong(label, tx, ty, text);
+        renderTitlebarTextStrongLimited(label, tx, ty, text, rect.x + rect.w - tx - 12);
     } else {
-        renderTitlebarText(label, tx, ty, text);
+        renderTitlebarTextLimited(label, tx, ty, text, rect.x + rect.w - tx - 12);
     }
 }
 
@@ -5206,7 +5220,7 @@ pub fn renderWhatsNew(window_width: f32, window_height: f32) void {
     if (!g_whats_new_visible) return;
 
     const line_h = whatsNewLineHeight();
-    const layout = whats_new_model.computeLayout(window_width, window_height, line_h);
+    const layout = whatsNewLayout(window_width, window_height);
 
     const bg = AppWindow.g_theme.background;
     const fg = AppWindow.g_theme.foreground;
@@ -5278,8 +5292,8 @@ pub fn renderWhatsNew(window_width: f32, window_height: f32) void {
     }
 
     // Footer buttons.
-    drawWhatsNewButton(layout.view_btn, "View on GitHub", window_height, quiet_border, mixColor(bg, fg, 0.10), body, false);
-    drawWhatsNewButton(layout.close_btn, "OK", window_height, mixColor(accent, fg, 0.22), mixColor(bg, accent, 0.24), mixColor(fg, accent, 0.16), true);
+    drawWhatsNewButton(layout.view_btn, WHATS_NEW_VIEW_LABEL, window_height, quiet_border, mixColor(bg, fg, 0.10), body, false);
+    drawWhatsNewButton(layout.close_btn, WHATS_NEW_OK_LABEL, window_height, mixColor(accent, fg, 0.22), mixColor(bg, accent, 0.24), mixColor(fg, accent, 0.16), true);
 }
 
 pub fn renderUpdatePrompt(window_width: f32, window_height: f32) void {

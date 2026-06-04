@@ -38,6 +38,11 @@ pub const Highlights = struct {
     len: usize = 0,
 };
 
+pub const ButtonMetrics = struct {
+    view_w: f32 = 156,
+    close_w: f32 = 72,
+};
+
 /// Display rows a single cleaned line of `display_len` bytes occupies at
 /// `wrap_cols` columns (always at least 1). Byte-length approximation — adequate
 /// for the ASCII-dominant release notes; wide glyphs may wrap a column early.
@@ -205,6 +210,12 @@ pub fn releaseTagUrl(buf: []u8, version: []const u8) []const u8 {
 
 /// Centered modal layout. `row_h` is the pixel height of one text row.
 pub fn computeLayout(window_w: f32, window_h: f32, row_h: f32) Layout {
+    return computeLayoutWithButtons(window_w, window_h, row_h, .{});
+}
+
+/// Centered modal layout with caller-supplied button widths. The renderer uses
+/// measured label widths here so centered text cannot escape the panel.
+pub fn computeLayoutWithButtons(window_w: f32, window_h: f32, row_h: f32, buttons: ButtonMetrics) Layout {
     const panel_w = @round(@min(@max(@as(f32, 320), window_w - 80), @as(f32, 860)));
     const panel_h = @round(@min(@max(@as(f32, 360), window_h - 80), @as(f32, 620)));
     const panel_x = @round((window_w - panel_w) / 2);
@@ -223,8 +234,8 @@ pub fn computeLayout(window_w: f32, window_h: f32, row_h: f32) Layout {
     };
 
     const btn_h: f32 = @round(@max(@as(f32, 34), row_h + 14));
-    const ok_w: f32 = 72;
-    const view_w: f32 = 156;
+    const ok_w: f32 = @max(@as(f32, 72), buttons.close_w);
+    const view_w: f32 = @max(@as(f32, 156), buttons.view_w);
     const btn_y = footer_y + @round((footer_h - btn_h) / 2);
     const close_btn = Rect{ .x = panel_x + panel_w - pad - ok_w, .y = btn_y, .w = ok_w, .h = btn_h };
     const view_btn = Rect{ .x = panel_x + pad, .y = btn_y, .w = view_w, .h = btn_h };
@@ -339,6 +350,16 @@ test "computeLayout places GitHub action on the left side of the footer" {
     try std.testing.expect(left_pad <= 44);
     try std.testing.expect(right_pad >= 24);
     try std.testing.expect(right_pad <= 44);
+    try std.testing.expect(layout.view_btn.x + layout.view_btn.w < layout.close_btn.x);
+}
+
+test "computeLayoutWithButtons accepts measured wide GitHub label" {
+    const layout = computeLayoutWithButtons(1200, 800, 36, .{ .view_w = 292, .close_w = 86 });
+    const left_pad = layout.view_btn.x - layout.panel.x;
+    try std.testing.expect(left_pad >= 24);
+    try std.testing.expect(left_pad <= 44);
+    try std.testing.expectEqual(@as(f32, 292), layout.view_btn.w);
+    try std.testing.expect(layout.view_btn.x + layout.view_btn.w <= layout.panel.x + layout.panel.w);
     try std.testing.expect(layout.view_btn.x + layout.view_btn.w < layout.close_btn.x);
 }
 
