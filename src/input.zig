@@ -136,6 +136,11 @@ test "input: command palette shortcut toggles command center" {
     try std.testing.expect(!overlays.commandPaletteVisible());
 }
 
+test "input: browser toolbar has a refresh action entrypoint" {
+    const info = @typeInfo(@TypeOf(refreshBrowserPanel)).@"fn";
+    try std.testing.expectEqual(@as(usize, 0), info.params.len);
+}
+
 test "macOS UI smoke: Cmd+Shift+B toggles the tab sidebar" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
 
@@ -515,6 +520,12 @@ fn closeBrowserPanel() void {
     if (AppWindow.g_window) |win| {
         syncPanelGridFromWindow(win);
     }
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+}
+
+pub fn refreshBrowserPanel() void {
+    browser_panel.refresh();
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
 }
@@ -1851,6 +1862,10 @@ fn hitTestBrowserToggleButton(xpos: f64, ypos: f64) bool {
     return hit_test.panelHeaderSecondButton(browserHeaderLayout() orelse return false, xpos, ypos);
 }
 
+fn hitTestBrowserRefreshButton(xpos: f64, ypos: f64) bool {
+    return hit_test.panelHeaderButton(browserHeaderLayout() orelse return false, 2, xpos, ypos);
+}
+
 fn toggleBrowserDisplayMode() void {
     browser_panel.setDisplayMode(if (browser_panel.displayMode() == .full) .side else .full);
     if (AppWindow.g_window) |win| {
@@ -3028,6 +3043,10 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             }
             if (hitTestFileExplorerCloseButton(xpos, ypos)) {
                 closeFileExplorerPanel();
+                return;
+            }
+            if (hitTestBrowserRefreshButton(xpos, ypos)) {
+                refreshBrowserPanel();
                 return;
             }
             if (hitTestBrowserToggleButton(xpos, ypos)) {
