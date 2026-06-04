@@ -7,12 +7,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const platform_pty_command = @import("../platform/pty_command.zig");
 const preview_path = @import("preview_path.zig");
+const html_server_model = @import("../html_server_model.zig");
 
 const looksLikePreviewPath = preview_path.looksLikePreviewPath;
 
 pub const LayoutResizeUrgency = enum { coalesced, immediate };
 pub const TerminalPathClickAction = enum { pass_through, open_url_or_preview, download_ssh_file };
-pub const InteractiveUnderlineTokenKind = enum { none, url, preview_path };
+pub const InteractiveUnderlineTokenKind = enum { none, url, html_path, preview_path };
 
 pub fn panelToggleResizeUrgency() LayoutResizeUrgency {
     return .coalesced;
@@ -37,6 +38,8 @@ pub fn interactiveUnderlineTokenKind(action: TerminalPathClickAction, text: []co
         .download_ssh_file => if (looksLikeDownloadPath(text)) .preview_path else .none,
         .open_url_or_preview => if (looksLikeUrl(text))
             .url
+        else if (html_server_model.isHtmlPath(text))
+            .html_path
         else if (looksLikePreviewPath(text))
             .preview_path
         else
@@ -103,6 +106,17 @@ test "interactive underline includes preview paths for ctrl hover" {
     try std.testing.expectEqual(
         InteractiveUnderlineTokenKind.none,
         interactiveUnderlineTokenKind(.pass_through, "README.md"),
+    );
+}
+
+test "interactive underline classifies html before generic preview" {
+    try std.testing.expectEqual(
+        InteractiveUnderlineTokenKind.html_path,
+        interactiveUnderlineTokenKind(.open_url_or_preview, "index.html"),
+    );
+    try std.testing.expectEqual(
+        InteractiveUnderlineTokenKind.html_path,
+        interactiveUnderlineTokenKind(.open_url_or_preview, "dist/report.htm"),
     );
 }
 

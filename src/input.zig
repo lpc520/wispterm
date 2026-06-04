@@ -18,6 +18,8 @@ const markdown_preview = @import("markdown_preview.zig");
 const markdown_preview_panel = AppWindow.markdown_preview_panel;
 const preview_token = @import("preview_token.zig");
 const browser_panel = AppWindow.browser_panel;
+const html_server = @import("html_server.zig");
+const html_server_model = @import("html_server_model.zig");
 const ai_sidebar = @import("ai_sidebar.zig");
 const ui_perf = AppWindow.ui_perf;
 const render_diagnostics = @import("render_diagnostics.zig");
@@ -2588,7 +2590,7 @@ fn extractDownloadPathAtCell(allocator: std.mem.Allocator, surface: *Surface, ce
 
 fn extractPreviewPathRangeAtCell(allocator: std.mem.Allocator, surface: *Surface, cell_pos: CellPos) ?TokenAtCell {
     const token = extractTokenRangeAtCell(allocator, surface, cell_pos) orelse return null;
-    if (!looksLikePreviewPath(token.text)) {
+    if (!looksLikePreviewPath(token.text) and !html_server_model.isHtmlPath(token.text)) {
         token.deinit(allocator);
         return null;
     }
@@ -2653,6 +2655,35 @@ fn openUrlAtCell(surface: *Surface, cell_pos: CellPos) bool {
     const opened = openUrl(surface, token.text);
     if (opened) clearUrlUnderline();
     return opened;
+}
+
+fn openHtmlPanelForCell(surface: *Surface, cell_pos: CellPos) bool {
+    const allocator = AppWindow.g_allocator orelse return false;
+    const path = extractPreviewPathAtCell(allocator, surface, cell_pos) orelse return false;
+    defer allocator.free(path);
+    if (!html_server_model.isHtmlPath(path)) return false;
+
+    switch (html_server.openForSurface(allocator, surface, path)) {
+        .url => |url| {
+            defer allocator.free(url);
+            const parent = AppWindow.currentNativeHandle();
+            browser_panel.open(parent, url);
+            if (AppWindow.g_window) |win| syncPanelGridFromWindow(win);
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+            return true;
+        },
+        .err => |err| {
+            file_explorer.setTransferStatus(.failed, switch (err) {
+                error.CwdUnavailable => "HTML cwd unknown",
+                error.ServerUnavailable => "Install Python 3 in this environment",
+                error.ServerNotReady => "HTML server not reachable",
+                error.TunnelFailed => "HTML SSH tunnel failed",
+                else => "HTML preview failed",
+            });
+            return true;
+        },
+    }
 }
 
 fn updateInteractiveUnderlineAtMouse(xpos: f64, ypos: f64, ctrl: bool, shift: bool, alt: bool, super: bool) void {
@@ -3459,6 +3490,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 },
                 .open_url_or_preview => {
                     if (openUrlAtCell(clicked_surface, cell_pos)) return;
+                    if (openHtmlPanelForCell(clicked_surface, cell_pos)) return;
                     if (openPreviewPanelForCell(clicked_surface, cell_pos)) return;
                 },
                 .pass_through => {},
