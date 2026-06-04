@@ -84,9 +84,8 @@ Task = struct {
     id:            []const u8,   // stable, generated at creation
     kind:          TaskKind,
     session_id:    []const u8,   // binding anchor (ai_chat.zig sessionId())
-    provider:      []const u8,   // for restart re-spawn fallback
-    model:         []const u8,
-    cwd:           []const u8,
+    model:         []const u8,   // captured for list display only
+    title:         []const u8,   // captured for list display only
     prompt:        []const u8,
 
     // loop
@@ -105,7 +104,7 @@ Task = struct {
 ```
 
 Exported pure functions:
-- `parseLoop(text, now, ctx) !Task` / `parseWatch(text, now, ctx) !Task` — text + session context → Task (or a typed parse error). `ctx` carries session_id/provider/model/cwd + a clock value.
+- `parseLoop(text, now, ctx) !Task` / `parseWatch(text, now, ctx) !Task` — text + session context → Task (or a typed parse error). `ctx` carries session_id/model/title + `now_ms` + `utc_offset_seconds` (clock + tz passed in, never read here).
 - `nextFire(task, now) i64` — compute next fire timestamp.
 - `dueTasks(tasks, now) []index` — which tasks are due (next_fire_ms <= now).
 - `advanceAfterFire(task, now) Task` — loop: decrement `remaining`, push `next_fire_ms += interval_ms`; watch daily: advance to next day's `tod`; watch one-shot: mark done (`remaining = 0`).
@@ -131,9 +130,14 @@ Owns the in-memory `[]Task`, loaded from disk on startup. No new thread.
      then `advanceAfterFire`. (`submit()` already early-returns when inflight — reuse that as the
      busy-skip; but check `request_inflight` first so a busy skip does NOT advance `next_fire`
      past the retry, and does not decrement `remaining`.)
-  3. If found but busy → skip (leave task unchanged; it stays due and retries next tick/interval).
-  4. If **not** open → resume by `session_id` (existing `/resume` machinery); on failure, open a
-     new chat seeded with `task.provider/model/cwd`, then inject. Loop never silently dies.
+  3. If found but busy (`requestState().inflight`) → skip (leave task unchanged; stays due, retries
+     next interval; `remaining` not decremented).
+  4. If **not** open (no session in `tab.g_tabs` matches `session_id`) → **skip this fire, keep the
+     task**, and log a one-line notice. The task re-activates automatically when that session is
+     reopened, because `/resume` restores the original `session_id` (`ai_chat.zig:640`
+     `copySessionId(record.session_id)`). Auto-resuming/respawning a closed session programmatically
+     is **out of scope for v1** (no programmatic resume-by-id exists; `/resume` is an interactive
+     picker — `commandPaletteOpenAgentHistory()`).
   5. Persist the task list whenever it changes (fire/advance/finish/cancel).
 - Tick granularity (~render interval, seconds) is acceptable for minute/hour-scale schedules.
 
@@ -168,8 +172,9 @@ user types "/loop 30m 8 <prompt>" in session S
 
 ... every tick ...
   → dueTasks(now) → [task]
-  → resolve S by session_id → open & not busy
-  → S.setInput(prompt); S.submit()           (busy → skip, no decrement)
+  → resolve S by session_id in tab.g_tabs → open & not busy
+  → S.submitScheduledPrompt(prompt)          (busy → returns false → skip, no decrement)
+                                             (closed → skip + keep + log; retries when reopened)
   → task = advanceAfterFire(task, now)        (remaining 8→7, next_fire += 30m)
   → if isFinished(task) remove; persist
 
@@ -213,6 +218,8 @@ headers, stop confirmations, and each parse-error message (`src/i18n.zig` catalo
 
 ## Out of scope / future
 
+- **Auto-resume/respawn of a closed bound session** at fire time (needs a programmatic
+  resume-by-id, which doesn't exist yet). v1 skips + keeps the task until the session reopens.
 - `/watch` condition/event triggers (terminal output match, file change).
 - Cron syntax; multiple times per day for `/watch`.
 - Cross-session/global task list view.
