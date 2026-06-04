@@ -247,8 +247,8 @@ This is a documentation deliverable, so verification is:
 - **Wiki enablement:** the `wispterm.wiki.git` repo only exists once Wiki is
   enabled and at least one page created in repo Settings. Flag to user at publish
   time; do not auto-create.
-- **Staging dir longevity:** keep `wiki/` in the main repo as the maintained
-  source of truth (recommended, so future edits are reviewable via PR), vs delete
-  after publishing. Default: **keep it.** Confirm with user.
+- **Staging dir longevity:** RESOLVED — `wiki/` is **kept** in the main repo as
+  the maintained source of truth, so future edits are reviewable via PR before
+  re-publishing to `wispterm.wiki.git`.
 - **Shipped-feature gating** for Jupyter / macOS WebView / `/loop` etc. resolved
   during writing by checking `main`.
