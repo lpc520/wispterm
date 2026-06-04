@@ -364,7 +364,7 @@ fn slashCommandOutput(allocator: std.mem.Allocator, command: SlashCommand) ![]u8
 
 fn permissionStatusOutput(allocator: std.mem.Allocator) ![]u8 {
     const current = currentAgentSettings().permission;
-    return std.fmt.allocPrint(allocator, "Agent permission is '{s}'. Use /permission confirm or /permission full to change it.", .{current.name()});
+    return std.fmt.allocPrint(allocator, "Agent permission is '{s}'. Use /permission ask, /permission auto, or /permission full to change it.", .{current.name()});
 }
 
 pub fn agentPermission() AgentPermission {
@@ -5588,13 +5588,15 @@ test "clearMessages empties transcript but keeps settings" {
     try std.testing.expectEqualStrings("m1", session.model());
 }
 
-test "/permission full flips the global agent permission" {
+test "/permission accepts ask auto and full modes" {
     const saved = currentAgentSettings();
     defer configureAgent(saved); // restore global state for other tests
     configureAgent(.{ .permission = .confirm });
+    applyPermissionArg("auto");
+    try std.testing.expectEqual(AgentPermission.auto, currentAgentSettings().permission);
     applyPermissionArg("full");
     try std.testing.expectEqual(AgentPermission.full, currentAgentSettings().permission);
-    applyPermissionArg("confirm");
+    applyPermissionArg("ask");
     try std.testing.expectEqual(AgentPermission.confirm, currentAgentSettings().permission);
     applyPermissionArg("bogus"); // invalid → no change
     try std.testing.expectEqual(AgentPermission.confirm, currentAgentSettings().permission);
