@@ -12,8 +12,11 @@ const impl = switch (builtin.os.tag) {
     .linux, .macos => @import("tmux_controller_posix.zig"),
     else => struct {
         const Allocator = std.mem.Allocator;
-        pub fn start(_: Allocator, _: []const u8, _: []const u8, _: u16, _: u16, _: u32, _: Config.CursorStyle, _: bool) bool {
+        pub fn start(_: Allocator, _: []const u8, _: []const u8, _: []const u8, _: u16, _: u16, _: u32, _: Config.CursorStyle, _: bool) bool {
             return false;
+        }
+        pub fn activeProfileNames(_: Allocator) []const []const u8 {
+            return &.{};
         }
         pub fn tickAll(_: Allocator, _: u16, _: u16) void {}
         pub fn shutdownAll(_: Allocator) void {}
@@ -36,6 +39,7 @@ pub const start = impl.start;
 pub const tickAll = impl.tickAll;
 pub const shutdownAll = impl.shutdownAll;
 pub const anyActive = impl.anyActive;
+pub const activeProfileNames = impl.activeProfileNames;
 pub const requestSplit = impl.requestSplit;
 pub const requestClosePane = impl.requestClosePane;
 pub const requestNewWindow = impl.requestNewWindow;

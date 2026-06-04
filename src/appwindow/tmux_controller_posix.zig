@@ -36,6 +36,9 @@ pub const TmuxController = struct {
     /// The `ssh … tmux -CC …` command, kept so a dropped transport can be
     /// re-spawned (reconnect). `-A` re-attaches the same server-side session.
     ssh_cmd: []u8,
+    /// SSH profile name this session came from, for session_persist re-attach
+    /// across app restarts (empty if started without a profile).
+    profile_name: []u8,
     password: [256]u8 = undefined,
     password_len: usize = 0,
     password_sent: bool = false,
@@ -195,6 +198,7 @@ pub const TmuxController = struct {
         }
         self.bridge.destroy();
         self.alloc.free(self.ssh_cmd);
+        self.alloc.free(self.profile_name);
         self.alloc.destroy(self);
     }
 };
@@ -206,6 +210,7 @@ pub fn start(
     alloc: Allocator,
     ssh_cmd_utf8: []const u8,
     password: []const u8,
+    profile_name: []const u8,
     cols: u16,
     rows: u16,
     scrollback_limit: u32,
@@ -245,15 +250,23 @@ pub fn start(
         pty.deinit();
         return false;
     };
-
-    const self = alloc.create(TmuxController) catch {
+    const profile_dup = alloc.dupe(u8, profile_name) catch {
         alloc.free(ssh_cmd_dup);
         bridge.destroy();
         command.deinit();
         pty.deinit();
         return false;
     };
-    self.* = .{ .alloc = alloc, .pty = pty, .command = command, .bridge = bridge, .ssh_cmd = ssh_cmd_dup };
+
+    const self = alloc.create(TmuxController) catch {
+        alloc.free(profile_dup);
+        alloc.free(ssh_cmd_dup);
+        bridge.destroy();
+        command.deinit();
+        pty.deinit();
+        return false;
+    };
+    self.* = .{ .alloc = alloc, .pty = pty, .command = command, .bridge = bridge, .ssh_cmd = ssh_cmd_dup, .profile_name = profile_dup };
     const plen = @min(password.len, self.password.len);
     @memcpy(self.password[0..plen], password[0..plen]);
     self.password_len = plen;
@@ -283,6 +296,26 @@ pub fn shutdownAll(alloc: Allocator) void {
 
 pub fn anyActive() bool {
     return g_controllers.items.len > 0;
+}
+
+/// Unique non-empty SSH profile names of the active tmux controllers, allocated
+/// in `alloc` (for session_persist save). Empty slice if none.
+pub fn activeProfileNames(alloc: Allocator) []const []const u8 {
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (g_controllers.items) |c| {
+        if (c.profile_name.len == 0) continue;
+        var dup = false;
+        for (names.items) |n| {
+            if (std.mem.eql(u8, n, c.profile_name)) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) continue;
+        const copy = alloc.dupe(u8, c.profile_name) catch continue;
+        names.append(alloc, copy) catch continue;
+    }
+    return names.toOwnedSlice(alloc) catch &.{};
 }
 
 /// If `surface` is a tmux pane, drive a tmux `split-window` for it (the echoed

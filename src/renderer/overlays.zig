@@ -2493,7 +2493,7 @@ fn connectSshProfileTmux(idx: usize) void {
     }) orelse return;
 
     sessionLauncherClose();
-    _ = AppWindow.startTmuxSession(cmd, password);
+    _ = AppWindow.startTmuxSession(cmd, password, name);
 }
 
 /// Connect a profile by name in tmux mode (dev/automation hook).

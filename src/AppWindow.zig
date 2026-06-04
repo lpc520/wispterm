@@ -1556,6 +1556,10 @@ fn installSessionRestoreHooks() void {
     // tab.zig routes persisted AI snapshots back through these hooks.
     tab.g_ai_restore_hook = reopenAiChatTabFromHistorySessionId;
     tab.g_ai_history_restore_hook = reopenAiHistoryTabFromSnapshot;
+    // tmux session persistence (#4c): save the active tmux profile names; on
+    // restore, re-attach each via the launcher's tmux connect path.
+    tab.g_tmux_active_profiles_hook = tmux_controller.activeProfileNames;
+    tab.g_tmux_restore_hook = overlays.connectProfileByNameTmux;
 }
 
 fn deinitGlobalAgentHistoryStore(allocator: std.mem.Allocator) void {
@@ -1703,12 +1707,13 @@ pub fn spawnTabWithCommandUtf8(command: []const u8) bool {
 /// for key auth). The controller (pumped from the main loop) builds tabs/splits
 /// from the remote tmux windows/panes. Returns false if the transport could not
 /// be launched.
-pub fn startTmuxSession(ssh_cmd: []const u8, password: []const u8) bool {
+pub fn startTmuxSession(ssh_cmd: []const u8, password: []const u8, profile_name: []const u8) bool {
     const allocator = g_allocator orelse return false;
     return tmux_controller.start(
         allocator,
         ssh_cmd,
         password,
+        profile_name,
         term_cols,
         term_rows,
         tab.g_scrollback_limit,

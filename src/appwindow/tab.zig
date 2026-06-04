@@ -150,6 +150,13 @@ pub threadlocal var g_ai_restore_hook: ?*const fn (session_id: []const u8) bool 
 // keep after returning. Returns true if the tab was reopened.
 pub threadlocal var g_ai_history_restore_hook: ?*const fn (session_persist.AiHistorySnap) bool = null;
 
+// tmux session persistence (Phase 3d #4c). The save hook returns the SSH profile
+// names of active tmux controllers (arena-allocated); the restore hook re-attaches
+// a profile by name. Registered by AppWindow so tab.zig stays free of the
+// controller/overlay dependency (and the import cycle).
+pub threadlocal var g_tmux_active_profiles_hook: ?*const fn (std.mem.Allocator) []const []const u8 = null;
+pub threadlocal var g_tmux_restore_hook: ?*const fn (profile_name: []const u8) bool = null;
+
 // Forced title from config (overrides all tab titles)
 pub threadlocal var g_forced_title: ?[]const u8 = null;
 
@@ -1402,21 +1409,27 @@ pub fn collectSessionSnapshot(arena: *std.heap.ArenaAllocator) !session_persist.
     const alloc = arena.allocator();
     if (g_tab_count == 0) return error.NoTabs;
 
+    // tmux tabs are NOT persisted as surface trees — they are recreated by the
+    // controller on restore (see tmux_profiles below). Skip them here.
+    const tmux_profiles = if (g_tmux_active_profiles_hook) |hook| hook(alloc) else &[_][]const u8{};
+
     const tabs = try alloc.alloc(session_persist.TabSnap, g_tab_count);
     var i: usize = 0;
     var written: usize = 0;
     while (i < g_tab_count) : (i += 1) {
         if (g_tabs[i]) |t| {
+            if (t.tmux_window_id != null) continue;
             tabs[written] = snapshotTab(alloc, t) catch continue;
             written += 1;
         }
     }
-    if (written == 0) return error.NoTabs;
+    if (written == 0 and tmux_profiles.len == 0) return error.NoTabs;
 
     return .{
         .version = session_persist.SCHEMA_VERSION,
-        .active_tab = @intCast(@min(active_tab_state.g_active_tab, written - 1)),
+        .active_tab = if (written > 0) @intCast(@min(active_tab_state.g_active_tab, written - 1)) else 0,
         .tabs = tabs[0..written],
+        .tmux_profiles = tmux_profiles,
     };
 }
 
@@ -1469,10 +1482,23 @@ pub fn restoreSessionFromFile(
             std.debug.print("restoreSessionFromFile: skipping failed tab\n", .{});
         }
     }
-    if (rebuilt == 0) return false;
 
-    const target = @min(@as(usize, loaded.value.active_tab), rebuilt - 1);
-    switchTab(target);
+    // Re-attach persisted tmux sessions (Phase 3d #4c): each profile re-connects
+    // via the controller, which rebuilds its window-tabs from the live server.
+    var tmux_restored: usize = 0;
+    if (g_tmux_restore_hook) |hook| {
+        for (loaded.value.tmux_profiles) |name| {
+            std.debug.print("tmux: restoring session for profile '{s}'\n", .{name});
+            if (hook(name)) tmux_restored += 1;
+        }
+    }
+
+    if (rebuilt == 0 and tmux_restored == 0) return false;
+
+    if (rebuilt > 0) {
+        const target = @min(@as(usize, loaded.value.active_tab), rebuilt - 1);
+        switchTab(target);
+    }
     return true;
 }
 
