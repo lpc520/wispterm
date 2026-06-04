@@ -4,6 +4,7 @@ const std = @import("std");
 const Surface = @import("Surface.zig");
 const platform_webview = @import("platform/webview.zig");
 const ssh_tunnel = @import("ssh_tunnel.zig");
+const html_server = @import("html_server.zig");
 const window_backend = @import("platform/window_backend.zig");
 const ui_perf = @import("ui_perf.zig");
 const tab = @import("appwindow/tab.zig");
@@ -309,6 +310,7 @@ pub fn sync(parent: window_backend.NativeHandle, window_width: i32, window_heigh
 
 pub fn deinit() void {
     destroyBrowser();
+    html_server.deinit();
     ssh_tunnel.deinit();
     g_visible = false;
     g_owner_tab = null;

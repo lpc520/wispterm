@@ -3,6 +3,7 @@
 const std = @import("std");
 const Surface = @import("Surface.zig");
 const ssh_tunnel = @import("ssh_tunnel.zig");
+const html_server = @import("html_server.zig");
 const window_backend = @import("platform/window_backend.zig");
 const tab = @import("appwindow/tab.zig");
 const active_tab_state = @import("appwindow/active_tab.zig");
@@ -168,6 +169,7 @@ pub fn sync(parent: window_backend.NativeHandle, window_width: i32, window_heigh
 }
 
 pub fn deinit() void {
+    html_server.deinit();
     ssh_tunnel.deinit();
     g_visible = false;
     g_owner_tab = null;

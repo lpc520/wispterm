@@ -650,6 +650,7 @@ comptime {
     _ = @import("input/key.zig");
     _ = @import("input/preview_source.zig");
     _ = @import("input_shortcuts.zig");
+    _ = @import("html_server.zig");
     _ = @import("keybind.zig");
     _ = @import("kitty_graphics_unit.zig");
     _ = @import("link_open.zig");
