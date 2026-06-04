@@ -402,3 +402,24 @@ test "tick fires due loop task, advances, and skips when busy" {
         try std.testing.expectEqual(@as(u32, 1), snap[0].remaining);
     }
 }
+
+test "setActive/clearActive/active module globals" {
+    // Verify the module-level store pointer is absent by default and round-trips.
+    clearActive();
+    try std.testing.expectEqual(@as(?*Store, null), active());
+
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(dir_path);
+    const path = try std.fs.path.join(a, &.{ dir_path, "loop_tasks.json" });
+    defer a.free(path);
+    var store = Store.init(a, path);
+    defer store.deinit();
+
+    setActive(&store);
+    try std.testing.expect(active() != null);
+    clearActive();
+    try std.testing.expectEqual(@as(?*Store, null), active());
+}
