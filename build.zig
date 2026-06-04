@@ -466,6 +466,8 @@ test "macOS Info.plist renders app bundle metadata and package type" {
     try expectSourceContains(plist, "<string>1.2.3</string>");
     try expectSourceContains(plist, "<key>CFBundleIconFile</key>");
     try expectSourceContains(plist, "<string>WispTerm</string>");
+    try expectSourceContains(plist, "NSAppTransportSecurity");
+    try expectSourceContains(plist, "NSAllowsLocalNetworking");
 }
 
 test "macOS app bundle links required native frameworks" {
@@ -925,9 +927,11 @@ fn createAppModuleWithRoot(
     }
 
     if (webview) {
+        const bridge_source = webviewBridgeSourcePath(platform).?;
         app_mod.addCSourceFile(.{
-            .file = b.path(webviewBridgeSourcePath(platform).?),
+            .file = b.path(bridge_source),
             .flags = &.{},
+            .language = if (std.mem.endsWith(u8, bridge_source, ".m")) .objective_c else .c,
         });
     }
 
@@ -952,7 +956,7 @@ fn addMacosAppBundle(
     platform: PlatformFeatures,
 ) *std.Build.Step.InstallDir {
     const metadata = macosBundleMetadata();
-    const macos_mod = createAppModule(b, target, optimize, app_version, platform, false);
+    const macos_mod = createAppModule(b, target, optimize, app_version, platform, platform.supports_embedded_browser);
 
     const exe = b.addExecutable(.{
         .name = metadata.executable_name,
