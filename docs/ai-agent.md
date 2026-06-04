@@ -117,8 +117,12 @@ Local slash commands (handled in the panel, without calling the model):
 - `/reload-commands` rescans the custom `commands/` directory.
 - `/clear` clears the current conversation context (keeps the tab and profile).
 - `/resume` opens the saved-conversation history picker.
-- `/permission` shows the agent tool permission; `/permission confirm` or
-  `/permission full` changes it at runtime.
+- `/permission` shows the agent tool permission; `/permission ask`,
+  `/permission auto`, or `/permission full` changes it at runtime.
+  `ask` prompts for normal tool use, `auto` runs ordinary tools automatically
+  while still confirming protected-path and dangerous commands, and `full`
+  skips approval guard prompts. `confirm` remains accepted as an alias for
+  `ask`.
 - `/export` writes the conversation to Markdown (clean by default; `/export full`
   includes reasoning, tool details, and usage).
 
