@@ -3852,11 +3852,14 @@ test "ai chat slash command suggestions show and filter from input" {
     var session = Session{ .allocator = allocator };
     session.appendInputText("/");
 
-    try std.testing.expectEqual(@as(usize, 11), session.slashCommandSuggestionCount());
+    // A bare "/" shows every built-in command. Tie the count to the registry so
+    // it can't go stale when commands are added (it did: /cwd, /loop, /watch).
+    try std.testing.expectEqual(slash_command_entries.len, session.slashCommandSuggestionCount());
     try std.testing.expectEqualStrings("/skills", session.slashCommandSuggestionAt(0).?.command);
 
+    // "/c" filters to /commands, /clear, /cwd.
     session.appendInputText("c");
-    try std.testing.expectEqual(@as(usize, 2), session.slashCommandSuggestionCount());
+    try std.testing.expectEqual(@as(usize, 3), session.slashCommandSuggestionCount());
     try std.testing.expectEqualStrings("/commands", session.slashCommandSuggestionAt(0).?.command);
 }
 
