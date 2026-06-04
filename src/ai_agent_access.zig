@@ -285,7 +285,9 @@ fn normForCompare(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
     }
     const normalized = try lexicalNormalize(a, slashed);
     if (builtin.os.tag == .windows) {
-        for (normalized) |*c| c.* = std.ascii.toLower(c.*);
+        const mut = try a.dupe(u8, normalized);
+        for (mut) |*c| c.* = std.ascii.toLower(c.*);
+        return mut;
     }
     return normalized;
 }
