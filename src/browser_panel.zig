@@ -53,6 +53,29 @@ pub fn contentBounds(bounds: Bounds) ?Bounds {
     };
 }
 
+pub const DisplayMode = enum { side, full };
+pub threadlocal var g_display_mode: DisplayMode = .side;
+
+pub fn setDisplayMode(mode: DisplayMode) void {
+    g_display_mode = mode;
+}
+
+pub fn displayMode() DisplayMode {
+    return g_display_mode;
+}
+
+/// Pure width math. In `full`, the panel covers the entire content area (the
+/// native webview occludes the terminal, which stays laid out behind it). In
+/// `side`, it reserves MIN_CONTENT_WIDTH for the terminal and clamps to stored_width.
+pub fn panelWidthForMode(mode: DisplayMode, stored_width: f32, window_width: i32, left_offset: f32, right_offset: f32) f32 {
+    const win_w: f32 = @floatFromInt(window_width);
+    if (mode == .full) {
+        return @max(MIN_WIDTH, win_w - left_offset - right_offset);
+    }
+    const max_width = @max(MIN_WIDTH, @min(MAX_WIDTH, win_w - left_offset - right_offset - MIN_CONTENT_WIDTH));
+    return @max(MIN_WIDTH, @min(stored_width, max_width));
+}
+
 pub threadlocal var g_visible: bool = false;
 pub threadlocal var g_owner_tab: ?usize = null;
 pub threadlocal var g_width: f32 = DEFAULT_WIDTH;
@@ -109,9 +132,7 @@ pub fn setWidth(w: f32, window_width: f32) bool {
 
 pub fn panelWidthForWindow(window_width: i32, left_offset: f32, right_offset: f32) f32 {
     if (!isVisibleForActiveTab()) return 0;
-    const win_w: f32 = @floatFromInt(window_width);
-    const max_width = @max(MIN_WIDTH, @min(MAX_WIDTH, win_w - left_offset - right_offset - MIN_CONTENT_WIDTH));
-    return @max(MIN_WIDTH, @min(g_width, max_width));
+    return panelWidthForMode(g_display_mode, g_width, window_width, left_offset, right_offset);
 }
 
 pub fn embeddedBrowserAvailable() bool {
@@ -191,6 +212,7 @@ pub fn openJupyterForSurface(allocator: std.mem.Allocator, parent: ?window_backe
 }
 
 pub fn close() void {
+    g_display_mode = .side;
     g_visible = false;
     g_owner_tab = null;
     g_url_bar_focused = false;
@@ -450,6 +472,12 @@ test "browser_panel: visible only on owning active tab" {
 
     active_tab_state.g_active_tab = 0;
     try std.testing.expect(isVisibleForActiveTab());
+}
+
+test "panelWidthForMode: full covers the whole content area; side reserves min content" {
+    try std.testing.expectEqual(@as(f32, 1600), panelWidthForMode(.full, 720, 1600, 0, 0));
+    try std.testing.expectEqual(@as(f32, 720), panelWidthForMode(.side, 720, 1600, 0, 0));
+    try std.testing.expectEqual(@as(f32, 1500), panelWidthForMode(.full, 720, 1600, 60, 40));
 }
 
 test "browser_panel: public parent handle API uses window backend handle" {
