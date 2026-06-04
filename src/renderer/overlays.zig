@@ -1352,6 +1352,29 @@ pub fn renderBrowserUrlBar(window_width: f32, window_height: f32, top_offset: f3
     }
     titlebar.renderCloseIcon(close_x, bar_y, close_btn_w, bar_h, if (close_hovered) fg else mixColor(bg, fg, 0.68));
 
+    if (hit_test.panelSecondButtonRect(close_layout)) |t| {
+        const t_left = @round(@as(f32, @floatCast(t.left)));
+        const toggle_hovered = blk: {
+            const win = AppWindow.g_window orelse break :blk false;
+            if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
+            break :blk hit_test.panelHeaderSecondButton(close_layout, @floatFromInt(win.mouse_x), @floatFromInt(win.mouse_y));
+        };
+        if (toggle_hovered) {
+            ui_pipeline.fillQuadAlpha(t_left + 6, bar_y + @round((bar_h - 20) / 2), 20, 20, mixColor(bg, fg, 0.14), 0.95);
+        }
+        const glyph_color = if (toggle_hovered) fg else mixColor(bg, fg, 0.68);
+        const gx = t_left + @as(f32, @floatCast(t.width)) / 2 - 6;
+        const gy = bar_y + bar_h / 2 - 6;
+        if (browser_panel.displayMode() == .full) {
+            ui_pipeline.fillQuadAlpha(gx, gy, 12, 12, glyph_color, 0.9);
+        } else {
+            ui_pipeline.fillQuadAlpha(gx, gy, 12, 1.5, glyph_color, 0.9);
+            ui_pipeline.fillQuadAlpha(gx, gy + 10.5, 12, 1.5, glyph_color, 0.9);
+            ui_pipeline.fillQuadAlpha(gx, gy, 1.5, 12, glyph_color, 0.9);
+            ui_pipeline.fillQuadAlpha(gx + 10.5, gy, 1.5, 12, glyph_color, 0.9);
+        }
+    }
+
     ui_pipeline.fillQuadAlpha(panel_x, bar_y, panel_w, 1, mixColor(bg, fg, 0.18), 0.55);
 }
 

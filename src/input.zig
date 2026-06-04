@@ -1787,6 +1787,19 @@ fn hitTestBrowserCloseButton(xpos: f64, ypos: f64) bool {
     return hit_test.panelHeaderCloseButton(browserHeaderLayout() orelse return false, xpos, ypos);
 }
 
+fn hitTestBrowserToggleButton(xpos: f64, ypos: f64) bool {
+    return hit_test.panelHeaderSecondButton(browserHeaderLayout() orelse return false, xpos, ypos);
+}
+
+fn toggleBrowserDisplayMode() void {
+    browser_panel.setDisplayMode(if (browser_panel.displayMode() == .full) .side else .full);
+    if (AppWindow.g_window) |win| {
+        syncPanelGridFromWindow(win);
+    }
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+}
+
 fn aiCopilotHeaderLayout() ?hit_test.PanelHeaderLayout {
     if (!AppWindow.aiCopilotVisible()) return null;
     const win = AppWindow.g_window orelse return null;
@@ -2955,6 +2968,10 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             }
             if (hitTestFileExplorerCloseButton(xpos, ypos)) {
                 closeFileExplorerPanel();
+                return;
+            }
+            if (hitTestBrowserToggleButton(xpos, ypos)) {
+                toggleBrowserDisplayMode();
                 return;
             }
             if (hitTestBrowserCloseButton(xpos, ypos)) {

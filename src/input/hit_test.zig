@@ -90,6 +90,20 @@ pub fn sidebarResizeHandle(l: SidebarLayout, x: f64, y: f64) bool {
     return x >= l.width - half_hit and x <= l.width + half_hit;
 }
 
+pub const PANEL_HEADER_BTN_GAP: f64 = 4;
+
+pub fn panelSecondButtonRect(l: PanelHeaderLayout) ?Rect {
+    const close = panelCloseButtonRect(l) orelse return null;
+    const left = close.left - PANEL_HEADER_BTN_GAP - close.width;
+    if (left <= l.left) return null;
+    return .{ .left = left, .top = close.top, .width = close.width, .height = close.height };
+}
+
+pub fn panelHeaderSecondButton(l: PanelHeaderLayout, x: f64, y: f64) bool {
+    const r = panelSecondButtonRect(l) orelse return false;
+    return x >= r.left and x < r.left + r.width and y >= r.top and y < r.top + r.height;
+}
+
 pub fn panelHeaderCloseButton(l: PanelHeaderLayout, x: f64, y: f64) bool {
     const rect = panelCloseButtonRect(l) orelse return false;
     return x >= rect.left and x < rect.left + rect.width and
@@ -213,4 +227,13 @@ test "panelCloseButtonRect: returns a reusable right-aligned rect" {
     var collapsed = sample_panel;
     collapsed.right = collapsed.left + collapsed.close_btn_w;
     try std.testing.expectEqual(@as(?Rect, null), panelCloseButtonRect(collapsed));
+}
+
+test "panelSecondButtonRect: sits just left of the close button" {
+    const close = panelCloseButtonRect(sample_panel).?;
+    const second = panelSecondButtonRect(sample_panel).?;
+    try std.testing.expectEqual(close.width, second.width);
+    try std.testing.expectEqual(close.top, second.top);
+    try std.testing.expect(second.left < close.left);
+    try std.testing.expect(second.left + second.width <= close.left);
 }
