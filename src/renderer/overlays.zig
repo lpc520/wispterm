@@ -566,6 +566,7 @@ fn executeCommand(action: CommandAction) void {
             }
         },
         .open_latest_release => openLatestRelease(),
+        .show_whats_new => showWhatsNew(),
         .update_skills => {
             if (AppWindow.g_app) |app| {
                 showStatusToast(i18n.s().toast_updating_skills);
