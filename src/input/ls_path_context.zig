@@ -1,10 +1,10 @@
 //! Smart path context for ctrl+click: infer a directory prefix from a nearby
-//! `ls <dir>/` command line so bare-filename clicks resolve to the right file.
+//! `ls <dir>` command line so bare-filename clicks resolve to the right file.
 //! Pure logic only — no terminal/Surface dependency — so it is unit-testable.
 
 const std = @import("std");
 
-/// Command names whose single trailing-`/` argument we treat as a path prefix.
+/// Command names whose single directory-looking argument we treat as a path prefix.
 const ls_commands = [_][]const u8{ "ls", "ll", "la", "l", "dir" };
 
 fn isLsCommand(tok: []const u8) bool {
@@ -14,11 +14,19 @@ fn isLsCommand(tok: []const u8) bool {
     return false;
 }
 
-/// If `line` is an `ls`-family command with exactly one directory argument
-/// (a non-flag token ending in `/`), return that directory (a slice into
-/// `line`). Returns null for zero args, multiple non-flag args, a sole
-/// argument not ending in `/`, or a non-ls command. The command token may be
-/// preceded by an arbitrary prompt prefix.
+fn looksLikeDirectoryArg(tok: []const u8) bool {
+    if (tok.len == 0) return false;
+    if (tok[tok.len - 1] == '/' or tok[tok.len - 1] == '\\') return true;
+    return std.mem.indexOfScalar(u8, tok, '/') != null or std.mem.indexOfScalar(u8, tok, '\\') != null;
+}
+
+/// If `line` is an `ls`-family command with exactly one directory-looking
+/// argument, return that directory (a slice into `line`). Directory-looking
+/// means the non-flag token either ends in a path separator or already contains
+/// one, so `ls Ph_SE/slingshot` is accepted while `ls foo.txt` remains
+/// ambiguous and rejected. Returns null for zero args, multiple non-flag args,
+/// a sole non-directory-looking arg, or a non-ls command. The command token may
+/// be preceded by an arbitrary prompt prefix.
 pub fn parseLsDirArg(line: []const u8) ?[]const u8 {
     var it = std.mem.tokenizeAny(u8, line, " \t");
 
@@ -39,12 +47,17 @@ pub fn parseLsDirArg(line: []const u8) ?[]const u8 {
     }
 
     const d = dir orelse return null; // ls of CWD, no dir arg
-    if (d.len == 0 or d[d.len - 1] != '/') return null; // must be a directory
+    if (!looksLikeDirectoryArg(d)) return null;
     return d;
 }
 
 test "parseLsDirArg: ls with a trailing-slash dir" {
     try std.testing.expectEqualStrings("Ath/Ph_SE/", parseLsDirArg("ls Ath/Ph_SE/").?);
+}
+
+test "parseLsDirArg: ls with a nested dir without trailing slash" {
+    try std.testing.expectEqualStrings("Ph_SE/slingshot", parseLsDirArg("ls Ph_SE/slingshot").?);
+    try std.testing.expectEqualStrings("results/04_slingshot_trajectory/Gma/Ph_SE/slingshot", parseLsDirArg("ls results/04_slingshot_trajectory/Gma/Ph_SE/slingshot").?);
 }
 
 test "parseLsDirArg: tolerates a prompt prefix" {
@@ -102,7 +115,7 @@ fn encodeRow(grid: anytype, row: usize, buf: []u8) []const u8 {
 }
 
 /// Scan upward from `click_row` (bounded to the grid) for the nearest line that
-/// parses as an `ls <dir>/` command. On a hit, copy the directory into
+/// parses as an `ls <dir>` command. On a hit, copy the directory into
 /// `out_buf` and return it; otherwise null. `grid` must expose
 /// `rowCount() usize`, `colCount(row) usize`, and `codepoint(row, col) u21`.
 pub fn inferPrefixForClick(grid: anytype, click_row: usize, out_buf: []u8) ?[]const u8 {
@@ -148,6 +161,15 @@ test "inferPrefixForClick: finds the ls command above the clicked row" {
     try std.testing.expectEqualStrings("Ath/Ph_SE/", inferPrefixForClick(grid, 2, &buf).?);
 }
 
+test "inferPrefixForClick: finds nested ls dir without trailing slash" {
+    const grid = FakeGrid{ .rows = &.{
+        "$ ls Ph_SE/slingshot",
+        "trajectory_plot.png",
+    } };
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Ph_SE/slingshot", inferPrefixForClick(grid, 1, &buf).?);
+}
+
 test "inferPrefixForClick: picks the nearest ls when several exist" {
     const grid = FakeGrid{ .rows = &.{
         "$ ls first/",
@@ -187,12 +209,16 @@ pub fn isBareRelativeFilename(path: []const u8) bool {
 }
 
 /// When `ls_prefix` is present and `path` is a bare filename, return an
-/// allocator-owned `prefix ++ path`. Returns null to mean "use `path` as-is"
-/// (no prefix, or the token is already a path). Caller frees a non-null result.
+/// allocator-owned `prefix/path`. Returns null to mean "use `path` as-is" (no
+/// prefix, or the token is already a path). Caller frees a non-null result.
 pub fn applyLsPrefix(allocator: std.mem.Allocator, path: []const u8, ls_prefix: ?[]const u8) !?[]u8 {
     const pfx = ls_prefix orelse return null;
     if (!isBareRelativeFilename(path)) return null;
-    return try std.fmt.allocPrint(allocator, "{s}{s}", .{ pfx, path });
+    if (pfx.len > 0 and (pfx[pfx.len - 1] == '/' or pfx[pfx.len - 1] == '\\')) {
+        return try std.fmt.allocPrint(allocator, "{s}{s}", .{ pfx, path });
+    }
+    const sep = if (std.mem.indexOfScalar(u8, pfx, '\\') != null and std.mem.indexOfScalar(u8, pfx, '/') == null) "\\" else "/";
+    return try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ pfx, sep, path });
 }
 
 test "isBareRelativeFilename: accepts plain names, rejects pathed tokens" {
@@ -214,13 +240,15 @@ test "applyLsPrefix: joins prefix onto a bare filename" {
     try std.testing.expectEqualStrings("Ath/Ph_SE/x.tsv", joined);
 }
 
-test "applyLsPrefix: concatenates verbatim (caller owns the separator)" {
+test "applyLsPrefix: inserts separator when prefix needs one" {
     const allocator = std.testing.allocator;
-    // applyLsPrefix does not insert a separator; parseLsDirArg guarantees the
-    // trailing slash. A prefix without one concatenates directly.
     const joined = (try applyLsPrefix(allocator, "x.tsv", "Ath")).?;
     defer allocator.free(joined);
-    try std.testing.expectEqualStrings("Athx.tsv", joined);
+    try std.testing.expectEqualStrings("Ath/x.tsv", joined);
+
+    const nested = (try applyLsPrefix(allocator, "trajectory_plot.png", "Ph_SE/slingshot")).?;
+    defer allocator.free(nested);
+    try std.testing.expectEqualStrings("Ph_SE/slingshot/trajectory_plot.png", nested);
 }
 
 test "applyLsPrefix: null prefix or already-pathed token yields null" {
