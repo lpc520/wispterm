@@ -173,3 +173,59 @@ test "inferPrefixForClick: empty grid returns null" {
     var buf: [256]u8 = undefined;
     try std.testing.expect(inferPrefixForClick(grid, 0, &buf) == null);
 }
+
+/// True when `path` is a plain filename with no directory component: not
+/// absolute, not `~`-rooted, no `/` or `\`, and not a `X:` Windows drive path.
+pub fn isBareRelativeFilename(path: []const u8) bool {
+    if (path.len == 0) return false;
+    if (path[0] == '/' or path[0] == '~') return false;
+    if (path.len >= 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and (path[2] == '/' or path[2] == '\\')) return false; // windows drive letter
+    for (path) |c| {
+        if (c == '/' or c == '\\') return false;
+    }
+    return true;
+}
+
+/// When `ls_prefix` is present and `path` is a bare filename, return an
+/// allocator-owned `prefix ++ path`. Returns null to mean "use `path` as-is"
+/// (no prefix, or the token is already a path). Caller frees a non-null result.
+pub fn applyLsPrefix(allocator: std.mem.Allocator, path: []const u8, ls_prefix: ?[]const u8) !?[]u8 {
+    const pfx = ls_prefix orelse return null;
+    if (!isBareRelativeFilename(path)) return null;
+    return try std.fmt.allocPrint(allocator, "{s}{s}", .{ pfx, path });
+}
+
+test "isBareRelativeFilename: accepts plain names, rejects pathed tokens" {
+    try std.testing.expect(isBareRelativeFilename("cluster_resolution_summary.tsv"));
+    try std.testing.expect(!isBareRelativeFilename("Ath/Ph_SE/x.tsv"));
+    try std.testing.expect(!isBareRelativeFilename("/abs/x.tsv"));
+    try std.testing.expect(!isBareRelativeFilename("~/x.tsv"));
+    try std.testing.expect(!isBareRelativeFilename("C:/x.tsv"));
+    try std.testing.expect(!isBareRelativeFilename("dir\\x.tsv"));
+    try std.testing.expect(!isBareRelativeFilename(""));
+    try std.testing.expect(isBareRelativeFilename("a:b")); // POSIX colon name, not a drive
+    try std.testing.expect(!isBareRelativeFilename("Z:\\x.tsv")); // real drive letter still rejected
+}
+
+test "applyLsPrefix: joins prefix onto a bare filename" {
+    const allocator = std.testing.allocator;
+    const joined = (try applyLsPrefix(allocator, "x.tsv", "Ath/Ph_SE/")).?;
+    defer allocator.free(joined);
+    try std.testing.expectEqualStrings("Ath/Ph_SE/x.tsv", joined);
+}
+
+test "applyLsPrefix: concatenates verbatim (caller owns the separator)" {
+    const allocator = std.testing.allocator;
+    // applyLsPrefix does not insert a separator; parseLsDirArg guarantees the
+    // trailing slash. A prefix without one concatenates directly.
+    const joined = (try applyLsPrefix(allocator, "x.tsv", "Ath")).?;
+    defer allocator.free(joined);
+    try std.testing.expectEqualStrings("Athx.tsv", joined);
+}
+
+test "applyLsPrefix: null prefix or already-pathed token yields null" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect((try applyLsPrefix(allocator, "x.tsv", null)) == null);
+    try std.testing.expect((try applyLsPrefix(allocator, "sub/x.tsv", "Ath/")) == null);
+    try std.testing.expect((try applyLsPrefix(allocator, "/abs/x.tsv", "Ath/")) == null);
+}
