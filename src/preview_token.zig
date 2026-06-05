@@ -12,6 +12,12 @@ pub const GridCell = struct {
     col: usize,
 };
 
+const Segment = struct {
+    row: usize,
+    start_col: usize,
+    end_col: usize,
+};
+
 pub const GridToken = struct {
     text: []u8,
     start: GridCell,
@@ -29,6 +35,144 @@ pub fn isDelimiter(cp: u21) bool {
         0xFF08, 0xFF09 => true, // fullwidth parentheses
         else => false,
     };
+}
+
+fn rowTokenSegmentAt(grid: anytype, row: usize, col: usize) ?Segment {
+    const cols = grid.colCount(row);
+    if (cols == 0 or col >= cols or isDelimiter(grid.codepoint(row, col))) return null;
+
+    var start_col = col;
+    while (start_col > 0) {
+        const prev = start_col - 1;
+        if (isDelimiter(grid.codepoint(row, prev))) break;
+        start_col = prev;
+    }
+
+    var end_col = col;
+    while (end_col + 1 < cols) {
+        const next = end_col + 1;
+        if (isDelimiter(grid.codepoint(row, next))) break;
+        end_col = next;
+    }
+
+    return .{ .row = row, .start_col = start_col, .end_col = end_col };
+}
+
+fn firstTokenSegmentInRow(grid: anytype, row: usize) ?Segment {
+    const cols = grid.colCount(row);
+    var col: usize = 0;
+    while (col < cols) : (col += 1) {
+        if (!isDelimiter(grid.codepoint(row, col))) return rowTokenSegmentAt(grid, row, col);
+    }
+    return null;
+}
+
+fn lastTokenSegmentInRow(grid: anytype, row: usize) ?Segment {
+    var col = grid.colCount(row);
+    while (col > 0) {
+        col -= 1;
+        if (!isDelimiter(grid.codepoint(row, col))) return rowTokenSegmentAt(grid, row, col);
+    }
+    return null;
+}
+
+fn sameSegment(a: Segment, b: Segment) bool {
+    return a.row == b.row and a.start_col == b.start_col and a.end_col == b.end_col;
+}
+
+fn isFirstTokenSegment(grid: anytype, segment: Segment) bool {
+    const first = firstTokenSegmentInRow(grid, segment.row) orelse return false;
+    return sameSegment(first, segment);
+}
+
+fn isLastTokenSegment(grid: anytype, segment: Segment) bool {
+    const last = lastTokenSegmentInRow(grid, segment.row) orelse return false;
+    return sameSegment(last, segment);
+}
+
+fn segmentEndsWithPathSeparator(grid: anytype, segment: Segment) bool {
+    return switch (grid.codepoint(segment.row, segment.end_col)) {
+        '/', '\\' => true,
+        else => false,
+    };
+}
+
+fn segmentHasUrlScheme(grid: anytype, segment: Segment) bool {
+    if (segment.end_col < segment.start_col + 2) return false;
+    var col = segment.start_col;
+    while (col + 2 <= segment.end_col) : (col += 1) {
+        if (grid.codepoint(segment.row, col) == ':' and
+            grid.codepoint(segment.row, col + 1) == '/' and
+            grid.codepoint(segment.row, col + 2) == '/')
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn appendInitialSegments(
+    allocator: std.mem.Allocator,
+    segments: *std.ArrayListUnmanaged(Segment),
+    grid: anytype,
+    start: GridCell,
+    end: GridCell,
+) !void {
+    var row = start.row;
+    while (true) : (row += 1) {
+        const cols = grid.colCount(row);
+        if (cols > 0) {
+            try segments.append(allocator, .{
+                .row = row,
+                .start_col = if (row == start.row) start.col else 0,
+                .end_col = if (row == end.row) end.col else cols - 1,
+            });
+        }
+        if (row == end.row) break;
+    }
+}
+
+fn prependHardWrappedPathSegments(
+    allocator: std.mem.Allocator,
+    segments: *std.ArrayListUnmanaged(Segment),
+    grid: anytype,
+) !void {
+    while (segments.items.len > 0) {
+        const first = segments.items[0];
+        if (first.row == 0 or !isFirstTokenSegment(grid, first)) break;
+
+        const prev_row = first.row - 1;
+        if (grid.continuesFromPrev(first.row) and grid.wrapsNext(prev_row)) break;
+
+        const prev = lastTokenSegmentInRow(grid, prev_row) orelse break;
+        if (!isLastTokenSegment(grid, prev)) break;
+        if (!segmentEndsWithPathSeparator(grid, prev)) break;
+        if (segmentHasUrlScheme(grid, prev)) break;
+
+        try segments.insert(allocator, 0, prev);
+    }
+}
+
+fn appendHardWrappedPathSegments(
+    allocator: std.mem.Allocator,
+    segments: *std.ArrayListUnmanaged(Segment),
+    grid: anytype,
+) !void {
+    const rows = grid.rowCount();
+    while (segments.items.len > 0) {
+        const last = segments.items[segments.items.len - 1];
+        const next_row = last.row + 1;
+        if (next_row >= rows or !isLastTokenSegment(grid, last)) break;
+
+        if (grid.wrapsNext(last.row) and grid.continuesFromPrev(next_row)) break;
+        if (!segmentEndsWithPathSeparator(grid, last)) break;
+        if (segmentHasUrlScheme(grid, last)) break;
+
+        const next = firstTokenSegmentInRow(grid, next_row) orelse break;
+        if (!isFirstTokenSegment(grid, next)) break;
+
+        try segments.append(allocator, next);
+    }
 }
 
 pub fn trim(token: []const u8) []const u8 {
@@ -122,29 +266,27 @@ pub fn extractGridTokenAtCell(
         end = .{ .row = next_row, .col = 0 };
     }
 
+    var segments: std.ArrayListUnmanaged(Segment) = .empty;
+    defer segments.deinit(allocator);
+    appendInitialSegments(allocator, &segments, grid, start, end) catch return null;
+    prependHardWrappedPathSegments(allocator, &segments, grid) catch return null;
+    appendHardWrappedPathSegments(allocator, &segments, grid) catch return null;
+
     var token: std.ArrayListUnmanaged(u8) = .empty;
     defer token.deinit(allocator);
     var positions: std.ArrayListUnmanaged(GridCell) = .empty;
     defer positions.deinit(allocator);
 
-    var pos = start;
-    while (true) {
-        const cp = grid.codepoint(pos.row, pos.col);
-        if (isDelimiter(cp)) break;
+    for (segments.items) |segment| {
+        var col = segment.start_col;
+        while (col <= segment.end_col) : (col += 1) {
+            const cp = grid.codepoint(segment.row, col);
+            if (isDelimiter(cp)) return null;
 
-        var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(cp, &buf) catch break;
-        token.appendSlice(allocator, buf[0..len]) catch return null;
-        positions.append(allocator, pos) catch return null;
-
-        if (pos.row == end.row and pos.col == end.col) break;
-
-        const cols = grid.colCount(pos.row);
-        if (pos.col + 1 < cols) {
-            pos.col += 1;
-        } else {
-            pos.row += 1;
-            pos.col = 0;
+            var buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(cp, &buf) catch return null;
+            token.appendSlice(allocator, buf[0..len]) catch return null;
+            positions.append(allocator, .{ .row = segment.row, .col = col }) catch return null;
         }
     }
 
@@ -337,4 +479,67 @@ test "extractGridTokenAtCell joins soft-wrapped path rows" {
     );
     try std.testing.expectEqual(GridCell{ .row = 0, .col = 8 }, token.start);
     try std.testing.expectEqual(GridCell{ .row = 1, .col = 8 }, token.end);
+}
+
+test "extractGridTokenAtCell joins path continuation after hard line break" {
+    const TestGrid = struct {
+        rows: []const []const u8,
+        cols: usize,
+
+        fn rowCount(self: @This()) usize {
+            return self.rows.len;
+        }
+
+        fn colCount(self: @This(), row: usize) usize {
+            _ = row;
+            return self.cols;
+        }
+
+        fn codepoint(self: @This(), row: usize, col: usize) u21 {
+            const text = self.rows[row];
+            return if (col < text.len) text[col] else 0;
+        }
+
+        fn wrapsNext(self: @This(), row: usize) bool {
+            _ = self;
+            _ = row;
+            return false;
+        }
+
+        fn continuesFromPrev(self: @This(), row: usize) bool {
+            _ = self;
+            _ = row;
+            return false;
+        }
+    };
+
+    const rows = [_][]const u8{
+        "/home/xzg/bioinformatics-skills/seq-align/",
+        "SKILL.md",
+    };
+    const grid = TestGrid{ .rows = &rows, .cols = 80 };
+
+    const from_first_row = extractGridTokenAtCell(std.testing.allocator, grid, .{
+        .row = 0,
+        .col = rows[0].len - 1,
+    }) orelse return error.ExpectedToken;
+    defer from_first_row.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(
+        "/home/xzg/bioinformatics-skills/seq-align/SKILL.md",
+        from_first_row.text,
+    );
+    try std.testing.expectEqual(GridCell{ .row = 0, .col = 0 }, from_first_row.start);
+    try std.testing.expectEqual(GridCell{ .row = 1, .col = 7 }, from_first_row.end);
+
+    const from_second_row = extractGridTokenAtCell(std.testing.allocator, grid, .{
+        .row = 1,
+        .col = 0,
+    }) orelse return error.ExpectedToken;
+    defer from_second_row.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(
+        "/home/xzg/bioinformatics-skills/seq-align/SKILL.md",
+        from_second_row.text,
+    );
+    try std.testing.expectEqual(GridCell{ .row = 0, .col = 0 }, from_second_row.start);
+    try std.testing.expectEqual(GridCell{ .row = 1, .col = 7 }, from_second_row.end);
 }
