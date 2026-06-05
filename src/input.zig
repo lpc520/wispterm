@@ -2896,7 +2896,10 @@ fn openInEditorAtRightClick(ev: platform_input.MouseButtonEvent) bool {
     const path = extractPreviewPathAtCell(allocator, surface, cell_pos) orelse return false;
     defer allocator.free(path);
 
-    const resolved = resolveTerminalPreviewPath(allocator, surface, path) catch return false;
+    var ls_prefix_buf: [256]u8 = undefined;
+    const ls_prefix = lsPrefixForCell(surface, cell_pos, &ls_prefix_buf);
+
+    const resolved = resolveTerminalPreviewPath(allocator, surface, path, ls_prefix) catch return false;
     defer allocator.free(resolved);
 
     return platform_open_url.open(allocator, .{ .url = resolved });

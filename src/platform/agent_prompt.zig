@@ -31,15 +31,14 @@ const macos_copilot_prompt = macos_prompt ++ copilot_binding_clause;
 const windows_copilot_prompt = windows_prompt ++ copilot_binding_clause;
 
 const common_tools_before_wsl =
-    \\- Be direct. Inspect the current directory before changes.
+    \\- Be direct; inspect the current directory before changes.
     \\- Preserve user work; do not overwrite, reset, or delete unless asked.
     \\
     \\Terminal tools:
-    \\- Use `terminal_list` before terminal writes.
-    \\- Use `terminal_context` to inspect the selected terminal write context without changing it.
-    \\- Use `terminal_select` before selected-terminal writes.
-    \\- Use `ssh_session_exec` only at an already-open SSH shell prompt.
-    \\- Use `ssh_profile_save` for saved SSH details; use `ssh_profile_connect` to open them.
+    \\- Use `terminal_list` before terminal writes, then `terminal_select`.
+    \\- Use `terminal_context` to inspect the selected write context.
+    \\- Use `ssh_session_exec` at an open SSH shell prompt.
+    \\- Use `ssh_profile_save` / `ssh_profile_connect` for saved SSH details.
 ;
 
 const wsl_tool_guidance =
@@ -48,17 +47,15 @@ const wsl_tool_guidance =
 
 const common_tools_after_wsl =
     \\- Use `terminal_repl_exec` for Codex, Claude Code, Python, R, or other REPL/app terminals.
-    \\- Start Codex, Claude Code, or any REPL (Python/R/Node) via `terminal_repl_exec repl=plain`; never shell-exec them (it hangs waiting for exit).
-    \\- surface_id accepts `focused` for the focused terminal (no terminal_list needed).
-    \\- Do not paste shell commands into Codex or Claude Code; send user-facing text.
-    \\- A slow session/exec command is usually still running, not broken; do not re-issue it. Wait, then re-check with `terminal_snapshot`.
-    \\- To recover a stuck terminal (`>` prompt, unclosed quote, hung command, or pager), send `terminal_repl_exec repl=plain code=<ctrl-c>` (or `<ctrl-u>`/`<esc>`/`<ctrl-d>`). Do not keep typing.
+    \\- Start Codex/Claude Code/REPLs (Python/R/Node) via `terminal_repl_exec repl=plain`; never shell-exec them.
+    \\- surface_id accepts `focused`.
+    \\- Do not paste shell commands into Codex or Claude Code; send user text.
+    \\- A slow session/exec command is usually still running; wait, then re-check with `terminal_snapshot`.
+    \\- For a stuck terminal (`>` prompt, unclosed quote, hung command, pager), send `terminal_repl_exec repl=plain code=<ctrl-c>` (or `<ctrl-u>`/`<esc>`/`<ctrl-d>`).
     \\- Use `tab_new` only when no suitable terminal exists.
-    \\- For WispTerm questions, call `wispterm_docs` to list and read built-in docs.
-    \\- When the request came from Weixin and the user asks you to send a generated or local artifact, call `weixin_send_attachment`.
-    \\- Use `kind=image` for image previews and `kind=file` for ordinary attachments; voice files are sent as file attachments.
-    \\- `kind=voice` is accepted for Weixin, but it behaves like `kind=file` and does not create an in-chat voice message.
-    \\- Prefer `read_file`, `write_file`, and `edit_file` for reading and editing files instead of shell `cat`/`sed`. For a file on a remote SSH server, pass the `surface_id` of the open SSH terminal; omit `surface_id` for local files. `write_file` and `edit_file` show a diff and may require approval.
+    \\- For WispTerm questions, call `wispterm_docs`.
+    \\- From Weixin, send generated/local artifacts with `weixin_send_attachment`: use `kind=image` for images and `kind=file` for files; voice files are sent as file attachments (`kind=voice` aliases `kind=file`).
+    \\- Prefer `read_file`, `write_file`, and `edit_file` for local/remote SSH files; remote paths need the open SSH `surface_id`. Writes show a diff and may require approval.
     \\
     \\Python:
     \\- Use uv for Python environments; run `uv --version` first.
