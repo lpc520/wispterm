@@ -403,12 +403,18 @@ fn previewPrompt(p: []const u8) []const u8 {
     return if (p.len > 48) p[0..48] else p;
 }
 
+const LoopTaskListScope = enum { session, all };
+
+fn taskOwnerLabel(v: ai_loop_store.TaskView) []const u8 {
+    return if (v.title.len > 0) v.title else v.session_id;
+}
+
 fn loopErrorText(err: ai_loop_schedule.ParseError, kind: ai_loop_schedule.TaskKind) []const u8 {
     return switch (err) {
         error.MissingArgs => if (kind == .loop)
-            "Usage: /loop <interval> <count> <prompt>  e.g. /loop 30m 8 check ci"
+            "Usage: /loop <interval> <count> <prompt>; /loop all; /loop stop <id>|all"
         else
-            "Usage: /watch <HH:MM | YYYY-MM-DD HH:MM> <prompt>",
+            "Usage: /watch <HH:MM | YYYY-MM-DD HH:MM> <prompt>; /watch all; /watch stop <id>|all",
         error.BadInterval => "Bad interval. Use a number + s/m/h/d, e.g. 30m, 5h.",
         error.BadCount => "Count must be a positive integer.",
         error.BadTime => "Bad time. Use HH:MM or YYYY-MM-DD HH:MM (24h).",
@@ -1934,7 +1940,15 @@ pub const Session = struct {
         };
 
         if (trimmed.len == 0) {
-            self.listLoopTasksLocked(store, kind);
+            self.listLoopTasksLocked(store, kind, .session);
+            return;
+        }
+        if (std.mem.eql(u8, trimmed, "all")) {
+            if (!self.copilot) {
+                self.emitLoopMessageLocked("Global scheduled task listing is only available in Copilot.");
+                return;
+            }
+            self.listLoopTasksLocked(store, kind, .all);
             return;
         }
         if (std.mem.startsWith(u8, trimmed, "stop")) {
@@ -1948,8 +1962,9 @@ pub const Session = struct {
                     self.emitLoopMessageLocked("Usage: stop <id> | stop all");
                     return;
                 };
-                const ok = store.stop(ctx.session_id, id);
-                self.emitLoopMessageLocked(if (ok) "Task cancelled." else "No such task in this session.");
+                var ok = store.stop(ctx.session_id, id);
+                if (!ok and self.copilot) ok = store.stopById(id);
+                self.emitLoopMessageLocked(if (ok) "Task cancelled." else "No such task.");
             }
             return;
         }
@@ -1970,8 +1985,11 @@ pub const Session = struct {
         self.emitRegisterConfirmationLocked(info);
     }
 
-    fn listLoopTasksLocked(self: *Session, store: *ai_loop_store.Store, kind: ai_loop_schedule.TaskKind) void {
-        const views = store.snapshotForSession(self.allocator, self.sessionId(), kind) catch {
+    fn listLoopTasksLocked(self: *Session, store: *ai_loop_store.Store, kind: ai_loop_schedule.TaskKind, scope: LoopTaskListScope) void {
+        const views = switch (scope) {
+            .session => store.snapshotForSession(self.allocator, self.sessionId(), kind),
+            .all => store.snapshotAll(self.allocator, kind),
+        } catch {
             self.emitLoopMessageLocked("Out of memory.");
             return;
         };
@@ -1984,17 +2002,34 @@ pub const Session = struct {
         defer buf.deinit(self.allocator);
         const w = buf.writer(self.allocator);
         for (views) |v| {
+            const owner = taskOwnerLabel(v);
             if (kind == .loop) {
                 const iv = ai_loop_schedule.formatInterval(v.interval_ms);
-                w.print("#{d}  every {d}{c}  remaining {d}  \u{2192} {s}\n", .{
-                    v.id, iv.value, iv.unit, v.remaining, previewPrompt(v.prompt),
-                }) catch return;
+                if (scope == .all) {
+                    w.print("#{d}  [{s}]  every {d}{c}  remaining {d}  \u{2192} {s}\n", .{
+                        v.id, owner, iv.value, iv.unit, v.remaining, previewPrompt(v.prompt),
+                    }) catch return;
+                } else {
+                    w.print("#{d}  every {d}{c}  remaining {d}  \u{2192} {s}\n", .{
+                        v.id, iv.value, iv.unit, v.remaining, previewPrompt(v.prompt),
+                    }) catch return;
+                }
             } else if (v.daily) {
-                w.print("#{d}  daily {d:0>2}:{d:0>2}  \u{2192} {s}\n", .{
-                    v.id, @divTrunc(v.tod_minutes, 60), @mod(v.tod_minutes, 60), previewPrompt(v.prompt),
-                }) catch return;
+                if (scope == .all) {
+                    w.print("#{d}  [{s}]  daily {d:0>2}:{d:0>2}  \u{2192} {s}\n", .{
+                        v.id, owner, @divTrunc(v.tod_minutes, 60), @mod(v.tod_minutes, 60), previewPrompt(v.prompt),
+                    }) catch return;
+                } else {
+                    w.print("#{d}  daily {d:0>2}:{d:0>2}  \u{2192} {s}\n", .{
+                        v.id, @divTrunc(v.tod_minutes, 60), @mod(v.tod_minutes, 60), previewPrompt(v.prompt),
+                    }) catch return;
+                }
             } else {
-                w.print("#{d}  once  \u{2192} {s}\n", .{ v.id, previewPrompt(v.prompt) }) catch return;
+                if (scope == .all) {
+                    w.print("#{d}  [{s}]  once  \u{2192} {s}\n", .{ v.id, owner, previewPrompt(v.prompt) }) catch return;
+                } else {
+                    w.print("#{d}  once  \u{2192} {s}\n", .{ v.id, previewPrompt(v.prompt) }) catch return;
+                }
             }
         }
         self.emitLoopMessageLocked(buf.items);
@@ -4727,6 +4762,7 @@ test "ai chat default system prompt comes from platform agent prompt" {
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "Python") != null);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, platform_process.localCommandToolName()) != null);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "terminal_list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "terminal_context") != null);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "terminal_select") != null);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "ssh_session_exec") != null);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "ssh_profile_save") != null);
@@ -4745,6 +4781,7 @@ test "ai chat default system prompt comes from platform agent prompt" {
 test "copilot prompt keeps tool guidance and adds the binding clause" {
     try std.testing.expect(std.mem.indexOf(u8, COPILOT_SYSTEM_PROMPT, "CURRENTLY FOCUSED") != null);
     try std.testing.expect(std.mem.indexOf(u8, COPILOT_SYSTEM_PROMPT, "ssh_session_exec") != null);
+    try std.testing.expect(std.mem.indexOf(u8, COPILOT_SYSTEM_PROMPT, "terminal_context") != null);
     try std.testing.expect(std.mem.indexOf(u8, COPILOT_SYSTEM_PROMPT, "terminal_select") != null);
 }
 
@@ -6432,4 +6469,49 @@ test "runLoopCommandLocked creates, lists, and stops a loop task" {
     const snap2 = try store.snapshotForSession(a, "session-test", .loop);
     defer ai_loop_store.freeSnapshot(a, snap2);
     try std.testing.expectEqual(@as(usize, 0), snap2.len);
+}
+
+test "copilot loop command lists and stops tasks from other sessions" {
+    const a = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(dir_path);
+    const path = try std.fs.path.join(a, &.{ dir_path, "loop_tasks.json" });
+    defer a.free(path);
+
+    var store = ai_loop_store.Store.init(a, path);
+    defer store.deinit();
+    ai_loop_store.setActive(&store);
+    defer ai_loop_store.clearActive();
+
+    _ = try store.registerLoop(
+        "30m 3 legacy copilot task",
+        .{ .session_id = "old-copilot-session", .model = "model", .title = "Old Copilot" },
+        1000,
+        0,
+    );
+
+    const copilot = try Session.init(a, "Copilot", "", "", "", "", "", "", "", "");
+    defer copilot.deinit();
+    copilot.copilot = true;
+    copilot.copySessionId("new-copilot-session");
+
+    copilot.mutex.lock();
+    _ = copilot.runBuiltinCommandLocked(.loop, "all");
+    copilot.mutex.unlock();
+
+    try std.testing.expect(copilot.messages.items.len > 0);
+    const list_msg = copilot.messages.items[copilot.messages.items.len - 1].content;
+    try std.testing.expect(std.mem.indexOf(u8, list_msg, "legacy copilot task") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list_msg, "Old Copilot") != null);
+
+    copilot.mutex.lock();
+    _ = copilot.runBuiltinCommandLocked(.loop, "stop 1");
+    copilot.mutex.unlock();
+
+    const remaining = try store.snapshotForSession(a, "old-copilot-session", .loop);
+    defer ai_loop_store.freeSnapshot(a, remaining);
+    try std.testing.expectEqual(@as(usize, 0), remaining.len);
 }

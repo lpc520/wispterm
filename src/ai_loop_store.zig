@@ -43,12 +43,24 @@ pub const TaskView = struct {
     daily: bool,
     tod_minutes: i32,
     next_fire_ms: i64,
+    session_id: []u8,
+    model: []u8,
+    title: []u8,
     prompt: []u8,
 };
 
 pub fn freeSnapshot(allocator: std.mem.Allocator, views: []TaskView) void {
-    for (views) |v| allocator.free(v.prompt);
+    freeSnapshotItems(allocator, views);
     allocator.free(views);
+}
+
+fn freeSnapshotItems(allocator: std.mem.Allocator, views: []TaskView) void {
+    for (views) |v| {
+        allocator.free(v.session_id);
+        allocator.free(v.model);
+        allocator.free(v.title);
+        allocator.free(v.prompt);
+    }
 }
 
 // ---- Module-level globals ----
@@ -178,22 +190,28 @@ pub const Store = struct {
         defer self.mutex.unlock();
         var out: std.ArrayListUnmanaged(TaskView) = .empty;
         errdefer {
-            for (out.items) |v| allocator.free(v.prompt);
+            freeSnapshotItems(allocator, out.items);
             out.deinit(allocator);
         }
         for (self.tasks.items) |t| {
             if (t.kind != kind) continue;
             if (!std.mem.eql(u8, t.session_id, session_id)) continue;
-            try out.append(allocator, .{
-                .id = t.id,
-                .kind = t.kind,
-                .interval_ms = t.interval_ms,
-                .remaining = t.remaining,
-                .daily = t.daily,
-                .tod_minutes = t.tod_minutes,
-                .next_fire_ms = t.next_fire_ms,
-                .prompt = try allocator.dupe(u8, t.prompt),
-            });
+            try appendTaskView(allocator, &out, t);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn snapshotAll(self: *Store, allocator: std.mem.Allocator, kind: TaskKind) ![]TaskView {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var out: std.ArrayListUnmanaged(TaskView) = .empty;
+        errdefer {
+            freeSnapshotItems(allocator, out.items);
+            out.deinit(allocator);
+        }
+        for (self.tasks.items) |t| {
+            if (t.kind != kind) continue;
+            try appendTaskView(allocator, &out, t);
         }
         return out.toOwnedSlice(allocator);
     }
@@ -206,6 +224,22 @@ pub const Store = struct {
         while (i < self.tasks.items.len) : (i += 1) {
             const t = self.tasks.items[i];
             if (t.id == id and std.mem.eql(u8, t.session_id, session_id)) {
+                var removed = self.tasks.orderedRemove(i);
+                self.freeTask(&removed);
+                self.saveLocked();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn stopById(self: *Store, id: u32) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var i: usize = 0;
+        while (i < self.tasks.items.len) : (i += 1) {
+            const t = self.tasks.items[i];
+            if (t.id == id) {
                 var removed = self.tasks.orderedRemove(i);
                 self.freeTask(&removed);
                 self.saveLocked();
@@ -311,6 +345,30 @@ pub const Store = struct {
     }
 };
 
+fn appendTaskView(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(TaskView), t: Task) !void {
+    var view = TaskView{
+        .id = t.id,
+        .kind = t.kind,
+        .interval_ms = t.interval_ms,
+        .remaining = t.remaining,
+        .daily = t.daily,
+        .tod_minutes = t.tod_minutes,
+        .next_fire_ms = t.next_fire_ms,
+        .session_id = try allocator.dupe(u8, t.session_id),
+        .model = undefined,
+        .title = undefined,
+        .prompt = undefined,
+    };
+    errdefer allocator.free(view.session_id);
+    view.model = try allocator.dupe(u8, t.model);
+    errdefer allocator.free(view.model);
+    view.title = try allocator.dupe(u8, t.title);
+    errdefer allocator.free(view.title);
+    view.prompt = try allocator.dupe(u8, t.prompt);
+    errdefer allocator.free(view.prompt);
+    try out.append(allocator, view);
+}
+
 // ---- Tests ----
 
 test "register loop, snapshot, stop, persist round-trip" {
@@ -346,6 +404,43 @@ test "register loop, snapshot, stop, persist round-trip" {
     const snap3 = try store2.snapshotForSession(a, "session-7", .loop);
     defer freeSnapshot(a, snap3);
     try std.testing.expectEqual(@as(usize, 0), snap3.len);
+}
+
+test "snapshotAll and stopById support global copilot task management" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(dir_path);
+    const path = try std.fs.path.join(a, &.{ dir_path, "loop_tasks.json" });
+    defer a.free(path);
+
+    var store = Store.init(a, path);
+    defer store.deinit();
+
+    const first = try store.registerLoop("30m 3 check ci", .{ .session_id = "old-copilot", .model = "m1", .title = "Old Copilot" }, 1000, 0);
+    const second = try store.registerLoop("1h 2 report", .{ .session_id = "other-chat", .model = "m2", .title = "Other Chat" }, 1000, 0);
+    const watch = try store.registerWatch("09:00 daily report", .{ .session_id = "old-copilot", .model = "m1", .title = "Old Copilot" }, 1000, 0);
+
+    const all_loops = try store.snapshotAll(a, .loop);
+    defer freeSnapshot(a, all_loops);
+    try std.testing.expectEqual(@as(usize, 2), all_loops.len);
+    try std.testing.expectEqual(first.id, all_loops[0].id);
+    try std.testing.expectEqualStrings("old-copilot", all_loops[0].session_id);
+    try std.testing.expectEqualStrings("Old Copilot", all_loops[0].title);
+    try std.testing.expectEqualStrings("check ci", all_loops[0].prompt);
+    try std.testing.expectEqual(second.id, all_loops[1].id);
+
+    try std.testing.expect(store.stopById(first.id));
+
+    const old_loops = try store.snapshotForSession(a, "old-copilot", .loop);
+    defer freeSnapshot(a, old_loops);
+    try std.testing.expectEqual(@as(usize, 0), old_loops.len);
+
+    const old_watches = try store.snapshotForSession(a, "old-copilot", .watch);
+    defer freeSnapshot(a, old_watches);
+    try std.testing.expectEqual(@as(usize, 1), old_watches.len);
+    try std.testing.expectEqual(watch.id, old_watches[0].id);
 }
 
 // Test injector that records calls and returns a scripted outcome.

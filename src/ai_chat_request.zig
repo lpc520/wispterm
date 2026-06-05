@@ -606,6 +606,7 @@ test "ai chat agent request json includes tool schemas" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"tools\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"tool_choice\":\"auto\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"terminal_list\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"terminal_context\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"terminal_select\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"ssh_session_exec\"") != null);
     if (@import("platform/pty_command.zig").wslSessionToolsEnabled()) {
@@ -670,6 +671,7 @@ test "ai chat responses request json uses input and response tool schemas" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"input\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"messages\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"function\",\"name\":\"terminal_list\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"function\",\"name\":\"terminal_context\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"function_call\",\"call_id\":\"call_1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"function_call_output\",\"call_id\":\"call_1\",\"output\":\"surface=1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"reasoning\":{\"effort\":\"high\"}") != null);

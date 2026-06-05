@@ -654,6 +654,7 @@ fn forEachToolSpec(
     comptime emit: fn (Ctx, []const u8, []const u8, []const u8) anyerror!void,
 ) !void {
     try emit(ctx, "terminal_list", "List WispTerm terminal surfaces visible to the agent, including the current agent-selected write context. Before any terminal write, use terminal_select to choose the intended surface_id; use focused=true only as a default hint.", "{}");
+    try emit(ctx, "terminal_context", "Report the current selected terminal write context/binding without changing it. Use this to verify which terminal Copilot or the agent will write to.", "{}");
     try emit(ctx, "terminal_snapshot", "Read a bounded text snapshot from one terminal surface or all surfaces.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Optional surface id from terminal_list.\"}}");
     try emit(ctx, "terminal_select", platform_pty_command.terminalSelectToolDescription(), "{\"surface_id\":{\"type\":\"string\",\"description\":\"Surface id from terminal_list to make the current agent write context.\"}}");
     try emit(ctx, platform_process.localCommandToolName(), platform_process.localCommandToolDescription(), "{\"command\":{\"type\":\"string\"},\"cwd\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\"}}");

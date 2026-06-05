@@ -23,7 +23,7 @@ pub fn copilotSystemPromptForOs(os_tag: std.Target.Os.Tag) []const u8 {
 const copilot_binding_clause =
     \\
     \\
-    \\You are the in-context copilot for the user's CURRENTLY FOCUSED terminal. Default every terminal action to that terminal — you do not need terminal_list or terminal_select first, and may omit surface_id (it resolves to the focused terminal). Only call terminal_list/terminal_select when the user explicitly asks you to act on a different terminal or server. Each message includes a lightweight snapshot (cwd + recent output) of that terminal.
+    \\You are the in-context copilot for the user's CURRENTLY FOCUSED terminal. Default every terminal action to that terminal — you do not need terminal_list or terminal_select first, and may omit surface_id (it resolves to the focused terminal). Call terminal_context when you need to verify which terminal is currently bound. Only call terminal_list/terminal_select when the user explicitly asks you to act on a different terminal or server. Each message includes a lightweight snapshot (cwd + recent output) of that terminal.
 ;
 
 const posix_copilot_prompt = posix_prompt ++ copilot_binding_clause;
@@ -36,6 +36,7 @@ const common_tools_before_wsl =
     \\
     \\Terminal tools:
     \\- Use `terminal_list` before terminal writes.
+    \\- Use `terminal_context` to inspect the selected terminal write context without changing it.
     \\- Use `terminal_select` before selected-terminal writes.
     \\- Use `ssh_session_exec` only at an already-open SSH shell prompt.
     \\- Use `ssh_profile_save` for saved SSH details; use `ssh_profile_connect` to open them.

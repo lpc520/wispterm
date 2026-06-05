@@ -92,11 +92,11 @@ pub const slash_command_entries = [_]SlashCommandEntry{
         .action = .reload_commands,
     },
     .{
-        .suggestion = .{ .command = "/loop", .description = "repeat a prompt every interval N times" },
+        .suggestion = .{ .command = "/loop", .description = "repeat, list, or stop interval prompts" },
         .action = .loop,
     },
     .{
-        .suggestion = .{ .command = "/watch", .description = "send a prompt at a daily or one-shot time" },
+        .suggestion = .{ .command = "/watch", .description = "schedule, list, or stop timed prompts" },
         .action = .watch,
     },
 };

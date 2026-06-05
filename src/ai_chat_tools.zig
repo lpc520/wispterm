@@ -41,6 +41,9 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
     if (std.mem.eql(u8, call.name, "terminal_list")) {
         return terminalListTool(ctx);
     }
+    if (std.mem.eql(u8, call.name, "terminal_context")) {
+        return terminalContextTool(ctx);
+    }
     if (std.mem.eql(u8, call.name, "terminal_snapshot")) {
         const args = parseArgs(ctx.allocator, call.arguments);
         defer if (args) |parsed| parsed.deinit();
@@ -313,6 +316,46 @@ fn toolSurfaceKind(surface: ToolSurface) []const u8 {
     if (surface.is_ssh) return "ssh";
     if (surface.is_wsl) return "wsl";
     return "terminal";
+}
+
+fn terminalContextTool(ctx: *const ToolContext) ![]u8 {
+    const selected = selectedWriteContext(ctx) orelse return ctx.allocator.dupe(u8, "No terminal context is selected.");
+    const snapshot = collectToolSnapshot(ctx) catch {
+        return std.fmt.allocPrint(ctx.allocator, "Selected terminal context surface_id={s}; terminal snapshot host unavailable.", .{selected});
+    };
+    defer snapshot.deinit(ctx.allocator);
+    const surface = findSurface(snapshot, selected) orelse {
+        return std.fmt.allocPrint(ctx.allocator, "Selected terminal context surface_id={s} is no longer open.", .{selected});
+    };
+    if (surface.agent_app != .none) {
+        return std.fmt.allocPrint(
+            ctx.allocator,
+            "selected surface_id={s} tab={d} focused={} kind={s} title=\"{s}\" cwd=\"{s}\" agent={s}:{s} confidence={d}",
+            .{
+                surface.id,
+                surface.tab_index + 1,
+                surface.focused,
+                toolSurfaceKind(surface),
+                surface.title,
+                surface.cwd,
+                surface.agent_app.label(),
+                surface.agent_state.label(),
+                surface.agent_confidence,
+            },
+        );
+    }
+    return std.fmt.allocPrint(
+        ctx.allocator,
+        "selected surface_id={s} tab={d} focused={} kind={s} title=\"{s}\" cwd=\"{s}\"",
+        .{
+            surface.id,
+            surface.tab_index + 1,
+            surface.focused,
+            toolSurfaceKind(surface),
+            surface.title,
+            surface.cwd,
+        },
+    );
 }
 
 fn terminalListTool(ctx: *const ToolContext) ![]u8 {
@@ -1584,13 +1627,16 @@ fn focusedSurface(snapshot: ToolSnapshot) ?ToolSurface {
     return null;
 }
 
-/// Resolve a tool surface_id, honoring focused-surface aliases
-/// (focused/active/current/empty → the focused terminal, falling back to the
-/// selected write-context). Returns null if nothing matches.
+/// Resolve a tool surface_id, honoring focused-surface aliases. A selected
+/// write-context wins over UI focus so scheduled Copilot work stays attached to
+/// the terminal that created it; otherwise aliases resolve to the focused
+/// terminal. Returns null if nothing matches.
 pub fn resolveSurfaceId(snapshot: ToolSnapshot, surface_id: []const u8, write_context: ?[]const u8) ?ToolSurface {
     if (isFocusedSurfaceAlias(surface_id)) {
+        if (write_context) |wc| {
+            if (findSurface(snapshot, wc)) |surface| return surface;
+        }
         if (focusedSurface(snapshot)) |surface| return surface;
-        if (write_context) |wc| return findSurface(snapshot, wc);
         return null;
     }
     return findSurface(snapshot, surface_id);
@@ -2340,6 +2386,77 @@ fn twoSurfaceSnapshotForTest(allocator: std.mem.Allocator) !ToolSnapshot {
     return .{ .surfaces = surfaces, .active_tab = 0 };
 }
 
+test "terminal_context reports the selected write context" {
+    const allocator = std.testing.allocator;
+    const cached = try twoSurfaceSnapshotForTest(allocator);
+    defer cached.deinit(allocator);
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = allocator,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = cached,
+        .settings = .{},
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    setWriteContext(&ctx, "aaa");
+    const call = ToolCall{ .id = @constCast("c1"), .name = @constCast("terminal_context"), .arguments = @constCast("{}") };
+
+    const out = try executeToolCall(&ctx, call);
+    defer allocator.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "selected surface_id=aaa") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "tab=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "focused=false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "title=\"shell\"") != null);
+    try std.testing.expectEqualStrings("aaa", ctx.write_context_surface_id[0..ctx.write_context_surface_id_len]);
+}
+
+test "terminal_context reports no selected write context" {
+    const allocator = std.testing.allocator;
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = allocator,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .settings = .{},
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    const call = ToolCall{ .id = @constCast("c1"), .name = @constCast("terminal_context"), .arguments = @constCast("{}") };
+
+    const out = try executeToolCall(&ctx, call);
+    defer allocator.free(out);
+
+    try std.testing.expectEqualStrings("No terminal context is selected.", out);
+}
+
+test "terminal_context reports a stale selected write context" {
+    const allocator = std.testing.allocator;
+    const cached = try twoSurfaceSnapshotForTest(allocator);
+    defer cached.deinit(allocator);
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = allocator,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = cached,
+        .settings = .{},
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    setWriteContext(&ctx, "closed-surface");
+    const call = ToolCall{ .id = @constCast("c1"), .name = @constCast("terminal_context"), .arguments = @constCast("{}") };
+
+    const out = try executeToolCall(&ctx, call);
+    defer allocator.free(out);
+
+    try std.testing.expectEqualStrings("Selected terminal context surface_id=closed-surface is no longer open.", out);
+    try std.testing.expectEqualStrings("closed-surface", ctx.write_context_surface_id[0..ctx.write_context_surface_id_len]);
+}
+
 test "terminal_select resolves the focused-surface alias to the focused surface" {
     const allocator = std.testing.allocator;
     const cached = try twoSurfaceSnapshotForTest(allocator);
@@ -2363,6 +2480,50 @@ test "terminal_select resolves the focused-surface alias to the focused surface"
     const exact = try terminalSelectTool(&ctx, "aaa");
     defer allocator.free(exact);
     try std.testing.expect(std.mem.indexOf(u8, exact, "surface_id=aaa") != null);
+}
+
+test "terminal_select focused alias honors selected write context before UI focus" {
+    const allocator = std.testing.allocator;
+    const cached = try twoSurfaceSnapshotForTest(allocator);
+    defer cached.deinit(allocator);
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = allocator,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = cached,
+        .settings = .{},
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    setWriteContext(&ctx, "aaa");
+
+    const result = try terminalSelectTool(&ctx, "focused");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "surface_id=aaa") != null);
+    try std.testing.expectEqualStrings("aaa", ctx.write_context_surface_id[0..ctx.write_context_surface_id_len]);
+}
+
+test "terminal_select focused alias falls back when selected write context is stale" {
+    const allocator = std.testing.allocator;
+    const cached = try twoSurfaceSnapshotForTest(allocator);
+    defer cached.deinit(allocator);
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = allocator,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = cached,
+        .settings = .{},
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    setWriteContext(&ctx, "closed-surface");
+
+    const result = try terminalSelectTool(&ctx, "focused");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "surface_id=bbb") != null);
+    try std.testing.expectEqualStrings("bbb", ctx.write_context_surface_id[0..ctx.write_context_surface_id_len]);
 }
 
 test "terminal_select lists available surfaces when the id does not match" {
