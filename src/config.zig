@@ -305,7 +305,8 @@ theme: ?[]const u8 = null,
 /// Default working directory for the AI agent's local commands (empty = unset).
 @"ai-agent-working-dir": []const u8 = "",
 
-/// API key for the Jina web search engine (https://s.jina.ai). Empty = unset.
+/// API key for Jina (https://jina.ai) — powers `$websearch` (s.jina.ai) and
+/// `$webread` (r.jina.ai). Optional for `$webread` (anonymous read works). Empty = unset.
 @"jina-api-key": []const u8 = "",
 
 /// The shell to run in the terminal. Platform aliases are resolved by
@@ -1283,7 +1284,7 @@ pub fn writeHelp(writer: anytype) !void {
         \\  --ai-agent-command-timeout-ms <ms> Agent command timeout budget
         \\  --ai-agent-output-limit <bytes> Max bytes returned by each tool
         \\  --ai-agent-working-dir <path> Default working directory for agent local commands
-        \\  --jina-api-key <key>         API key for the Jina web search ($websearch)
+        \\  --jina-api-key <key>         API key for Jina web search/read ($websearch, $webread)
         \\  --auto-update-check <bool>  Check GitHub Releases after startup
         \\  --config-file <path>         Include another config file (prefix ? for optional)
         \\  --keybind <binding>          Configure a shortcut, e.g. global:ctrl+backquote=toggle_quake
