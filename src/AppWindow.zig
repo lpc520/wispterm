@@ -2603,6 +2603,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
         .output_limit = cfg.@"ai-agent-output-limit",
     });
     ai_chat.setDefaultWorkingDir(cfg.@"ai-agent-working-dir");
+    @import("web_search.zig").setJinaApiKey(cfg.@"jina-api-key");
 
     if (g_window == null) return;
     g_quake_mode = cfg.@"quake-mode";
