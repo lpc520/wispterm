@@ -73,6 +73,7 @@ pub const TmuxBridge = struct {
             .onLayoutChange = onLayoutChange,
             .onWindowRenamed = onWindowRenamed,
             .onWindowClose = onWindowClose,
+            .onActiveWindowChanged = onActiveWindowChanged,
             .onActivePaneChanged = onActivePaneChanged,
         };
     }
@@ -214,6 +215,48 @@ pub const TmuxBridge = struct {
         return true;
     }
 
+    pub fn hasLiveTabsExcept(self: *TmuxBridge, excluded: ?*TabState) bool {
+        var ti: usize = 0;
+        while (ti < tab.g_tab_count) : (ti += 1) {
+            const t = tab.g_tabs[ti] orelse continue;
+            if (excluded) |skip| {
+                if (t == skip) continue;
+            }
+            if (t.tmux_owner == ownerPtr(self)) return true;
+        }
+        return false;
+    }
+
+    /// Close every local tab mirrored by this controller. The remote tmux
+    /// session is already gone (or the controller is being intentionally
+    /// detached), so this clears the UI mirror instead of trying to revive it.
+    pub fn closeOwnedTabs(self: *TmuxBridge) void {
+        var ti: usize = 0;
+        while (ti < tab.g_tab_count) {
+            const t = tab.g_tabs[ti] orelse {
+                ti += 1;
+                continue;
+            };
+            if (t.tmux_owner != ownerPtr(self)) {
+                ti += 1;
+                continue;
+            }
+
+            _ = self.forgetTab(t);
+            if (tab.g_tab_count > 1) {
+                tab.closeTab(ti, self.alloc);
+                continue;
+            }
+
+            // Keep the app's last tab alive, but make it a detached/dead
+            // terminal tab rather than leaving a dangling owner pointer.
+            t.tmux_window_id = null;
+            t.tmux_owner = null;
+            t.tmux_name_len = 0;
+            ti += 1;
+        }
+    }
+
     /// Drop pane mappings whose borrowed Surface pointer is no longer present
     /// in any live tab owned by this bridge. This repairs sessions after older
     /// builds or direct UI closes left stale PaneMap entries behind.
@@ -279,9 +322,18 @@ pub const TmuxBridge = struct {
         while (it.next()) |entry| {
             if (self.panes.findIdBySurface(entry.surface)) |id| self.panes.removePane(id);
         }
-        // closeTab no-ops when this is the last tab; whole-connection teardown
-        // for that case is a Phase 3d concern.
-        tab.closeTab(idx, self.alloc);
+        if (tab.g_tab_count > 1) {
+            tab.closeTab(idx, self.alloc);
+        } else {
+            t.tmux_window_id = null;
+            t.tmux_owner = null;
+            t.tmux_name_len = 0;
+        }
+    }
+
+    fn onActiveWindowChanged(ctx: *anyopaque, window_id: usize) void {
+        const idx = findTabIndexByWindowId(ctx, window_id) orelse return;
+        active_tab_state.g_active_tab = idx;
     }
 
     fn onActivePaneChanged(ctx: *anyopaque, pane_id: usize) void {

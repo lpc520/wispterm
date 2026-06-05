@@ -34,12 +34,14 @@ pub const Session = struct {
     /// seeding). Replies arrive in command order, so the front matches the next
     /// non-window-list `block_end`.
     capture_queue: std.ArrayListUnmanaged(usize) = .empty,
+    active_window: ?usize = null,
     active_pane: ?usize = null,
     exited: bool = false,
     events: EventSink = .{},
 
     pub const Window = struct {
         id: usize,
+        active: bool = false,
         name: std.ArrayListUnmanaged(u8) = .empty,
         panes: std.ArrayListUnmanaged(usize) = .empty,
 
@@ -61,11 +63,13 @@ pub const Session = struct {
         onLayoutChange: *const fn (ctx: *anyopaque, window_id: usize, root: *const layout.Node) void = noLayout,
         onWindowRenamed: *const fn (ctx: *anyopaque, window_id: usize, name: []const u8) void = noRename,
         onWindowClose: *const fn (ctx: *anyopaque, window_id: usize) void = noClose,
+        onActiveWindowChanged: *const fn (ctx: *anyopaque, window_id: usize) void = noActiveWindow,
         onActivePaneChanged: *const fn (ctx: *anyopaque, pane_id: usize) void = noActive,
 
         fn noLayout(_: *anyopaque, _: usize, _: *const layout.Node) void {}
         fn noRename(_: *anyopaque, _: usize, _: []const u8) void {}
         fn noClose(_: *anyopaque, _: usize) void {}
+        fn noActiveWindow(_: *anyopaque, _: usize) void {}
         fn noActive(_: *anyopaque, _: usize) void {}
     };
 
@@ -169,6 +173,7 @@ pub const Session = struct {
                 self.removeWindow(w.window_id);
             },
             .window_pane_changed => |w| {
+                self.active_window = w.window_id;
                 self.active_pane = w.pane_id;
                 self.events.onActivePaneChanged(self.events.ctx, w.pane_id);
             },
@@ -202,6 +207,7 @@ pub const Session = struct {
             if (self.windows.items[i].id == id) {
                 self.windows.items[i].deinit(self.alloc);
                 _ = self.windows.orderedRemove(i);
+                if (self.active_window == id) self.active_window = null;
                 return;
             }
         }
@@ -218,26 +224,56 @@ pub const Session = struct {
         self.events.onLayoutChange(self.events.ctx, window_id, &tree.root);
     }
 
-    /// Parse a `list-windows -F "#{window_id} #{window_layout}"` reply body and
-    /// apply each `@<id> <layout>` line as a layout. Used to bootstrap the
-    /// model on attach, since tmux does not push %layout-change for existing
-    /// windows. Returns true if at least one line applied — the `block_end`
-    /// handler uses that to tell a window-list reply apart from a capture-pane
-    /// reply. Non-matching lines are skipped.
+    /// Parse a `list-windows` reply body and apply each line as a layout. New
+    /// replies are tab-separated:
+    ///
+    ///     #{window_id}\t#{window_active}\t#{window_layout}\t#{window_name}
+    ///
+    /// Returns true if at least one line applied — the `block_end` handler uses
+    /// that to tell a window-list reply apart from a capture-pane reply.
+    /// Non-matching lines are skipped.
     fn applyWindowList(self: *Session, body: []const u8) Allocator.Error!bool {
         var applied = false;
+        var active_window: ?usize = null;
+        var seen: std.ArrayListUnmanaged(usize) = .empty;
+        defer seen.deinit(self.alloc);
+
         var lines = std.mem.splitScalar(u8, body, '\n');
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \r\t");
-            if (line.len < 2 or line[0] != '@') continue;
-            const sp = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
-            const id = std.fmt.parseInt(usize, line[1..sp], 10) catch continue;
-            const layout_str = std.mem.trim(u8, line[sp + 1 ..], " \r\t");
-            if (layout_str.len == 0) continue;
-            try self.applyLayout(id, layout_str);
+            const parsed = parseWindowListLine(line) orelse continue;
+            try seen.append(self.alloc, parsed.id);
+            try self.applyLayout(parsed.id, parsed.layout_str);
+            const w = self.findWindow(parsed.id) orelse continue;
+            w.active = parsed.active;
+            if (parsed.name) |name| {
+                try self.renameWindow(parsed.id, name);
+                self.events.onWindowRenamed(self.events.ctx, parsed.id, name);
+            }
+            if (parsed.active) active_window = parsed.id;
             applied = true;
         }
+        if (applied) self.removeWindowsNotIn(seen.items);
+        self.active_window = active_window;
+        if (active_window) |id| {
+            self.events.onActiveWindowChanged(self.events.ctx, id);
+        }
         return applied;
+    }
+
+    fn removeWindowsNotIn(self: *Session, ids: []const usize) void {
+        var i: usize = 0;
+        while (i < self.windows.items.len) {
+            const id = self.windows.items[i].id;
+            if (containsId(ids, id)) {
+                i += 1;
+                continue;
+            }
+            self.events.onWindowClose(self.events.ctx, id);
+            self.windows.items[i].deinit(self.alloc);
+            _ = self.windows.orderedRemove(i);
+            if (self.active_window == id) self.active_window = null;
+        }
     }
 
     /// Enqueue a `capture-pane` for a pane and remember it (FIFO) so the reply
@@ -258,7 +294,7 @@ pub const Session = struct {
     /// notifications.)
     pub fn start(self: *Session) Allocator.Error!void {
         try self.enqueueResize();
-        try self.cmds.appendSlice(self.alloc, "list-windows -F \"#{window_id} #{window_layout}\"\n");
+        try self.cmds.appendSlice(self.alloc, "list-windows -F \"#{window_id}\t#{window_active}\t#{window_layout}\t#{window_name}\"\n");
     }
 
     pub fn resizeClient(self: *Session, cols: u16, rows: u16) Allocator.Error!void {
@@ -312,6 +348,43 @@ pub const Session = struct {
         try self.cmds.appendSlice(self.alloc, s);
     }
 };
+
+const WindowListLine = struct {
+    id: usize,
+    active: bool = false,
+    layout_str: []const u8,
+    name: ?[]const u8 = null,
+};
+
+fn parseWindowListLine(line: []const u8) ?WindowListLine {
+    if (line.len < 2 or line[0] != '@') return null;
+    return parseTabbedWindowListLine(line);
+}
+
+fn parseTabbedWindowListLine(line: []const u8) ?WindowListLine {
+    const tab1 = std.mem.indexOfScalar(u8, line, '\t') orelse return null;
+    const id = std.fmt.parseInt(usize, line[1..tab1], 10) catch return null;
+    const rest1 = line[tab1 + 1 ..];
+    const tab2 = std.mem.indexOfScalar(u8, rest1, '\t') orelse return null;
+    const active = std.mem.eql(u8, rest1[0..tab2], "1");
+    const rest2 = rest1[tab2 + 1 ..];
+    const tab3 = std.mem.indexOfScalar(u8, rest2, '\t');
+    const layout_str = if (tab3) |idx| rest2[0..idx] else rest2;
+    if (layout_str.len == 0) return null;
+    return .{
+        .id = id,
+        .active = active,
+        .layout_str = layout_str,
+        .name = if (tab3) |idx| rest2[idx + 1 ..] else null,
+    };
+}
+
+fn containsId(ids: []const usize, id: usize) bool {
+    for (ids) |candidate| {
+        if (candidate == id) return true;
+    }
+    return false;
+}
 
 fn collectPanes(
     alloc: Allocator,
@@ -500,6 +573,7 @@ const EventLog = struct {
     renamed_window: ?usize = null,
     renamed_name: std.ArrayListUnmanaged(u8) = .empty,
     closed_window: ?usize = null,
+    active_window: ?usize = null,
     active_pane: ?usize = null,
 
     fn eventSink(self: *EventLog) Session.EventSink {
@@ -508,6 +582,7 @@ const EventLog = struct {
             .onLayoutChange = onLayout,
             .onWindowRenamed = onRenamed,
             .onWindowClose = onClose,
+            .onActiveWindowChanged = onActiveWindow,
             .onActivePaneChanged = onActive,
         };
     }
@@ -528,6 +603,10 @@ const EventLog = struct {
     fn onClose(ctx: *anyopaque, window_id: usize) void {
         const self: *EventLog = @ptrCast(@alignCast(ctx));
         self.closed_window = window_id;
+    }
+    fn onActiveWindow(ctx: *anyopaque, window_id: usize) void {
+        const self: *EventLog = @ptrCast(@alignCast(ctx));
+        self.active_window = window_id;
     }
     fn onActive(ctx: *anyopaque, pane_id: usize) void {
         const self: *EventLog = @ptrCast(@alignCast(ctx));
@@ -609,15 +688,67 @@ test "block_end list-windows reply drives onLayoutChange per window (bootstrap)"
     defer s.deinit();
     s.events = log.eventSink();
 
-    // The reply tmux sends on attach to `list-windows -F "#{window_id} #{window_layout}"`.
-    try s.feed("%begin 1 1 0\n@1 b25e,80x24,0,0,1\n%end 1 1 0\n");
+    // The reply tmux sends on attach to `list-windows -F "#{window_id}\t#{window_active}\t#{window_layout}\t#{window_name}"`.
+    try s.feed("%begin 1 1 0\n@1\t1\tb25e,80x24,0,0,1\tshell\n%end 1 1 0\n");
     try std.testing.expectEqual(@as(?usize, 1), log.layout_window);
     try std.testing.expectEqual(@as(usize, 1), log.layout_panes);
     try std.testing.expectEqual(@as(usize, 1), s.windowCount());
+    try std.testing.expectEqualStrings("shell", s.findWindow(1).?.name.items);
 
     // A non-window-list reply body must not create windows.
     try s.feed("%begin 2 2 0\nsome other output\n%end 2 2 0\n");
     try std.testing.expectEqual(@as(usize, 1), s.windowCount());
+}
+
+test "block_end list-windows reply carries window names and the active window" {
+    var col = Collector{ .alloc = std.testing.allocator };
+    defer col.deinit();
+    var log = EventLog{ .alloc = std.testing.allocator };
+    defer log.deinit();
+    var s = Session.init(std.testing.allocator, col.sink(), 80, 24);
+    defer s.deinit();
+    s.events = log.eventSink();
+
+    try s.feed(
+        "%begin 1 1 0\n" ++
+            "@1\t0\tb25e,80x24,0,0,1\tbuild\n" ++
+            "@2\t1\tb25e,80x24,0,0,2\teditor tab\n" ++
+            "%end 1 1 0\n",
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), s.windowCount());
+    try std.testing.expectEqualStrings("build", s.findWindow(1).?.name.items);
+    try std.testing.expectEqualStrings("editor tab", s.findWindow(2).?.name.items);
+    try std.testing.expect(!s.findWindow(1).?.active);
+    try std.testing.expect(s.findWindow(2).?.active);
+    try std.testing.expectEqual(@as(?usize, 2), s.active_window);
+    try std.testing.expectEqual(@as(?usize, 2), log.active_window);
+    try std.testing.expectEqual(@as(?usize, 2), log.renamed_window);
+    try std.testing.expectEqualStrings("editor tab", log.renamed_name.items);
+}
+
+test "block_end list-windows reply removes windows absent from the full refresh" {
+    var col = Collector{ .alloc = std.testing.allocator };
+    defer col.deinit();
+    var log = EventLog{ .alloc = std.testing.allocator };
+    defer log.deinit();
+    var s = Session.init(std.testing.allocator, col.sink(), 80, 24);
+    defer s.deinit();
+    s.events = log.eventSink();
+
+    try s.feed(
+        "%begin 1 1 0\n" ++
+            "@1\t0\tb25e,80x24,0,0,1\told\n" ++
+            "@2\t1\tb25e,80x24,0,0,2\tkeep\n" ++
+            "%end 1 1 0\n",
+    );
+    try std.testing.expectEqual(@as(usize, 2), s.windowCount());
+
+    try s.feed("%begin 2 2 0\n@2\t1\tb25e,80x24,0,0,2\tkeep\n%end 2 2 0\n");
+    try std.testing.expectEqual(@as(usize, 1), s.windowCount());
+    try std.testing.expect(s.findWindow(1) == null);
+    try std.testing.expect(s.findWindow(2) != null);
+    try std.testing.expectEqual(@as(?usize, 1), log.closed_window);
 }
 
 test "capture-pane reply is routed to the pane sink (scrollback seed)" {

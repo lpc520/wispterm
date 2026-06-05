@@ -323,11 +323,16 @@ pub const TmuxController = struct {
     early_debug_chunks: u8 = 0,
     last_cols: u16 = 0,
     last_rows: u16 = 0,
+    /// Pre-handshake transport setup failed; retry login/connect with backoff.
+    /// Once tmux control mode has started, transport exit closes the controller
+    /// instead of re-running `new -A` and recreating a user-killed session.
     reconnecting: bool = false,
+    closed: bool = false,
     next_retry_ms: i64 = 0,
     backoff_ms: i64 = INITIAL_BACKOFF_MS,
 
     fn tick(self: *TmuxController, client_cols: u16, client_rows: u16) void {
+        if (self.closed) return;
         if (self.reconnecting) {
             self.tryReconnect();
             return;
@@ -360,6 +365,15 @@ pub const TmuxController = struct {
                 std.debug.print("tmux: control-mode handshake seen\n", .{});
             }
             self.bridge.session.feed(chunk) catch {};
+            if (self.bridge.session.exited) {
+                self.closeFromRemoteExit();
+                return;
+            }
+        }
+
+        if (self.bridge.session.exited) {
+            self.closeFromRemoteExit();
+            return;
         }
 
         if (self.transportExited()) {
@@ -378,12 +392,25 @@ pub const TmuxController = struct {
         }
     }
 
+    fn closeFromRemoteExit(self: *TmuxController) void {
+        if (self.closed) return;
+        std.debug.print("tmux: control-mode session exited; closing controller\n", .{});
+        if (!self.reconnecting) self.transport.deinit();
+        self.reconnecting = false;
+        self.bridge.closeOwnedTabs();
+        self.closed = true;
+    }
+
     fn transportExited(self: *TmuxController) bool {
         return self.transport.exited();
     }
 
     fn markDisconnected(self: *TmuxController) void {
         if (self.reconnecting) return;
+        if (self.handshake_seen) {
+            self.closeFromRemoteExit();
+            return;
+        }
         std.debug.print("tmux: transport lost - reconnecting...\n", .{});
         self.transport.deinit();
         self.handshake_seen = false;
@@ -505,7 +532,7 @@ pub const TmuxController = struct {
     }
 
     fn destroy(self: *TmuxController) void {
-        if (!self.reconnecting) {
+        if (!self.reconnecting and !self.closed) {
             self.transport.deinit();
         }
         self.bridge.destroy();
@@ -599,7 +626,17 @@ pub fn start(
 
 pub fn tickAll(alloc: Allocator, client_cols: u16, client_rows: u16) void {
     _ = alloc;
-    for (g_controllers.items) |c| c.tick(client_cols, client_rows);
+    var i: usize = 0;
+    while (i < g_controllers.items.len) {
+        const c = g_controllers.items[i];
+        c.tick(client_cols, client_rows);
+        if (c.closed) {
+            _ = g_controllers.orderedRemove(i);
+            c.destroy();
+            continue;
+        }
+        i += 1;
+    }
 }
 
 pub fn shutdownAll(alloc: Allocator) void {
@@ -610,8 +647,16 @@ pub fn shutdownAll(alloc: Allocator) void {
 
 pub fn forgetClosedTab(tab_state: *anyopaque) void {
     const t: *tab.TabState = @ptrCast(@alignCast(tab_state));
-    for (g_controllers.items) |c| {
-        if (c.bridge.forgetTab(t)) return;
+    var i: usize = 0;
+    while (i < g_controllers.items.len) : (i += 1) {
+        const c = g_controllers.items[i];
+        if (c.bridge.forgetTab(t)) {
+            if (!c.bridge.hasLiveTabsExcept(t)) {
+                _ = g_controllers.orderedRemove(i);
+                c.destroy();
+            }
+            return;
+        }
     }
 }
 

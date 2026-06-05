@@ -55,14 +55,16 @@ pub const TmuxController = struct {
     /// Last client size forwarded to tmux, to avoid redundant refresh-client.
     last_cols: u16 = 0,
     last_rows: u16 = 0,
-    /// Transport down (ssh/network dropped); retrying with backoff. Tabs and
-    /// surfaces are kept; on reconnect the same session re-attaches and the
-    /// bridge reuses the surfaces by pane id, so state is preserved.
+    /// Pre-handshake transport setup failed; retry login/connect with backoff.
+    /// Once tmux control mode has started, transport exit closes the controller
+    /// instead of re-running `new -A` and recreating a user-killed session.
     reconnecting: bool = false,
+    closed: bool = false,
     next_retry_ms: i64 = 0,
     backoff_ms: i64 = INITIAL_BACKOFF_MS,
 
     fn tick(self: *TmuxController, client_cols: u16, client_rows: u16) void {
+        if (self.closed) return;
         if (self.reconnecting) {
             self.tryReconnect();
             return;
@@ -94,10 +96,19 @@ pub const TmuxController = struct {
                     std.debug.print("tmux: control-mode handshake seen\n", .{});
                 }
                 self.bridge.session.feed(chunk) catch {};
+                if (self.bridge.session.exited) {
+                    self.closeFromRemoteExit();
+                    return;
+                }
             } else if (fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
                 self.markDisconnected();
                 return;
             } else break;
+        }
+
+        if (self.bridge.session.exited) {
+            self.closeFromRemoteExit();
+            return;
         }
 
         // Hold all outbound commands until the control-mode handshake; tmux is
@@ -113,10 +124,26 @@ pub const TmuxController = struct {
         }
     }
 
-    /// Transport dropped: tear down the dead transport (but keep the bridge /
-    /// tabs / surfaces) and schedule a reconnect.
+    fn closeFromRemoteExit(self: *TmuxController) void {
+        if (self.closed) return;
+        std.debug.print("tmux: control-mode session exited; closing controller\n", .{});
+        if (!self.reconnecting) {
+            self.command.deinit();
+            self.pty.deinit();
+        }
+        self.reconnecting = false;
+        self.bridge.closeOwnedTabs();
+        self.closed = true;
+    }
+
+    /// Pre-handshake transport failed: tear it down and schedule a retry.
+    /// Post-handshake transport close means the tmux control session ended.
     fn markDisconnected(self: *TmuxController) void {
         if (self.reconnecting) return;
+        if (self.handshake_seen) {
+            self.closeFromRemoteExit();
+            return;
+        }
         std.debug.print("tmux: transport lost — reconnecting…\n", .{});
         self.command.deinit();
         self.pty.deinit();
@@ -193,7 +220,7 @@ pub const TmuxController = struct {
         // Closing the transport PTY sends ssh SIGHUP, which detaches (not kills)
         // the remote tmux session — the persistence we want. Skip the transport
         // teardown if we're mid-reconnect (it's already closed).
-        if (!self.reconnecting) {
+        if (!self.reconnecting and !self.closed) {
             self.command.deinit();
             self.pty.deinit();
         }
@@ -306,7 +333,17 @@ pub fn start(
 /// shutdownAll (app quit).
 pub fn tickAll(alloc: Allocator, client_cols: u16, client_rows: u16) void {
     _ = alloc;
-    for (g_controllers.items) |c| c.tick(client_cols, client_rows);
+    var i: usize = 0;
+    while (i < g_controllers.items.len) {
+        const c = g_controllers.items[i];
+        c.tick(client_cols, client_rows);
+        if (c.closed) {
+            _ = g_controllers.orderedRemove(i);
+            c.destroy();
+            continue;
+        }
+        i += 1;
+    }
 }
 
 pub fn shutdownAll(alloc: Allocator) void {
@@ -317,8 +354,16 @@ pub fn shutdownAll(alloc: Allocator) void {
 
 pub fn forgetClosedTab(tab_state: *anyopaque) void {
     const t: *tab.TabState = @ptrCast(@alignCast(tab_state));
-    for (g_controllers.items) |c| {
-        if (c.bridge.forgetTab(t)) return;
+    var i: usize = 0;
+    while (i < g_controllers.items.len) : (i += 1) {
+        const c = g_controllers.items[i];
+        if (c.bridge.forgetTab(t)) {
+            if (!c.bridge.hasLiveTabsExcept(t)) {
+                _ = g_controllers.orderedRemove(i);
+                c.destroy();
+            }
+            return;
+        }
     }
 }
 
