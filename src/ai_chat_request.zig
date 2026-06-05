@@ -10,6 +10,7 @@ const ai_chat_protocol = @import("ai_chat_protocol.zig");
 const ai_skill_distill = @import("ai_skill_distill.zig");
 const ai_chat_tools = @import("ai_chat_tools.zig");
 const web_search = @import("web_search.zig");
+const web_read = @import("web_read.zig");
 const ai_chat_types = @import("ai_chat_types.zig");
 
 // Type aliases from ai_chat_protocol
@@ -159,6 +160,38 @@ pub fn webSearchThreadMain(req: *ai_chat.WebSearchRequest) void {
 
     const text = web_search.formatForUser(allocator, req.query, results.items) catch {
         ai_chat.appendWebSearchResult(session, "Out of memory formatting results.");
+        return;
+    };
+    defer allocator.free(text);
+    ai_chat.appendWebSearchResult(session, text);
+}
+
+/// Background worker for one `$webread` command. Owns `req`; frees it on exit.
+/// Reuses the Jina key when configured (optional — anonymous read works), reads the
+/// target, and appends the formatted content to the transcript.
+pub fn webReadThreadMain(req: *ai_chat.WebReadRequest) void {
+    defer req.deinit();
+    const allocator = req.allocator;
+    const session = req.session;
+    if (session.closing.load(.acquire)) return;
+
+    const key_opt = web_search.jinaApiKeyAlloc(allocator) catch null;
+    defer if (key_opt) |k| allocator.free(k);
+    const key = key_opt orelse "";
+
+    var result = web_read.executeRead(allocator, req.target, .{ .api_key = key }) catch |err| {
+        const text = web_read.formatErrorText(allocator, err) catch {
+            ai_chat.appendWebSearchResult(session, web_read.errorText(err));
+            return;
+        };
+        defer allocator.free(text);
+        ai_chat.appendWebSearchResult(session, text);
+        return;
+    };
+    defer result.deinit();
+
+    const text = web_read.formatForUser(allocator, req.target, &result) catch {
+        ai_chat.appendWebSearchResult(session, "Out of memory formatting content.");
         return;
     };
     defer allocator.free(text);

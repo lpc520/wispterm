@@ -21,18 +21,20 @@ pub const SlashCommand = enum {
     unknown,
 };
 
-pub const WebCommand = enum { websearch };
+pub const WebCommand = enum { websearch, webread };
 
 /// Reserved `$`-prefixed commands shown in the same dropdown as skills.
 pub const ReservedWebCommand = struct { name: []const u8, description: []const u8 };
 pub const reserved_web_commands = [_]ReservedWebCommand{
     .{ .name = "websearch", .description = "search the web (Jina)" },
+    .{ .name = "webread", .description = "read a web page or local file (Jina)" },
 };
 
 /// Match the first whitespace-delimited token against a reserved `$` command.
 /// `token` is e.g. "$websearch" (the value of `first_tok` in Session.submit).
 pub fn parseWebCommand(token: []const u8) ?WebCommand {
     if (std.mem.eql(u8, token, "$websearch")) return .websearch;
+    if (std.mem.eql(u8, token, "$webread")) return .webread;
     return null;
 }
 
@@ -451,10 +453,18 @@ test "parseWebCommand matches only the $websearch token" {
 }
 
 test "reserved $websearch appears in the $ suggestion dropdown" {
-    try std.testing.expectEqual(@as(usize, 1), skillSuggestionCountForPrefix("$web", &.{}));
+    try std.testing.expectEqual(@as(usize, 2), skillSuggestionCountForPrefix("$web", &.{}));
     const s = skillSuggestionAtForPrefix("$web", &.{}, 0).?;
     try std.testing.expectEqual(ComposerSuggestionKind.skill, s.kind);
     try std.testing.expectEqualStrings("websearch", s.text);
+}
+
+test "parseWebCommand matches $webread and still matches $websearch" {
+    try std.testing.expectEqual(WebCommand.webread, parseWebCommand("$webread").?);
+    try std.testing.expectEqual(WebCommand.websearch, parseWebCommand("$websearch").?);
+    try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("$webreadx"));
+    try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("/webread"));
+    try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("webread"));
 }
 
 test "parseCwdArg classifies show, reset, and set" {
