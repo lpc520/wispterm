@@ -16,8 +16,9 @@ const user_truncate_cap: usize = 8000;
 pub const Options = struct {
     api_key: []const u8 = "", // "" = anonymous (no Authorization header)
     max_file_bytes: usize = 25 * 1024 * 1024, // reject larger local files (OOM guard)
-    cache_dir: ?[]const u8 = null, // working dir; null = cache next to the file. Used for the
-    // .webread_cache root AND to resolve a relative file target.
+    // Working dir; null = cache next to the file. Used both as the `.webread_cache`
+    // root and to resolve a relative file target.
+    cache_dir: ?[]const u8 = null,
 };
 
 pub const ReadResult = struct {
@@ -347,6 +348,8 @@ pub fn executeRead(gpa: std.mem.Allocator, target: []const u8, opts: Options) !R
         if (web_read_cache.read(gpa, p)) |cached| {
             defer gpa.free(cached);
             const arena = result.arena.allocator();
+            // The cache stores only the markdown body (a readable .md), so title is
+            // intentionally blank on a hit; content is what callers care about.
             result.url = try arena.dupe(u8, resolved);
             result.content = try arena.dupe(u8, cached);
             result.cached = true;
@@ -357,7 +360,9 @@ pub fn executeRead(gpa: std.mem.Allocator, target: []const u8, opts: Options) !R
     var response = try uploadFile(gpa, lf, opts);
     defer response.deinit(gpa);
     try parseResponseInto(&result, response);
-    if (cpath) |p| web_read_cache.store(gpa, p, result.content);
+    // Best-effort store of the fresh markdown; the miss→store path is network-dependent
+    // so it is not exercised by the offline tests.
+    if (cpath) |p| web_read_cache.store(p, result.content);
     return result;
 }
 
@@ -535,7 +540,7 @@ test "executeRead returns cached content with no network on a cache hit" {
     const hash = web_read_cache.sha256Hex("PDFDATA", &hb);
     const cpath = try web_read_cache.cachePath(a, dir, pdf, hash);
     defer a.free(cpath);
-    web_read_cache.store(a, cpath, "CACHED MARKDOWN");
+    web_read_cache.store(cpath, "CACHED MARKDOWN");
 
     var result = try executeRead(a, pdf, .{ .cache_dir = dir });
     defer result.deinit();

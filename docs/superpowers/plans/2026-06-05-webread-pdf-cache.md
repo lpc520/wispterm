@@ -95,7 +95,7 @@ pub fn read(allocator: std.mem.Allocator, cache_path: []const u8) ?[]u8 {
 
 /// Best-effort: mkdir -p the parent dir, then atomically write `content`. All errors
 /// are swallowed — caching must never fail the read.
-pub fn store(_: std.mem.Allocator, cache_path: []const u8, content: []const u8) void {
+pub fn store(cache_path: []const u8, content: []const u8) void {
     if (std.fs.path.dirname(cache_path)) |dir| std.fs.cwd().makePath(dir) catch return;
     var write_buffer: [0]u8 = .{};
     var atomic = std.fs.cwd().atomicFile(cache_path, .{ .write_buffer = &write_buffer }) catch return;
@@ -139,7 +139,7 @@ test "store then read round-trips; missing and empty read as null" {
     const cpath = try std.fs.path.join(a, &.{ root, ".webread_cache", "x.pdf.deadbeefdeadbeef.md" });
     defer a.free(cpath);
 
-    store(a, cpath, "CACHED MARKDOWN");
+    store(cpath, "CACHED MARKDOWN");
     const got = read(a, cpath).?;
     defer a.free(got);
     try std.testing.expectEqualStrings("CACHED MARKDOWN", got);
@@ -347,7 +347,7 @@ test "executeRead returns cached content with no network on a cache hit" {
     const hash = web_read_cache.sha256Hex("PDFDATA", &hb);
     const cpath = try web_read_cache.cachePath(a, dir, pdf, hash);
     defer a.free(cpath);
-    web_read_cache.store(a, cpath, "CACHED MARKDOWN");
+    web_read_cache.store(cpath, "CACHED MARKDOWN");
 
     var result = try executeRead(a, pdf, .{ .cache_dir = dir });
     defer result.deinit();
@@ -404,7 +404,7 @@ const web_read_cache = @import("web_read_cache.zig");
     var response = try uploadFile(gpa, lf, opts);
     defer response.deinit(gpa);
     try parseResponseInto(&result, response);
-    if (cpath) |p| web_read_cache.store(gpa, p, result.content);
+    if (cpath) |p| web_read_cache.store(p, result.content);
     return result;
 ```
 
