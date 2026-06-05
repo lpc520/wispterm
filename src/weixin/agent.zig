@@ -3,6 +3,7 @@
 const std = @import("std");
 const control = @import("control.zig");
 const types = @import("types.zig");
+const approval_reply = @import("approval_reply.zig");
 
 const AI_ACK = "信息已收到，开始处理。\n发送 /stop 可停止本次处理。";
 const ESC = "\x1b";
@@ -98,6 +99,28 @@ fn sendAi(ctrl: control.Control, text: []const u8, reply_context: ?types.ReplyCo
         break :blk ctrl.findAiSurface() orelse return out.set("已请求打开副驾，但未等到副驾标签页。");
     };
 
+    // A pending approval turns this reply into the answer for it, not a new
+    // prompt. resolveAiApproval's bool is discarded: we just checked pending
+    // above, and a lost race (resolved locally in between) needs no different
+    // reply. Both approve and deny keep streaming — denying a tool does not
+    // abort the run, the copilot continues with the denial (use /stop to abort).
+    if (ctrl.aiApprovalPending()) {
+        switch (approval_reply.classify(text)) {
+            .approve => {
+                _ = ctrl.resolveAiApproval(true);
+                try out.set("已确认，继续执行。");
+                out.expect_ai_progress = true;
+            },
+            .deny => {
+                _ = ctrl.resolveAiApproval(false);
+                try out.set("已拒绝该操作。");
+                out.expect_ai_progress = true;
+            },
+            .unrecognized => try out.set("当前有待确认操作，请先回复 Y 同意 / N 拒绝。"),
+        }
+        return;
+    }
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(out.allocator);
     try buf.appendSlice(out.allocator, text);
@@ -153,6 +176,9 @@ const FakeControl = struct {
     len: usize = 0,
     last_surface: [16]u8 = [_]u8{0} ** 16,
     last_reply_context: ?types.ReplyContext = null,
+    approval_pending: bool = false,
+    resolved_calls: u8 = 0,
+    last_resolve_approve: bool = false,
 
     /// Bytes captured from the last send_input. send_input borrows its argument
     /// (production consumes it synchronously), so the fake copies for inspection.
@@ -185,6 +211,17 @@ const FakeControl = struct {
     fn latest_transcript(_: *anyopaque) []const u8 {
         return "";
     }
+    fn ai_approval_pending(ctx: *anyopaque) bool {
+        return cast(ctx).approval_pending;
+    }
+    fn resolve_ai_approval(ctx: *anyopaque, approve: bool) bool {
+        const self = cast(ctx);
+        if (!self.approval_pending) return false;
+        self.approval_pending = false;
+        self.resolved_calls += 1;
+        self.last_resolve_approve = approve;
+        return true;
+    }
     fn cast(ctx: *anyopaque) *FakeControl {
         return @ptrCast(@alignCast(ctx));
     }
@@ -202,6 +239,8 @@ const FakeControl = struct {
             .open_ai_agent = open_ai_agent,
             .send_input = send_input,
             .latest_transcript = latest_transcript,
+            .ai_approval_pending = ai_approval_pending,
+            .resolve_ai_approval = resolve_ai_approval,
         } };
     }
 };
@@ -282,4 +321,47 @@ test "/stop sends ESC to the AI surface and requests followup cancellation" {
     try t.expectEqualStrings(ESC, fake.lastInput());
     try t.expect(out.stop_followup);
     try t.expect(!out.expect_ai_progress);
+}
+
+test "approval pending: Y approves, acks, and streams progress" {
+    var fake = FakeControl{ .approval_pending = true };
+    var out = Reply.init(t.allocator);
+    defer out.deinit();
+    try route(t.allocator, fake.control_iface(), defaultSettings(), "Y", null, &out);
+    try t.expectEqual(@as(u8, 1), fake.resolved_calls);
+    try t.expect(fake.last_resolve_approve);
+    try t.expectEqualStrings("已确认，继续执行。", out.text.items);
+    try t.expect(out.expect_ai_progress);
+}
+
+test "approval pending: 拒绝 denies and streams the continuation" {
+    var fake = FakeControl{ .approval_pending = true };
+    var out = Reply.init(t.allocator);
+    defer out.deinit();
+    try route(t.allocator, fake.control_iface(), defaultSettings(), "拒绝", null, &out);
+    try t.expectEqual(@as(u8, 1), fake.resolved_calls);
+    try t.expect(!fake.last_resolve_approve);
+    try t.expectEqualStrings("已拒绝该操作。", out.text.items);
+    try t.expect(out.expect_ai_progress);
+}
+
+test "approval pending: unrecognized reply reminds without acting" {
+    var fake = FakeControl{ .approval_pending = true };
+    var out = Reply.init(t.allocator);
+    defer out.deinit();
+    try route(t.allocator, fake.control_iface(), defaultSettings(), "先删回收站", null, &out);
+    try t.expectEqual(@as(u8, 0), fake.resolved_calls);
+    try t.expect(!out.expect_ai_progress);
+    try t.expect(std.mem.indexOf(u8, out.text.items, "请先回复") != null);
+    // The unrecognized text must NOT be forwarded to the composer.
+    try t.expectEqual(@as(usize, 0), fake.len);
+}
+
+test "no approval pending: default text still goes to the AI surface" {
+    var fake = FakeControl{}; // approval_pending defaults false
+    var out = Reply.init(t.allocator);
+    defer out.deinit();
+    try route(t.allocator, fake.control_iface(), defaultSettings(), "hello world", null, &out);
+    try t.expectEqualStrings("hello world\r", fake.lastInput());
+    try t.expect(out.expect_ai_progress);
 }
