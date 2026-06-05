@@ -77,3 +77,99 @@ test "parseLsDirArg: rejects zero, multiple, and non-dir args" {
     try std.testing.expect(parseLsDirArg("ls foo.txt") == null);
     try std.testing.expect(parseLsDirArg("ls Ath") == null);
 }
+
+/// Encode one grid row into UTF-8 bytes in `buf`. Empty cells (codepoint 0)
+/// become spaces so tokenization sees word boundaries. Truncates at `buf` len.
+fn encodeRow(grid: anytype, row: usize, buf: []u8) []const u8 {
+    const cols = grid.colCount(row);
+    var n: usize = 0;
+    var col: usize = 0;
+    while (col < cols) : (col += 1) {
+        var cp = grid.codepoint(row, col);
+        if (cp == 0) cp = ' ';
+        var tmp: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(cp, &tmp) catch blk: {
+            // Un-encodable codepoint (shouldn't occur from a real grid):
+            // substitute a space so column structure / token boundaries hold.
+            tmp[0] = ' ';
+            break :blk @as(usize, 1);
+        };
+        if (n + len > buf.len) break;
+        @memcpy(buf[n .. n + len], tmp[0..len]);
+        n += len;
+    }
+    return buf[0..n];
+}
+
+/// Scan upward from `click_row` (bounded to the grid) for the nearest line that
+/// parses as an `ls <dir>/` command. On a hit, copy the directory into
+/// `out_buf` and return it; otherwise null. `grid` must expose
+/// `rowCount() usize`, `colCount(row) usize`, and `codepoint(row, col) u21`.
+pub fn inferPrefixForClick(grid: anytype, click_row: usize, out_buf: []u8) ?[]const u8 {
+    const count = grid.rowCount();
+    if (count == 0) return null;
+    var row = if (click_row >= count) count - 1 else click_row;
+    var line_buf: [1024]u8 = undefined;
+    while (true) {
+        const line = encodeRow(grid, row, &line_buf);
+        if (parseLsDirArg(line)) |dir| {
+            if (dir.len == 0 or dir.len > out_buf.len) return null;
+            @memcpy(out_buf[0..dir.len], dir);
+            return out_buf[0..dir.len];
+        }
+        if (row == 0) break;
+        row -= 1;
+    }
+    return null;
+}
+
+/// Test-only grid backed by ASCII rows (index 0 = top row).
+const FakeGrid = struct {
+    rows: []const []const u8,
+
+    fn rowCount(self: FakeGrid) usize {
+        return self.rows.len;
+    }
+    fn colCount(self: FakeGrid, row: usize) usize {
+        return self.rows[row].len;
+    }
+    fn codepoint(self: FakeGrid, row: usize, col: usize) u21 {
+        return self.rows[row][col];
+    }
+};
+
+test "inferPrefixForClick: finds the ls command above the clicked row" {
+    const grid = FakeGrid{ .rows = &.{
+        "$ ls Ath/Ph_SE/",
+        "cluster_resolution_summary.tsv",
+        "summary.txt",
+    } };
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Ath/Ph_SE/", inferPrefixForClick(grid, 2, &buf).?);
+}
+
+test "inferPrefixForClick: picks the nearest ls when several exist" {
+    const grid = FakeGrid{ .rows = &.{
+        "$ ls first/",
+        "a.txt",
+        "$ ls second/",
+        "b.txt",
+    } };
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("second/", inferPrefixForClick(grid, 3, &buf).?);
+}
+
+test "inferPrefixForClick: no ls above returns null" {
+    const grid = FakeGrid{ .rows = &.{
+        "$ cat notes.txt",
+        "some output",
+    } };
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(inferPrefixForClick(grid, 1, &buf) == null);
+}
+
+test "inferPrefixForClick: empty grid returns null" {
+    const grid = FakeGrid{ .rows = &.{} };
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(inferPrefixForClick(grid, 0, &buf) == null);
+}
