@@ -59,18 +59,25 @@ pub fn looksBinary(content: []const u8) bool {
 
 /// Render `content` as numbered lines `   <n>\t<line>\n` starting at 1-based
 /// `offset` (0 means 1), emitting at most `limit` lines (0 means all). Owned.
+/// Matches `cat -n` semantics: a single trailing newline is dropped so a normal
+/// POSIX text file does not render a phantom blank final line.
 pub fn sliceLinesAlloc(
     allocator: std.mem.Allocator,
     content: []const u8,
     offset: usize,
     limit: usize,
 ) ![]u8 {
-    const start = if (offset == 0) 1 else offset;
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
+    if (content.len == 0) return out.toOwnedSlice(allocator);
+    // offset==0 means start at line 1; limit==0 means no cap. Drop a single
+    // trailing newline so a normal text file does not render a phantom blank
+    // final line (matches `cat -n`).
+    const start = if (offset == 0) 1 else offset;
+    const body = if (content[content.len - 1] == '\n') content[0 .. content.len - 1] else content;
     var line_no: usize = 1;
     var emitted: usize = 0;
-    var it = std.mem.splitScalar(u8, content, '\n');
+    var it = std.mem.splitScalar(u8, body, '\n');
     while (it.next()) |line| : (line_no += 1) {
         if (line_no < start) continue;
         if (limit != 0 and emitted >= limit) break;
@@ -103,6 +110,7 @@ pub fn unifiedDiffAlloc(
     old: []const u8,
     new: []const u8,
 ) ![]u8 {
+    if (std.mem.eql(u8, old, new)) return allocator.dupe(u8, "(no changes)\n");
     const old_lines = try splitLines(allocator, old);
     defer allocator.free(old_lines);
     const new_lines = try splitLines(allocator, new);
@@ -183,7 +191,7 @@ test "sliceLinesAlloc with offset 0 starts at line 1" {
     const a = std.testing.allocator;
     const r = try sliceLinesAlloc(a, "x\ny\n", 0, 0);
     defer a.free(r);
-    try std.testing.expectEqualStrings("     1\tx\n     2\ty\n     3\t\n", r);
+    try std.testing.expectEqualStrings("     1\tx\n     2\ty\n", r);
 }
 
 test "unifiedDiffAlloc shows a single changed line" {
@@ -204,4 +212,32 @@ test "unifiedDiffAlloc for a new file shows only additions" {
         "--- a/n.txt\n+++ b/n.txt\n@@ -1,0 +1,2 @@\n+x\n+y\n",
         d,
     );
+}
+
+test "sliceLinesAlloc returns empty for an empty file" {
+    const a = std.testing.allocator;
+    const r = try sliceLinesAlloc(a, "", 0, 0);
+    defer a.free(r);
+    try std.testing.expectEqualStrings("", r);
+}
+
+test "sliceLinesAlloc keeps an intentional blank line before EOF" {
+    const a = std.testing.allocator;
+    const r = try sliceLinesAlloc(a, "x\n\n", 0, 0);
+    defer a.free(r);
+    try std.testing.expectEqualStrings("     1\tx\n     2\t\n", r);
+}
+
+test "applyEdit deletes the match when new_string is empty" {
+    const a = std.testing.allocator;
+    const r = try applyEdit(a, "line1\nline2\nline3\n", "line2\n", "", false);
+    defer a.free(r.new_content);
+    try std.testing.expectEqualStrings("line1\nline3\n", r.new_content);
+}
+
+test "unifiedDiffAlloc reports no changes for identical content" {
+    const a = std.testing.allocator;
+    const d = try unifiedDiffAlloc(a, "f.txt", "same\n", "same\n");
+    defer a.free(d);
+    try std.testing.expectEqualStrings("(no changes)\n", d);
 }
