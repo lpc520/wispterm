@@ -158,6 +158,155 @@ pub fn formatForAgent(allocator: std.mem.Allocator, target: []const u8, result: 
     return out.toOwnedSlice(allocator);
 }
 
+// --- threadlocal error detail (mirrors web_search) -------------------------
+const ErrorDetailKind = enum { none, network, http_status, parse_failed };
+threadlocal var g_error_detail_kind: ErrorDetailKind = .none;
+threadlocal var g_error_detail_buf: [512]u8 = undefined;
+threadlocal var g_error_detail_len: usize = 0;
+
+fn clearErrorDetail() void {
+    g_error_detail_kind = .none;
+    g_error_detail_len = 0;
+}
+
+fn setErrorDetail(kind: ErrorDetailKind, comptime fmt: []const u8, args: anytype) void {
+    const text = std.fmt.bufPrint(&g_error_detail_buf, fmt, args) catch {
+        const fallback = "Web read failed: diagnostic message was too long.";
+        @memcpy(g_error_detail_buf[0..fallback.len], fallback);
+        g_error_detail_len = fallback.len;
+        g_error_detail_kind = kind;
+        return;
+    };
+    g_error_detail_len = text.len;
+    g_error_detail_kind = kind;
+}
+
+fn errorDetail(kind: ErrorDetailKind) ?[]const u8 {
+    if (g_error_detail_kind != kind or g_error_detail_len == 0) return null;
+    return g_error_detail_buf[0..g_error_detail_len];
+}
+
+fn setNetworkErrorDetail(err: anyerror) void {
+    setErrorDetail(.network, "Web read request failed before response: {s} ({s})", .{ @errorName(err), reader_url });
+}
+
+/// Friendly, user/model-facing message for a read error.
+pub fn errorText(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "Web read failed: no such local file (pass an http(s):// URL or an existing file path).",
+        error.FileTooLarge => "Web read failed: file exceeds the 25 MB upload limit.",
+        error.Network => errorDetail(.network) orelse "Web read failed: could not reach the Jina reader service.",
+        error.HttpStatus => errorDetail(.http_status) orelse "Web read failed: the Jina reader service returned an error.",
+        error.ParseFailed => errorDetail(.parse_failed) orelse "Web read failed: could not parse the Jina response.",
+        else => "Web read failed.",
+    };
+}
+
+/// Owned error text for transcript/model output. Keeps unexpected error names visible.
+pub fn formatErrorText(allocator: std.mem.Allocator, err: anyerror) ![]u8 {
+    return switch (err) {
+        error.FileNotFound, error.FileTooLarge, error.Network, error.HttpStatus, error.ParseFailed => allocator.dupe(u8, errorText(err)),
+        else => std.fmt.allocPrint(allocator, "Web read failed: {s}.", .{@errorName(err)}),
+    };
+}
+
+fn appendAuthHeader(headers: []platform_http.Header, n: *usize, bearer: ?[]const u8) void {
+    if (bearer) |b| {
+        headers[n.*] = .{ .name = "Authorization", .value = b };
+        n.* += 1;
+    }
+}
+
+fn fetchUrl(gpa: std.mem.Allocator, url: []const u8, opts: Options) !platform_http.Response {
+    const body = try buildUrlRequestBody(gpa, url);
+    defer gpa.free(body);
+    const bearer: ?[]u8 = if (opts.api_key.len > 0) try std.fmt.allocPrint(gpa, "Bearer {s}", .{opts.api_key}) else null;
+    defer if (bearer) |b| gpa.free(b);
+
+    var headers: [4]platform_http.Header = undefined;
+    var n: usize = 0;
+    headers[n] = .{ .name = "Content-Type", .value = "application/json" };
+    n += 1;
+    headers[n] = .{ .name = "Accept", .value = "application/json" };
+    n += 1;
+    appendAuthHeader(&headers, &n, bearer);
+
+    return platform_http.fetch(gpa, .{
+        .method = .POST,
+        .url = reader_url,
+        .headers = headers[0..n],
+        .body = body,
+        .timeout_ms = 60_000,
+    }) catch |err| {
+        setNetworkErrorDetail(err);
+        return error.Network;
+    };
+}
+
+fn fetchFile(gpa: std.mem.Allocator, path: []const u8, opts: Options) !platform_http.Response {
+    const lf = try readLocalFileForUpload(gpa, path, opts.max_file_bytes);
+    defer gpa.free(lf.bytes);
+    const mp = try buildMultipartBody(gpa, lf.basename, lf.bytes);
+    defer gpa.free(mp.body);
+    defer gpa.free(mp.content_type);
+    const bearer: ?[]u8 = if (opts.api_key.len > 0) try std.fmt.allocPrint(gpa, "Bearer {s}", .{opts.api_key}) else null;
+    defer if (bearer) |b| gpa.free(b);
+
+    var headers: [4]platform_http.Header = undefined;
+    var n: usize = 0;
+    headers[n] = .{ .name = "Content-Type", .value = mp.content_type };
+    n += 1;
+    headers[n] = .{ .name = "Accept", .value = "application/json" };
+    n += 1;
+    appendAuthHeader(&headers, &n, bearer);
+
+    return platform_http.fetch(gpa, .{
+        .method = .POST,
+        .url = reader_url,
+        .headers = headers[0..n],
+        .body = mp.body,
+        .timeout_ms = 60_000,
+    }) catch |err| {
+        setNetworkErrorDetail(err);
+        return error.Network;
+    };
+}
+
+/// Read `target` (http(s) URL or local file path) into clean markdown. The returned
+/// `ReadResult` owns its strings via its arena (free with `result.deinit()`).
+pub fn executeRead(gpa: std.mem.Allocator, target: []const u8, opts: Options) !ReadResult {
+    clearErrorDetail();
+    var result = ReadResult{ .arena = std.heap.ArenaAllocator.init(gpa), .title = "", .url = "", .content = "" };
+    errdefer result.arena.deinit();
+
+    var response = if (isHttpUrl(target))
+        try fetchUrl(gpa, target, opts)
+    else
+        try fetchFile(gpa, target, opts);
+    defer response.deinit(gpa);
+
+    if (response.status != 200) {
+        const trimmed = std.mem.trim(u8, response.body, " \t\r\n");
+        const excerpt = trimmed[0..@min(trimmed.len, 300)];
+        if (excerpt.len > 0)
+            setErrorDetail(.http_status, "Web read failed: Jina returned HTTP {d}: {s}", .{ response.status, excerpt })
+        else
+            setErrorDetail(.http_status, "Web read failed: Jina returned HTTP {d}.", .{response.status});
+        std.log.warn("jina reader HTTP {d}: {s}", .{ response.status, trimmed });
+        return error.HttpStatus;
+    }
+
+    const fields = parseReaderResponse(result.arena.allocator(), response.body) catch |err| {
+        if (err == error.ParseFailed)
+            setErrorDetail(.parse_failed, "Web read failed: could not parse the Jina response ({s}).", .{@errorName(err)});
+        return err;
+    };
+    result.title = fields.title;
+    result.url = fields.url;
+    result.content = fields.content;
+    return result;
+}
+
 test "isHttpUrl recognizes only http(s) schemes" {
     try std.testing.expect(isHttpUrl("http://x"));
     try std.testing.expect(isHttpUrl("HTTPS://x"));
@@ -262,4 +411,23 @@ test "formatForAgent keeps full content" {
     defer a.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "URL: https://x/") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "short body") != null);
+}
+
+test "executeRead reports a missing local file without touching the network" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.FileNotFound, executeRead(arena.allocator(), "/no/such/file.pdf", .{}));
+}
+
+test "errorText maps reader errors to friendly text" {
+    clearErrorDetail();
+    try std.testing.expect(std.mem.indexOf(u8, errorText(error.FileNotFound), "local file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, errorText(error.FileTooLarge), "25 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, errorText(error.Network), "reader") != null);
+}
+
+test "formatErrorText surfaces unexpected error names" {
+    const text = try formatErrorText(std.testing.allocator, error.SomethingWeird);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "SomethingWeird") != null);
 }
