@@ -15,6 +15,8 @@ const user_truncate_cap: usize = 8000;
 pub const Options = struct {
     api_key: []const u8 = "", // "" = anonymous (no Authorization header)
     max_file_bytes: usize = 25 * 1024 * 1024, // reject larger local files (OOM guard)
+    cache_dir: ?[]const u8 = null, // working dir; null = cache next to the file. Used for the
+    // .webread_cache root AND to resolve a relative file target.
 };
 
 pub const ReadResult = struct {
@@ -22,6 +24,7 @@ pub const ReadResult = struct {
     title: []const u8,
     url: []const u8,
     content: []const u8,
+    cached: bool = false,
     pub fn deinit(self: *ReadResult) void {
         self.arena.deinit();
     }
@@ -111,6 +114,15 @@ pub fn buildMultipartBody(allocator: std.mem.Allocator, filename: []const u8, by
     errdefer allocator.free(body);
     const content_type = try std.fmt.allocPrint(allocator, "multipart/form-data; boundary={s}", .{upload_boundary});
     return .{ .body = body, .content_type = content_type };
+}
+
+/// Resolve a relative file `target` against `cache_dir` (the working dir); an absolute
+/// target is returned as-is. Caller frees. Mirrors ai_chat_tools.resolveLocalPath so
+/// `webread` resolves the same way the file-edit tools do.
+fn resolveFilePath(allocator: std.mem.Allocator, target: []const u8, cache_dir: ?[]const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(target)) return allocator.dupe(u8, target);
+    if (cache_dir) |cd| if (cd.len > 0) return std.fs.path.join(allocator, &.{ cd, target });
+    return allocator.dupe(u8, target);
 }
 
 pub const LocalFile = struct { basename: []const u8, bytes: []u8 };
@@ -256,9 +268,7 @@ fn fetchUrl(gpa: std.mem.Allocator, url: []const u8, opts: Options) !platform_ht
     };
 }
 
-fn fetchFile(gpa: std.mem.Allocator, path: []const u8, opts: Options) !platform_http.Response {
-    const lf = try readLocalFileForUpload(gpa, path, opts.max_file_bytes);
-    defer gpa.free(lf.bytes);
+fn uploadFile(gpa: std.mem.Allocator, lf: LocalFile, opts: Options) !platform_http.Response {
     const mp = try buildMultipartBody(gpa, lf.basename, lf.bytes);
     defer gpa.free(mp.body);
     defer gpa.free(mp.content_type);
@@ -285,19 +295,9 @@ fn fetchFile(gpa: std.mem.Allocator, path: []const u8, opts: Options) !platform_
     };
 }
 
-/// Read `target` (http(s) URL or local file path) into clean markdown. The returned
-/// `ReadResult` owns its strings via its arena (free with `result.deinit()`).
-pub fn executeRead(gpa: std.mem.Allocator, target: []const u8, opts: Options) !ReadResult {
-    clearErrorDetail();
-    var result = ReadResult{ .arena = std.heap.ArenaAllocator.init(gpa), .title = "", .url = "", .content = "" };
-    errdefer result.arena.deinit();
-
-    var response = if (isHttpUrl(target))
-        try fetchUrl(gpa, target, opts)
-    else
-        try fetchFile(gpa, target, opts);
-    defer response.deinit(gpa);
-
+/// Check the HTTP status and parse the Jina JSON body into `result` (title/url/content
+/// duped into result.arena). Sets the threadlocal error detail on failure.
+fn parseResponseInto(result: *ReadResult, response: platform_http.Response) !void {
     if (response.status != 200) {
         const trimmed = std.mem.trim(u8, response.body, " \t\r\n");
         const excerpt = trimmed[0..@min(trimmed.len, 300)];
@@ -308,7 +308,6 @@ pub fn executeRead(gpa: std.mem.Allocator, target: []const u8, opts: Options) !R
         std.log.warn("jina reader HTTP {d}: {s}", .{ response.status, trimmed });
         return error.HttpStatus;
     }
-
     const fields = parseReaderResponse(result.arena.allocator(), response.body) catch |err| {
         if (err == error.ParseFailed)
             setErrorDetail(.parse_failed, "Web read failed: could not parse the Jina response ({s}).", .{@errorName(err)});
@@ -317,6 +316,30 @@ pub fn executeRead(gpa: std.mem.Allocator, target: []const u8, opts: Options) !R
     result.title = fields.title;
     result.url = fields.url;
     result.content = fields.content;
+}
+
+/// Read `target` (http(s) URL or local file path) into clean markdown. The returned
+/// `ReadResult` owns its strings via its arena (free with `result.deinit()`).
+pub fn executeRead(gpa: std.mem.Allocator, target: []const u8, opts: Options) !ReadResult {
+    clearErrorDetail();
+    var result = ReadResult{ .arena = std.heap.ArenaAllocator.init(gpa), .title = "", .url = "", .content = "" };
+    errdefer result.arena.deinit();
+
+    if (isHttpUrl(target)) {
+        var response = try fetchUrl(gpa, target, opts);
+        defer response.deinit(gpa);
+        try parseResponseInto(&result, response);
+        return result;
+    }
+
+    const resolved = try resolveFilePath(gpa, target, opts.cache_dir);
+    defer gpa.free(resolved);
+    const lf = try readLocalFileForUpload(gpa, resolved, opts.max_file_bytes);
+    defer gpa.free(lf.bytes);
+
+    var response = try uploadFile(gpa, lf, opts);
+    defer response.deinit(gpa);
+    try parseResponseInto(&result, response);
     return result;
 }
 
