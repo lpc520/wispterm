@@ -65,6 +65,7 @@ fn previousCodepointStart(text: []const u8, start: usize, end: usize) ?usize {
 
 fn isLeadingTrimCodepoint(cp: u21) bool {
     return switch (cp) {
+        '@',
         '\'',
         '"',
         '`',
@@ -121,6 +122,13 @@ fn isTrailingTrimCodepoint(cp: u21) bool {
 
 test "trim keeps preview path and drops ASCII sentence punctuation" {
     try std.testing.expectEqualStrings("docs/readme.md", trim("`docs/readme.md`."));
+}
+
+test "trim drops leading mention marker before markdown path" {
+    try std.testing.expectEqualStrings(
+        "docs/superpowers/plans/2026-06-04-copilot-tiling-panel.md",
+        trim("@docs/superpowers/plans/2026-06-04-copilot-tiling-panel.md"),
+    );
 }
 
 test "trim drops Chinese sentence punctuation after markdown path" {
