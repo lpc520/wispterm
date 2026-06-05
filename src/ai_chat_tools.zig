@@ -229,7 +229,7 @@ pub fn wisptermDocsTool(allocator: std.mem.Allocator, topic: ?[]const u8) ![]u8 
 /// Agent `websearch` tool: full-content Jina search, formatted for the model.
 fn webSearchTool(allocator: std.mem.Allocator, query: []const u8, max_results: ?u32) ![]u8 {
     const key = (web_search.jinaApiKeyAlloc(allocator) catch null) orelse
-        return allocator.dupe(u8, web_search.errorText(error.MissingApiKey));
+        return web_search.formatErrorText(allocator, error.MissingApiKey);
     defer allocator.free(key);
     const max: usize = if (max_results) |m| @min(@max(m, 1), 20) else 10;
     var results = web_search.executeSearch(allocator, query, .{
@@ -237,7 +237,7 @@ fn webSearchTool(allocator: std.mem.Allocator, query: []const u8, max_results: ?
         .api_key = key,
         .with_content = true,
         .max_results = max,
-    }) catch |err| return allocator.dupe(u8, web_search.errorText(err));
+    }) catch |err| return web_search.formatErrorText(allocator, err);
     defer results.deinit();
     return web_search.formatForAgent(allocator, query, results.items);
 }

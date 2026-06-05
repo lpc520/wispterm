@@ -1,7 +1,11 @@
 //! Engine-agnostic web search core. Pure request-build / response-parse / format
 //! helpers plus one HTTP call (`executeSearch`). Only the `jina` engine exists
-//! today; a new engine is a new branch in `executeSearch`. Leaf module: std only.
+//! today; a new engine is a new branch in `executeSearch`. HTTP transport goes
+//! through `platform/http_client.zig` so desktop builds can use system proxies.
 const std = @import("std");
+const platform_http = @import("platform/http_client.zig");
+
+const jina_search_url = "https://s.jina.ai/";
 
 pub const Engine = enum { jina };
 
@@ -212,20 +216,109 @@ pub fn jinaApiKeyAlloc(allocator: std.mem.Allocator) !?[]u8 {
     return try allocator.dupe(u8, g_jina_key_buf[0..g_jina_key_len]);
 }
 
+const ErrorDetailKind = enum { none, network, http_status, parse_failed };
+
+threadlocal var g_error_detail_kind: ErrorDetailKind = .none;
+threadlocal var g_error_detail_buf: [512]u8 = undefined;
+threadlocal var g_error_detail_len: usize = 0;
+
+fn clearErrorDetail() void {
+    g_error_detail_kind = .none;
+    g_error_detail_len = 0;
+}
+
+fn setErrorDetail(kind: ErrorDetailKind, comptime fmt: []const u8, args: anytype) void {
+    const text = std.fmt.bufPrint(&g_error_detail_buf, fmt, args) catch {
+        const fallback = "Web search failed: diagnostic message was too long.";
+        @memcpy(g_error_detail_buf[0..fallback.len], fallback);
+        g_error_detail_len = fallback.len;
+        g_error_detail_kind = kind;
+        return;
+    };
+    g_error_detail_len = text.len;
+    g_error_detail_kind = kind;
+}
+
+fn errorDetail(kind: ErrorDetailKind) ?[]const u8 {
+    if (g_error_detail_kind != kind or g_error_detail_len == 0) return null;
+    return g_error_detail_buf[0..g_error_detail_len];
+}
+
+fn setNetworkErrorDetail(err: anyerror) void {
+    switch (err) {
+        error.ConnectionTimedOut => setErrorDetail(
+            .network,
+            "Web search request timed out before response: {s} ({s})",
+            .{ @errorName(err), jina_search_url },
+        ),
+        error.UnknownHostName,
+        error.TemporaryNameServerFailure,
+        error.NameServerFailure,
+        error.HostLacksNetworkAddresses,
+        => setErrorDetail(
+            .network,
+            "Web search DNS lookup failed before response: {s} ({s})",
+            .{ @errorName(err), jina_search_url },
+        ),
+        error.TlsInitializationFailed,
+        error.CertificateBundleLoadFailure,
+        => setErrorDetail(
+            .network,
+            "Web search TLS setup failed before response: {s} ({s})",
+            .{ @errorName(err), jina_search_url },
+        ),
+        error.ConnectionRefused,
+        error.NetworkUnreachable,
+        error.ConnectionResetByPeer,
+        => setErrorDetail(
+            .network,
+            "Web search connection failed before response: {s} ({s})",
+            .{ @errorName(err), jina_search_url },
+        ),
+        error.ProxyConfigurationFailed => setErrorDetail(
+            .network,
+            "Web search system proxy configuration failed before response: {s} ({s})",
+            .{ @errorName(err), jina_search_url },
+        ),
+        error.WinHttpRequestFailed,
+        error.MacosHttpRequestFailed,
+        => setErrorDetail(
+            .network,
+            "Web search platform HTTP request failed before response: {s} ({s})",
+            .{ @errorName(err), jina_search_url },
+        ),
+        else => setErrorDetail(
+            .network,
+            "Web search request failed before response: {s} ({s})",
+            .{ @errorName(err), jina_search_url },
+        ),
+    }
+}
+
 /// Friendly, user/model-facing message for a search error.
 pub fn errorText(err: anyerror) []const u8 {
     return switch (err) {
         error.MissingApiKey => "Jina API key not set — add `jina-api-key = <key>` to your WispTerm config.",
-        error.Network => "Web search failed: could not reach the Jina search service.",
-        error.HttpStatus => "Web search failed: the Jina search service returned an error.",
-        error.ParseFailed => "Web search failed: could not parse the Jina response.",
+        error.Network => errorDetail(.network) orelse "Web search failed: could not reach the Jina search service.",
+        error.HttpStatus => errorDetail(.http_status) orelse "Web search failed: the Jina search service returned an error.",
+        error.ParseFailed => errorDetail(.parse_failed) orelse "Web search failed: could not parse the Jina response.",
         else => "Web search failed.",
+    };
+}
+
+/// Owned error text for transcript/model output. Unlike `errorText`, this keeps
+/// unexpected lower-level error names visible instead of collapsing them.
+pub fn formatErrorText(allocator: std.mem.Allocator, err: anyerror) ![]u8 {
+    return switch (err) {
+        error.MissingApiKey, error.Network, error.HttpStatus, error.ParseFailed => allocator.dupe(u8, errorText(err)),
+        else => std.fmt.allocPrint(allocator, "Web search failed: {s}.", .{@errorName(err)}),
     };
 }
 
 /// Run a web search. `gpa` is used for transient HTTP buffers; the returned
 /// `Results` owns its strings via its own arena (free with `results.deinit()`).
 pub fn executeSearch(gpa: std.mem.Allocator, query: []const u8, opts: Options) !Results {
+    clearErrorDetail();
     if (opts.api_key.len == 0) return error.MissingApiKey;
     var results = Results{ .arena = std.heap.ArenaAllocator.init(gpa), .items = &.{} };
     errdefer results.arena.deinit();
@@ -241,41 +334,57 @@ fn searchJina(arena: std.mem.Allocator, gpa: std.mem.Allocator, query: []const u
     const bearer = try std.fmt.allocPrint(gpa, "Bearer {s}", .{opts.api_key});
     defer gpa.free(bearer);
 
-    var client: std.http.Client = .{ .allocator = gpa };
-    defer client.deinit();
-
-    var resp_buf: std.Io.Writer.Allocating = .init(gpa);
-    defer resp_buf.deinit();
-
-    var extra: [2]std.http.Header = undefined;
-    var extra_len: usize = 0;
-    extra[extra_len] = .{ .name = "Accept", .value = "application/json" };
-    extra_len += 1;
+    var headers: [4]platform_http.Header = undefined;
+    var header_len: usize = 0;
+    headers[header_len] = .{ .name = "Content-Type", .value = "application/json" };
+    header_len += 1;
+    headers[header_len] = .{ .name = "Authorization", .value = bearer };
+    header_len += 1;
+    headers[header_len] = .{ .name = "Accept", .value = "application/json" };
+    header_len += 1;
     if (!opts.with_content) {
-        extra[extra_len] = .{ .name = "X-Respond-With", .value = "no-content" };
-        extra_len += 1;
+        headers[header_len] = .{ .name = "X-Respond-With", .value = "no-content" };
+        header_len += 1;
     }
 
-    const result = client.fetch(.{
-        .location = .{ .url = "https://s.jina.ai/" },
+    var response = platform_http.fetch(gpa, .{
         .method = .POST,
-        .payload = body,
-        .headers = .{
-            .content_type = .{ .override = "application/json" },
-            .authorization = .{ .override = bearer },
-        },
-        .extra_headers = extra[0..extra_len],
-        .response_writer = &resp_buf.writer,
-    }) catch return error.Network;
+        .url = jina_search_url,
+        .headers = headers[0..header_len],
+        .body = body,
+        .timeout_ms = 30_000,
+    }) catch |err| {
+        setNetworkErrorDetail(err);
+        std.log.warn("{s}", .{errorText(error.Network)});
+        return error.Network;
+    };
+    defer response.deinit(gpa);
 
-    var resp_list = resp_buf.toArrayList();
-    defer resp_list.deinit(gpa);
-
-    if (result.status != .ok) {
-        std.log.warn("jina search HTTP {d}: {s}", .{ @intFromEnum(result.status), std.mem.trim(u8, resp_list.items, " \t\r\n") });
+    if (response.status != 200) {
+        const trimmed = std.mem.trim(u8, response.body, " \t\r\n");
+        const excerpt = trimmed[0..@min(trimmed.len, 300)];
+        if (excerpt.len > 0) {
+            setErrorDetail(
+                .http_status,
+                "Web search failed: Jina returned HTTP {d}: {s}",
+                .{ response.status, excerpt },
+            );
+        } else {
+            setErrorDetail(
+                .http_status,
+                "Web search failed: Jina returned HTTP {d}.",
+                .{response.status},
+            );
+        }
+        std.log.warn("jina search HTTP {d}: {s}", .{ response.status, trimmed });
         return error.HttpStatus;
     }
-    return parseJinaResponse(arena, resp_list.items, opts.max_results);
+    return parseJinaResponse(arena, response.body, opts.max_results) catch |err| {
+        if (err == error.ParseFailed) {
+            setErrorDetail(.parse_failed, "Web search failed: could not parse the Jina response ({s}).", .{@errorName(err)});
+        }
+        return err;
+    };
 }
 
 test "executeSearch rejects an empty api key without touching the network" {
@@ -285,8 +394,26 @@ test "executeSearch rejects an empty api key without touching the network" {
 }
 
 test "errorText maps known errors to friendly text" {
+    clearErrorDetail();
     try std.testing.expect(std.mem.indexOf(u8, errorText(error.MissingApiKey), "jina-api-key") != null);
     try std.testing.expect(std.mem.indexOf(u8, errorText(error.Network), "reach") != null);
+}
+
+test "errorText exposes captured transport and HTTP details" {
+    clearErrorDetail();
+    setNetworkErrorDetail(error.ConnectionTimedOut);
+    try std.testing.expect(std.mem.indexOf(u8, errorText(error.Network), "ConnectionTimedOut") != null);
+    try std.testing.expect(std.mem.indexOf(u8, errorText(error.Network), "timed out") != null);
+    clearErrorDetail();
+    setErrorDetail(.http_status, "Web search failed: Jina returned HTTP {d}: {s}", .{ 401, "AuthenticationRequiredError" });
+    try std.testing.expect(std.mem.indexOf(u8, errorText(error.HttpStatus), "401") != null);
+    clearErrorDetail();
+}
+
+test "formatErrorText includes unexpected lower-level error names" {
+    const text = try formatErrorText(std.testing.allocator, error.ConnectionTimedOut);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "ConnectionTimedOut") != null);
 }
 
 test "jina api key globals round-trip and clear" {

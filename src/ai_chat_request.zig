@@ -147,7 +147,12 @@ pub fn webSearchThreadMain(req: *ai_chat.WebSearchRequest) void {
         .with_content = false,
         .max_results = 10,
     }) catch |err| {
-        ai_chat.appendWebSearchResult(session, web_search.errorText(err));
+        const text = web_search.formatErrorText(allocator, err) catch {
+            ai_chat.appendWebSearchResult(session, web_search.errorText(err));
+            return;
+        };
+        defer allocator.free(text);
+        ai_chat.appendWebSearchResult(session, text);
         return;
     };
     defer results.deinit();
