@@ -7,7 +7,7 @@ const builtin = @import("builtin");
 const types = @import("ai_chat_types.zig");
 const agent_file_edit = @import("agent_file_edit.zig");
 const scp = @import("scp.zig");
-const agent_file_edit_SshConn = types.SshConnection;
+const ToolSshConnection = types.SshConnection;
 const ai_chat_protocol = @import("ai_chat_protocol.zig");
 const ToolCall = ai_chat_protocol.ToolCall;
 const ToolContext = types.ToolContext;
@@ -139,7 +139,13 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
         const path = jsonStringArg(args.value, "path") orelse return ctx.allocator.dupe(u8, "Missing path");
-        const content = jsonStringArg(args.value, "content") orelse return ctx.allocator.dupe(u8, "Missing content");
+        // content may be empty (truncate to an empty file), so do NOT use
+        // jsonStringArg (it rejects ""). Read the raw .string.
+        const content = blk: {
+            if (args.value != .object) break :blk null;
+            const v = args.value.object.get("content") orelse break :blk null;
+            break :blk if (v == .string) v.string else null;
+        } orelse return ctx.allocator.dupe(u8, "Missing content");
         const surface_id = jsonStringArg(args.value, "surface_id");
         return writeFileTool(ctx, path, content, surface_id);
     }
@@ -1797,7 +1803,7 @@ fn writeFileTool(ctx: *ToolContext, path: []const u8, content: []const u8, surfa
     var owns_old = false;
     defer if (owns_old) ctx.allocator.free(old_content);
 
-    const remote_conn: ?agent_file_edit_SshConn = blk: {
+    const remote_conn: ?ToolSshConnection = blk: {
         if (surface_id) |sid| {
             if (ctx.sshConnectionForSurface(sid)) |conn| break :blk conn;
         }
@@ -1851,7 +1857,7 @@ fn writeFileTool(ctx: *ToolContext, path: []const u8, content: []const u8, surfa
 
 fn editFileTool(ctx: *ToolContext, path: []const u8, old_string: []const u8, new_string: []const u8, replace_all: bool, surface_id: ?[]const u8) ![]u8 {
     if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
-    const remote_conn: ?agent_file_edit_SshConn = blk: {
+    const remote_conn: ?ToolSshConnection = blk: {
         if (surface_id) |sid| {
             if (ctx.sshConnectionForSurface(sid)) |conn| break :blk conn;
         }
@@ -3064,6 +3070,30 @@ test "write_file creates a local file in full permission mode" {
     const written = try tmp.dir.readFileAlloc(a, "w.txt", 1024);
     defer a.free(written);
     try std.testing.expectEqualStrings("hello\n", written);
+}
+
+test "write_file can truncate to an empty file" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "t.txt", .data = "old content" });
+    const abs = try tmp.dir.realpathAlloc(a, "t.txt");
+    defer a.free(abs);
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = a,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .settings = .{ .permission = .full, .access_rules = null },
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    const out = try writeFileTool(&ctx, abs, "", null);
+    defer a.free(out);
+    const after = try tmp.dir.readFileAlloc(a, "t.txt", 1024);
+    defer a.free(after);
+    try std.testing.expectEqualStrings("", after);
 }
 
 test "edit_file applies a unique replacement to a local file" {
