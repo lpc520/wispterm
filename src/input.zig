@@ -2679,7 +2679,10 @@ fn openHtmlPanelForCell(surface: *Surface, cell_pos: CellPos) bool {
     defer allocator.free(path);
     if (!html_server_model.isHtmlPath(path)) return false;
 
-    switch (html_server.openForSurface(allocator, surface, path)) {
+    var ls_prefix_buf: [256]u8 = undefined;
+    const ls_prefix = lsPrefixForCell(surface, cell_pos, &ls_prefix_buf);
+
+    switch (html_server.openForSurface(allocator, surface, path, ls_prefix)) {
         .url => |url| {
             defer allocator.free(url);
             const parent = AppWindow.currentNativeHandle();
@@ -2784,6 +2787,10 @@ fn openFileExplorerPreview(row_idx: usize) bool {
     return openPreviewAsync(kind, title, path, source_kind);
 }
 
+/// Infer the `ls <dir>/` directory prefix for the clicked cell, copied into
+/// `out_buf`. The returned slice points into `out_buf`, so the caller's buffer
+/// must outlive every use of the result. Returns null when no nearby `ls`
+/// command applies. Holds `render_state.mutex` only for the grid scan.
 fn lsPrefixForCell(surface: *Surface, cell_pos: CellPos, out_buf: []u8) ?[]const u8 {
     const cols = @as(usize, @intCast(surface.size.grid.cols));
     const rows = @as(usize, @intCast(surface.size.grid.rows));
