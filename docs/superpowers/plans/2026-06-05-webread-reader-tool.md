@@ -202,14 +202,16 @@ Functions:
 pub const MultipartBody = struct { body: []u8, content_type: []u8 };
 
 /// Build a `multipart/form-data` body with one `file` field (raw bytes, binary-safe).
-/// Caller frees `.body` and `.content_type`.
+/// Caller frees `.body` and `.content_type`. The filename is sanitized (`"`, CR, LF
+/// → `_`) so a path with quotes/newlines can't corrupt or inject the header line.
 pub fn buildMultipartBody(allocator: std.mem.Allocator, filename: []const u8, bytes: []const u8) !MultipartBody {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
     const w = out.writer(allocator);
     try w.print("--{s}\r\n", .{upload_boundary});
-    try w.print("Content-Disposition: form-data; name=\"file\"; filename=\"{s}\"\r\n", .{filename});
-    try w.writeAll("Content-Type: application/octet-stream\r\n\r\n");
+    try w.writeAll("Content-Disposition: form-data; name=\"file\"; filename=\"");
+    for (filename) |c| try w.writeByte(if (c == '"' or c == '\r' or c == '\n') '_' else c);
+    try w.writeAll("\"\r\nContent-Type: application/octet-stream\r\n\r\n");
     try w.writeAll(bytes);
     try w.print("\r\n--{s}--\r\n", .{upload_boundary});
     const body = try out.toOwnedSlice(allocator);
@@ -249,6 +251,14 @@ test "buildMultipartBody frames the file field with the boundary" {
     try std.testing.expect(std.mem.indexOf(u8, mp.body, "PDFBYTES") != null);
     try std.testing.expect(std.mem.endsWith(u8, mp.body, "--" ++ upload_boundary ++ "--\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, mp.content_type, upload_boundary) != null);
+}
+
+test "buildMultipartBody sanitizes quotes and newlines in the filename" {
+    const a = std.testing.allocator;
+    const mp = try buildMultipartBody(a, "a\"b\r\nc.pdf", "X");
+    defer a.free(mp.body);
+    defer a.free(mp.content_type);
+    try std.testing.expect(std.mem.indexOf(u8, mp.body, "filename=\"a_b__c.pdf\"") != null);
 }
 
 test "readLocalFileForUpload reads bytes, reports missing and oversize" {
@@ -293,9 +303,18 @@ git commit -m "feat(web_read): multipart upload body + local file reader"
 Functions (place after `readLocalFileForUpload`):
 
 ```zig
+/// Largest byte index <= cap that is not inside a UTF-8 multi-byte sequence, so a
+/// truncation there never splits a codepoint (important for CJK/markdown content).
+fn utf8SafeCut(s: []const u8, cap: usize) usize {
+    if (cap >= s.len) return s.len;
+    var cut = cap;
+    while (cut > 0 and (s[cut] & 0xC0) == 0x80) cut -= 1;
+    return cut;
+}
+
 /// Render for the transcript (user `$webread`): title + source + content,
-/// truncated to `user_truncate_cap` bytes with a note when longer.
-pub fn formatForUser(allocator: std.mem.Allocator, target: []const u8, result: ReadResult) ![]u8 {
+/// truncated to ~`user_truncate_cap` bytes (on a codepoint boundary) with a note.
+pub fn formatForUser(allocator: std.mem.Allocator, target: []const u8, result: *const ReadResult) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
     const w = out.writer(allocator);
@@ -304,7 +323,8 @@ pub fn formatForUser(allocator: std.mem.Allocator, target: []const u8, result: R
     if (result.url.len > 0) try w.print("{s}\n", .{result.url});
     try w.writeAll("\n");
     if (result.content.len > user_truncate_cap) {
-        try w.writeAll(result.content[0..user_truncate_cap]);
+        const cut = utf8SafeCut(result.content, user_truncate_cap);
+        try w.writeAll(result.content[0..cut]);
         try w.print("\n\n…(truncated, {d} chars total)\n", .{result.content.len});
     } else {
         try w.writeAll(result.content);
@@ -313,7 +333,7 @@ pub fn formatForUser(allocator: std.mem.Allocator, target: []const u8, result: R
 }
 
 /// Render for the model (agent `webread` tool): title + source + full content.
-pub fn formatForAgent(allocator: std.mem.Allocator, target: []const u8, result: ReadResult) ![]u8 {
+pub fn formatForAgent(allocator: std.mem.Allocator, target: []const u8, result: *const ReadResult) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
     const w = out.writer(allocator);
@@ -345,24 +365,50 @@ test "formatForUser truncates past the cap and notes total length" {
     const a = std.testing.allocator;
     var big = testReadResult(true);
     defer big.deinit();
-    const text = try formatForUser(a, "https://x/", big);
+    const text = try formatForUser(a, "https://x/", &big);
     defer a.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "truncated, " ) != null);
     try std.testing.expect(text.len < user_truncate_cap + 300);
 
     var small = testReadResult(false);
     defer small.deinit();
-    const text2 = try formatForUser(a, "https://x/", small);
+    const text2 = try formatForUser(a, "https://x/", &small);
     defer a.free(text2);
     try std.testing.expect(std.mem.indexOf(u8, text2, "short body") != null);
     try std.testing.expect(std.mem.indexOf(u8, text2, "truncated") == null);
+}
+
+test "formatForUser truncation never splits a UTF-8 codepoint" {
+    const a = std.testing.allocator;
+    // Many 3-byte CJK chars so the byte cap lands mid-character.
+    var r = ReadResult{ .arena = std.heap.ArenaAllocator.init(a), .title = "", .url = "", .content = undefined };
+    defer r.deinit();
+    const n = (user_truncate_cap / 3) + 200;
+    const buf = try r.arena.allocator().alloc(u8, n * 3);
+    var i: usize = 0;
+    while (i < n) : (i += 1) std.mem.copyForwards(u8, buf[i * 3 ..][0..3], "\xe4\xb8\xad"); // 中
+    r.content = buf;
+    const text = try formatForUser(a, "x", &r);
+    defer a.free(text);
+    const note_at = std.mem.indexOf(u8, text, "\n\n…(truncated").?;
+    try std.testing.expect(std.unicode.utf8ValidateSlice(text[0..note_at]));
+}
+
+test "formatForUser omits empty title and url" {
+    const a = std.testing.allocator;
+    var r = ReadResult{ .arena = std.heap.ArenaAllocator.init(a), .title = "", .url = "", .content = "body text" };
+    defer r.deinit();
+    const text = try formatForUser(a, "x", &r);
+    defer a.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "# ") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "body text") != null);
 }
 
 test "formatForAgent keeps full content" {
     const a = std.testing.allocator;
     var small = testReadResult(false);
     defer small.deinit();
-    const text = try formatForAgent(a, "https://x/", small);
+    const text = try formatForAgent(a, "https://x/", &small);
     defer a.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "URL: https://x/") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "short body") != null);
@@ -809,7 +855,7 @@ pub fn webReadThreadMain(req: *ai_chat.WebReadRequest) void {
     };
     defer result.deinit();
 
-    const text = web_read.formatForUser(allocator, req.target, result) catch {
+    const text = web_read.formatForUser(allocator, req.target, &result) catch {
         ai_chat.appendWebSearchResult(session, "Out of memory formatting content.");
         return;
     };
@@ -887,7 +933,7 @@ fn webReadTool(allocator: std.mem.Allocator, target: []const u8) ![]u8 {
     var result = web_read.executeRead(allocator, target, .{ .api_key = key }) catch |err|
         return web_read.formatErrorText(allocator, err);
     defer result.deinit();
-    return web_read.formatForAgent(allocator, target, result);
+    return web_read.formatForAgent(allocator, target, &result);
 }
 ```
 
