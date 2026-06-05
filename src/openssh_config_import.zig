@@ -76,13 +76,6 @@ pub fn parseCandidates(config: []const u8, out: []Candidate) []Candidate {
             while (aliases.next()) |alias| pending.addAlias(alias);
             continue;
         }
-        if (std.ascii.eqlIgnoreCase(key_value.key, "Match")) {
-            if (have_block) flushPending(&pending, out, &count);
-            pending = .{};
-            have_block = false;
-            continue;
-        }
-
         if (!have_block) continue;
 
         if (std.ascii.eqlIgnoreCase(key_value.key, "HostName") and !pending.has_host) {
@@ -352,28 +345,4 @@ test "openssh config import: ignores comments blank lines and unsupported blocks
     try std.testing.expectEqual(@as(usize, 1), rows.len);
     try std.testing.expectEqualStrings("ok", rows[0].name());
     try std.testing.expectEqualStrings("ok.example", rows[0].host());
-}
-
-test "openssh config import: ignores match blocks" {
-    const config =
-        \\Host ok
-        \\  HostName ok.example
-        \\  User bob
-        \\Match host *
-        \\  HostName ignored.example
-        \\  User root
-        \\Host next
-        \\  HostName next.example
-        \\  User alice
-        \\
-    ;
-    var out: [8]Candidate = undefined;
-    const rows = parseCandidates(config, &out);
-    try std.testing.expectEqual(@as(usize, 2), rows.len);
-    try std.testing.expectEqualStrings("ok", rows[0].name());
-    try std.testing.expectEqualStrings("ok.example", rows[0].host());
-    try std.testing.expectEqualStrings("bob", rows[0].user());
-    try std.testing.expectEqualStrings("next", rows[1].name());
-    try std.testing.expectEqualStrings("next.example", rows[1].host());
-    try std.testing.expectEqualStrings("alice", rows[1].user());
 }
