@@ -830,10 +830,14 @@ fn renderSkillCenterFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_i
         // Hold the lock for the duration of render: the View borrows the matrix.
         session.mutex.lock();
         defer session.mutex.unlock();
+        const sel_idx = session.model.selectedServerIndex();
+        const server_name: []const u8 = if (sel_idx) |i| serverDisplayName(session.model.servers.?[i].source_id) else "";
+        const server_reachable = if (sel_idx) |i| session.model.servers.?[i].reachable else false;
         const view: skill_center_renderer.View = .{
-            .matrix = if (session.model.matrix) |*m| m else null,
+            .rows = if (session.model.pairing) |p| p else &.{},
+            .server_name = server_name,
+            .server_reachable = server_reachable,
             .sel_row = session.model.sel_row,
-            .sel_col = session.model.sel_col,
             .scroll = session.model.scroll,
             .stale = session.model.stale,
             .status = session.status,
@@ -848,6 +852,12 @@ fn renderSkillCenterFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_i
             aiHistoryContentWidth(fb_width, left_panels_w, right_panels_w),
         );
     }
+}
+
+/// Display name for a skill-center source id: strip the "ssh:" prefix.
+fn serverDisplayName(source_id: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, source_id, "ssh:")) return source_id["ssh:".len..];
+    return source_id;
 }
 
 fn renderAiCopilotPanel(fb_width: c_int, fb_height: c_int, titlebar_offset: f32) void {
