@@ -753,6 +753,9 @@ const NoopControl = struct {
     fn resolveAiApproval(_: *anyopaque, _: bool) bool {
         return false;
     }
+    fn inboundFileDir(_: *anyopaque, _: []u8) []const u8 {
+        return "";
+    }
     var dummy: u8 = 0;
     fn iface() control_mod.Control {
         return .{ .ctx = &dummy, .vtable = &.{
@@ -764,6 +767,7 @@ const NoopControl = struct {
             .latest_transcript = latestTranscript,
             .ai_approval_pending = aiApprovalPending,
             .resolve_ai_approval = resolveAiApproval,
+            .inbound_file_dir = inboundFileDir,
         } };
     }
 };
@@ -1011,6 +1015,9 @@ const ApprovalTranscriptControl = struct {
     fn resolveAiApproval(_: *anyopaque, _: bool) bool {
         return false;
     }
+    fn inboundFileDir(_: *anyopaque, _: []u8) []const u8 {
+        return "";
+    }
     var dummy: u8 = 0;
     fn iface() control_mod.Control {
         return .{ .ctx = &dummy, .vtable = &.{
@@ -1022,6 +1029,7 @@ const ApprovalTranscriptControl = struct {
             .latest_transcript = latestTranscript,
             .ai_approval_pending = aiApprovalPending,
             .resolve_ai_approval = resolveAiApproval,
+            .inbound_file_dir = inboundFileDir,
         } };
     }
 };
