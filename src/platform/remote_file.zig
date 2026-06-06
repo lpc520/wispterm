@@ -27,6 +27,13 @@ pub fn localPosixExec(allocator: std.mem.Allocator, command: []const u8, max_byt
         if (n == 0) break;
         try output.appendSlice(allocator, buf[0..n]);
     }
+    // If we stopped at the cap, drain the rest of stdout to EOF so the child
+    // can't block on a full pipe — otherwise child.wait() (and the scan worker
+    // thread joining on it at teardown) would hang forever.
+    while (output.items.len >= max_bytes) {
+        const n = stdout.read(&buf) catch break;
+        if (n == 0) break;
+    }
     _ = child.wait() catch {};
     return output.toOwnedSlice(allocator);
 }
