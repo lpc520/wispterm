@@ -55,7 +55,9 @@ const common_tools_after_wsl =
     \\- Use `tab_new` only when no suitable terminal exists.
     \\- For WispTerm questions, call `wispterm_docs`.
     \\- From Weixin, send generated/local artifacts with `weixin_send_attachment`: use `kind=image` for images and `kind=file` for files; voice files are sent as file attachments (`kind=voice` aliases `kind=file`).
-    \\- Prefer `read_file`, `write_file`, and `edit_file` for local/remote SSH files; remote paths need the open SSH `surface_id`. Writes show a diff and may require approval.
+    \\- Before sending WSL/SSH artifacts to Weixin, call `copy_file` without a destination to stage under `wispterm-files`, then pass its local path to `weixin_send_attachment`.
+    \\- To send a local/Weixin/workspace file to WSL or SSH, call `copy_file` with `dest_surface_id`; do not paste copy commands into agent/REPL terminals.
+    \\- Prefer `read_file`, `write_file`, `edit_file`, and `copy_file` for local/WSL/remote SSH files; remote paths need the open SSH `surface_id`. Writes show a diff and may require approval.
     \\
     \\Python:
     \\- Use uv for Python environments; run `uv --version` first.
@@ -158,5 +160,13 @@ test "platform agent prompt mentions file tools on every OS" {
         try std.testing.expect(std.mem.indexOf(u8, p, "read_file") != null);
         try std.testing.expect(std.mem.indexOf(u8, p, "write_file") != null);
         try std.testing.expect(std.mem.indexOf(u8, p, "edit_file") != null);
+    }
+}
+
+test "platform agent prompt teaches attachment file staging" {
+    for ([_]std.Target.Os.Tag{ .windows, .linux, .macos }) |os| {
+        const p = defaultSystemPromptForOs(os);
+        try std.testing.expect(std.mem.indexOf(u8, p, "copy_file") != null);
+        try std.testing.expect(std.mem.indexOf(u8, p, "wispterm-files") != null);
     }
 }

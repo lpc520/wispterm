@@ -42,6 +42,7 @@ test {
     _ = @import("ai_agent_config.zig");
     _ = @import("ai_agent_access.zig");
     _ = @import("agent_file_edit.zig");
+    _ = @import("agent_file_copy.zig");
     _ = @import("ssh_connection.zig");
     _ = @import("openssh_config_import.zig");
     _ = @import("appwindow/active_tab.zig");
