@@ -51,8 +51,7 @@ pub const ai_history_session = @import("ai_history_session.zig");
 pub const ai_history_source = @import("ai_history_source.zig");
 pub const skill_center = @import("skill_center.zig");
 const skill_scan = @import("skill_scan.zig");
-const skill_inventory = @import("skill_inventory.zig");
-const skill_inventory_cache = @import("skill_inventory_cache.zig");
+const skill_transfer_cmd = @import("skill_transfer_cmd.zig");
 const remote_file = @import("platform/remote_file.zig");
 const ssh_connection = @import("ssh_connection.zig");
 const skill_transfer = @import("skill_transfer.zig");
@@ -834,18 +833,36 @@ fn renderSkillCenterFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_i
         // Hold the lock for the duration of render: the View borrows the pairing.
         session.mutex.lock();
         defer session.mutex.unlock();
-        const sel_idx = session.model.selectedServerIndex();
-        const server_name: []const u8 = if (sel_idx) |i| serverDisplayName(session.model.servers.?[i].source_id) else "";
-        const server_reachable = if (sel_idx) |i| session.model.servers.?[i].reachable else false;
+        const m = &session.model;
+        const lib_len = if (m.library) |l| l.len else 0;
+        const overlay: skill_center_renderer.Overlay = switch (m.overlay) {
+            .none, .busy => .none,
+            .picker => |*p| .{ .list = .{
+                .title = if (p.purpose == .deploy) i18n.s().sc_pick_deploy else i18n.s().sc_pick_import,
+                .len = p.labels.len,
+                .ctx = @ptrCast(p),
+                .itemAt = scPickerItemAt,
+                .sel = p.sel,
+            } },
+            .import_list => |*il| .{ .list = .{
+                .title = i18n.s().sc_import_title,
+                .len = il.names.len,
+                .ctx = @ptrCast(il),
+                .itemAt = scImportItemAt,
+                .sel = il.sel,
+            } },
+            .confirm => |*c| .{ .confirm = c.text },
+        };
         const view: skill_center_renderer.View = .{
-            .rows = if (session.model.pairing) |p| p else &.{},
-            .server_name = server_name,
-            .server_reachable = server_reachable,
-            .sel_row = session.model.sel_row,
-            .scroll = session.model.scroll,
-            .stale = session.model.stale,
+            .skills_len = lib_len,
+            .ctx = @ptrCast(m),
+            .nameAt = scNameAt,
+            .sel_row = m.sel_row,
+            .scroll = m.scroll,
+            .title = i18n.s().sl_skill_center,
+            .legend = i18n.s().sc_legend_v2,
             .status = session.status,
-            .confirm_text = if (session.model.confirm_text) |t| t else "",
+            .overlay = overlay,
         };
         skill_center_renderer.render(
             draw,
@@ -859,10 +876,25 @@ fn renderSkillCenterFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_i
     }
 }
 
-/// Display name for a skill-center source id: strip the "ssh:" prefix.
-fn serverDisplayName(source_id: []const u8) []const u8 {
-    if (std.mem.startsWith(u8, source_id, "ssh:")) return source_id["ssh:".len..];
-    return source_id;
+/// Renderer accessor: library skill name at index i (read under the session lock).
+fn scNameAt(ctx: *anyopaque, i: usize) []const u8 {
+    const m: *const skill_center.PanelModel = @ptrCast(@alignCast(ctx));
+    const lib = m.library orelse return "";
+    return if (i < lib.len) lib[i].name else "";
+}
+fn scPickerItemAt(ctx: *anyopaque, i: usize) skill_center_renderer.ListItem {
+    const p: *const skill_center.PickerState = @ptrCast(@alignCast(ctx));
+    return if (i < p.labels.len) .{ .label = p.labels[i], .marker = "" } else .{ .label = "", .marker = "" };
+}
+fn scImportItemAt(ctx: *anyopaque, i: usize) skill_center_renderer.ListItem {
+    const il: *const skill_center.ImportState = @ptrCast(@alignCast(ctx));
+    if (i >= il.names.len) return .{ .label = "", .marker = "" };
+    const t = i18n.s();
+    return switch (il.markers[i]) {
+        .new_ => .{ .label = il.names[i], .marker = t.sc_marker_new, .marker_color = .{ 0.42, 0.62, 0.88 } },
+        .same => .{ .label = il.names[i], .marker = t.sc_marker_same, .marker_color = mixColor(g_theme.background, g_theme.foreground, 0.58) },
+        .differ => .{ .label = il.names[i], .marker = t.sc_marker_differ, .marker_color = .{ 0.86, 0.70, 0.28 } },
+    };
 }
 
 fn renderAiCopilotPanel(fb_width: c_int, fb_height: c_int, titlebar_offset: f32) void {
@@ -970,37 +1002,400 @@ pub fn activeSkillCenter() ?*skill_center.Session {
     return tab.activeSkillCenter();
 }
 
-/// Move the selected pairing row by `drow`, clamping. Returns false if no tab.
-pub fn skillCenterMoveSelection(drow: isize, dcol: isize) bool {
-    _ = dcol; // columns are fixed (local | server); kept for the input.zig arity
+fn scMoveSel(sel: *usize, len: usize, delta: isize) void {
+    if (len == 0) {
+        sel.* = 0;
+        return;
+    }
+    const cur: isize = @intCast(sel.*);
+    sel.* = @intCast(std.math.clamp(cur + delta, 0, @as(isize, @intCast(len - 1))));
+}
+
+/// Move selection in the active overlay list, else in the library list.
+pub fn skillCenterMove(delta: isize) bool {
     const session = activeSkillCenter() orelse return false;
     session.mutex.lock();
     defer session.mutex.unlock();
-    const rows = if (session.model.pairing) |p| p.len else 0;
-    if (rows > 0) {
-        const cur: isize = @intCast(session.model.sel_row);
-        const next = std.math.clamp(cur + drow, 0, @as(isize, @intCast(rows - 1)));
-        session.model.sel_row = @intCast(next);
+    switch (session.model.overlay) {
+        .picker => |*p| scMoveSel(&p.sel, p.labels.len, delta),
+        .import_list => |*il| scMoveSel(&il.sel, il.names.len, delta),
+        else => {
+            const n = if (session.model.library) |l| l.len else 0;
+            scMoveSel(&session.model.sel_row, n, delta);
+        },
     }
     markUiDirty();
     return true;
 }
 
-/// Cycle the selected server by `delta` (wraps) and rebuild the pairing.
-pub fn skillCenterSwitchServer(delta: isize) bool {
+/// True if an overlay (picker/import/confirm) is open (captures Enter/Esc).
+pub fn skillCenterOverlayActive() bool {
     const session = activeSkillCenter() orelse return false;
     session.mutex.lock();
     defer session.mutex.unlock();
-    const rc = session.model.remoteCount();
-    if (rc == 0) return true;
-    const cur: isize = @intCast(session.model.sel_server);
-    var next = @rem(cur + delta, @as(isize, @intCast(rc)));
-    if (next < 0) next += @intCast(rc);
-    session.model.sel_server = @intCast(next);
-    session.model.sel_row = 0;
-    session.model.scroll = 0;
-    session.model.rebuildPairing();
+    return session.model.overlay != .none;
+}
+
+pub fn skillCenterOverlayCancel() bool {
+    const session = activeSkillCenter() orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    if (session.model.overlay == .none) return false;
+    session.model.clearOverlay();
     markUiDirty();
+    return true;
+}
+
+/// Library root `<config>/skills`. Caller frees.
+fn skillCenterLibraryDir(allocator: std.mem.Allocator) ?[]const u8 {
+    return platform_dirs.pathInConfigDir(allocator, "skills") catch null;
+}
+
+/// ExecHost over a location: local POSIX, or SSH when a conn is present.
+const SkillLocExec = struct {
+    conn: ?ssh_connection.SshConnection,
+    fn exec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) anyerror![]u8 {
+        const self: *SkillLocExec = @ptrCast(@alignCast(ctx));
+        if (self.conn) |c| return remote_file.sshExecCapture(allocator, c, command);
+        return remote_file.localPosixExec(allocator, command, 4 * 1024 * 1024);
+    }
+    fn host(self: *SkillLocExec) skill_scan.ExecHost {
+        return .{ .ctx = self, .exec = exec };
+    }
+};
+
+/// Resolve a target's SshConnection (null for a local target / unresolved).
+fn skillCenterTargetConn(target: skill_center.Target) ?ssh_connection.SshConnection {
+    if (target.is_local) return null;
+    if (std.mem.startsWith(u8, target.machine_id, "ssh:")) {
+        return overlays.aiHistorySshConnection(target.machine_id["ssh:".len..]);
+    }
+    return null;
+}
+
+/// Adapts skill_transfer.Ops onto local/ssh/scp. conn null → a local-only target.
+const SkillTransferCtx = struct {
+    conn: ?ssh_connection.SshConnection,
+    fn localExec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) bool {
+        _ = ctx;
+        return remote_file.localPosixExecOk(allocator, command);
+    }
+    fn remoteExec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) bool {
+        const self: *SkillTransferCtx = @ptrCast(@alignCast(ctx));
+        const c = self.conn orelse return false;
+        const out = remote_file.sshExecCapture(allocator, c, command) catch return false;
+        allocator.free(out);
+        return true;
+    }
+    fn copy(ctx: *anyopaque, allocator: std.mem.Allocator, dir: skill_transfer.CopyDir, local_tmp: []const u8, remote_tmp: []const u8) bool {
+        const self: *SkillTransferCtx = @ptrCast(@alignCast(ctx));
+        const c = self.conn orelse return false;
+        var buf: [512]u8 = undefined;
+        const spec = scp.remoteSpec(&buf, &c, remote_tmp);
+        const r = switch (dir) {
+            .to_remote => scp.transfer(allocator, &c, local_tmp, spec),
+            .to_local => scp.transfer(allocator, &c, spec, local_tmp),
+        };
+        return r == .ok;
+    }
+    fn ops(self: *SkillTransferCtx) skill_transfer.Ops {
+        return .{ .ctx = self, .localExec = localExec, .remoteExec = remoteExec, .copy = copy };
+    }
+};
+
+/// Marker for a target skill vs the library (by name + hash).
+fn skillCenterMarkerFor(library: ?[]skill_center.LibrarySkill, name: []const u8, target_hash: ?[]const u8) skill_center.Marker {
+    const lib = library orelse return .new_;
+    for (lib) |s| {
+        if (std.mem.eql(u8, s.name, name)) {
+            const lh = s.agg_hash orelse return .differ;
+            const th = target_hash orelse return .differ;
+            return if (std.mem.eql(u8, lh, th)) .same else .differ;
+        }
+    }
+    return .new_;
+}
+
+/// Build an ImportState from a target's scanned rows. Caller holds the lock.
+fn skillCenterMakeImportState(allocator: std.mem.Allocator, model: *const skill_center.PanelModel, rows: []const skill_scan.SkillRow, target: skill_center.Target) !skill_center.ImportState {
+    var names: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+    var markers: std.ArrayListUnmanaged(skill_center.Marker) = .empty;
+    errdefer markers.deinit(allocator);
+    for (rows) |r| {
+        const marker = skillCenterMarkerFor(model.library, r.name, r.agg_hash);
+        const n = try allocator.dupe(u8, r.name);
+        errdefer allocator.free(n);
+        try names.append(allocator, n);
+        try markers.append(allocator, marker);
+    }
+    var tgt = try target.clone(allocator);
+    errdefer tgt.deinit(allocator);
+    return .{
+        .target = tgt,
+        .names = try names.toOwnedSlice(allocator),
+        .markers = try markers.toOwnedSlice(allocator),
+        .sel = 0,
+    };
+}
+
+fn skillCenterAddMachine(allocator: std.mem.Allocator, labels: *std.ArrayListUnmanaged([]u8), targets: *std.ArrayListUnmanaged(skill_center.Target), machine_id: []const u8, machine_label: []const u8, is_local: bool) !void {
+    const sws = [_]skill_center.Software{ .claude, .codex };
+    for (sws) |sw| {
+        const sw_label = switch (sw) {
+            .claude => i18n.s().sc_sw_claude,
+            .codex => i18n.s().sc_sw_codex,
+        };
+        const label = try std.fmt.allocPrint(allocator, "{s} · {s}", .{ machine_label, sw_label });
+        errdefer allocator.free(label);
+        var tgt = try skill_center.Target.dupe(allocator, machine_id, machine_label, sw, is_local);
+        errdefer tgt.deinit(allocator);
+        try labels.append(allocator, label);
+        try targets.append(allocator, tgt);
+    }
+}
+
+/// Build a target picker over {local, ssh profiles} × {claude, codex}.
+fn skillCenterBuildPicker(allocator: std.mem.Allocator, purpose: skill_center.Purpose, skill_name: []const u8) !skill_center.PickerState {
+    var labels: std.ArrayListUnmanaged([]u8) = .empty;
+    var targets: std.ArrayListUnmanaged(skill_center.Target) = .empty;
+    errdefer {
+        for (labels.items) |l| allocator.free(l);
+        labels.deinit(allocator);
+        for (targets.items) |*t| t.deinit(allocator);
+        targets.deinit(allocator);
+    }
+    try skillCenterAddMachine(allocator, &labels, &targets, "local", i18n.s().sc_local, true);
+    const names = overlays.sshProfileNames(allocator) catch &[_][]u8{};
+    defer {
+        for (names) |n| allocator.free(n);
+        allocator.free(names);
+    }
+    for (names) |nm| {
+        const id = try std.fmt.allocPrint(allocator, "ssh:{s}", .{nm});
+        defer allocator.free(id);
+        try skillCenterAddMachine(allocator, &labels, &targets, id, nm, false);
+    }
+    const name_copy = try allocator.dupe(u8, skill_name);
+    errdefer allocator.free(name_copy);
+    return .{
+        .purpose = purpose,
+        .skill_name = name_copy,
+        .labels = try labels.toOwnedSlice(allocator),
+        .targets = try targets.toOwnedSlice(allocator),
+        .sel = 0,
+    };
+}
+
+fn skillCenterOpenPicker(purpose: skill_center.Purpose) bool {
+    const session = activeSkillCenter() orelse return false;
+    const allocator = g_allocator orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    var name: []const u8 = "";
+    if (purpose == .deploy) {
+        const sk = session.model.selected() orelse return true;
+        name = sk.name;
+    }
+    const picker = skillCenterBuildPicker(allocator, purpose, name) catch return true;
+    session.model.setOverlay(.{ .picker = picker });
+    markUiDirty();
+    return true;
+}
+
+pub fn skillCenterDeploy() bool {
+    return skillCenterOpenPicker(.deploy);
+}
+pub fn skillCenterImport() bool {
+    return skillCenterOpenPicker(.import_);
+}
+
+/// Scan a chosen target and open the import list. Synchronous (UI thread).
+fn skillCenterOpenImportList(allocator: std.mem.Allocator, target: skill_center.Target) void {
+    const session = activeSkillCenter() orelse return;
+    const conn = skillCenterTargetConn(target);
+    if (!target.is_local and conn == null) {
+        overlays.showStatusToast(i18n.s().sc_toast_no_conn);
+        return;
+    }
+    var le = SkillLocExec{ .conn = conn };
+    const root_expr = skill_transfer_cmd.homeRootExpr(allocator, target.software.rootRel()) catch return;
+    defer allocator.free(root_expr);
+    var outcome = skill_scan.scanLocation(allocator, root_expr, le.host()) catch {
+        overlays.showStatusToast(i18n.s().sc_toast_no_conn);
+        return;
+    };
+    defer outcome.deinit(allocator);
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    const st = skillCenterMakeImportState(allocator, &session.model, outcome.rows, target) catch return;
+    session.model.setOverlay(.{ .import_list = st });
+    markUiDirty();
+}
+
+/// Run a transfer synchronously (library ⇆ target), then rescan the library.
+fn skillCenterRunTransfer(allocator: std.mem.Allocator, is_import: bool, target: skill_center.Target, name: []const u8) void {
+    const session = activeSkillCenter() orelse return;
+    const conn = skillCenterTargetConn(target);
+    if (!target.is_local and conn == null) {
+        overlays.showStatusToast(i18n.s().sc_toast_no_conn);
+        return;
+    }
+    const lib_dir = skillCenterLibraryDir(allocator) orelse return;
+    defer allocator.free(lib_dir);
+    const lib_root = skill_transfer_cmd.absRootExpr(allocator, lib_dir) catch return;
+    defer allocator.free(lib_root);
+    const tgt_root = skill_transfer_cmd.homeRootExpr(allocator, target.software.rootRel()) catch return;
+    defer allocator.free(tgt_root);
+    var ctx = SkillTransferCtx{ .conn = conn };
+    const lib_ep = skill_transfer.Endpoint{ .root_expr = lib_root, .is_local = true };
+    const tgt_ep = skill_transfer.Endpoint{ .root_expr = tgt_root, .is_local = target.is_local };
+    const from = if (is_import) tgt_ep else lib_ep;
+    const to = if (is_import) lib_ep else tgt_ep;
+    const r = skill_transfer.transfer(allocator, ctx.ops(), from, to, name);
+    if (r == .ok) {
+        overlays.showStatusToast(if (is_import) i18n.s().sc_toast_imported else i18n.s().sc_toast_synced);
+        startSkillCenterScan(allocator, session);
+    } else {
+        overlays.showStatusToast(i18n.s().sc_toast_sync_failed);
+    }
+    markUiDirty();
+}
+
+/// Arm an overwrite confirm overlay for a pending deploy/import.
+fn skillCenterArmConfirm(allocator: std.mem.Allocator, is_import: bool, target: skill_center.Target, name: []const u8) void {
+    const session = activeSkillCenter() orelse return;
+    var msg_buf: [256]u8 = undefined;
+    const t = i18n.s();
+    const msg = std.fmt.bufPrint(&msg_buf, "{s} → {s} {s}", .{ name, target.machine_label, t.sc_confirm_suffix }) catch t.sc_confirm_suffix;
+    var tgt = target.clone(allocator) catch return;
+    errdefer tgt.deinit(allocator);
+    const name_dup = allocator.dupe(u8, name) catch return;
+    errdefer allocator.free(name_dup);
+    const text = allocator.dupe(u8, msg) catch return;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    session.model.setOverlay(.{ .confirm = .{ .text = text, .is_import = is_import, .target = tgt, .name = name_dup } });
+    markUiDirty();
+}
+
+/// Deploy: scan the target for the skill, decide noop/direct/confirm, act.
+fn skillCenterDeployDecide(allocator: std.mem.Allocator, target: skill_center.Target, name: []const u8, src_hash: ?[]const u8) void {
+    const conn = skillCenterTargetConn(target);
+    if (!target.is_local and conn == null) {
+        overlays.showStatusToast(i18n.s().sc_toast_no_conn);
+        return;
+    }
+    var le = SkillLocExec{ .conn = conn };
+    const root_expr = skill_transfer_cmd.homeRootExpr(allocator, target.software.rootRel()) catch return;
+    defer allocator.free(root_expr);
+    var outcome = skill_scan.scanLocation(allocator, root_expr, le.host()) catch {
+        overlays.showStatusToast(i18n.s().sc_toast_no_conn);
+        return;
+    };
+    defer outcome.deinit(allocator);
+    var present = false;
+    var target_hash: ?[]const u8 = null;
+    for (outcome.rows) |r| {
+        if (std.mem.eql(u8, r.name, name)) {
+            present = true;
+            target_hash = r.agg_hash;
+        }
+    }
+    switch (skill_center.overwriteDecision(present, target_hash, src_hash)) {
+        .noop => overlays.showStatusToast(i18n.s().sc_toast_in_sync),
+        .direct => skillCenterRunTransfer(allocator, false, target, name),
+        .confirm => skillCenterArmConfirm(allocator, false, target, name),
+    }
+}
+
+/// Import: the marker already encodes new/same/differ.
+fn skillCenterImportAct(allocator: std.mem.Allocator, target: skill_center.Target, name: []const u8, marker: skill_center.Marker) void {
+    switch (marker) {
+        .same => overlays.showStatusToast(i18n.s().sc_toast_in_sync),
+        .new_ => skillCenterRunTransfer(allocator, true, target, name),
+        .differ => skillCenterArmConfirm(allocator, true, target, name),
+    }
+}
+
+/// Enter inside an overlay: act on the selection. Snapshots under the lock,
+/// then runs the (blocking) work after releasing it.
+pub fn skillCenterOverlaySelect() bool {
+    const session = activeSkillCenter() orelse return false;
+    const allocator = g_allocator orelse return false;
+    const Act = enum { none, deploy_picked, import_picked, import_item, confirm };
+    var act: Act = .none;
+    var target: ?skill_center.Target = null;
+    var name_owned: ?[]u8 = null;
+    var src_hash_owned: ?[]u8 = null;
+    var marker: skill_center.Marker = .new_;
+    var is_import_confirm = false;
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        switch (session.model.overlay) {
+            .picker => |*p| {
+                if (p.sel < p.targets.len) {
+                    target = p.targets[p.sel].clone(allocator) catch null;
+                    if (p.purpose == .deploy) {
+                        name_owned = allocator.dupe(u8, p.skill_name) catch null;
+                        if (session.model.library) |lib| {
+                            for (lib) |s| {
+                                if (std.mem.eql(u8, s.name, p.skill_name)) {
+                                    if (s.agg_hash) |h| src_hash_owned = allocator.dupe(u8, h) catch null;
+                                }
+                            }
+                        }
+                        act = .deploy_picked;
+                    } else {
+                        act = .import_picked;
+                    }
+                }
+                session.model.clearOverlay();
+            },
+            .import_list => |*il| {
+                if (il.sel < il.names.len) {
+                    name_owned = allocator.dupe(u8, il.names[il.sel]) catch null;
+                    target = il.target.clone(allocator) catch null;
+                    marker = il.markers[il.sel];
+                    act = .import_item;
+                }
+                session.model.clearOverlay();
+            },
+            .confirm => |*c| {
+                target = c.target.clone(allocator) catch null;
+                name_owned = allocator.dupe(u8, c.name) catch null;
+                is_import_confirm = c.is_import;
+                act = .confirm;
+                session.model.clearOverlay();
+            },
+            .none, .busy => {},
+        }
+    }
+    defer {
+        if (target) |*t| t.deinit(allocator);
+        if (name_owned) |n| allocator.free(n);
+        if (src_hash_owned) |h| allocator.free(h);
+    }
+    markUiDirty();
+    switch (act) {
+        .none => {},
+        .deploy_picked => {
+            if (target) |tgt| if (name_owned) |nm| skillCenterDeployDecide(allocator, tgt, nm, src_hash_owned);
+        },
+        .import_picked => {
+            if (target) |tgt| skillCenterOpenImportList(allocator, tgt);
+        },
+        .import_item => {
+            if (target) |tgt| if (name_owned) |nm| skillCenterImportAct(allocator, tgt, nm, marker);
+        },
+        .confirm => {
+            if (target) |tgt| if (name_owned) |nm| skillCenterRunTransfer(allocator, is_import_confirm, tgt, nm);
+        },
+    }
     return true;
 }
 
@@ -1013,241 +1408,37 @@ pub fn skillCenterRescan() bool {
     return true;
 }
 
-/// Enter on a row: fetch the selected skill's SKILL.md from local and/or the
-/// selected server and show it in the markdown preview — a unified diff when the
-/// skill exists on both sides, otherwise the one side that has it. Synchronous
-/// (brief block) on the UI thread.
+/// Preview the selected library skill's SKILL.md in the markdown panel.
 pub fn skillCenterPreviewSelected() bool {
     const session = activeSkillCenter() orelse return false;
     const allocator = g_allocator orelse return false;
-
-    // Snapshot the selected row's rel paths + the server conn under the lock.
-    var local_rel: ?[]u8 = null;
-    var remote_rel: ?[]u8 = null;
-    var conn: ?ssh_connection.SshConnection = null;
+    var rel_owned: ?[]u8 = null;
     var name_buf: [128]u8 = undefined;
     var name_len: usize = 0;
     {
         session.mutex.lock();
         defer session.mutex.unlock();
-        const rows = session.model.pairing orelse return true;
-        if (session.model.sel_row >= rows.len) return true;
-        const pr = rows[session.model.sel_row];
-        name_len = @min(pr.name.len, name_buf.len);
-        @memcpy(name_buf[0..name_len], pr.name[0..name_len]);
-        if (pr.local_rel_path) |p| local_rel = allocator.dupe(u8, p) catch null;
-        if (pr.remote_rel_path) |p| remote_rel = allocator.dupe(u8, p) catch null;
-        conn = skillCenterSelectedConn(&session.model);
+        const sk = session.model.selected() orelse return true;
+        name_len = @min(sk.name.len, name_buf.len);
+        @memcpy(name_buf[0..name_len], sk.name[0..name_len]);
+        rel_owned = allocator.dupe(u8, sk.rel_path) catch null;
     }
-    const name = name_buf[0..name_len];
-    defer if (local_rel) |p| allocator.free(p);
-    defer if (remote_rel) |p| allocator.free(p);
-
-    // Fetch local SKILL.md.
-    var local_text: ?[]u8 = null;
-    defer if (local_text) |t| allocator.free(t);
-    if (local_rel) |rp| {
-        if (skill_center.previewCommand(allocator, rp) catch null) |c| {
-            defer allocator.free(c);
-            local_text = remote_file.localPosixExec(allocator, c, 1024 * 1024) catch null;
-        }
-    }
-    // Fetch remote SKILL.md.
-    var remote_text: ?[]u8 = null;
-    defer if (remote_text) |t| allocator.free(t);
-    if (remote_rel) |rp| {
-        if (conn) |cn| {
-            if (skill_center.previewCommand(allocator, rp) catch null) |c| {
-                defer allocator.free(c);
-                remote_text = remote_file.sshExecCapture(allocator, cn, c) catch null;
-            }
-        }
-    }
-
-    // Build the markdown to show.
-    var md: std.ArrayListUnmanaged(u8) = .empty;
-    defer md.deinit(allocator);
-    if (local_text != null and remote_text != null) {
-        md.appendSlice(allocator, "```diff\n") catch {};
-        if (skill_diff.diff(allocator, local_text.?, remote_text.?) catch null) |lines| {
-            defer allocator.free(lines);
-            for (lines) |l| {
-                const prefix = switch (l.op) {
-                    .context => " ",
-                    .add => "+",
-                    .del => "-",
-                };
-                md.appendSlice(allocator, prefix) catch {};
-                md.appendSlice(allocator, l.text) catch {};
-                md.append(allocator, '\n') catch {};
-            }
-        }
-        md.appendSlice(allocator, "```\n") catch {};
-    } else if (local_text) |t| {
-        md.appendSlice(allocator, t) catch {};
-    } else if (remote_text) |t| {
-        md.appendSlice(allocator, t) catch {};
+    const rp = rel_owned orelse return true;
+    defer allocator.free(rp);
+    const lib_dir = skillCenterLibraryDir(allocator) orelse return true;
+    defer allocator.free(lib_dir);
+    const abs = std.fs.path.join(allocator, &.{ lib_dir, rp }) catch return true;
+    defer allocator.free(abs);
+    const command = skill_center.catCommand(allocator, abs) catch return true;
+    defer allocator.free(command);
+    const text = remote_file.localPosixExec(allocator, command, 1024 * 1024) catch null;
+    if (text) |t| {
+        defer allocator.free(t);
+        markdown_preview_panel.open(.markdown, name_buf[0..name_len], "SKILL.md", t);
+        markUiDirty();
     } else {
         overlays.showStatusToast(i18n.s().sc_toast_read_failed);
-        return true;
     }
-
-    markdown_preview_panel.open(.markdown, name, "SKILL.md", md.items);
-    markUiDirty();
-    return true;
-}
-
-/// Adapts the skill_transfer.Ops seam onto the real local/ssh/scp primitives.
-const SkillTransferCtx = struct {
-    conn: ssh_connection.SshConnection,
-
-    fn localExec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) bool {
-        _ = ctx;
-        // Exit-status-checked: a failed local tar/extract must surface as a
-        // failed transfer, not a false success (localPosixExec ignores exit code).
-        return remote_file.localPosixExecOk(allocator, command);
-    }
-    fn remoteExec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) bool {
-        const self: *SkillTransferCtx = @ptrCast(@alignCast(ctx));
-        const out = remote_file.sshExecCapture(allocator, self.conn, command) catch return false;
-        allocator.free(out);
-        return true;
-    }
-    fn copy(ctx: *anyopaque, allocator: std.mem.Allocator, dir: skill_transfer.Direction, local_tmp: []const u8, remote_tmp: []const u8) bool {
-        const self: *SkillTransferCtx = @ptrCast(@alignCast(ctx));
-        var buf: [512]u8 = undefined;
-        const remote_spec = scp.remoteSpec(&buf, &self.conn, remote_tmp);
-        const result = switch (dir) {
-            .upload => scp.transfer(allocator, &self.conn, local_tmp, remote_spec),
-            .download => scp.transfer(allocator, &self.conn, remote_spec, local_tmp),
-        };
-        return result == .ok;
-    }
-    fn ops(self: *SkillTransferCtx) skill_transfer.Ops {
-        return .{ .ctx = self, .localExec = localExec, .remoteExec = remoteExec, .copy = copy };
-    }
-};
-
-/// Resolve the SshConnection for the model's selected server (by "ssh:<name>").
-/// Caller must hold the session mutex (reads session.model).
-fn skillCenterSelectedConn(model: *const skill_center.PanelModel) ?ssh_connection.SshConnection {
-    const idx = model.selectedServerIndex() orelse return null;
-    const servers = model.servers orelse return null;
-    const id = servers[idx].source_id;
-    if (!std.mem.startsWith(u8, id, "ssh:")) return null;
-    return overlays.aiHistorySshConnection(id["ssh:".len..]);
-}
-
-/// Run a transfer synchronously on the UI thread, then rescan to refresh.
-fn skillCenterStartTransfer(dir: skill_transfer.Direction, rel_path: []const u8) void {
-    const allocator = g_allocator orelse return;
-    const session = activeSkillCenter() orelse return;
-    const conn = blk: {
-        session.mutex.lock();
-        defer session.mutex.unlock();
-        break :blk skillCenterSelectedConn(&session.model);
-    } orelse {
-        overlays.showStatusToast(i18n.s().sc_toast_no_conn);
-        return;
-    };
-    var ctx = SkillTransferCtx{ .conn = conn };
-    const result = switch (dir) {
-        .upload => skill_transfer.upload(allocator, ctx.ops(), rel_path),
-        .download => skill_transfer.download(allocator, ctx.ops(), rel_path),
-    };
-    if (result == .ok) {
-        overlays.showStatusToast(i18n.s().sc_toast_synced);
-        startSkillCenterScan(allocator, session); // UI thread — safe
-    } else {
-        overlays.showStatusToast(i18n.s().sc_toast_sync_failed);
-    }
-    markUiDirty();
-}
-
-/// Handle a u/d keypress: decide direct / confirm / noop / invalid.
-fn skillCenterRequestTransfer(dir: skill_transfer.Direction) bool {
-    const session = activeSkillCenter() orelse return false;
-    const allocator = g_allocator orelse return false;
-    var rel_owned: ?[]u8 = null;
-    var decision: skill_center.TransferDecision = .invalid;
-    {
-        session.mutex.lock();
-        defer session.mutex.unlock();
-        const rows = session.model.pairing orelse return true;
-        if (session.model.sel_row >= rows.len) return true;
-        const pr = rows[session.model.sel_row];
-        decision = skill_center.transferDecision(dir, pr.relation);
-        const rel_path = (switch (dir) {
-            .upload => pr.local_rel_path,
-            .download => pr.remote_rel_path,
-        }) orelse return true;
-        if (decision == .confirm) {
-            var msg_buf: [256]u8 = undefined;
-            const t = i18n.s();
-            const verb = if (dir == .upload) t.sc_overwrite_upload else t.sc_overwrite_download;
-            const msg = std.fmt.bufPrint(&msg_buf, "{s} {s} {s}", .{ verb, pr.name, t.sc_confirm_suffix }) catch t.sc_confirm_suffix;
-            session.model.setConfirm(msg, dir, rel_path);
-        } else if (decision == .direct) {
-            rel_owned = allocator.dupe(u8, rel_path) catch null;
-        }
-    }
-    switch (decision) {
-        .noop => overlays.showStatusToast(i18n.s().sc_toast_in_sync),
-        .invalid => overlays.showStatusToast(if (dir == .upload) i18n.s().sc_toast_no_local else i18n.s().sc_toast_no_remote),
-        .confirm => markUiDirty(),
-        .direct => {
-            if (rel_owned) |rp| {
-                defer allocator.free(rp);
-                skillCenterStartTransfer(dir, rp);
-            }
-        },
-    }
-    return true;
-}
-
-pub fn skillCenterUpload() bool {
-    return skillCenterRequestTransfer(.upload);
-}
-pub fn skillCenterDownload() bool {
-    return skillCenterRequestTransfer(.download);
-}
-
-/// True if a confirm is armed (so Enter/Esc are captured by it).
-pub fn skillCenterConfirmActive() bool {
-    const session = activeSkillCenter() orelse return false;
-    session.mutex.lock();
-    defer session.mutex.unlock();
-    return session.model.confirm_text != null;
-}
-
-pub fn skillCenterConfirmProceed() bool {
-    const session = activeSkillCenter() orelse return false;
-    const allocator = g_allocator orelse return false;
-    var dir: skill_transfer.Direction = .upload;
-    var rel_owned: ?[]u8 = null;
-    {
-        session.mutex.lock();
-        defer session.mutex.unlock();
-        if (session.model.confirm_text == null) return false;
-        dir = session.model.confirm_dir;
-        if (session.model.confirm_rel_path) |p| rel_owned = allocator.dupe(u8, p) catch null;
-        session.model.clearConfirm();
-    }
-    if (rel_owned) |rp| {
-        defer allocator.free(rp);
-        skillCenterStartTransfer(dir, rp);
-    }
-    markUiDirty();
-    return true;
-}
-
-pub fn skillCenterConfirmCancel() bool {
-    const session = activeSkillCenter() orelse return false;
-    session.mutex.lock();
-    defer session.mutex.unlock();
-    if (session.model.confirm_text == null) return false;
-    session.model.clearConfirm();
-    markUiDirty();
     return true;
 }
 
@@ -1570,139 +1761,43 @@ fn startAiHistoryScan(allocator: std.mem.Allocator, session: *ai_history_session
 /// threadlocal pointers); `local`/`wsl` resolve inside the worker. `unreachable_`
 /// marks a source we want to show as an unreachable column (e.g. an SSH profile
 /// that could not be resolved, or local on a non-POSIX host).
-const SkillCenterTarget = union(enum) {
-    local,
-    wsl,
-    ssh: ssh_connection.SshConnection,
-    unreachable_,
-};
+/// Background job: scan the local library (`<config>/skills`) off the UI thread.
+const SkillLibraryScanJob = struct {
+    root_expr: []u8, // owned shell expression for the library root
 
-/// One scan column's stable per-source state. `id`/`name` are owned (duped on
-/// the UI thread); the ExecHost.ctx points at this struct for the scan duration.
-const SkillCenterSourceEntry = struct {
-    id: []u8,
-    name: []u8,
-    target: SkillCenterTarget,
-
-    /// ExecHost callback: run the scan command against this source's target.
-    /// Local POSIX exec lives in platform/remote_file.zig so the OS switch stays
-    /// out of this platform-neutral module (capped at 4 MiB).
-    fn exec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) anyerror![]u8 {
-        const self: *SkillCenterSourceEntry = @ptrCast(@alignCast(ctx));
-        return switch (self.target) {
-            .local => remote_file.localPosixExec(allocator, command, 4 * 1024 * 1024),
-            .wsl => remote_file.wslExec(allocator, command) orelse error.RemoteExecFailed,
-            .ssh => |conn| remote_file.sshExecCapture(allocator, conn, command),
-            .unreachable_ => error.Unreachable,
-        };
-    }
-};
-
-/// Background scan job: owns the snapshot source list and drives a full
-/// inventory scan across every source. Worker thread.
-const SkillCenterScanJob = struct {
-    entries: []SkillCenterSourceEntry,
-
-    /// HostFactory.make: resolve the source's stable entry by id and hand back
-    /// an ExecHost whose ctx points at it (stable for the scan duration).
-    fn makeHost(ctx: *anyopaque, _: std.mem.Allocator, src: skill_center.ScanSource) anyerror!skill_scan.ExecHost {
-        const job: *SkillCenterScanJob = @ptrCast(@alignCast(ctx));
-        for (job.entries) |*entry| {
-            if (std.mem.eql(u8, entry.id, src.id)) {
-                if (entry.target == .unreachable_) return error.Unreachable;
-                return .{ .ctx = entry, .exec = SkillCenterSourceEntry.exec };
-            }
-        }
-        return error.Unreachable;
-    }
-
-    fn run(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]skill_inventory.ServerScan {
-        const job: *SkillCenterScanJob = @ptrCast(@alignCast(ctx));
-        const sources = try allocator.alloc(skill_center.ScanSource, job.entries.len);
-        defer allocator.free(sources);
-        for (job.entries, 0..) |entry, i| {
-            sources[i] = .{ .id = entry.id, .name = entry.name };
-        }
-        const factory = skill_center.HostFactory{ .ctx = job, .make = makeHost };
-        const servers = try skill_center.runScan(allocator, sources, factory);
-        // Best-effort: persist for instant reopen next time.
-        skill_inventory_cache.save(allocator, servers) catch {};
-        return servers;
+    fn run(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]skill_center.LibrarySkill {
+        const job: *SkillLibraryScanJob = @ptrCast(@alignCast(ctx));
+        var le = SkillLocExec{ .conn = null };
+        const outcome = try skill_scan.scanLocation(allocator, job.root_expr, le.host());
+        // Move the scanned rows into the library list (frees the rows slice).
+        return skill_center.libraryFromRows(allocator, outcome.rows);
     }
 
     fn destroy(ctx: *anyopaque, allocator: std.mem.Allocator) void {
-        const job: *SkillCenterScanJob = @ptrCast(@alignCast(ctx));
-        for (job.entries) |entry| {
-            allocator.free(entry.id);
-            allocator.free(entry.name);
-        }
-        allocator.free(job.entries);
+        const job: *SkillLibraryScanJob = @ptrCast(@alignCast(ctx));
+        allocator.free(job.root_expr);
         allocator.destroy(job);
     }
 };
 
-/// Build the worker-safe list of scan sources on the UI thread: local plus one
-/// column per saved SSH profile. Each entry's id is a stable key ("local",
-/// "ssh:<name>"). SSH profiles that cannot be resolved are still included as an
-/// unreachable column so the user sees the server is offline.
-/// TODO: WSL distro enumeration (no readily-available enumeration API yet).
-fn buildSkillCenterSources(allocator: std.mem.Allocator) ![]SkillCenterSourceEntry {
-    var entries: std.ArrayListUnmanaged(SkillCenterSourceEntry) = .empty;
-    errdefer {
-        for (entries.items) |entry| {
-            allocator.free(entry.id);
-            allocator.free(entry.name);
-        }
-        entries.deinit(allocator);
-    }
-
-    // Local column. On hosts without a POSIX shell (Windows native) the local
-    // source is unreachable for v1; WSL/SSH columns still work.
-    try entries.append(allocator, .{
-        .id = try allocator.dupe(u8, "local"),
-        .name = try allocator.dupe(u8, "local"),
-        .target = if (remote_file.localPosixExecSupported()) .local else .unreachable_,
-    });
-
-    // One column per saved SSH profile.
-    const names = overlays.sshProfileNames(allocator) catch &[_][]u8{};
-    defer {
-        for (names) |n| allocator.free(n);
-        allocator.free(names);
-    }
-    for (names) |name| {
-        const id = try std.fmt.allocPrint(allocator, "ssh:{s}", .{name});
-        errdefer allocator.free(id);
-        const name_copy = try allocator.dupe(u8, name);
-        errdefer allocator.free(name_copy);
-        const target: SkillCenterTarget = if (overlays.aiHistorySshConnection(name)) |conn|
-            .{ .ssh = conn }
-        else
-            .unreachable_;
-        try entries.append(allocator, .{ .id = id, .name = name_copy, .target = target });
-    }
-
-    return entries.toOwnedSlice(allocator);
-}
-
-/// Kick off an async Skill Center scan for `session`. UI thread. On setup
-/// failure marks the session failed instead of spawning a doomed worker.
+/// Kick off an async library scan for `session`. UI thread.
 fn startSkillCenterScan(allocator: std.mem.Allocator, session: *skill_center.Session) void {
-    const entries = buildSkillCenterSources(allocator) catch {
+    const lib_dir = skillCenterLibraryDir(allocator) orelse {
         session.publishScanFailure(session.scan_generation);
         return;
     };
-    const job = allocator.create(SkillCenterScanJob) catch {
-        for (entries) |entry| {
-            allocator.free(entry.id);
-            allocator.free(entry.name);
-        }
-        allocator.free(entries);
+    defer allocator.free(lib_dir);
+    const root_expr = skill_transfer_cmd.absRootExpr(allocator, lib_dir) catch {
         session.publishScanFailure(session.scan_generation);
         return;
     };
-    job.* = .{ .entries = entries };
-    session.scanAsync(.{ .ctx = job, .run = SkillCenterScanJob.run, .destroy = SkillCenterScanJob.destroy });
+    const job = allocator.create(SkillLibraryScanJob) catch {
+        allocator.free(root_expr);
+        session.publishScanFailure(session.scan_generation);
+        return;
+    };
+    job.* = .{ .root_expr = root_expr };
+    session.scanAsync(.{ .ctx = job, .run = SkillLibraryScanJob.run, .destroy = SkillLibraryScanJob.destroy });
 }
 
 /// Kick off an async transcript load for the selected row. UI thread.
@@ -2405,14 +2500,12 @@ pub fn spawnAiHistoryTab(source: ai_history_source.Source) bool {
     return true;
 }
 
-/// Open a new Skill Center tab: seed from the cached scan for instant display,
-/// then kick off a live rescan across all sources. Mirrors spawnAiHistoryTab.
+/// Open a new Skill Center tab and scan the local library.
 pub fn spawnSkillCenterTab() bool {
     const allocator = g_allocator orelse return false;
     if (!tab.spawnSkillCenterTab(allocator)) return false;
     clearUiStateOnTabChange();
     if (activeSkillCenter()) |session| {
-        session.seedFromCache();
         startSkillCenterScan(allocator, session);
     }
     return true;

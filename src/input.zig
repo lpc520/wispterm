@@ -1478,52 +1478,40 @@ fn handleKey(ev: platform_input.KeyEvent) void {
         return;
     }
 
-    // Skill Center: ↑/↓ move the row, ←/→ or s switch server, Enter previews, r rescans.
+    // Skill Center: ↑/↓ move, ⏎ preview/select, esc cancel overlay, d deploy, i import, r rescan.
     if (AppWindow.activeSkillCenter() != null) {
         const plain = !ev.ctrl and !ev.alt and !ev.super;
         switch (ev.key_code) {
             platform_input.key_up => {
-                _ = AppWindow.skillCenterMoveSelection(-1, 0);
+                _ = AppWindow.skillCenterMove(-1);
                 return;
             },
             platform_input.key_down => {
-                _ = AppWindow.skillCenterMoveSelection(1, 0);
-                return;
-            },
-            platform_input.key_left => {
-                _ = AppWindow.skillCenterSwitchServer(-1);
-                return;
-            },
-            platform_input.key_right => {
-                _ = AppWindow.skillCenterSwitchServer(1);
+                _ = AppWindow.skillCenterMove(1);
                 return;
             },
             platform_input.key_enter => {
-                if (AppWindow.skillCenterConfirmActive()) {
-                    _ = AppWindow.skillCenterConfirmProceed();
+                if (AppWindow.skillCenterOverlayActive()) {
+                    _ = AppWindow.skillCenterOverlaySelect();
                 } else {
                     _ = AppWindow.skillCenterPreviewSelected();
                 }
                 return;
             },
             platform_input.key_escape => {
-                _ = AppWindow.skillCenterConfirmCancel();
+                _ = AppWindow.skillCenterOverlayCancel();
                 return;
             },
             0x52 => if (plain and !ev.shift) {
                 _ = AppWindow.skillCenterRescan();
                 return;
             },
-            0x53 => if (plain and !ev.shift) {
-                _ = AppWindow.skillCenterSwitchServer(1);
-                return;
-            },
-            0x55 => if (plain and !ev.shift) {
-                _ = AppWindow.skillCenterUpload();
-                return;
-            },
             0x44 => if (plain and !ev.shift) {
-                _ = AppWindow.skillCenterDownload();
+                _ = AppWindow.skillCenterDeploy();
+                return;
+            },
+            0x49 => if (plain and !ev.shift) {
+                _ = AppWindow.skillCenterImport();
                 return;
             },
             else => {},
