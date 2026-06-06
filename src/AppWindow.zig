@@ -830,7 +830,7 @@ fn renderSkillCenterFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_i
             .renderTextLimited = titlebar.renderTextLimited,
             .glyphAdvance = titlebar.titlebarGlyphAdvance,
         };
-        // Hold the lock for the duration of render: the View borrows the matrix.
+        // Hold the lock for the duration of render: the View borrows the pairing.
         session.mutex.lock();
         defer session.mutex.unlock();
         const sel_idx = session.model.selectedServerIndex();
@@ -1102,9 +1102,9 @@ const SkillTransferCtx = struct {
 
     fn localExec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) bool {
         _ = ctx;
-        const out = remote_file.localPosixExec(allocator, command, 4 * 1024 * 1024) catch return false;
-        allocator.free(out);
-        return true;
+        // Exit-status-checked: a failed local tar/extract must surface as a
+        // failed transfer, not a false success (localPosixExec ignores exit code).
+        return remote_file.localPosixExecOk(allocator, command);
     }
     fn remoteExec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) bool {
         const self: *SkillTransferCtx = @ptrCast(@alignCast(ctx));

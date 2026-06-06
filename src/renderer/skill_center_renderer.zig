@@ -138,13 +138,25 @@ pub fn render(
     const title_y = yTextFromTop(draw, window_height, top + 11);
     const title_end = draw.renderTextLimited("Skill Center", content_x + PAD_X, title_y, fg, content_w - PAD_X * 2);
 
-    var sub_buf: [160]u8 = undefined;
+    // Counts: local is always known (local presence is never ambiguous); the
+    // remote count counts every row present on the server, which is only
+    // meaningful when the server is reachable and fresh (when offline, `unknown`
+    // rows don't imply remote presence) — so it's shown only in that case.
+    var local_count: usize = 0;
+    var remote_count: usize = 0;
+    for (view.rows) |r| {
+        if (r.relation != .remote_only) local_count += 1;
+        if (r.relation != .local_only) remote_count += 1;
+    }
+    var sub_buf: [192]u8 = undefined;
     const sub = if (view.server_name.len == 0)
-        std.fmt.bufPrint(&sub_buf, "本地（无服务器）", .{}) catch ""
+        std.fmt.bufPrint(&sub_buf, "本地 {d}（无服务器）", .{local_count}) catch ""
     else if (view.stale)
-        std.fmt.bufPrint(&sub_buf, "本地 ⇆ {s}（缓存）", .{view.server_name}) catch ""
+        std.fmt.bufPrint(&sub_buf, "本地 {d} ⇆ {s}（缓存）", .{ local_count, view.server_name }) catch ""
+    else if (!view.server_reachable)
+        std.fmt.bufPrint(&sub_buf, "本地 {d} ⇆ {s}（离线）", .{ local_count, view.server_name }) catch ""
     else
-        std.fmt.bufPrint(&sub_buf, "本地 ⇆ {s}", .{view.server_name}) catch "";
+        std.fmt.bufPrint(&sub_buf, "本地 {d} ⇆ {s} {d}", .{ local_count, view.server_name, remote_count }) catch "";
     const sub_x = title_end + 16;
     _ = draw.renderTextLimited(sub, sub_x, title_y, muted, @max(0, content_x + content_w - PAD_X - sub_x));
 

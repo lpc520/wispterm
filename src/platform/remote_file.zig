@@ -45,6 +45,31 @@ pub fn localPosixExecSupported() bool {
     return builtin.os.tag != .windows;
 }
 
+/// Run a POSIX-shell command on the LOCAL host and return whether it exited 0,
+/// discarding stdout. Returns false on a non-POSIX host, spawn failure, or a
+/// non-zero exit. Use this when only success/failure matters (e.g. a local
+/// `tar` extract) — unlike `localPosixExec`, which returns stdout WITHOUT
+/// checking the exit status and so would mask a failed command.
+pub fn localPosixExecOk(allocator: std.mem.Allocator, command: []const u8) bool {
+    if (builtin.os.tag == .windows) return false;
+    const argv = [_][]const u8{ "sh", "-c", command };
+    var child = initHiddenCaptureChild(&argv, allocator);
+    child.spawn() catch return false;
+    // Drain stdout to EOF so the child can't block on a full pipe at exit.
+    if (child.stdout) |stdout| {
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = stdout.read(&buf) catch break;
+            if (n == 0) break;
+        }
+    }
+    const term = child.wait() catch return false;
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+}
+
 pub fn wslHomeCommand() []const u8 {
     return "printf %s \"$HOME\"";
 }
