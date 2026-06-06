@@ -1499,7 +1499,15 @@ fn handleKey(ev: platform_input.KeyEvent) void {
                 return;
             },
             platform_input.key_enter => {
-                _ = AppWindow.skillCenterPreviewSelected();
+                if (AppWindow.skillCenterConfirmActive()) {
+                    _ = AppWindow.skillCenterConfirmProceed();
+                } else {
+                    _ = AppWindow.skillCenterPreviewSelected();
+                }
+                return;
+            },
+            platform_input.key_escape => {
+                _ = AppWindow.skillCenterConfirmCancel();
                 return;
             },
             0x52 => if (plain and !ev.shift) {
@@ -1508,6 +1516,14 @@ fn handleKey(ev: platform_input.KeyEvent) void {
             },
             0x53 => if (plain and !ev.shift) {
                 _ = AppWindow.skillCenterSwitchServer(1);
+                return;
+            },
+            0x55 => if (plain and !ev.shift) {
+                _ = AppWindow.skillCenterUpload();
+                return;
+            },
+            0x44 => if (plain and !ev.shift) {
+                _ = AppWindow.skillCenterDownload();
                 return;
             },
             else => {},

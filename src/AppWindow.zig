@@ -55,6 +55,8 @@ const skill_inventory = @import("skill_inventory.zig");
 const skill_inventory_cache = @import("skill_inventory_cache.zig");
 const remote_file = @import("platform/remote_file.zig");
 const ssh_connection = @import("ssh_connection.zig");
+const skill_transfer = @import("skill_transfer.zig");
+const scp = @import("scp.zig");
 pub const tab = @import("appwindow/tab.zig");
 const active_tab_state = @import("appwindow/active_tab.zig");
 pub const font = @import("font/manager.zig");
@@ -1016,6 +1018,159 @@ pub fn skillCenterRescan() bool {
 pub fn skillCenterPreviewSelected() bool {
     if (activeSkillCenter() == null) return false;
     overlays.showStatusToast("Skill preview coming soon");
+    return true;
+}
+
+/// Adapts the skill_transfer.Ops seam onto the real local/ssh/scp primitives.
+const SkillTransferCtx = struct {
+    conn: ssh_connection.SshConnection,
+
+    fn localExec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) bool {
+        _ = ctx;
+        const out = remote_file.localPosixExec(allocator, command, 4 * 1024 * 1024) catch return false;
+        allocator.free(out);
+        return true;
+    }
+    fn remoteExec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) bool {
+        const self: *SkillTransferCtx = @ptrCast(@alignCast(ctx));
+        const out = remote_file.sshExecCapture(allocator, self.conn, command) catch return false;
+        allocator.free(out);
+        return true;
+    }
+    fn copy(ctx: *anyopaque, allocator: std.mem.Allocator, dir: skill_transfer.Direction, local_tmp: []const u8, remote_tmp: []const u8) bool {
+        const self: *SkillTransferCtx = @ptrCast(@alignCast(ctx));
+        var buf: [512]u8 = undefined;
+        const remote_spec = scp.remoteSpec(&buf, &self.conn, remote_tmp);
+        const result = switch (dir) {
+            .upload => scp.transfer(allocator, &self.conn, local_tmp, remote_spec),
+            .download => scp.transfer(allocator, &self.conn, remote_spec, local_tmp),
+        };
+        return result == .ok;
+    }
+    fn ops(self: *SkillTransferCtx) skill_transfer.Ops {
+        return .{ .ctx = self, .localExec = localExec, .remoteExec = remoteExec, .copy = copy };
+    }
+};
+
+/// Resolve the SshConnection for the model's selected server (by "ssh:<name>").
+/// Caller must hold the session mutex (reads session.model).
+fn skillCenterSelectedConn(model: *const skill_center.PanelModel) ?ssh_connection.SshConnection {
+    const idx = model.selectedServerIndex() orelse return null;
+    const servers = model.servers orelse return null;
+    const id = servers[idx].source_id;
+    if (!std.mem.startsWith(u8, id, "ssh:")) return null;
+    return overlays.aiHistorySshConnection(id["ssh:".len..]);
+}
+
+/// Run a transfer synchronously on the UI thread, then rescan to refresh.
+fn skillCenterStartTransfer(dir: skill_transfer.Direction, rel_path: []const u8) void {
+    const allocator = g_allocator orelse return;
+    const session = activeSkillCenter() orelse return;
+    const conn = blk: {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        break :blk skillCenterSelectedConn(&session.model);
+    } orelse {
+        overlays.showStatusToast("无法连接所选服务器");
+        return;
+    };
+    var ctx = SkillTransferCtx{ .conn = conn };
+    const result = switch (dir) {
+        .upload => skill_transfer.upload(allocator, ctx.ops(), rel_path),
+        .download => skill_transfer.download(allocator, ctx.ops(), rel_path),
+    };
+    if (result == .ok) {
+        overlays.showStatusToast("Skill 同步完成");
+        startSkillCenterScan(allocator, session); // UI thread — safe
+    } else {
+        overlays.showStatusToast("Skill 同步失败");
+    }
+    markUiDirty();
+}
+
+/// Handle a u/d keypress: decide direct / confirm / noop / invalid.
+fn skillCenterRequestTransfer(dir: skill_transfer.Direction) bool {
+    const session = activeSkillCenter() orelse return false;
+    const allocator = g_allocator orelse return false;
+    var rel_owned: ?[]u8 = null;
+    var decision: skill_center.TransferDecision = .invalid;
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        const rows = session.model.pairing orelse return true;
+        if (session.model.sel_row >= rows.len) return true;
+        const pr = rows[session.model.sel_row];
+        decision = skill_center.transferDecision(dir, pr.relation);
+        const rel_path = (switch (dir) {
+            .upload => pr.local_rel_path,
+            .download => pr.remote_rel_path,
+        }) orelse return true;
+        if (decision == .confirm) {
+            var msg_buf: [256]u8 = undefined;
+            const verb = if (dir == .upload) "上传覆盖" else "下载覆盖";
+            const msg = std.fmt.bufPrint(&msg_buf, "{s} {s}（内容不同）？ [⏎ 确认] [esc 取消]", .{ verb, pr.name }) catch "覆盖？ [⏎ 确认] [esc 取消]";
+            session.model.setConfirm(msg, dir, rel_path);
+        } else if (decision == .direct) {
+            rel_owned = allocator.dupe(u8, rel_path) catch null;
+        }
+    }
+    switch (decision) {
+        .noop => overlays.showStatusToast("已一致，无需同步"),
+        .invalid => overlays.showStatusToast(if (dir == .upload) "本地没有该 skill" else "服务器没有该 skill"),
+        .confirm => markUiDirty(),
+        .direct => {
+            if (rel_owned) |rp| {
+                defer allocator.free(rp);
+                skillCenterStartTransfer(dir, rp);
+            }
+        },
+    }
+    return true;
+}
+
+pub fn skillCenterUpload() bool {
+    return skillCenterRequestTransfer(.upload);
+}
+pub fn skillCenterDownload() bool {
+    return skillCenterRequestTransfer(.download);
+}
+
+/// True if a confirm is armed (so Enter/Esc are captured by it).
+pub fn skillCenterConfirmActive() bool {
+    const session = activeSkillCenter() orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    return session.model.confirm_text != null;
+}
+
+pub fn skillCenterConfirmProceed() bool {
+    const session = activeSkillCenter() orelse return false;
+    const allocator = g_allocator orelse return false;
+    var dir: skill_transfer.Direction = .upload;
+    var rel_owned: ?[]u8 = null;
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        if (session.model.confirm_text == null) return false;
+        dir = session.model.confirm_dir;
+        if (session.model.confirm_rel_path) |p| rel_owned = allocator.dupe(u8, p) catch null;
+        session.model.clearConfirm();
+    }
+    if (rel_owned) |rp| {
+        defer allocator.free(rp);
+        skillCenterStartTransfer(dir, rp);
+    }
+    markUiDirty();
+    return true;
+}
+
+pub fn skillCenterConfirmCancel() bool {
+    const session = activeSkillCenter() orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    if (session.model.confirm_text == null) return false;
+    session.model.clearConfirm();
+    markUiDirty();
     return true;
 }
 
