@@ -66,6 +66,7 @@ test {
     _ = @import("ai_history_cache.zig");
     _ = @import("skill_scan.zig");
     _ = @import("skill_inventory.zig");
+    _ = @import("skill_inventory_cache.zig");
     _ = @import("ai_history_resume.zig");
     _ = @import("ai_history_session.zig");
     _ = @import("browser_url.zig");
