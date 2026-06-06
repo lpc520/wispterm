@@ -47,6 +47,12 @@ A two-pane Skill Center where **local is the hub**:
   currently-selected server's skills; a server picker in the header.
 - Rows are **aligned by `(provider, name)`** so each row shows local status and
   remote status side by side.
+- **Skills are provider-scoped.** A `claude` skill and a `codex` skill that
+  share a name are **distinct rows**, and transfer always routes to that
+  provider's own root — `claude` → `~/.claude/skills/<name>/`, `codex` →
+  `~/.codex/skills/<name>/` or `~/.codex/prompts/<name>.md`. A claude skill can
+  never overwrite a codex skill of the same name (or vice versa); the provider
+  root is taken from the skill's own `rel_path`, never inferred from the name.
 - **Upload** (local → selected server) and **download** (selected server →
   local) a skill, off the UI thread.
 - Same-name skills can be **diffed** before acting.

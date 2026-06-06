@@ -17,6 +17,13 @@
 - **macOS link-gap fallback:** if `zig build test` fails to *link* on macOS (known pre-existing gap), still run the touched module directly with `zig test src/<file>.zig`; that is the authoritative per-module result.
 - **Integration build sanity (Phase 2/3 tasks that touch `AppWindow.zig`/`input.zig`):** also run `zig build -Dtarget=aarch64-macos macos-app` once at the end of the task to confirm the GUI graph still compiles.
 - Commit after every task. Branch is already `worktree-feat-skill-center`.
+- **Provider-scoping invariant (cross-cutting):** every comparison and transfer
+  is keyed by `(provider, name)`, never name alone. `claude` and `codex` skills
+  with the same name are distinct rows and transfer to different roots. This is
+  honored for free because pairing keys on `provider` (Task 1's `findRow`/
+  `lessThan`) and `splitSkillPath` derives the root from the skill's own
+  `rel_path` (`.claude/skills` vs `.codex/skills` / `.codex/prompts`, Task 6).
+  Do not add any name-only matching.
 
 ---
 
