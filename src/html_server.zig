@@ -50,6 +50,7 @@ const Server = struct {
     launch_kind: Surface.LaunchKind,
     kind: model.ServerKind,
     port: u16,
+    source_surface_id: [16]u8,
     root_buf: [MAX_ROOT_BYTES]u8 = undefined,
     root_len: usize = 0,
     user_buf: [128]u8 = undefined,
@@ -68,6 +69,7 @@ const Server = struct {
             .launch_kind = launch_kind,
             .kind = kind,
             .port = port,
+            .source_surface_id = surface.remote_id,
         };
         server.root_len = copyBounded(server.root_buf[0..], root_path);
         if (surface.ssh_connection) |conn| {
@@ -110,13 +112,35 @@ const Server = struct {
             std.mem.eql(u8, self.sshPort(), conn.port()) and
             std.mem.eql(u8, self.proxyJump(), conn.proxyJump());
     }
+
+    fn matchesSurface(self: *const Server, surface: *const Surface) bool {
+        return surfaceIdsEqual(&self.source_surface_id, &surface.remote_id);
+    }
 };
 
 threadlocal var g_servers: [MAX_SERVERS]?Server = [_]?Server{null} ** MAX_SERVERS;
 threadlocal var g_next_port: u16 = 49152;
 
 pub fn deinit() void {
+    stopAll();
+}
+
+pub fn stopAll() void {
     for (&g_servers) |*slot| stopServer(slot);
+}
+
+pub fn stopForSurface(surface: *const Surface) void {
+    for (&g_servers) |*slot| {
+        const server = if (slot.*) |*server| server else continue;
+        if (server.matchesSurface(surface)) stopServer(slot);
+    }
+}
+
+pub fn stopForSurfaceId(source_surface_id: *const [16]u8) void {
+    for (&g_servers) |*slot| {
+        const server = if (slot.*) |*server| server else continue;
+        if (surfaceIdsEqual(&server.source_surface_id, source_surface_id)) stopServer(slot);
+    }
 }
 
 pub fn openForSurface(allocator: std.mem.Allocator, surface: *Surface, path: []const u8, ls_prefix: ?[]const u8) OpenResult {
@@ -150,7 +174,11 @@ fn ensureServerForSurface(allocator: std.mem.Allocator, surface: *Surface, root:
     if (root.len == 0 or root.len > MAX_ROOT_BYTES) return error.PathTooLong;
 
     pruneExitedServers();
-    if (findReusableServer(allocator, surface, root)) |port| return port;
+    if (findReusableServerSlot(allocator, surface, root)) |server_slot| {
+        const port = g_servers[server_slot].?.port;
+        stopServersExcept(server_slot);
+        return port;
+    }
 
     const slot = firstEmptySlot() orelse return error.ServerUnavailable;
     var attempts: usize = 0;
@@ -166,6 +194,7 @@ fn ensureServerForSurface(allocator: std.mem.Allocator, surface: *Surface, root:
             return error.PathTooLong;
         };
         g_servers[slot] = server;
+        stopServersExcept(slot);
         return port;
     }
     return error.ServerNotReady;
@@ -184,8 +213,8 @@ fn spawnReadyServerForSurface(allocator: std.mem.Allocator, surface: *Surface, r
     };
 }
 
-fn findReusableServer(allocator: std.mem.Allocator, surface: *Surface, root: []const u8) ?u16 {
-    for (&g_servers) |*slot| {
+fn findReusableServerSlot(allocator: std.mem.Allocator, surface: *Surface, root: []const u8) ?usize {
+    for (&g_servers, 0..) |*slot, i| {
         const server = if (slot.*) |*server| server else continue;
         if (!server.matches(surface, root)) continue;
         if (childHasExited(&server.child)) {
@@ -196,7 +225,7 @@ fn findReusableServer(allocator: std.mem.Allocator, surface: *Surface, root: []c
             stopServer(slot);
             continue;
         }
-        return server.port;
+        return i;
     }
     return null;
 }
@@ -617,6 +646,20 @@ fn pruneExitedServers() void {
     }
 }
 
+fn stopServersExcept(keep_slot: usize) void {
+    for (&g_servers, 0..) |*slot, i| {
+        if (shouldStopServerSlot(i, keep_slot)) stopServer(slot);
+    }
+}
+
+fn shouldStopServerSlot(slot_index: usize, keep_slot: usize) bool {
+    return slot_index != keep_slot;
+}
+
+fn surfaceIdsEqual(a: *const [16]u8, b: *const [16]u8) bool {
+    return std.mem.eql(u8, a.*[0..], b.*[0..]);
+}
+
 fn childHasExited(child: *std.process.Child) bool {
     return switch (platform_process.childExited(child.id, 0)) {
         .running => false,
@@ -711,6 +754,34 @@ test "html_server: public open API shape stays stable" {
     const info = @typeInfo(@TypeOf(openForSurface)).@"fn";
     try std.testing.expectEqual(@as(usize, 4), info.params.len);
     try std.testing.expect(info.return_type.? == OpenResult);
+}
+
+test "html_server: public stop API shape stays stable" {
+    const info = @typeInfo(@TypeOf(stopAll)).@"fn";
+    try std.testing.expectEqual(@as(usize, 0), info.params.len);
+    try std.testing.expect(info.return_type.? == void);
+}
+
+test "html_server: public surface stop API shape stays stable" {
+    const info = @typeInfo(@TypeOf(stopForSurface)).@"fn";
+    try std.testing.expectEqual(@as(usize, 1), info.params.len);
+    try std.testing.expect(info.params[0].type.? == *const Surface);
+    try std.testing.expect(info.return_type.? == void);
+}
+
+test "html_server: stale server cleanup keeps the current slot" {
+    try std.testing.expect(!shouldStopServerSlot(3, 3));
+    try std.testing.expect(shouldStopServerSlot(2, 3));
+    try std.testing.expect(shouldStopServerSlot(4, 3));
+}
+
+test "html_server: surface ownership compares the full source id" {
+    var first = [_]u8{0} ** 16;
+    var second = first;
+    second[15] = 1;
+
+    try std.testing.expect(surfaceIdsEqual(&first, &first));
+    try std.testing.expect(!surfaceIdsEqual(&first, &second));
 }
 
 test "html_server: non-html model check rejects markdown" {

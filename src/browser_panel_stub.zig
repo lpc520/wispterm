@@ -163,6 +163,7 @@ pub fn openJupyterForSurface(allocator: std.mem.Allocator, parent: ?window_backe
 pub fn close() void {
     g_visible = false;
     g_owner_tab = null;
+    html_server.stopAll();
 }
 
 pub fn focus() void {}
@@ -188,7 +189,7 @@ pub fn sync(parent: window_backend.NativeHandle, window_width: i32, window_heigh
 }
 
 pub fn deinit() void {
-    html_server.deinit();
+    html_server.stopAll();
     ssh_tunnel.deinit();
     g_visible = false;
     g_owner_tab = null;

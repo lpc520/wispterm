@@ -72,6 +72,7 @@ pub const markdown_preview_panel = @import("markdown_preview_panel.zig");
 pub const markdown_preview_renderer = @import("renderer/markdown_preview_renderer.zig");
 pub const weixin_qr_panel = @import("weixin/qr_panel.zig");
 pub const weixin_qr_renderer = @import("renderer/weixin_qr_renderer.zig");
+const html_server = @import("html_server.zig");
 pub const browser_panel = if (build_options.webview)
     @import("browser_panel.zig")
 else
@@ -2130,8 +2131,11 @@ pub fn splitFocusedReturningSurface(direction: SplitTree.Split.Direction) ?*Surf
 pub fn closeFocusedSplit() void {
     const allocator = g_allocator orelse return;
     const closing_tab_idx = active_tab_state.g_active_tab;
+    var closing_surface_id: ?[16]u8 = null;
+    if (tab.activeSurface()) |surface| closing_surface_id = surface.remote_id;
     switch (tab.closeFocusedSplit(allocator)) {
         .closed_split => {
+            if (closing_surface_id) |*source_id| html_server.stopForSurfaceId(source_id);
             input.g_selecting = false;
             handleActiveSurfaceChangeWithinTab();
             requestImmediateLayoutResize();

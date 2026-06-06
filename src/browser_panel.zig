@@ -238,6 +238,7 @@ pub fn close() void {
     g_url_bar_focused = false;
     g_url_edit_select_all = false;
     destroyBrowser();
+    html_server.stopAll();
 }
 
 pub fn focus() void {
@@ -310,7 +311,7 @@ pub fn sync(parent: window_backend.NativeHandle, window_width: i32, window_heigh
 
 pub fn deinit() void {
     destroyBrowser();
-    html_server.deinit();
+    html_server.stopAll();
     ssh_tunnel.deinit();
     g_visible = false;
     g_owner_tab = null;
