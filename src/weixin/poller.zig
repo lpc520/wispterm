@@ -425,37 +425,48 @@ pub const Poller = struct {
         var failed_names: std.ArrayListUnmanaged([]const u8) = .empty;
         defer failed_names.deinit(allocator);
 
+        // Reserve capacity up front so every in-loop append is infallible: the
+        // loop body then has no `try` that could return mid-iteration, so the
+        // `name`/`full` allocations are either appended (owned by the lists,
+        // freed by the defers above) or freed on their own failure path — no
+        // errdefer needed, no double-free on OOM.
+        try saved_names.ensureTotalCapacity(allocator, plans.len);
+        try saved_paths.ensureTotalCapacity(allocator, plans.len);
+        try failed_names.ensureTotalCapacity(allocator, plans.len);
+
         for (plans, 0..) |plan, idx| {
             if (self.stop_requested.load(.acquire)) break;
             const bytes = self.client.downloadAttachment(allocator, plan.encrypt_query_param, plan.aes_key, plan.allow_plain) catch |err| {
                 std.debug.print("weixin media: download failed kind={s} err={}\n", .{ plan.kind.name(), err });
-                try failed_names.append(allocator, failureLabel(plan));
+                failed_names.appendAssumeCapacity(failureLabel(plan));
                 continue;
             };
             defer allocator.free(bytes);
 
             const chosen = media_inbound_mod.chooseFileName(allocator, plan, bytes, idx) catch {
-                try failed_names.append(allocator, failureLabel(plan));
+                failed_names.appendAssumeCapacity(failureLabel(plan));
                 continue;
             };
             defer allocator.free(chosen);
+
             const name = media_inbound_mod.dedupeFileName(allocator, chosen, saved_names.items) catch {
-                try failed_names.append(allocator, failureLabel(plan));
+                failed_names.appendAssumeCapacity(failureLabel(plan));
                 continue;
             };
-            errdefer allocator.free(name);
-
-            const full = try std.fs.path.join(allocator, &.{ save_dir, name });
-            errdefer allocator.free(full);
+            const full = std.fs.path.join(allocator, &.{ save_dir, name }) catch {
+                allocator.free(name);
+                failed_names.appendAssumeCapacity(failureLabel(plan));
+                continue;
+            };
             writeFileAbsolute(full, bytes) catch |err| {
                 std.debug.print("weixin media: write failed err={}\n", .{err});
                 allocator.free(name);
                 allocator.free(full);
-                try failed_names.append(allocator, failureLabel(plan));
+                failed_names.appendAssumeCapacity(failureLabel(plan));
                 continue;
             };
-            try saved_names.append(allocator, name);
-            try saved_paths.append(allocator, full);
+            saved_names.appendAssumeCapacity(name);
+            saved_paths.appendAssumeCapacity(full);
         }
 
         if (saved_names.items.len == 0) {
