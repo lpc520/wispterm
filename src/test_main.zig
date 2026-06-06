@@ -718,6 +718,7 @@ comptime {
     _ = @import("selection_unit.zig");
     _ = @import("session_persist.zig");
     _ = @import("skill_registry.zig");
+    _ = @import("skill_scan.zig");
     _ = @import("command_registry.zig");
     _ = @import("scrollbar_model.zig");
     _ = @import("ai_chat_scrollbar_model.zig");
