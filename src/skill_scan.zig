@@ -148,7 +148,7 @@ pub fn buildScanCommand(allocator: std.mem.Allocator, targets: []const ScanTarge
                     \\if [ -d "$R" ]; then for d in "$R"/*/; do
                     \\[ -f "${{d}}SKILL.md" ] || continue;
                     \\n=$(basename "$d");
-                    \\if [ -n "$HASHCMD" ]; then h=$(cd "$d" && find . -type f | LC_ALL=C sort | xargs -r $HASHCMD | $HASHCMD | cut -d' ' -f1); else h=""; fi;
+                    \\if [ -n "$HASHCMD" ]; then h=$(cd "$d" && find . -type f | LC_ALL=C sort | xargs $HASHCMD | $HASHCMD | cut -d' ' -f1); else h=""; fi;
                     \\printf '{s}\t%s\t{s}/%s/SKILL.md\t%s\n' "$n" "$n" "$h";
                     \\done; fi;
                     \\
@@ -187,6 +187,7 @@ test "skill_scan: buildScanCommand probes hash tool and covers all targets" {
     try std.testing.expect(std.mem.indexOf(u8, cmd, "$HOME/.codex/skills") != null);
     try std.testing.expect(std.mem.indexOf(u8, cmd, "$HOME/.codex/prompts") != null);
     try std.testing.expect(std.mem.indexOf(u8, cmd, "SKILL.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, ".codex/prompts/%s.md") != null);
     try std.testing.expect(std.mem.indexOf(u8, cmd, "printf 'claude\\t") != null);
     try std.testing.expect(std.mem.indexOf(u8, cmd, "printf 'codex\\t") != null);
 }
@@ -257,4 +258,10 @@ test "skill_scan: scanSource marks offline host unreachable" {
 
     try std.testing.expect(!outcome.reachable);
     try std.testing.expectEqual(@as(usize, 0), outcome.rows.len);
+}
+
+test "skill_scan: parseScanOutput returns empty slice on empty input" {
+    const rows = try parseScanOutput(std.testing.allocator, "");
+    defer freeRows(std.testing.allocator, rows);
+    try std.testing.expectEqual(@as(usize, 0), rows.len);
 }
