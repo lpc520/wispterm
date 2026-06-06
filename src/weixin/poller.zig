@@ -39,6 +39,13 @@ pub const RouteResult = struct {
     baseline_transcript: []u8 = &.{},
 };
 
+pub const MediaOutcome = struct {
+    /// true ⇒ this message carried inbound media (text path is skipped).
+    handled: bool = false,
+    /// true ⇒ at least one file saved (route the synthetic prompt).
+    any_saved: bool = false,
+};
+
 pub const ThreadControl = struct {
     request_synchronous_io_cancel: *const fn (thread: std.Thread) bool,
     wait_for_exit: *const fn (thread: std.Thread, timeout_ms: u32) bool,
@@ -72,6 +79,16 @@ pub const ProcessInput = struct {
     /// Cancels any active AI-reply progress streaming. Invoked (with progress_ctx)
     /// when a routed message reports stop_followup (e.g. /stop).
     stop_progress_fn: ?*const fn (ctx: *anyopaque) void = null,
+    media_ctx: ?*anyopaque = null,
+    /// Downloads + saves inbound media in `msg`. Fills `receipt` (sent verbatim
+    /// as the ack) and `prompt` (routed to the copilot; its reply is suppressed).
+    media_fn: ?*const fn (
+        ctx: *anyopaque,
+        msg: types.Message,
+        allocator: std.mem.Allocator,
+        receipt: *std.ArrayListUnmanaged(u8),
+        prompt: *std.ArrayListUnmanaged(u8),
+    ) anyerror!MediaOutcome = null,
 };
 
 /// Mirror of processWeixinUpdates: filter, extract, route, reply.
@@ -96,6 +113,45 @@ pub fn processUpdates(input: ProcessInput) !void {
             std.debug.print("weixin process({d}): index={d} skipped reason={s}\n", .{ debugNowMs(), i, decision.reason });
             continue;
         }
+
+        if (input.media_fn) |media_fn| {
+            var receipt: std.ArrayListUnmanaged(u8) = .empty;
+            defer receipt.deinit(input.allocator);
+            var prompt: std.ArrayListUnmanaged(u8) = .empty;
+            defer prompt.deinit(input.allocator);
+            const outcome = media_fn(input.media_ctx.?, msg, input.allocator, &receipt, &prompt) catch |err| blk: {
+                std.debug.print("weixin process({d}): index={d} media=failed err={}\n", .{ debugNowMs(), i, err });
+                break :blk MediaOutcome{};
+            };
+            if (outcome.handled) {
+                const receipt_trimmed = std.mem.trim(u8, receipt.items, " \t\r\n");
+                if (receipt_trimmed.len != 0) {
+                    input.send_fn(input.send_ctx, msg.from_user_id, receipt_trimmed, msg.context_token) catch |err| {
+                        std.debug.print("weixin send({d}): index={d} kind=receipt status=failed err={}\n", .{ debugNowMs(), i, err });
+                    };
+                }
+                if (outcome.any_saved and prompt.items.len != 0) {
+                    var throwaway: std.ArrayListUnmanaged(u8) = .empty;
+                    defer throwaway.deinit(input.allocator);
+                    const rr = input.route_fn(input.route_ctx, prompt.items, msg.from_user_id, msg.context_token, input.allocator, &throwaway) catch |err| route_blk: {
+                        std.debug.print("weixin process({d}): index={d} media_route=failed err={}\n", .{ debugNowMs(), i, err });
+                        break :route_blk RouteResult{};
+                    };
+                    defer if (rr.baseline_transcript.len != 0) input.allocator.free(rr.baseline_transcript);
+                    if (rr.expect_ai_progress) {
+                        if (input.progress_ctx) |ctx| {
+                            if (input.start_progress_fn) |start| {
+                                start(ctx, rr.baseline_transcript, msg.from_user_id, msg.context_token) catch |err| {
+                                    std.debug.print("weixin process({d}): index={d} media_followup=failed err={}\n", .{ debugNowMs(), i, err });
+                                };
+                            }
+                        }
+                    }
+                }
+                continue; // media handled → skip the text path
+            }
+        }
+
         const text = binding.extractText(msg);
         if (text.len == 0) {
             std.debug.print("weixin process({d}): index={d} skipped reason=no_text_item\n", .{ debugNowMs(), i });
@@ -868,6 +924,90 @@ test "processUpdates routes inbound voice transcript as message text" {
     try t.expectEqualStrings("transcribed command", cap.routed.items[0]);
     try t.expectEqualStrings("u1", cap.routed_to.items[0]);
     try t.expectEqualStrings("voice-ctx", cap.routed_context.items[0]);
+}
+
+test "processUpdates sends the receipt as ack and routes the synthetic prompt for media" {
+    const MediaCtx = struct {
+        fn media(_: *anyopaque, _: types.Message, allocator: std.mem.Allocator, receipt: *std.ArrayListUnmanaged(u8), prompt: *std.ArrayListUnmanaged(u8)) anyerror!MediaOutcome {
+            try receipt.appendSlice(allocator, "已收到文件：a.pdf");
+            try prompt.appendSlice(allocator, "用户通过微信发送了文件：\n- /work/weixin_inbound/a.pdf");
+            return .{ .handled = true, .any_saved = true };
+        }
+    };
+    var cap = Captured{};
+    defer cap.deinit();
+    var rctx = RouteCtx{ .cap = &cap };
+    var sctx = SendCtx{ .cap = &cap };
+    var pctx = ProgressCtx{};
+    defer pctx.deinit();
+    var media_ctx: u8 = 0;
+
+    const msgs = [_]types.Message{
+        .{ .from_user_id = "u1", .context_token = "ctx", .item_list = &.{
+            .{ .type = 4, .file_name = "a.pdf", .media = .{ .encrypt_query_param = "E1", .aes_key = "K1" } },
+        } },
+    };
+
+    try processUpdates(.{
+        .allocator = t.allocator,
+        .owner = "u1",
+        .account_id = "",
+        .messages = &msgs,
+        .route_ctx = &rctx,
+        .route_fn = RouteCtx.route,
+        .send_ctx = &sctx,
+        .send_fn = SendCtx.send,
+        .progress_ctx = &pctx,
+        .start_progress_fn = ProgressCtx.start,
+        .media_ctx = &media_ctx,
+        .media_fn = MediaCtx.media,
+    });
+
+    // Receipt is the only ack sent (route reply suppressed).
+    try t.expectEqual(@as(usize, 1), cap.sent.items.len);
+    try t.expectEqualStrings("已收到文件：a.pdf", cap.sent.items[0]);
+    // The synthetic prompt was routed to the copilot.
+    try t.expectEqual(@as(usize, 1), cap.routed.items.len);
+    try t.expect(std.mem.indexOf(u8, cap.routed.items[0], "/work/weixin_inbound/a.pdf") != null);
+    // RouteCtx.route returns .{} (no progress), so streaming is not started here.
+}
+
+test "processUpdates skips routing when media is handled but nothing saved" {
+    const MediaCtx = struct {
+        fn media(_: *anyopaque, _: types.Message, allocator: std.mem.Allocator, receipt: *std.ArrayListUnmanaged(u8), prompt: *std.ArrayListUnmanaged(u8)) anyerror!MediaOutcome {
+            _ = prompt;
+            try receipt.appendSlice(allocator, "文件接收失败：a.pdf");
+            return .{ .handled = true, .any_saved = false };
+        }
+    };
+    var cap = Captured{};
+    defer cap.deinit();
+    var rctx = RouteCtx{ .cap = &cap };
+    var sctx = SendCtx{ .cap = &cap };
+    var media_ctx: u8 = 0;
+
+    const msgs = [_]types.Message{
+        .{ .from_user_id = "u1", .context_token = "ctx", .item_list = &.{
+            .{ .type = 4, .file_name = "a.pdf", .media = .{ .encrypt_query_param = "E1", .aes_key = "K1" } },
+        } },
+    };
+
+    try processUpdates(.{
+        .allocator = t.allocator,
+        .owner = "u1",
+        .account_id = "",
+        .messages = &msgs,
+        .route_ctx = &rctx,
+        .route_fn = RouteCtx.route,
+        .send_ctx = &sctx,
+        .send_fn = SendCtx.send,
+        .media_ctx = &media_ctx,
+        .media_fn = MediaCtx.media,
+    });
+
+    try t.expectEqual(@as(usize, 1), cap.sent.items.len);
+    try t.expectEqualStrings("文件接收失败：a.pdf", cap.sent.items[0]);
+    try t.expectEqual(@as(usize, 0), cap.routed.items.len);
 }
 
 test "processUpdates cancels AI followup when a routed message reports stop_followup" {
