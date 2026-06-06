@@ -72,6 +72,7 @@ test {
     _ = @import("skill_pairing.zig");
     _ = @import("skill_transfer_cmd.zig");
     _ = @import("skill_transfer.zig");
+    _ = @import("skill_diff.zig");
     _ = @import("ai_history_resume.zig");
     _ = @import("ai_history_session.zig");
     _ = @import("browser_url.zig");
