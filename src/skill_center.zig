@@ -1,271 +1,252 @@
+//! Skill Center v2 model: a local wispterm **library** of skills that the user
+//! deploys to / imports from a **target = machine × software**. The library is
+//! always local; the panel lists library skills and drives deploy/import through
+//! a popup picker. Pure model + a concurrency-safe Session that runs the (local)
+//! library scan off the UI thread. UI strings live in i18n; transfer/diff live in
+//! sibling modules.
 const std = @import("std");
 const scan = @import("skill_scan.zig");
-const inv = @import("skill_inventory.zig");
-const pairing = @import("skill_pairing.zig");
-const inv_cache = @import("skill_inventory_cache.zig");
-const dirs = @import("platform/dirs.zig");
-const transfer = @import("skill_transfer.zig");
 
-pub const TransferDecision = enum { direct, confirm, noop, invalid };
+/// Target software — a skills root under $HOME on the target machine. Both use
+/// the same SKILL.md directory format, so a library skill deploys to either.
+pub const Software = enum {
+    claude,
+    codex,
+    pub fn rootRel(self: Software) []const u8 {
+        return switch (self) {
+            .claude => ".claude/skills",
+            .codex => ".codex/skills",
+        };
+    }
+};
 
-/// Decide what a transfer of the selected row implies, given the relation.
-/// `invalid` = the source side is absent (nothing to send).
-pub fn transferDecision(dir: transfer.Direction, rel: pairing.Relation) TransferDecision {
-    return switch (dir) {
-        .upload => switch (rel) {
-            .local_only => .direct, // remote absent
-            .same => .noop,
-            .differ, .unknown => .confirm,
-            .remote_only => .invalid, // nothing local to upload
-        },
-        .download => switch (rel) {
-            .remote_only => .direct, // local absent
-            .same => .noop,
-            .differ, .unknown => .confirm,
-            .local_only => .invalid, // nothing remote to download
-        },
-    };
+/// A deploy/import destination: a machine × a software root.
+pub const Target = struct {
+    machine_id: []u8, // owned: "local" or "ssh:<profile>"
+    machine_label: []u8, // owned display name
+    software: Software,
+    is_local: bool,
+
+    pub fn dupe(
+        allocator: std.mem.Allocator,
+        machine_id: []const u8,
+        machine_label: []const u8,
+        software: Software,
+        is_local: bool,
+    ) !Target {
+        const id = try allocator.dupe(u8, machine_id);
+        errdefer allocator.free(id);
+        const label = try allocator.dupe(u8, machine_label);
+        return .{ .machine_id = id, .machine_label = label, .software = software, .is_local = is_local };
+    }
+    pub fn clone(self: Target, allocator: std.mem.Allocator) !Target {
+        return dupe(allocator, self.machine_id, self.machine_label, self.software, self.is_local);
+    }
+    pub fn deinit(self: *Target, allocator: std.mem.Allocator) void {
+        allocator.free(self.machine_id);
+        allocator.free(self.machine_label);
+        self.* = undefined;
+    }
+};
+
+/// One skill in the wispterm library (`<config>/skills/<name>/SKILL.md`).
+pub const LibrarySkill = struct {
+    name: []u8,
+    rel_path: []u8, // relative to the library root, e.g. "<name>/SKILL.md"
+    agg_hash: ?[]u8,
+    pub fn deinit(self: *LibrarySkill, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.rel_path);
+        if (self.agg_hash) |h| allocator.free(h);
+        self.* = undefined;
+    }
+};
+
+pub fn freeLibrary(allocator: std.mem.Allocator, lib: []LibrarySkill) void {
+    for (lib) |*s| s.deinit(allocator);
+    allocator.free(lib);
 }
 
-/// Source descriptor for a scan column. `id` is the stable column identity;
-/// `name` is the display label.
-pub const ScanSource = struct {
-    id: []const u8,
-    name: []const u8,
-};
-
-/// Seam that produces an `ExecHost` for a source (or errors -> unreachable
-/// column). The integration layer supplies a real factory; tests use a fake.
-pub const HostFactory = struct {
-    ctx: *anyopaque,
-    make: *const fn (*anyopaque, std.mem.Allocator, ScanSource) anyerror!scan.ExecHost,
-};
-
-/// Scan every source and return owned `[]inv.ServerScan` (free with
-/// `inv_cache.freeServerScans` then free the slice). A source whose host cannot
-/// be created, or whose scan reports unreachable, becomes an unreachable column
-/// with no rows.
-pub fn runScan(
-    allocator: std.mem.Allocator,
-    sources: []const ScanSource,
-    factory: HostFactory,
-) ![]inv.ServerScan {
-    var out = try allocator.alloc(inv.ServerScan, sources.len);
-    var built: usize = 0;
-    errdefer {
-        inv_cache.freeServerScans(allocator, out[0..built]);
-        allocator.free(out);
+/// Convert owned scan rows (from `skill_scan.scanLocation`) into a LibrarySkill
+/// slice. Takes ownership of the rows' backing strings (moves them); frees the
+/// rows slice itself. `provider` is ignored (v2 keys by name).
+pub fn libraryFromRows(allocator: std.mem.Allocator, rows: []scan.SkillRow) ![]LibrarySkill {
+    const out = try allocator.alloc(LibrarySkill, rows.len);
+    for (rows, 0..) |r, i| {
+        out[i] = .{ .name = r.name, .rel_path = r.rel_path, .agg_hash = r.agg_hash };
     }
-
-    for (sources, 0..) |src, i| {
-        const id_copy = try allocator.dupe(u8, src.id);
-        errdefer allocator.free(id_copy);
-
-        const host = factory.make(factory.ctx, allocator, src) catch {
-            out[i] = .{ .source_id = id_copy, .reachable = false, .rows = &.{} };
-            built += 1;
-            continue;
-        };
-
-        var outcome = scan.scanSource(allocator, scan.defaultTargets(), host) catch {
-            out[i] = .{ .source_id = id_copy, .reachable = false, .rows = &.{} };
-            built += 1;
-            continue;
-        };
-        out[i] = .{ .source_id = id_copy, .reachable = outcome.reachable, .rows = outcome.rows };
-        outcome.rows = &.{}; // ownership moved into the ServerScan
-        built += 1;
-    }
-
+    allocator.free(rows); // strings moved into `out`
     return out;
 }
 
-/// Build a command that prints one skill's SKILL.md / prompt file from a
-/// server, given its `rel_path` (relative to $HOME, as produced by the scan).
-/// The path is single-quote-escaped so a hostile name from a remote listing
-/// cannot inject shell; $HOME still expands via the surrounding double quotes.
-pub fn previewCommand(allocator: std.mem.Allocator, rel_path: []const u8) ![]u8 {
+pub const Decision = enum { direct, confirm, noop };
+
+/// Decide what copying a skill onto a destination implies.
+/// `target_present` false → `direct` (nothing to overwrite). Both hashes present
+/// and equal → `noop`. Differing, or either hash unknown → `confirm`.
+pub fn overwriteDecision(target_present: bool, target_hash: ?[]const u8, src_hash: ?[]const u8) Decision {
+    if (!target_present) return .direct;
+    const th = target_hash orelse return .confirm;
+    const sh = src_hash orelse return .confirm;
+    return if (std.mem.eql(u8, th, sh)) .noop else .confirm;
+}
+
+// --- Overlay state (interaction) ---
+
+pub const Purpose = enum { deploy, import_ };
+pub const Marker = enum { new_, same, differ };
+
+/// Target picker: a flat list of "machine · software" entries to choose from.
+pub const PickerState = struct {
+    purpose: Purpose,
+    skill_name: []u8, // library skill being deployed (deploy); "" for import
+    labels: [][]u8, // owned entry labels
+    targets: []Target, // parallel, owned
+    sel: usize = 0,
+
+    fn deinit(self: *PickerState, allocator: std.mem.Allocator) void {
+        allocator.free(self.skill_name);
+        for (self.labels) |l| allocator.free(l);
+        allocator.free(self.labels);
+        for (self.targets) |*t| t.deinit(allocator);
+        allocator.free(self.targets);
+        self.* = undefined;
+    }
+};
+
+/// Import list: the chosen target's skills, marked vs the library.
+pub const ImportState = struct {
+    target: Target, // owned
+    names: [][]u8, // owned target skill names
+    markers: []Marker, // parallel
+    sel: usize = 0,
+
+    fn deinit(self: *ImportState, allocator: std.mem.Allocator) void {
+        self.target.deinit(allocator);
+        for (self.names) |n| allocator.free(n);
+        allocator.free(self.names);
+        allocator.free(self.markers);
+        self.* = undefined;
+    }
+};
+
+/// Pending overwrite confirmation for a deploy/import that would clobber a
+/// differing same-name skill.
+pub const ConfirmState = struct {
+    text: []u8, // owned display message
+    is_import: bool,
+    target: Target, // owned
+    name: []u8, // owned skill name
+
+    fn deinit(self: *ConfirmState, allocator: std.mem.Allocator) void {
+        allocator.free(self.text);
+        self.target.deinit(allocator);
+        allocator.free(self.name);
+        self.* = undefined;
+    }
+};
+
+pub const Overlay = union(enum) {
+    none,
+    picker: PickerState,
+    import_list: ImportState,
+    confirm: ConfirmState,
+    busy: []u8, // owned message
+
+    pub fn deinit(self: *Overlay, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .none => {},
+            .picker => |*p| p.deinit(allocator),
+            .import_list => |*i| i.deinit(allocator),
+            .confirm => |*c| c.deinit(allocator),
+            .busy => |m| allocator.free(m),
+        }
+        self.* = .none;
+    }
+};
+
+/// Build a `cat '<path>'` command for an absolute path (the library skill's
+/// SKILL.md). Single-quote-escaped.
+pub fn catCommand(allocator: std.mem.Allocator, abs_path: []const u8) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
-    try buf.appendSlice(allocator, "cat \"$HOME\"/'");
-    for (rel_path) |c| {
-        if (c == '\'') {
-            try buf.appendSlice(allocator, "'\\''");
-        } else {
-            try buf.append(allocator, c);
-        }
+    try buf.appendSlice(allocator, "cat '");
+    for (abs_path) |c| {
+        if (c == '\'') try buf.appendSlice(allocator, "'\\''") else try buf.append(allocator, c);
     }
     try buf.append(allocator, '\'');
     return buf.toOwnedSlice(allocator);
 }
 
-// --- Tests ---
-
-/// Panel state for the Skill Center UI: owns the current scan results,
-/// the focused cell, scroll offset, and a stale flag. The background scan
-/// worker (integration layer) calls `setServers` to swap in new results;
-/// `seedFromCache` loads the last persisted scan for instant display.
+/// Panel state: the library list, selection, and the active overlay.
 pub const PanelModel = struct {
     allocator: std.mem.Allocator,
-    servers: ?[]inv.ServerScan = null,
-    /// Aligned local-vs-selected-server view (rows borrow from `servers`).
-    pairing: ?[]pairing.PairRow = null,
-    /// Index into the remote servers (everything except source_id == "local").
-    sel_server: usize = 0,
+    library: ?[]LibrarySkill = null,
     sel_row: usize = 0,
     scroll: usize = 0,
-    stale: bool = false,
-    /// Pending overwrite confirmation text (owned), or null. When set, the input
-    /// layer routes Enter=proceed / Esc=cancel to it (wired in a later task).
-    confirm_text: ?[]u8 = null,
-    /// What the confirm will execute on Enter.
-    confirm_dir: transfer.Direction = .upload,
-    /// Owned rel_path of the skill to transfer when confirmed.
-    confirm_rel_path: ?[]u8 = null,
+    overlay: Overlay = .none,
 
     pub fn init(allocator: std.mem.Allocator) PanelModel {
         return .{ .allocator = allocator };
     }
 
-    /// Seed from the persisted cache so the panel renders immediately; mark stale.
-    pub fn seedFromCache(self: *PanelModel) void {
-        const cached = inv_cache.load(self.allocator) catch return;
-        if (cached.len == 0) {
-            self.allocator.free(cached);
-            return;
-        }
-        self.setServers(cached);
-        self.stale = true;
-    }
-
-    /// Take ownership of a fresh `[]inv.ServerScan`, rebuild the pairing, clear stale.
-    pub fn setServers(self: *PanelModel, servers: []inv.ServerScan) void {
-        self.freeServers();
-        self.servers = servers;
-        self.stale = false;
-        self.rebuildPairing();
-    }
-
-    /// Index in `servers` of the local hub ("local"); null if none present.
-    fn localIndex(self: *const PanelModel) ?usize {
-        const servers = self.servers orelse return null;
-        for (servers, 0..) |s, i| {
-            if (std.mem.eql(u8, s.source_id, "local")) return i;
-        }
-        return null;
-    }
-
-    /// Count of selectable remote servers (all non-local columns).
-    pub fn remoteCount(self: *const PanelModel) usize {
-        const servers = self.servers orelse return 0;
-        const li = self.localIndex();
-        var n: usize = 0;
-        for (servers, 0..) |_, i| {
-            if (li != null and i == li.?) continue;
-            n += 1;
-        }
-        return n;
-    }
-
-    /// Resolve `sel_server` (an index over remote servers) to an index in
-    /// `servers`; null when there are no remote servers.
-    pub fn selectedServerIndex(self: *const PanelModel) ?usize {
-        const servers = self.servers orelse return null;
-        const li = self.localIndex();
-        var n: usize = 0;
-        for (servers, 0..) |_, i| {
-            if (li != null and i == li.?) continue;
-            if (n == self.sel_server) return i;
-            n += 1;
-        }
-        return null;
-    }
-
-    /// Rebuild `pairing` from the local hub vs the selected server. Frees any
-    /// prior pairing slice (rows borrow from `servers`, so only the slice).
-    pub fn rebuildPairing(self: *PanelModel) void {
-        if (self.pairing) |p| {
-            self.allocator.free(p);
-            self.pairing = null;
-        }
-        const servers = self.servers orelse return;
-        const local: inv.ServerScan = if (self.localIndex()) |li|
-            servers[li]
-        else
-            .{ .source_id = "local", .reachable = false, .rows = &.{} };
-        const remote_idx = self.selectedServerIndex() orelse {
-            self.pairing = pairing.pair(self.allocator, local, .{ .source_id = "", .reachable = false, .rows = &.{} }, false) catch null;
-            self.clampSelection();
-            return;
-        };
-        const remote = servers[remote_idx];
-        self.pairing = pairing.pair(self.allocator, local, remote, remote.reachable) catch null;
+    /// Take ownership of a fresh library list; clamp selection.
+    pub fn setLibrary(self: *PanelModel, lib: []LibrarySkill) void {
+        self.freeLibraryList();
+        self.library = lib;
         self.clampSelection();
     }
 
+    fn freeLibraryList(self: *PanelModel) void {
+        if (self.library) |l| {
+            freeLibrary(self.allocator, l);
+            self.library = null;
+        }
+    }
+
     fn clampSelection(self: *PanelModel) void {
-        const rows = if (self.pairing) |p| p.len else 0;
-        if (rows == 0) {
+        const n = if (self.library) |l| l.len else 0;
+        if (n == 0) {
             self.sel_row = 0;
-        } else if (self.sel_row >= rows) {
-            self.sel_row = rows - 1;
-        }
-        const rc = self.remoteCount();
-        if (rc == 0) {
-            self.sel_server = 0;
-        } else if (self.sel_server >= rc) {
-            self.sel_server = rc - 1;
+        } else if (self.sel_row >= n) {
+            self.sel_row = n - 1;
         }
     }
 
-    pub fn setConfirm(self: *PanelModel, text: []const u8, dir: transfer.Direction, rel_path: []const u8) void {
-        self.clearConfirm();
-        self.confirm_text = self.allocator.dupe(u8, text) catch null;
-        self.confirm_rel_path = self.allocator.dupe(u8, rel_path) catch null;
-        self.confirm_dir = dir;
-    }
-    pub fn clearConfirm(self: *PanelModel) void {
-        if (self.confirm_text) |t| self.allocator.free(t);
-        if (self.confirm_rel_path) |p| self.allocator.free(p);
-        self.confirm_text = null;
-        self.confirm_rel_path = null;
+    /// Selected library skill, or null.
+    pub fn selected(self: *const PanelModel) ?LibrarySkill {
+        const lib = self.library orelse return null;
+        if (self.sel_row >= lib.len) return null;
+        return lib[self.sel_row];
     }
 
-    fn freeServers(self: *PanelModel) void {
-        self.clearConfirm();
-        if (self.pairing) |p| {
-            self.allocator.free(p);
-            self.pairing = null;
-        }
-        if (self.servers) |s| {
-            inv_cache.freeServerScans(self.allocator, s);
-            self.allocator.free(s);
-            self.servers = null;
-        }
+    /// Replace the overlay (frees the previous one's owned data).
+    pub fn setOverlay(self: *PanelModel, ov: Overlay) void {
+        self.overlay.deinit(self.allocator);
+        self.overlay = ov;
+    }
+    pub fn clearOverlay(self: *PanelModel) void {
+        self.overlay.deinit(self.allocator);
     }
 
     pub fn deinit(self: *PanelModel) void {
-        self.freeServers();
+        self.overlay.deinit(self.allocator);
+        self.freeLibraryList();
         self.* = undefined;
     }
 };
 
-/// Owned unit of background scan work. `run` performs the blocking scan on the
-/// worker thread and returns owned `[]inv.ServerScan` (free with
-/// `inv_cache.freeServerScans` then free the slice). `destroy` frees `ctx`. Both
-/// run on the worker thread; `ctx` must own everything `run` needs and hold no
-/// pointers into threadlocal UI state. Mirrors `ai_history_session.ScanWork`.
+/// Owned unit of background scan work — scans the (local) library off the UI
+/// thread and returns an owned `[]LibrarySkill`. `destroy` frees `ctx`.
 pub const ScanWork = struct {
     ctx: *anyopaque,
-    run: *const fn (*anyopaque, std.mem.Allocator) anyerror![]inv.ServerScan,
+    run: *const fn (*anyopaque, std.mem.Allocator) anyerror![]LibrarySkill,
     destroy: *const fn (*anyopaque, std.mem.Allocator) void,
 };
 
-/// Concurrency-safe holder for the Skill Center panel. Mirrors
-/// `ai_history_session.Session`'s discipline: `mutex` guards the `model` and
-/// `status`; the background scan worker runs host I/O without the lock and takes
-/// it only to publish via `finishScan`; `closing` + join-on-deinit give UAF
-/// safety. The renderer reads the model on the UI thread under `mutex`.
+/// Concurrency-safe holder for the panel. `mutex` guards `model` + `status`; the
+/// worker runs I/O without the lock and takes it only to publish via
+/// `finishScan`; `closing` + join-on-deinit give UAF safety.
 pub const Session = struct {
     allocator: std.mem.Allocator,
     model: PanelModel,
@@ -273,8 +254,7 @@ pub const Session = struct {
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     scan_generation: u64 = 0,
     scan_thread: ?std.Thread = null,
-    /// Owned status string ("Scanning…"/"Done"/"Failed"/""). Reset via setStatus.
-    status: []u8 = &.{},
+    status: []u8 = &.{}, // owned "Scanning…"/"Failed"/""
 
     pub fn create(allocator: std.mem.Allocator) !*Session {
         const self = try allocator.create(Session);
@@ -295,23 +275,13 @@ pub const Session = struct {
         allocator.destroy(self);
     }
 
-    /// Seed from the persisted cache for instant display. UI thread, before any
-    /// worker is spawned (no lock needed — single-threaded at this point).
-    pub fn seedFromCache(self: *Session) void {
-        self.model.seedFromCache();
-    }
-
-    /// Replace the owned status string. Callers must hold `mutex`.
     fn setStatusLocked(self: *Session, text: []const u8) void {
         const next = self.allocator.dupe(u8, text) catch return;
         if (self.status.len > 0) self.allocator.free(self.status);
         self.status = next;
     }
 
-    /// Start a background scan. UI thread only. Joins any prior worker first (at
-    /// most one in flight), bumps the generation, sets status "Scanning…", and
-    /// spawns the worker. Returns immediately. On spawn failure marks "Failed"
-    /// and destroys `work`.
+    /// Start a background library scan. UI thread only.
     pub fn scanAsync(self: *Session, work: ScanWork) void {
         if (self.scan_thread) |t| {
             t.join();
@@ -333,22 +303,19 @@ pub const Session = struct {
         self.scan_thread = thread;
     }
 
-    /// Publish the scan result under the lock if `generation` is current and we
-    /// are not closing; otherwise discard `servers` (free + free slice). Always
-    /// consumes ownership of `servers`. Worker-thread only.
-    pub fn finishScan(self: *Session, generation: u64, servers: []inv.ServerScan) void {
+    /// Publish a library scan result under the lock if current; else discard.
+    /// Always consumes ownership of `lib`. Worker-thread only.
+    pub fn finishScan(self: *Session, generation: u64, lib: []LibrarySkill) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (!self.closing.load(.acquire) and generation == self.scan_generation) {
-            self.model.setServers(servers);
+            self.model.setLibrary(lib);
             self.setStatusLocked("");
         } else {
-            inv_cache.freeServerScans(self.allocator, servers);
-            self.allocator.free(servers);
+            freeLibrary(self.allocator, lib);
         }
     }
 
-    /// Mark the scan failed if `generation` is still current and not closing.
     pub fn publishScanFailure(self: *Session, generation: u64) void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -357,7 +324,7 @@ pub const Session = struct {
         }
     }
 
-    /// Test-only: wait for an in-flight worker so results can be asserted.
+    /// Test-only: wait for an in-flight worker.
     pub fn joinForTest(self: *Session) void {
         if (self.scan_thread) |t| {
             t.join();
@@ -368,188 +335,103 @@ pub const Session = struct {
 
 fn scanThreadMain(session: *Session, work: ScanWork, generation: u64) void {
     defer work.destroy(work.ctx, session.allocator);
-    const servers = work.run(work.ctx, session.allocator) catch {
+    const lib = work.run(work.ctx, session.allocator) catch {
         session.publishScanFailure(generation);
         return;
     };
-    session.finishScan(generation, servers);
+    session.finishScan(generation, lib);
 }
 
-test "skill_center: previewCommand single-quotes the rel path under HOME" {
-    const allocator = std.testing.allocator;
-    const cmd = try previewCommand(allocator, ".claude/skills/pdf/SKILL.md");
-    defer allocator.free(cmd);
-    try std.testing.expectEqualStrings("cat \"$HOME\"/'.claude/skills/pdf/SKILL.md'", cmd);
-}
+// --- Tests ---
 
-test "skill_center: previewCommand escapes single quotes" {
-    const allocator = std.testing.allocator;
-    const cmd = try previewCommand(allocator, "a'b/SKILL.md");
-    defer allocator.free(cmd);
-    try std.testing.expectEqualStrings("cat \"$HOME\"/'a'\\''b/SKILL.md'", cmd);
-}
-
-test "skill_center: seedFromCache loads persisted scan and marks stale" {
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(tmp_path);
-    dirs.setTestConfigDirForCurrentThread(tmp_path);
-    defer dirs.clearTestConfigDirForCurrentThread();
-
-    // Persist a one-server scan.
-    const rows = [_]scan.SkillRow{
-        .{ .provider = .claude, .name = @constCast("a"), .rel_path = @constCast(".claude/skills/a/SKILL.md"), .agg_hash = @constCast("h") },
-    };
-    const servers = [_]inv.ServerScan{
-        .{ .source_id = "local", .reachable = true, .rows = &rows },
-    };
-    try inv_cache.save(allocator, &servers);
-
-    var model = PanelModel.init(allocator);
-    defer model.deinit();
-    model.seedFromCache();
-
-    try std.testing.expect(model.stale);
-    try std.testing.expect(model.servers != null);
-    try std.testing.expect(model.pairing != null);
-    try std.testing.expectEqual(@as(usize, 1), model.pairing.?.len);
-}
-
-test "skill_center: PanelModel setServers rebuilds pairing and clamps selection" {
-    const allocator = std.testing.allocator;
-    var model = PanelModel.init(allocator);
-    defer model.deinit();
-
-    // First scan: 2 skills.
-    const rows1 = [_]scan.SkillRow{
-        .{ .provider = .claude, .name = @constCast("a"), .rel_path = @constCast(".claude/skills/a/SKILL.md"), .agg_hash = @constCast("h") },
-        .{ .provider = .claude, .name = @constCast("b"), .rel_path = @constCast(".claude/skills/b/SKILL.md"), .agg_hash = @constCast("h") },
-    };
-    const s1 = try allocator.alloc(inv.ServerScan, 1);
-    s1[0] = .{ .source_id = try allocator.dupe(u8, "local"), .reachable = true, .rows = try dupRows(allocator, &rows1) };
-    model.setServers(s1);
-    model.sel_row = 1; // select the 2nd skill
-
-    try std.testing.expect(model.pairing != null);
-    try std.testing.expectEqual(@as(usize, 2), model.pairing.?.len);
-
-    // Replace with a scan that has only 1 skill -> selection must clamp to 0.
-    const rows2 = [_]scan.SkillRow{
-        .{ .provider = .claude, .name = @constCast("a"), .rel_path = @constCast(".claude/skills/a/SKILL.md"), .agg_hash = @constCast("h") },
-    };
-    const s2 = try allocator.alloc(inv.ServerScan, 1);
-    s2[0] = .{ .source_id = try allocator.dupe(u8, "local"), .reachable = true, .rows = try dupRows(allocator, &rows2) };
-    model.setServers(s2);
-
-    try std.testing.expectEqual(@as(usize, 1), model.pairing.?.len);
-    try std.testing.expectEqual(@as(usize, 0), model.sel_row); // clamped
-}
-
-// Helper: deep-dupe borrowed rows into owned rows the model/cache can free.
-fn dupRows(allocator: std.mem.Allocator, src: []const scan.SkillRow) ![]scan.SkillRow {
-    const out = try allocator.alloc(scan.SkillRow, src.len);
-    var built: usize = 0;
-    errdefer {
-        for (out[0..built]) |*r| r.deinit(allocator);
-        allocator.free(out);
-    }
-    for (src, 0..) |r, i| {
+fn ownedLib(allocator: std.mem.Allocator, names: []const []const u8) ![]LibrarySkill {
+    const out = try allocator.alloc(LibrarySkill, names.len);
+    for (names, 0..) |n, i| {
         out[i] = .{
-            .provider = r.provider,
-            .name = try allocator.dupe(u8, r.name),
-            .rel_path = try allocator.dupe(u8, r.rel_path),
-            .agg_hash = if (r.agg_hash) |h| try allocator.dupe(u8, h) else null,
+            .name = try allocator.dupe(u8, n),
+            .rel_path = try std.fmt.allocPrint(allocator, "{s}/SKILL.md", .{n}),
+            .agg_hash = try allocator.dupe(u8, "h"),
         };
-        built += 1;
     }
     return out;
 }
 
-// Build an owned one-server scan the Session can take ownership of and free.
-fn ownedServers(allocator: std.mem.Allocator) ![]inv.ServerScan {
-    const rows = [_]scan.SkillRow{
-        .{ .provider = .claude, .name = @constCast("a"), .rel_path = @constCast(".claude/skills/a/SKILL.md"), .agg_hash = @constCast("h") },
-    };
-    const s = try allocator.alloc(inv.ServerScan, 1);
-    s[0] = .{ .source_id = try allocator.dupe(u8, "local"), .reachable = true, .rows = try dupRows(allocator, &rows) };
-    return s;
+test "skill_center: overwriteDecision" {
+    try std.testing.expectEqual(Decision.direct, overwriteDecision(false, null, "h"));
+    try std.testing.expectEqual(Decision.noop, overwriteDecision(true, "h", "h"));
+    try std.testing.expectEqual(Decision.confirm, overwriteDecision(true, "h", "x"));
+    try std.testing.expectEqual(Decision.confirm, overwriteDecision(true, null, "h"));
+    try std.testing.expectEqual(Decision.confirm, overwriteDecision(true, "h", null));
 }
 
-test "skill_center: Session.finishScan publishes a current-generation result" {
-    const allocator = std.testing.allocator;
-    const session = try Session.create(allocator);
+test "skill_center: setLibrary clamps selection" {
+    const a = std.testing.allocator;
+    var m = PanelModel.init(a);
+    defer m.deinit();
+    m.setLibrary(try ownedLib(a, &.{ "x", "y", "z" }));
+    m.sel_row = 2;
+    try std.testing.expectEqual(@as(usize, 3), m.library.?.len);
+    m.setLibrary(try ownedLib(a, &.{"x"})); // shrink → clamp
+    try std.testing.expectEqual(@as(usize, 0), m.sel_row);
+    try std.testing.expectEqualStrings("x", m.selected().?.name);
+}
+
+test "skill_center: overlay set/clear frees owned data (no leak)" {
+    const a = std.testing.allocator;
+    var m = PanelModel.init(a);
+    defer m.deinit();
+
+    // picker overlay with owned labels + targets
+    var labels = try a.alloc([]u8, 2);
+    labels[0] = try a.dupe(u8, "local · Claude Code");
+    labels[1] = try a.dupe(u8, "web · Codex");
+    var targets = try a.alloc(Target, 2);
+    targets[0] = try Target.dupe(a, "local", "local", .claude, true);
+    targets[1] = try Target.dupe(a, "ssh:web", "web", .codex, false);
+    m.setOverlay(.{ .picker = .{ .purpose = .deploy, .skill_name = try a.dupe(u8, "pdf"), .labels = labels, .targets = targets } });
+    try std.testing.expect(m.overlay == .picker);
+
+    // replace with a confirm overlay → picker freed
+    m.setOverlay(.{ .confirm = .{
+        .text = try a.dupe(u8, "overwrite?"),
+        .is_import = false,
+        .target = try Target.dupe(a, "ssh:web", "web", .codex, false),
+        .name = try a.dupe(u8, "pdf"),
+    } });
+    try std.testing.expect(m.overlay == .confirm);
+    m.clearOverlay();
+    try std.testing.expect(m.overlay == .none);
+}
+
+test "skill_center: libraryFromRows moves ownership" {
+    const a = std.testing.allocator;
+    const rows = try a.alloc(scan.SkillRow, 1);
+    rows[0] = .{ .provider = .claude, .name = try a.dupe(u8, "pdf"), .rel_path = try a.dupe(u8, "pdf/SKILL.md"), .agg_hash = try a.dupe(u8, "h") };
+    const lib = try libraryFromRows(a, rows);
+    defer freeLibrary(a, lib);
+    try std.testing.expectEqual(@as(usize, 1), lib.len);
+    try std.testing.expectEqualStrings("pdf", lib[0].name);
+    try std.testing.expectEqualStrings("h", lib[0].agg_hash.?);
+}
+
+test "skill_center: catCommand quotes an absolute path" {
+    const a = std.testing.allocator;
+    const cmd = try catCommand(a, "/cfg/skills/pdf/SKILL.md");
+    defer a.free(cmd);
+    try std.testing.expectEqualStrings("cat '/cfg/skills/pdf/SKILL.md'", cmd);
+}
+
+test "skill_center: Session.finishScan publishes then discards stale (no leak)" {
+    const a = std.testing.allocator;
+    const session = try Session.create(a);
     defer session.destroy();
 
-    // No scan started yet -> generation is 0; bump it once to mirror scanAsync.
     session.scan_generation +%= 1;
-    const gen = session.scan_generation;
-    session.finishScan(gen, try ownedServers(allocator));
+    session.finishScan(session.scan_generation, try ownedLib(a, &.{ "a", "b" }));
+    try std.testing.expect(session.model.library != null);
+    try std.testing.expectEqual(@as(usize, 2), session.model.library.?.len);
 
-    try std.testing.expect(session.model.servers != null);
-    try std.testing.expect(session.model.pairing != null);
-    try std.testing.expectEqual(@as(usize, 1), session.model.pairing.?.len);
-}
-
-test "skill_center: Session.finishScan discards a stale-generation result (no leak)" {
-    const allocator = std.testing.allocator;
-    const session = try Session.create(allocator);
-    defer session.destroy();
-
-    session.scan_generation = 5; // current generation
-    // A worker from an older generation finishes late: must be discarded + freed.
-    session.finishScan(3, try ownedServers(allocator));
-
-    try std.testing.expect(session.model.servers == null);
-    try std.testing.expect(session.model.pairing == null);
-}
-
-test "skill_center: transferDecision" {
-    // upload: local must exist; same -> noop; differ/unknown -> confirm; remote absent -> direct
-    try std.testing.expectEqual(TransferDecision.noop, transferDecision(.upload, .same));
-    try std.testing.expectEqual(TransferDecision.confirm, transferDecision(.upload, .differ));
-    try std.testing.expectEqual(TransferDecision.confirm, transferDecision(.upload, .unknown));
-    try std.testing.expectEqual(TransferDecision.direct, transferDecision(.upload, .local_only));
-    try std.testing.expectEqual(TransferDecision.invalid, transferDecision(.upload, .remote_only));
-    // download: remote must exist; same -> noop; differ/unknown -> confirm; local absent -> direct
-    try std.testing.expectEqual(TransferDecision.noop, transferDecision(.download, .same));
-    try std.testing.expectEqual(TransferDecision.confirm, transferDecision(.download, .differ));
-    try std.testing.expectEqual(TransferDecision.direct, transferDecision(.download, .remote_only));
-    try std.testing.expectEqual(TransferDecision.invalid, transferDecision(.download, .local_only));
-}
-
-test "skill_center: confirm set/clear" {
-    const allocator = std.testing.allocator;
-    var model = PanelModel.init(allocator);
-    defer model.deinit();
-    model.setConfirm("覆盖 web 上的 pdf？", .upload, ".claude/skills/pdf/SKILL.md");
-    try std.testing.expect(model.confirm_text != null);
-    try std.testing.expect(model.confirm_rel_path != null);
-    model.clearConfirm();
-    try std.testing.expect(model.confirm_text == null);
-    try std.testing.expect(model.confirm_rel_path == null);
-}
-
-test "skill_center: model builds pairing for the selected server" {
-    const allocator = std.testing.allocator;
-    var model = PanelModel.init(allocator);
-    defer model.deinit();
-
-    const local_rows = [_]scan.SkillRow{
-        .{ .provider = .claude, .name = @constCast("a"), .rel_path = @constCast(".claude/skills/a/SKILL.md"), .agg_hash = @constCast("h") },
-    };
-    const web_rows = [_]scan.SkillRow{
-        .{ .provider = .claude, .name = @constCast("a"), .rel_path = @constCast(".claude/skills/a/SKILL.md"), .agg_hash = @constCast("DIFF") },
-        .{ .provider = .claude, .name = @constCast("b"), .rel_path = @constCast(".claude/skills/b/SKILL.md"), .agg_hash = @constCast("h") },
-    };
-    const s = try allocator.alloc(inv.ServerScan, 2);
-    s[0] = .{ .source_id = try allocator.dupe(u8, "local"), .reachable = true, .rows = try dupRows(allocator, &local_rows) };
-    s[1] = .{ .source_id = try allocator.dupe(u8, "ssh:web"), .reachable = true, .rows = try dupRows(allocator, &web_rows) };
-    model.setServers(s);
-
-    try std.testing.expect(model.pairing != null);
-    // local 'a' differs from web 'a'; web 'b' is remote_only -> 2 rows.
-    try std.testing.expectEqual(@as(usize, 2), model.pairing.?.len);
-    try std.testing.expectEqual(@as(usize, 0), model.sel_server); // first (only) remote
+    session.scan_generation = 9;
+    session.finishScan(3, try ownedLib(a, &.{"stale"})); // discarded + freed
+    try std.testing.expectEqual(@as(usize, 2), session.model.library.?.len);
 }
