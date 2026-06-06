@@ -1271,11 +1271,18 @@ fn skillCenterArmConfirm(allocator: std.mem.Allocator, is_import: bool, target: 
     var msg_buf: [256]u8 = undefined;
     const t = i18n.s();
     const msg = std.fmt.bufPrint(&msg_buf, "{s} → {s} {s}", .{ name, target.machine_label, t.sc_confirm_suffix }) catch t.sc_confirm_suffix;
+    // Explicit cleanup (not errdefer): this is a void fn, so errdefer would
+    // never fire on the `catch return` paths.
     var tgt = target.clone(allocator) catch return;
-    errdefer tgt.deinit(allocator);
-    const name_dup = allocator.dupe(u8, name) catch return;
-    errdefer allocator.free(name_dup);
-    const text = allocator.dupe(u8, msg) catch return;
+    const name_dup = allocator.dupe(u8, name) catch {
+        tgt.deinit(allocator);
+        return;
+    };
+    const text = allocator.dupe(u8, msg) catch {
+        tgt.deinit(allocator);
+        allocator.free(name_dup);
+        return;
+    };
     session.mutex.lock();
     defer session.mutex.unlock();
     session.model.setOverlay(.{ .confirm = .{ .text = text, .is_import = is_import, .target = tgt, .name = name_dup } });
