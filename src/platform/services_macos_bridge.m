@@ -109,16 +109,6 @@ bool wispterm_macos_display_point_on_any_screen(int32_t x, int32_t y) {
     }
 }
 
-int32_t wispterm_macos_text_case_insensitive_equal(const char *a, const char *b) {
-    @autoreleasepool {
-        if (a == NULL || b == NULL) return -1;
-        NSString *lhs = [NSString stringWithUTF8String:a];
-        NSString *rhs = [NSString stringWithUTF8String:b];
-        if (lhs == nil || rhs == nil) return -1;
-        return [lhs caseInsensitiveCompare:rhs] == NSOrderedSame ? 1 : 0;
-    }
-}
-
 bool wispterm_macos_workspace_open_url(const char *url) {
     @autoreleasepool {
         if (url == NULL) return false;

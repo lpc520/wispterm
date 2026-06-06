@@ -1014,6 +1014,11 @@ fn handleChar(ev: platform_input.CharEvent) void {
         }
         return;
     }
+    // Skill Center has no text input; swallow character input so the rescan
+    // hotkey ('r') and other keys never leak to the terminal/copilot.
+    if (AppWindow.activeSkillCenter() != null) {
+        return;
+    }
     // AI copilot sidebar (terminal tabs): when the copilot owns focus, route
     // text input to its composer. `activeCopilotSessionForInput` is non-null
     // only when the panel is visible on the active terminal tab.
@@ -1466,6 +1471,47 @@ fn handleKey(ev: platform_input.KeyEvent) void {
             },
             0x52 => if (plain and !ev.shift) {
                 g_ai_history_suppress_refresh_char = AppWindow.aiHistoryScanLocalNow();
+                return;
+            },
+            else => {},
+        }
+        return;
+    }
+
+    // Skill Center: ↑/↓ move, ⏎ preview/select, esc cancel overlay, d deploy, i import, r rescan.
+    if (AppWindow.activeSkillCenter() != null) {
+        const plain = !ev.ctrl and !ev.alt and !ev.super;
+        switch (ev.key_code) {
+            platform_input.key_up => {
+                _ = AppWindow.skillCenterMove(-1);
+                return;
+            },
+            platform_input.key_down => {
+                _ = AppWindow.skillCenterMove(1);
+                return;
+            },
+            platform_input.key_enter => {
+                if (AppWindow.skillCenterOverlayActive()) {
+                    _ = AppWindow.skillCenterOverlaySelect();
+                } else {
+                    _ = AppWindow.skillCenterPreviewSelected();
+                }
+                return;
+            },
+            platform_input.key_escape => {
+                _ = AppWindow.skillCenterOverlayCancel();
+                return;
+            },
+            0x52 => if (plain and !ev.shift) {
+                _ = AppWindow.skillCenterRescan();
+                return;
+            },
+            0x44 => if (plain and !ev.shift) {
+                _ = AppWindow.skillCenterDeploy();
+                return;
+            },
+            0x49 => if (plain and !ev.shift) {
+                _ = AppWindow.skillCenterImport();
                 return;
             },
             else => {},

@@ -577,6 +577,9 @@ fn executeCommand(action: CommandAction) void {
                 showStatusToast(i18n.s().toast_update_skills_unavailable);
             }
         },
+        .open_skill_center => {
+            _ = AppWindow.spawnSkillCenterTab();
+        },
     }
 }
 
@@ -2347,6 +2350,25 @@ pub fn aiHistorySshConnection(identifier: []const u8) ?ssh_connection.SshConnect
     conn.password_auth = password.len > 0;
     conn.legacy_algorithms = AppWindow.g_ssh_legacy_algorithms;
     return conn;
+}
+
+/// Enumerate the saved SSH profile names (UI thread; loads the threadlocal
+/// store on demand). Returns an owned slice of owned name strings — the caller
+/// frees each name and then the slice. Used by the Skill Center to build one
+/// scan column per SSH profile. Empty/unsafe names are skipped.
+pub fn sshProfileNames(allocator: std.mem.Allocator) ![][]u8 {
+    loadSshProfiles();
+    var out: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (out.items) |n| allocator.free(n);
+        out.deinit(allocator);
+    }
+    for (0..g_ssh_profile_count) |idx| {
+        const name = profileField(&g_ssh_profiles[idx], .name);
+        if (name.len == 0) continue;
+        try out.append(allocator, try allocator.dupe(u8, name));
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 const copySshProfileField = profile_codec.copySshProfileField;

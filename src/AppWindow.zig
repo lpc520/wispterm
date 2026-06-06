@@ -49,7 +49,15 @@ const ai_loop_store = @import("ai_loop_store.zig");
 const ai_history_types = @import("ai_history_types.zig");
 pub const ai_history_session = @import("ai_history_session.zig");
 pub const ai_history_source = @import("ai_history_source.zig");
+pub const skill_center = @import("skill_center.zig");
+const skill_scan = @import("skill_scan.zig");
+const skill_transfer_cmd = @import("skill_transfer_cmd.zig");
+const remote_file = @import("platform/remote_file.zig");
 const ssh_connection = @import("ssh_connection.zig");
+const skill_transfer = @import("skill_transfer.zig");
+const skill_diff = @import("skill_diff.zig");
+const scp = @import("scp.zig");
+const i18n = @import("i18n.zig");
 pub const tab = @import("appwindow/tab.zig");
 const active_tab_state = @import("appwindow/active_tab.zig");
 pub const font = @import("font/manager.zig");
@@ -79,6 +87,7 @@ else
     @import("browser_panel_stub.zig");
 pub const ai_chat_renderer = @import("renderer/ai_chat_renderer.zig");
 pub const ai_history_renderer = @import("renderer/ai_history_renderer.zig");
+pub const skill_center_renderer = @import("renderer/skill_center_renderer.zig");
 const ai_sidebar = @import("ai_sidebar.zig");
 pub const ui_perf = @import("ui_perf.zig");
 const log = std.log.scoped(.app_window);
@@ -803,6 +812,92 @@ fn renderAiHistoryFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_int
     }
 }
 
+fn renderSkillCenterFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_int, titlebar_offset: f32, left_panels_w: f32, right_panels_w: f32) void {
+    gpu.state.setViewport(0, 0, @intCast(fb_width), @intCast(fb_height));
+    gpu.gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
+    clearWithBackground(fb_width, fb_height);
+    titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+    titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+    markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
+    file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+    if (active_tab.skill_center_session) |session| {
+        const draw: skill_center_renderer.DrawContext = .{
+            .bg = g_theme.background,
+            .fg = g_theme.foreground,
+            .accent = g_theme.cursor_color,
+            .cell_h = font.g_titlebar_cell_height,
+            .fillQuad = ui_pipeline.fillQuad,
+            .fillQuadAlpha = ui_pipeline.fillQuadAlpha,
+            .renderTextLimited = titlebar.renderTextLimited,
+            .glyphAdvance = titlebar.titlebarGlyphAdvance,
+        };
+        // Hold the lock for the duration of render: the View borrows the pairing.
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        const m = &session.model;
+        const lib_len = if (m.library) |l| l.len else 0;
+        const overlay: skill_center_renderer.Overlay = switch (m.overlay) {
+            .none, .busy => .none,
+            .picker => |*p| .{ .list = .{
+                .title = if (p.purpose == .deploy) i18n.s().sc_pick_deploy else i18n.s().sc_pick_import,
+                .len = p.labels.len,
+                .ctx = @ptrCast(p),
+                .itemAt = scPickerItemAt,
+                .sel = p.sel,
+            } },
+            .import_list => |*il| .{ .list = .{
+                .title = i18n.s().sc_import_title,
+                .len = il.names.len,
+                .ctx = @ptrCast(il),
+                .itemAt = scImportItemAt,
+                .sel = il.sel,
+            } },
+            .confirm => |*c| .{ .confirm = c.text },
+        };
+        const view: skill_center_renderer.View = .{
+            .skills_len = lib_len,
+            .ctx = @ptrCast(m),
+            .nameAt = scNameAt,
+            .sel_row = m.sel_row,
+            .scroll = m.scroll,
+            .title = i18n.s().sl_skill_center,
+            .legend = i18n.s().sc_legend_v2,
+            .status = session.status,
+            .overlay = overlay,
+        };
+        skill_center_renderer.render(
+            draw,
+            view,
+            @floatFromInt(fb_width),
+            @floatFromInt(fb_height),
+            titlebar_offset,
+            left_panels_w,
+            aiHistoryContentWidth(fb_width, left_panels_w, right_panels_w),
+        );
+    }
+}
+
+/// Renderer accessor: library skill name at index i (read under the session lock).
+fn scNameAt(ctx: *anyopaque, i: usize) []const u8 {
+    const m: *const skill_center.PanelModel = @ptrCast(@alignCast(ctx));
+    const lib = m.library orelse return "";
+    return if (i < lib.len) lib[i].name else "";
+}
+fn scPickerItemAt(ctx: *anyopaque, i: usize) skill_center_renderer.ListItem {
+    const p: *const skill_center.PickerState = @ptrCast(@alignCast(ctx));
+    return if (i < p.labels.len) .{ .label = p.labels[i], .marker = "" } else .{ .label = "", .marker = "" };
+}
+fn scImportItemAt(ctx: *anyopaque, i: usize) skill_center_renderer.ListItem {
+    const il: *const skill_center.ImportState = @ptrCast(@alignCast(ctx));
+    if (i >= il.names.len) return .{ .label = "", .marker = "" };
+    const t = i18n.s();
+    return switch (il.markers[i]) {
+        .new_ => .{ .label = il.names[i], .marker = t.sc_marker_new, .marker_color = .{ 0.42, 0.62, 0.88 } },
+        .same => .{ .label = il.names[i], .marker = t.sc_marker_same, .marker_color = mixColor(g_theme.background, g_theme.foreground, 0.58) },
+        .differ => .{ .label = il.names[i], .marker = t.sc_marker_differ, .marker_color = .{ 0.86, 0.70, 0.28 } },
+    };
+}
+
 fn renderAiCopilotPanel(fb_width: c_int, fb_height: c_int, titlebar_offset: f32) void {
     if (!aiCopilotVisible()) return;
     const session = ensureActiveCopilotSession() orelse return;
@@ -902,6 +997,467 @@ pub fn activeAiHistory() ?*ai_history_session.Session {
     const active = activeTab() orelse return null;
     if (active.kind != .ai_history) return null;
     return active.ai_history_session;
+}
+
+pub fn activeSkillCenter() ?*skill_center.Session {
+    return tab.activeSkillCenter();
+}
+
+fn scMoveSel(sel: *usize, len: usize, delta: isize) void {
+    if (len == 0) {
+        sel.* = 0;
+        return;
+    }
+    const cur: isize = @intCast(sel.*);
+    sel.* = @intCast(std.math.clamp(cur + delta, 0, @as(isize, @intCast(len - 1))));
+}
+
+/// Move selection in the active overlay list, else in the library list.
+pub fn skillCenterMove(delta: isize) bool {
+    const session = activeSkillCenter() orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    switch (session.model.overlay) {
+        .picker => |*p| scMoveSel(&p.sel, p.labels.len, delta),
+        .import_list => |*il| scMoveSel(&il.sel, il.names.len, delta),
+        else => {
+            const n = if (session.model.library) |l| l.len else 0;
+            scMoveSel(&session.model.sel_row, n, delta);
+        },
+    }
+    markUiDirty();
+    return true;
+}
+
+/// True if an overlay (picker/import/confirm) is open (captures Enter/Esc).
+pub fn skillCenterOverlayActive() bool {
+    const session = activeSkillCenter() orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    return session.model.overlay != .none;
+}
+
+pub fn skillCenterOverlayCancel() bool {
+    const session = activeSkillCenter() orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    if (session.model.overlay == .none) return false;
+    session.model.clearOverlay();
+    markUiDirty();
+    return true;
+}
+
+/// Library root `<config>/skills`. Caller frees.
+fn skillCenterLibraryDir(allocator: std.mem.Allocator) ?[]const u8 {
+    return platform_dirs.pathInConfigDir(allocator, "skills") catch null;
+}
+
+/// ExecHost over a location: local POSIX, or SSH when a conn is present.
+const SkillLocExec = struct {
+    conn: ?ssh_connection.SshConnection,
+    fn exec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) anyerror![]u8 {
+        const self: *SkillLocExec = @ptrCast(@alignCast(ctx));
+        if (self.conn) |c| return remote_file.sshExecCapture(allocator, c, command);
+        return remote_file.localPosixExec(allocator, command, 4 * 1024 * 1024);
+    }
+    fn host(self: *SkillLocExec) skill_scan.ExecHost {
+        return .{ .ctx = self, .exec = exec };
+    }
+};
+
+/// Resolve a target's SshConnection (null for a local target / unresolved).
+fn skillCenterTargetConn(target: skill_center.Target) ?ssh_connection.SshConnection {
+    if (target.is_local) return null;
+    if (std.mem.startsWith(u8, target.machine_id, "ssh:")) {
+        return overlays.aiHistorySshConnection(target.machine_id["ssh:".len..]);
+    }
+    return null;
+}
+
+/// Adapts skill_transfer.Ops onto local/ssh/scp. conn null → a local-only target.
+const SkillTransferCtx = struct {
+    conn: ?ssh_connection.SshConnection,
+    fn localExec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) bool {
+        _ = ctx;
+        return remote_file.localPosixExecOk(allocator, command);
+    }
+    fn remoteExec(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8) bool {
+        const self: *SkillTransferCtx = @ptrCast(@alignCast(ctx));
+        const c = self.conn orelse return false;
+        const out = remote_file.sshExecCapture(allocator, c, command) catch return false;
+        allocator.free(out);
+        return true;
+    }
+    fn copy(ctx: *anyopaque, allocator: std.mem.Allocator, dir: skill_transfer.CopyDir, local_tmp: []const u8, remote_tmp: []const u8) bool {
+        const self: *SkillTransferCtx = @ptrCast(@alignCast(ctx));
+        const c = self.conn orelse return false;
+        var buf: [512]u8 = undefined;
+        const spec = scp.remoteSpec(&buf, &c, remote_tmp);
+        const r = switch (dir) {
+            .to_remote => scp.transfer(allocator, &c, local_tmp, spec),
+            .to_local => scp.transfer(allocator, &c, spec, local_tmp),
+        };
+        return r == .ok;
+    }
+    fn ops(self: *SkillTransferCtx) skill_transfer.Ops {
+        return .{ .ctx = self, .localExec = localExec, .remoteExec = remoteExec, .copy = copy };
+    }
+};
+
+/// Marker for a target skill vs the library (by name + hash).
+fn skillCenterMarkerFor(library: ?[]skill_center.LibrarySkill, name: []const u8, target_hash: ?[]const u8) skill_center.Marker {
+    const lib = library orelse return .new_;
+    for (lib) |s| {
+        if (std.mem.eql(u8, s.name, name)) {
+            const lh = s.agg_hash orelse return .differ;
+            const th = target_hash orelse return .differ;
+            return if (std.mem.eql(u8, lh, th)) .same else .differ;
+        }
+    }
+    return .new_;
+}
+
+/// Build an ImportState from a target's scanned rows. Caller holds the lock.
+fn skillCenterMakeImportState(allocator: std.mem.Allocator, model: *const skill_center.PanelModel, rows: []const skill_scan.SkillRow, target: skill_center.Target) !skill_center.ImportState {
+    var names: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+    var markers: std.ArrayListUnmanaged(skill_center.Marker) = .empty;
+    errdefer markers.deinit(allocator);
+    for (rows) |r| {
+        const marker = skillCenterMarkerFor(model.library, r.name, r.agg_hash);
+        const n = try allocator.dupe(u8, r.name);
+        // Explicit cleanup: once `n` is in `names`, the function-level errdefer
+        // owns it — a per-item errdefer here would double-free on a later error.
+        names.append(allocator, n) catch |e| {
+            allocator.free(n);
+            return e;
+        };
+        try markers.append(allocator, marker);
+    }
+    var tgt = try target.clone(allocator);
+    errdefer tgt.deinit(allocator);
+    return .{
+        .target = tgt,
+        .names = try names.toOwnedSlice(allocator),
+        .markers = try markers.toOwnedSlice(allocator),
+        .sel = 0,
+    };
+}
+
+fn skillCenterAddMachine(allocator: std.mem.Allocator, labels: *std.ArrayListUnmanaged([]u8), targets: *std.ArrayListUnmanaged(skill_center.Target), machine_id: []const u8, machine_label: []const u8, is_local: bool) !void {
+    const sws = [_]skill_center.Software{ .claude, .codex };
+    for (sws) |sw| {
+        const sw_label = switch (sw) {
+            .claude => i18n.s().sc_sw_claude,
+            .codex => i18n.s().sc_sw_codex,
+        };
+        // Explicit per-append cleanup: once an item is in its list, the outer
+        // (buildPicker) errdefer owns it — a per-item errdefer would double-free.
+        const label = try std.fmt.allocPrint(allocator, "{s} · {s}", .{ machine_label, sw_label });
+        labels.append(allocator, label) catch |e| {
+            allocator.free(label);
+            return e;
+        };
+        var tgt = try skill_center.Target.dupe(allocator, machine_id, machine_label, sw, is_local);
+        targets.append(allocator, tgt) catch |e| {
+            tgt.deinit(allocator);
+            return e;
+        };
+    }
+}
+
+/// Build a target picker over {local, ssh profiles} × {claude, codex}.
+fn skillCenterBuildPicker(allocator: std.mem.Allocator, purpose: skill_center.Purpose, skill_name: []const u8) !skill_center.PickerState {
+    var labels: std.ArrayListUnmanaged([]u8) = .empty;
+    var targets: std.ArrayListUnmanaged(skill_center.Target) = .empty;
+    errdefer {
+        for (labels.items) |l| allocator.free(l);
+        labels.deinit(allocator);
+        for (targets.items) |*t| t.deinit(allocator);
+        targets.deinit(allocator);
+    }
+    try skillCenterAddMachine(allocator, &labels, &targets, "local", i18n.s().sc_local, true);
+    const names = overlays.sshProfileNames(allocator) catch &[_][]u8{};
+    defer {
+        for (names) |n| allocator.free(n);
+        allocator.free(names);
+    }
+    for (names) |nm| {
+        const id = try std.fmt.allocPrint(allocator, "ssh:{s}", .{nm});
+        defer allocator.free(id);
+        try skillCenterAddMachine(allocator, &labels, &targets, id, nm, false);
+    }
+    const name_copy = try allocator.dupe(u8, skill_name);
+    errdefer allocator.free(name_copy);
+    return .{
+        .purpose = purpose,
+        .skill_name = name_copy,
+        .labels = try labels.toOwnedSlice(allocator),
+        .targets = try targets.toOwnedSlice(allocator),
+        .sel = 0,
+    };
+}
+
+fn skillCenterOpenPicker(purpose: skill_center.Purpose) bool {
+    const session = activeSkillCenter() orelse return false;
+    const allocator = g_allocator orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    var name: []const u8 = "";
+    if (purpose == .deploy) {
+        const sk = session.model.selected() orelse return true;
+        name = sk.name;
+    }
+    const picker = skillCenterBuildPicker(allocator, purpose, name) catch return true;
+    session.model.setOverlay(.{ .picker = picker });
+    markUiDirty();
+    return true;
+}
+
+pub fn skillCenterDeploy() bool {
+    return skillCenterOpenPicker(.deploy);
+}
+pub fn skillCenterImport() bool {
+    return skillCenterOpenPicker(.import_);
+}
+
+/// Scan a chosen target and open the import list. Synchronous (UI thread).
+fn skillCenterOpenImportList(allocator: std.mem.Allocator, target: skill_center.Target) void {
+    const session = activeSkillCenter() orelse return;
+    const conn = skillCenterTargetConn(target);
+    if (!target.is_local and conn == null) {
+        overlays.showStatusToast(i18n.s().sc_toast_no_conn);
+        return;
+    }
+    var le = SkillLocExec{ .conn = conn };
+    const root_expr = skill_transfer_cmd.homeRootExpr(allocator, target.software.rootRel()) catch return;
+    defer allocator.free(root_expr);
+    var outcome = skill_scan.scanLocation(allocator, root_expr, le.host()) catch {
+        overlays.showStatusToast(i18n.s().sc_toast_no_conn);
+        return;
+    };
+    defer outcome.deinit(allocator);
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    const st = skillCenterMakeImportState(allocator, &session.model, outcome.rows, target) catch return;
+    session.model.setOverlay(.{ .import_list = st });
+    markUiDirty();
+}
+
+/// Run a transfer synchronously (library ⇆ target), then rescan the library.
+fn skillCenterRunTransfer(allocator: std.mem.Allocator, is_import: bool, target: skill_center.Target, name: []const u8) void {
+    const session = activeSkillCenter() orelse return;
+    const conn = skillCenterTargetConn(target);
+    if (!target.is_local and conn == null) {
+        overlays.showStatusToast(i18n.s().sc_toast_no_conn);
+        return;
+    }
+    const lib_dir = skillCenterLibraryDir(allocator) orelse return;
+    defer allocator.free(lib_dir);
+    const lib_root = skill_transfer_cmd.absRootExpr(allocator, lib_dir) catch return;
+    defer allocator.free(lib_root);
+    const tgt_root = skill_transfer_cmd.homeRootExpr(allocator, target.software.rootRel()) catch return;
+    defer allocator.free(tgt_root);
+    var ctx = SkillTransferCtx{ .conn = conn };
+    const lib_ep = skill_transfer.Endpoint{ .root_expr = lib_root, .is_local = true };
+    const tgt_ep = skill_transfer.Endpoint{ .root_expr = tgt_root, .is_local = target.is_local };
+    const from = if (is_import) tgt_ep else lib_ep;
+    const to = if (is_import) lib_ep else tgt_ep;
+    const r = skill_transfer.transfer(allocator, ctx.ops(), from, to, name);
+    if (r == .ok) {
+        overlays.showStatusToast(if (is_import) i18n.s().sc_toast_imported else i18n.s().sc_toast_synced);
+        startSkillCenterScan(allocator, session);
+    } else {
+        overlays.showStatusToast(i18n.s().sc_toast_sync_failed);
+    }
+    markUiDirty();
+}
+
+/// Arm an overwrite confirm overlay for a pending deploy/import.
+fn skillCenterArmConfirm(allocator: std.mem.Allocator, is_import: bool, target: skill_center.Target, name: []const u8) void {
+    const session = activeSkillCenter() orelse return;
+    var msg_buf: [256]u8 = undefined;
+    const t = i18n.s();
+    const msg = std.fmt.bufPrint(&msg_buf, "{s} → {s} {s}", .{ name, target.machine_label, t.sc_confirm_suffix }) catch t.sc_confirm_suffix;
+    // Explicit cleanup (not errdefer): this is a void fn, so errdefer would
+    // never fire on the `catch return` paths.
+    var tgt = target.clone(allocator) catch return;
+    const name_dup = allocator.dupe(u8, name) catch {
+        tgt.deinit(allocator);
+        return;
+    };
+    const text = allocator.dupe(u8, msg) catch {
+        tgt.deinit(allocator);
+        allocator.free(name_dup);
+        return;
+    };
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    session.model.setOverlay(.{ .confirm = .{ .text = text, .is_import = is_import, .target = tgt, .name = name_dup } });
+    markUiDirty();
+}
+
+/// Deploy: scan the target for the skill, decide noop/direct/confirm, act.
+fn skillCenterDeployDecide(allocator: std.mem.Allocator, target: skill_center.Target, name: []const u8, src_hash: ?[]const u8) void {
+    const conn = skillCenterTargetConn(target);
+    if (!target.is_local and conn == null) {
+        overlays.showStatusToast(i18n.s().sc_toast_no_conn);
+        return;
+    }
+    var le = SkillLocExec{ .conn = conn };
+    const root_expr = skill_transfer_cmd.homeRootExpr(allocator, target.software.rootRel()) catch return;
+    defer allocator.free(root_expr);
+    var outcome = skill_scan.scanLocation(allocator, root_expr, le.host()) catch {
+        overlays.showStatusToast(i18n.s().sc_toast_no_conn);
+        return;
+    };
+    defer outcome.deinit(allocator);
+    var present = false;
+    var target_hash: ?[]const u8 = null;
+    for (outcome.rows) |r| {
+        if (std.mem.eql(u8, r.name, name)) {
+            present = true;
+            target_hash = r.agg_hash;
+        }
+    }
+    switch (skill_center.overwriteDecision(present, target_hash, src_hash)) {
+        .noop => overlays.showStatusToast(i18n.s().sc_toast_in_sync),
+        .direct => skillCenterRunTransfer(allocator, false, target, name),
+        .confirm => skillCenterArmConfirm(allocator, false, target, name),
+    }
+}
+
+/// Import: the marker already encodes new/same/differ.
+fn skillCenterImportAct(allocator: std.mem.Allocator, target: skill_center.Target, name: []const u8, marker: skill_center.Marker) void {
+    switch (marker) {
+        .same => overlays.showStatusToast(i18n.s().sc_toast_in_sync),
+        .new_ => skillCenterRunTransfer(allocator, true, target, name),
+        .differ => skillCenterArmConfirm(allocator, true, target, name),
+    }
+}
+
+/// Enter inside an overlay: act on the selection. Snapshots under the lock,
+/// then runs the (blocking) work after releasing it.
+pub fn skillCenterOverlaySelect() bool {
+    const session = activeSkillCenter() orelse return false;
+    const allocator = g_allocator orelse return false;
+    const Act = enum { none, deploy_picked, import_picked, import_item, confirm };
+    var act: Act = .none;
+    var target: ?skill_center.Target = null;
+    var name_owned: ?[]u8 = null;
+    var src_hash_owned: ?[]u8 = null;
+    var marker: skill_center.Marker = .new_;
+    var is_import_confirm = false;
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        switch (session.model.overlay) {
+            .picker => |*p| {
+                if (p.sel < p.targets.len) {
+                    target = p.targets[p.sel].clone(allocator) catch null;
+                    if (p.purpose == .deploy) {
+                        name_owned = allocator.dupe(u8, p.skill_name) catch null;
+                        if (session.model.library) |lib| {
+                            for (lib) |s| {
+                                if (std.mem.eql(u8, s.name, p.skill_name)) {
+                                    if (s.agg_hash) |h| src_hash_owned = allocator.dupe(u8, h) catch null;
+                                }
+                            }
+                        }
+                        act = .deploy_picked;
+                    } else {
+                        act = .import_picked;
+                    }
+                }
+                session.model.clearOverlay();
+            },
+            .import_list => |*il| {
+                if (il.sel < il.names.len) {
+                    name_owned = allocator.dupe(u8, il.names[il.sel]) catch null;
+                    target = il.target.clone(allocator) catch null;
+                    marker = il.markers[il.sel];
+                    act = .import_item;
+                }
+                session.model.clearOverlay();
+            },
+            .confirm => |*c| {
+                target = c.target.clone(allocator) catch null;
+                name_owned = allocator.dupe(u8, c.name) catch null;
+                is_import_confirm = c.is_import;
+                act = .confirm;
+                session.model.clearOverlay();
+            },
+            .none, .busy => {},
+        }
+    }
+    defer {
+        if (target) |*t| t.deinit(allocator);
+        if (name_owned) |n| allocator.free(n);
+        if (src_hash_owned) |h| allocator.free(h);
+    }
+    markUiDirty();
+    switch (act) {
+        .none => {},
+        .deploy_picked => {
+            if (target) |tgt| if (name_owned) |nm| skillCenterDeployDecide(allocator, tgt, nm, src_hash_owned);
+        },
+        .import_picked => {
+            if (target) |tgt| skillCenterOpenImportList(allocator, tgt);
+        },
+        .import_item => {
+            if (target) |tgt| if (name_owned) |nm| skillCenterImportAct(allocator, tgt, nm, marker);
+        },
+        .confirm => {
+            if (target) |tgt| if (name_owned) |nm| skillCenterRunTransfer(allocator, is_import_confirm, tgt, nm);
+        },
+    }
+    return true;
+}
+
+/// Rescan all sources for the active Skill Center tab. UI thread.
+pub fn skillCenterRescan() bool {
+    const session = activeSkillCenter() orelse return false;
+    const allocator = g_allocator orelse return false;
+    startSkillCenterScan(allocator, session);
+    markUiDirty();
+    return true;
+}
+
+/// Preview the selected library skill's SKILL.md in the markdown panel.
+pub fn skillCenterPreviewSelected() bool {
+    const session = activeSkillCenter() orelse return false;
+    const allocator = g_allocator orelse return false;
+    var rel_owned: ?[]u8 = null;
+    var name_buf: [128]u8 = undefined;
+    var name_len: usize = 0;
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        const sk = session.model.selected() orelse return true;
+        name_len = @min(sk.name.len, name_buf.len);
+        @memcpy(name_buf[0..name_len], sk.name[0..name_len]);
+        rel_owned = allocator.dupe(u8, sk.rel_path) catch null;
+    }
+    const rp = rel_owned orelse return true;
+    defer allocator.free(rp);
+    const lib_dir = skillCenterLibraryDir(allocator) orelse return true;
+    defer allocator.free(lib_dir);
+    const abs = std.fs.path.join(allocator, &.{ lib_dir, rp }) catch return true;
+    defer allocator.free(abs);
+    const command = skill_center.catCommand(allocator, abs) catch return true;
+    defer allocator.free(command);
+    const text = remote_file.localPosixExec(allocator, command, 1024 * 1024) catch null;
+    if (text) |t| {
+        defer allocator.free(t);
+        markdown_preview_panel.open(.markdown, name_buf[0..name_len], "SKILL.md", t);
+        markUiDirty();
+    } else {
+        overlays.showStatusToast(i18n.s().sc_toast_read_failed);
+    }
+    return true;
 }
 
 pub fn aiHistoryInsertCodepoint(codepoint: u21) bool {
@@ -1212,6 +1768,54 @@ fn startAiHistoryScan(allocator: std.mem.Allocator, session: *ai_history_session
     };
     job.* = .{ .target = target };
     session.scanAsync(.{ .ctx = job, .run = AiHistoryScanJob.run, .destroy = AiHistoryScanJob.destroy });
+}
+
+// ===========================================================================
+// Skill Center — scan worker, host factory, source enumeration
+// ===========================================================================
+
+/// Everything a Skill Center scan host needs for one source, snapshotted on the
+/// UI thread. `ssh` carries a copied `SshConnection` value (inline buffers, no
+/// threadlocal pointers); `local`/`wsl` resolve inside the worker. `unreachable_`
+/// marks a source we want to show as an unreachable column (e.g. an SSH profile
+/// that could not be resolved, or local on a non-POSIX host).
+/// Background job: scan the local library (`<config>/skills`) off the UI thread.
+const SkillLibraryScanJob = struct {
+    root_expr: []u8, // owned shell expression for the library root
+
+    fn run(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]skill_center.LibrarySkill {
+        const job: *SkillLibraryScanJob = @ptrCast(@alignCast(ctx));
+        var le = SkillLocExec{ .conn = null };
+        const outcome = try skill_scan.scanLocation(allocator, job.root_expr, le.host());
+        // Move the scanned rows into the library list (frees the rows slice).
+        return skill_center.libraryFromRows(allocator, outcome.rows);
+    }
+
+    fn destroy(ctx: *anyopaque, allocator: std.mem.Allocator) void {
+        const job: *SkillLibraryScanJob = @ptrCast(@alignCast(ctx));
+        allocator.free(job.root_expr);
+        allocator.destroy(job);
+    }
+};
+
+/// Kick off an async library scan for `session`. UI thread.
+fn startSkillCenterScan(allocator: std.mem.Allocator, session: *skill_center.Session) void {
+    const lib_dir = skillCenterLibraryDir(allocator) orelse {
+        session.publishScanFailure(session.scan_generation);
+        return;
+    };
+    defer allocator.free(lib_dir);
+    const root_expr = skill_transfer_cmd.absRootExpr(allocator, lib_dir) catch {
+        session.publishScanFailure(session.scan_generation);
+        return;
+    };
+    const job = allocator.create(SkillLibraryScanJob) catch {
+        allocator.free(root_expr);
+        session.publishScanFailure(session.scan_generation);
+        return;
+    };
+    job.* = .{ .root_expr = root_expr };
+    session.scanAsync(.{ .ctx = job, .run = SkillLibraryScanJob.run, .destroy = SkillLibraryScanJob.destroy });
 }
 
 /// Kick off an async transcript load for the selected row. UI thread.
@@ -1914,6 +2518,17 @@ pub fn spawnAiHistoryTab(source: ai_history_source.Source) bool {
     return true;
 }
 
+/// Open a new Skill Center tab and scan the local library.
+pub fn spawnSkillCenterTab() bool {
+    const allocator = g_allocator orelse return false;
+    if (!tab.spawnSkillCenterTab(allocator)) return false;
+    clearUiStateOnTabChange();
+    if (activeSkillCenter()) |session| {
+        startSkillCenterScan(allocator, session);
+    }
+    return true;
+}
+
 pub fn reopenAiChatTabFromHistorySessionId(session_id: []const u8) bool {
     if (tab.switchToAiTabBySessionId(session_id)) {
         clearUiStateOnTabChange();
@@ -2424,6 +3039,8 @@ fn renderResizeFrame(width: i32, height: i32) void {
                 renderAiChatFrame(fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
             } else if (active_tab.kind == .ai_history) {
                 renderAiHistoryFrame(active_tab, fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
+            } else if (active_tab.kind == .skill_center) {
+                renderSkillCenterFrame(active_tab, fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
             } else if (activeSurface()) |surface| {
                 // Single surface: simple render path
                 const rend = &surface.surface_renderer;
@@ -5206,7 +5823,7 @@ fn runMainLoop(self: *AppWindow) !void {
             const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, font.cell_width, font.cell_height);
             syncRemoteLayout(allocator);
             syncImeCaretPosition(win, split_count);
-            if (active_tab.kind != .ai_chat and active_tab.kind != .ai_history and synchronizedOutputPendingForVisibleSplits(split_count)) {
+            if (active_tab.kind != .ai_chat and active_tab.kind != .ai_history and active_tab.kind != .skill_center and synchronizedOutputPendingForVisibleSplits(split_count)) {
                 std.Thread.sleep(std.time.ns_per_ms);
                 continue;
             }
@@ -5217,6 +5834,8 @@ fn runMainLoop(self: *AppWindow) !void {
                 renderAiChatFrame(fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
             } else if (active_tab.kind == .ai_history) {
                 renderAiHistoryFrame(active_tab, fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
+            } else if (active_tab.kind == .skill_center) {
+                renderSkillCenterFrame(active_tab, fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
             } else if (post_process.g_post_enabled) {
                 // Post-processing path: only render focused surface for now
                 if (activeSurface()) |surface| {

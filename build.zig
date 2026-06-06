@@ -46,6 +46,7 @@ const macos_objective_c_sources = [_][]const u8{
     "src/platform/window_macos_bridge.m",
     "src/platform/font_macos_bridge.m",
     "src/platform/services_macos_bridge.m",
+    "src/platform/text_macos_bridge.m",
     "src/platform/menu_macos_bridge.m",
     "src/platform/http_client_macos_bridge.m",
 };
@@ -625,13 +626,25 @@ pub fn build(b: *std.Build) void {
     switch (b.graph.host.result.os.tag) {
         .windows => fast_test_mod.linkSystemLibrary("winhttp", .{}),
         .macos => {
+            fast_test_mod.link_libc = true;
             fast_test_mod.addCSourceFile(.{
                 .file = b.path("src/platform/http_client_macos_bridge.m"),
                 .flags = &.{},
                 .language = .objective_c,
             });
+            // The fast suite's graph also reaches platform/text.zig →
+            // text_macos.zig, whose caseInsensitiveCompare bridge lives in the
+            // Foundation-only text_macos_bridge.m. Link it so the symbol
+            // resolves on macOS hosts.
+            fast_test_mod.addCSourceFile(.{
+                .file = b.path("src/platform/text_macos_bridge.m"),
+                .flags = &.{},
+                .language = .objective_c,
+            });
             fast_test_mod.linkFramework("Foundation", .{});
+            fast_test_mod.linkFramework("CoreFoundation", .{});
             fast_test_mod.linkSystemLibrary("objc", .{});
+            apple_sdk.addPaths(b, fast_tests) catch @panic("failed to locate native Apple SDK for fast tests");
         },
         else => {},
     }
@@ -757,10 +770,19 @@ pub fn build(b: *std.Build) void {
             .flags = &.{},
             .language = .objective_c,
         });
+        macos_services_test_mod.addCSourceFile(.{
+            .file = b.path("src/platform/text_macos_bridge.m"),
+            .flags = &.{},
+            .language = .objective_c,
+        });
         macos_services_test_mod.linkFramework("AppKit", .{});
         macos_services_test_mod.linkFramework("Carbon", .{});
         macos_services_test_mod.linkFramework("CoreFoundation", .{});
         macos_services_test_mod.linkFramework("Foundation", .{});
+        // services_macos_bridge.m uses UNUserNotificationCenter; the app bundle
+        // links UserNotifications (macos_app_frameworks) but this test module
+        // previously did not, so the smoke test failed to link on macOS.
+        macos_services_test_mod.linkFramework("UserNotifications", .{});
         macos_services_test_mod.linkSystemLibrary("objc", .{});
         const macos_services_tests = b.addTest(.{
             .name = "wispterm-macos-services-test",
