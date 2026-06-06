@@ -71,7 +71,13 @@ pub fn freeLibrary(allocator: std.mem.Allocator, lib: []LibrarySkill) void {
 /// slice. Takes ownership of the rows' backing strings (moves them); frees the
 /// rows slice itself. `provider` is ignored (v2 keys by name).
 pub fn libraryFromRows(allocator: std.mem.Allocator, rows: []scan.SkillRow) ![]LibrarySkill {
-    const out = try allocator.alloc(LibrarySkill, rows.len);
+    // Always consumes `rows`: on the alloc-failure path the strings haven't been
+    // moved yet, so free them; on success the strings move into `out` and only
+    // the rows slice is freed.
+    const out = allocator.alloc(LibrarySkill, rows.len) catch |e| {
+        scan.freeRows(allocator, rows);
+        return e;
+    };
     for (rows, 0..) |r, i| {
         out[i] = .{ .name = r.name, .rel_path = r.rel_path, .agg_hash = r.agg_hash };
     }

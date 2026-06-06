@@ -1128,8 +1128,12 @@ fn skillCenterMakeImportState(allocator: std.mem.Allocator, model: *const skill_
     for (rows) |r| {
         const marker = skillCenterMarkerFor(model.library, r.name, r.agg_hash);
         const n = try allocator.dupe(u8, r.name);
-        errdefer allocator.free(n);
-        try names.append(allocator, n);
+        // Explicit cleanup: once `n` is in `names`, the function-level errdefer
+        // owns it — a per-item errdefer here would double-free on a later error.
+        names.append(allocator, n) catch |e| {
+            allocator.free(n);
+            return e;
+        };
         try markers.append(allocator, marker);
     }
     var tgt = try target.clone(allocator);
@@ -1149,12 +1153,18 @@ fn skillCenterAddMachine(allocator: std.mem.Allocator, labels: *std.ArrayListUnm
             .claude => i18n.s().sc_sw_claude,
             .codex => i18n.s().sc_sw_codex,
         };
+        // Explicit per-append cleanup: once an item is in its list, the outer
+        // (buildPicker) errdefer owns it — a per-item errdefer would double-free.
         const label = try std.fmt.allocPrint(allocator, "{s} · {s}", .{ machine_label, sw_label });
-        errdefer allocator.free(label);
+        labels.append(allocator, label) catch |e| {
+            allocator.free(label);
+            return e;
+        };
         var tgt = try skill_center.Target.dupe(allocator, machine_id, machine_label, sw, is_local);
-        errdefer tgt.deinit(allocator);
-        try labels.append(allocator, label);
-        try targets.append(allocator, tgt);
+        targets.append(allocator, tgt) catch |e| {
+            tgt.deinit(allocator);
+            return e;
+        };
     }
 }
 
