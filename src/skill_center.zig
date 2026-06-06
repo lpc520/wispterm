@@ -115,6 +115,13 @@ pub const PanelModel = struct {
     sel_row: usize = 0,
     scroll: usize = 0,
     stale: bool = false,
+    /// Pending overwrite confirmation text (owned), or null. When set, the input
+    /// layer routes Enter=proceed / Esc=cancel to it (wired in a later task).
+    confirm_text: ?[]u8 = null,
+    /// What the confirm will execute on Enter.
+    confirm_dir: transfer.Direction = .upload,
+    /// Owned rel_path of the skill to transfer when confirmed.
+    confirm_rel_path: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) PanelModel {
         return .{ .allocator = allocator };
@@ -211,7 +218,21 @@ pub const PanelModel = struct {
         }
     }
 
+    pub fn setConfirm(self: *PanelModel, text: []const u8, dir: transfer.Direction, rel_path: []const u8) void {
+        self.clearConfirm();
+        self.confirm_text = self.allocator.dupe(u8, text) catch null;
+        self.confirm_rel_path = self.allocator.dupe(u8, rel_path) catch null;
+        self.confirm_dir = dir;
+    }
+    pub fn clearConfirm(self: *PanelModel) void {
+        if (self.confirm_text) |t| self.allocator.free(t);
+        if (self.confirm_rel_path) |p| self.allocator.free(p);
+        self.confirm_text = null;
+        self.confirm_rel_path = null;
+    }
+
     fn freeServers(self: *PanelModel) void {
+        self.clearConfirm();
         if (self.pairing) |p| {
             self.allocator.free(p);
             self.pairing = null;
@@ -496,6 +517,18 @@ test "skill_center: transferDecision" {
     try std.testing.expectEqual(TransferDecision.confirm, transferDecision(.download, .differ));
     try std.testing.expectEqual(TransferDecision.direct, transferDecision(.download, .remote_only));
     try std.testing.expectEqual(TransferDecision.invalid, transferDecision(.download, .local_only));
+}
+
+test "skill_center: confirm set/clear" {
+    const allocator = std.testing.allocator;
+    var model = PanelModel.init(allocator);
+    defer model.deinit();
+    model.setConfirm("覆盖 web 上的 pdf？", .upload, ".claude/skills/pdf/SKILL.md");
+    try std.testing.expect(model.confirm_text != null);
+    try std.testing.expect(model.confirm_rel_path != null);
+    model.clearConfirm();
+    try std.testing.expect(model.confirm_text == null);
+    try std.testing.expect(model.confirm_rel_path == null);
 }
 
 test "skill_center: model builds pairing for the selected server" {

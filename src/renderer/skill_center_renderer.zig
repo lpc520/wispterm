@@ -22,6 +22,7 @@ pub const View = struct {
     scroll: usize,
     stale: bool,
     status: []const u8,
+    confirm_text: []const u8, // "" when no confirm pending
 };
 
 fn localGlyph(rel: pairing.Relation) []const u8 {
@@ -218,6 +219,15 @@ pub fn render(
         _ = draw.renderTextLimited(hintFor(pr.relation), hint_x, text_y, muted, @max(0, content_x + content_w - PAD_X - hint_x));
 
         rendered += 1;
+    }
+
+    if (view.confirm_text.len > 0) {
+        const bar_h = rowHeight(draw.cell_h);
+        const bar_y = legendHeight(draw.cell_h);
+        draw.fillQuadAlpha(content_x, bar_y, content_w, bar_h, mixColor(bg, accent, 0.22), 0.97);
+        const t_y = bar_y + (bar_h - draw.cell_h) / 2;
+        _ = draw.renderTextLimited(view.confirm_text, content_x + PAD_X, t_y, fg, content_w - PAD_X * 2);
+        return; // the confirm bar replaces the legend line while active
     }
 
     renderLegend(draw, content_x, content_w, muted, line);

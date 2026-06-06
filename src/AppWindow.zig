@@ -841,6 +841,7 @@ fn renderSkillCenterFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_i
             .scroll = session.model.scroll,
             .stale = session.model.stale,
             .status = session.status,
+            .confirm_text = if (session.model.confirm_text) |t| t else "",
         };
         skill_center_renderer.render(
             draw,
