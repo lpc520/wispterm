@@ -56,6 +56,12 @@ pub fn runScan(
     return out;
 }
 
+/// Build a command that prints one skill's SKILL.md / prompt file from a
+/// server, given its `rel_path` (relative to $HOME, as produced by the scan).
+pub fn previewCommand(allocator: std.mem.Allocator, rel_path: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "cat \"$HOME/{s}\"", .{rel_path});
+}
+
 // --- Tests ---
 
 const ScriptHost = struct {
@@ -98,4 +104,11 @@ test "skill_center: runScan over sources builds a matrix" {
     try std.testing.expectEqual(inv.CellState.differ, m.cellAt(0, 0).state); // local h1 != ref(DIFF)
     try std.testing.expectEqual(inv.CellState.match, m.cellAt(0, 1).state); // web DIFF == ref
     try std.testing.expectEqual(inv.CellState.unknown, m.cellAt(0, 2).state); // off
+}
+
+test "skill_center: previewCommand cats the rel path under HOME" {
+    const allocator = std.testing.allocator;
+    const cmd = try previewCommand(allocator, ".claude/skills/pdf/SKILL.md");
+    defer allocator.free(cmd);
+    try std.testing.expectEqualStrings("cat \"$HOME/.claude/skills/pdf/SKILL.md\"", cmd);
 }
