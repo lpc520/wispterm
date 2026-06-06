@@ -1,6 +1,7 @@
 const std = @import("std");
 const scan = @import("skill_scan.zig");
 const inv = @import("skill_inventory.zig");
+const pairing = @import("skill_pairing.zig");
 const inv_cache = @import("skill_inventory_cache.zig");
 const dirs = @import("platform/dirs.zig");
 
@@ -128,6 +129,10 @@ pub const PanelModel = struct {
     allocator: std.mem.Allocator,
     servers: ?[]inv.ServerScan = null,
     matrix: ?inv.Matrix = null,
+    /// Aligned local-vs-selected-server view (rows borrow from `servers`).
+    pairing: ?[]pairing.PairRow = null,
+    /// Index into the remote servers (everything except source_id == "local").
+    sel_server: usize = 0,
     sel_row: usize = 0,
     sel_col: usize = 0,
     scroll: usize = 0,
@@ -155,24 +160,86 @@ pub const PanelModel = struct {
         if (self.matrix) |*m| m.deinit();
         self.matrix = inv.buildMatrix(self.allocator, servers) catch null;
         self.stale = false;
+        self.rebuildPairing();
+    }
+
+    /// Index in `servers` of the local hub ("local"); null if none present.
+    fn localIndex(self: *const PanelModel) ?usize {
+        const servers = self.servers orelse return null;
+        for (servers, 0..) |s, i| {
+            if (std.mem.eql(u8, s.source_id, "local")) return i;
+        }
+        return null;
+    }
+
+    /// Count of selectable remote servers (all non-local columns).
+    pub fn remoteCount(self: *const PanelModel) usize {
+        const servers = self.servers orelse return 0;
+        const li = self.localIndex();
+        var n: usize = 0;
+        for (servers, 0..) |_, i| {
+            if (li != null and i == li.?) continue;
+            n += 1;
+        }
+        return n;
+    }
+
+    /// Resolve `sel_server` (an index over remote servers) to an index in
+    /// `servers`; null when there are no remote servers.
+    pub fn selectedServerIndex(self: *const PanelModel) ?usize {
+        const servers = self.servers orelse return null;
+        const li = self.localIndex();
+        var n: usize = 0;
+        for (servers, 0..) |_, i| {
+            if (li != null and i == li.?) continue;
+            if (n == self.sel_server) return i;
+            n += 1;
+        }
+        return null;
+    }
+
+    /// Rebuild `pairing` from the local hub vs the selected server. Frees any
+    /// prior pairing slice (rows borrow from `servers`, so only the slice).
+    pub fn rebuildPairing(self: *PanelModel) void {
+        if (self.pairing) |p| {
+            self.allocator.free(p);
+            self.pairing = null;
+        }
+        const servers = self.servers orelse return;
+        const local: inv.ServerScan = if (self.localIndex()) |li|
+            servers[li]
+        else
+            .{ .source_id = "local", .reachable = false, .rows = &.{} };
+        const remote_idx = self.selectedServerIndex() orelse {
+            self.pairing = pairing.pair(self.allocator, local, .{ .source_id = "", .reachable = false, .rows = &.{} }, false) catch null;
+            self.clampSelection();
+            return;
+        };
+        const remote = servers[remote_idx];
+        self.pairing = pairing.pair(self.allocator, local, remote, remote.reachable) catch null;
         self.clampSelection();
     }
 
     fn clampSelection(self: *PanelModel) void {
-        const m = self.matrix orelse return;
-        if (m.skills.len == 0) {
+        const rows = if (self.pairing) |p| p.len else 0;
+        if (rows == 0) {
             self.sel_row = 0;
-        } else if (self.sel_row >= m.skills.len) {
-            self.sel_row = m.skills.len - 1;
+        } else if (self.sel_row >= rows) {
+            self.sel_row = rows - 1;
         }
-        if (m.servers.len == 0) {
-            self.sel_col = 0;
-        } else if (self.sel_col >= m.servers.len) {
-            self.sel_col = m.servers.len - 1;
+        const rc = self.remoteCount();
+        if (rc == 0) {
+            self.sel_server = 0;
+        } else if (self.sel_server >= rc) {
+            self.sel_server = rc - 1;
         }
     }
 
     fn freeServers(self: *PanelModel) void {
+        if (self.pairing) |p| {
+            self.allocator.free(p);
+            self.pairing = null;
+        }
         if (self.servers) |s| {
             inv_cache.freeServerScans(self.allocator, s);
             self.allocator.free(s);
@@ -440,4 +507,27 @@ test "skill_center: Session.finishScan discards a stale-generation result (no le
 
     try std.testing.expect(session.model.servers == null);
     try std.testing.expect(session.model.matrix == null);
+}
+
+test "skill_center: model builds pairing for the selected server" {
+    const allocator = std.testing.allocator;
+    var model = PanelModel.init(allocator);
+    defer model.deinit();
+
+    const local_rows = [_]scan.SkillRow{
+        .{ .provider = .claude, .name = @constCast("a"), .rel_path = @constCast(".claude/skills/a/SKILL.md"), .agg_hash = @constCast("h") },
+    };
+    const web_rows = [_]scan.SkillRow{
+        .{ .provider = .claude, .name = @constCast("a"), .rel_path = @constCast(".claude/skills/a/SKILL.md"), .agg_hash = @constCast("DIFF") },
+        .{ .provider = .claude, .name = @constCast("b"), .rel_path = @constCast(".claude/skills/b/SKILL.md"), .agg_hash = @constCast("h") },
+    };
+    const s = try allocator.alloc(inv.ServerScan, 2);
+    s[0] = .{ .source_id = try allocator.dupe(u8, "local"), .reachable = true, .rows = try dupRows(allocator, &local_rows) };
+    s[1] = .{ .source_id = try allocator.dupe(u8, "ssh:web"), .reachable = true, .rows = try dupRows(allocator, &web_rows) };
+    model.setServers(s);
+
+    try std.testing.expect(model.pairing != null);
+    // local 'a' differs from web 'a'; web 'b' is remote_only -> 2 rows.
+    try std.testing.expectEqual(@as(usize, 2), model.pairing.?.len);
+    try std.testing.expectEqual(@as(usize, 0), model.sel_server); // first (only) remote
 }
