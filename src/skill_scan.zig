@@ -121,3 +121,72 @@ test "skill_scan: parseScanOutput parses good rows and skips garbage" {
     try std.testing.expectEqualStrings("foo", rows[1].name);
     try std.testing.expectEqual(@as(?[]u8, null), rows[1].agg_hash);
 }
+
+const hash_probe =
+    \\HASHCMD="";
+    \\if command -v sha256sum >/dev/null 2>&1; then HASHCMD="sha256sum";
+    \\elif command -v shasum >/dev/null 2>&1; then HASHCMD="shasum -a 256"; fi;
+    \\
+;
+
+/// Build a single POSIX-shell command that discovers skills under every target
+/// root (relative to $HOME) and prints one `provider\tname\trel_path\thash`
+/// line per skill. Missing roots are skipped; when no hash tool exists the hash
+/// field is empty. Caller frees.
+pub fn buildScanCommand(allocator: std.mem.Allocator, targets: []const ScanTarget) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, hash_probe);
+
+    for (targets) |t| {
+        const prov = t.provider.toString();
+        switch (t.format) {
+            .skill_md => {
+                const block = try std.fmt.allocPrint(allocator,
+                    \\R="$HOME/{s}";
+                    \\if [ -d "$R" ]; then for d in "$R"/*/; do
+                    \\[ -f "${{d}}SKILL.md" ] || continue;
+                    \\n=$(basename "$d");
+                    \\if [ -n "$HASHCMD" ]; then h=$(cd "$d" && find . -type f | LC_ALL=C sort | xargs -r $HASHCMD | $HASHCMD | cut -d' ' -f1); else h=""; fi;
+                    \\printf '{s}\t%s\t{s}/%s/SKILL.md\t%s\n' "$n" "$n" "$h";
+                    \\done; fi;
+                    \\
+                , .{ t.root_rel, prov, t.root_rel });
+                defer allocator.free(block);
+                try buf.appendSlice(allocator, block);
+            },
+            .prompt_md => {
+                const block = try std.fmt.allocPrint(allocator,
+                    \\R="$HOME/{s}";
+                    \\if [ -d "$R" ]; then for f in "$R"/*.md; do
+                    \\[ -f "$f" ] || continue;
+                    \\n=$(basename "$f" .md);
+                    \\if [ -n "$HASHCMD" ]; then h=$($HASHCMD "$f" | cut -d' ' -f1); else h=""; fi;
+                    \\printf '{s}\t%s\t{s}/%s.md\t%s\n' "$n" "$n" "$h";
+                    \\done; fi;
+                    \\
+                , .{ t.root_rel, prov, t.root_rel });
+                defer allocator.free(block);
+                try buf.appendSlice(allocator, block);
+            },
+        }
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
+test "skill_scan: buildScanCommand probes hash tool and covers all targets" {
+    const allocator = std.testing.allocator;
+    const cmd = try buildScanCommand(allocator, defaultTargets());
+    defer allocator.free(cmd);
+
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "sha256sum") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "shasum -a 256") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "$HOME/.claude/skills") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "$HOME/.codex/skills") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "$HOME/.codex/prompts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "SKILL.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "printf 'claude\\t") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "printf 'codex\\t") != null);
+}
