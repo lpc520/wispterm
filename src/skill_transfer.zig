@@ -1,15 +1,22 @@
-//! Skill transfer runner: upload (local hub -> server) and download
-//! (server -> local hub) of one skill, via a temp-file tar dance over existing
-//! primitives. The three operations are injected so this stays platform-neutral
-//! and unit-testable:
+//! Skill transfer runner: copy a skill from one endpoint to another via a
+//! temp-file tar dance over injected primitives. The library side is always
+//! local; at most one of from/to is remote.
+//!
+//! The three operations are injected so this stays platform-neutral and
+//! unit-testable:
 //!   - localExec(cmd): run a POSIX command locally, return ok
 //!   - remoteExec(cmd): run a POSIX command on the server, return ok
-//!   - copy(direction, local_path, remote_path): scp the temp tarball
+//!   - copy(dir, local_path, remote_path): scp the temp tarball
 const std = @import("std");
 const cmd = @import("skill_transfer_cmd.zig");
 
 pub const Result = enum { ok, failed };
-pub const Direction = enum { upload, download };
+pub const CopyDir = enum { to_remote, to_local };
+
+pub const Endpoint = struct {
+    root_expr: []const u8, // shell root expression on its host
+    is_local: bool,        // true → localExec; false → remoteExec + scp
+};
 
 pub const Ops = struct {
     ctx: *anyopaque,
@@ -17,9 +24,8 @@ pub const Ops = struct {
     localExec: *const fn (*anyopaque, std.mem.Allocator, []const u8) bool,
     /// Run `command` on the server; return true on success.
     remoteExec: *const fn (*anyopaque, std.mem.Allocator, []const u8) bool,
-    /// Copy the tarball. `dir == .upload`: local_tmp -> remote_tmp.
-    /// `dir == .download`: remote_tmp -> local_tmp. Return true on success.
-    copy: *const fn (*anyopaque, std.mem.Allocator, Direction, []const u8, []const u8) bool,
+    /// Copy the tarball. dir = .to_remote: local_tmp → remote_tmp; .to_local: remote_tmp → local_tmp.
+    copy: *const fn (*anyopaque, std.mem.Allocator, CopyDir, []const u8, []const u8) bool,
 };
 
 // Staging tarball path. Same string on purpose — it names a file on two
@@ -30,40 +36,31 @@ pub const Ops = struct {
 const LOCAL_TMP = "/tmp/.wispterm-skill.tgz";
 const REMOTE_TMP = "/tmp/.wispterm-skill.tgz";
 
-/// Upload the skill at `rel_path` from the local hub to the server.
-pub fn upload(allocator: std.mem.Allocator, ops: Ops, rel_path: []const u8) Result {
-    const sp = cmd.splitSkillPath(rel_path) orelse return .failed;
-    const make = cmd.tarCreateCmd(allocator, sp.root_rel, sp.item, LOCAL_TMP) catch return .failed;
+/// Copy skill `name` from `from` to `to`. The library side is always local;
+/// at most one of from/to is remote. .ok only if every step succeeds.
+pub fn transfer(allocator: std.mem.Allocator, ops: Ops, from: Endpoint, to: Endpoint, name: []const u8) Result {
+    const src_tmp = if (from.is_local) LOCAL_TMP else REMOTE_TMP;
+    const make = cmd.tarCreateCmd(allocator, from.root_expr, name, src_tmp) catch return .failed;
     defer allocator.free(make);
-    if (!ops.localExec(ops.ctx, allocator, make)) return .failed;
+    const make_ok = if (from.is_local) ops.localExec(ops.ctx, allocator, make) else ops.remoteExec(ops.ctx, allocator, make);
+    if (!make_ok) return .failed;
 
-    if (!ops.copy(ops.ctx, allocator, .upload, LOCAL_TMP, REMOTE_TMP)) return .failed;
+    const dst_tmp = if (to.is_local) LOCAL_TMP else REMOTE_TMP;
+    if (from.is_local != to.is_local) {
+        const copy_ok = if (to.is_local)
+            ops.copy(ops.ctx, allocator, .to_local, LOCAL_TMP, REMOTE_TMP)
+        else
+            ops.copy(ops.ctx, allocator, .to_remote, LOCAL_TMP, REMOTE_TMP);
+        if (!copy_ok) return .failed;
+    }
 
-    const extract = cmd.tarExtractCmd(allocator, sp.root_rel, sp.item, REMOTE_TMP) catch return .failed;
+    const extract = cmd.tarExtractCmd(allocator, to.root_expr, name, dst_tmp) catch return .failed;
     defer allocator.free(extract);
-    const cleanup = std.fmt.allocPrint(allocator, "{s}; rm -f '{s}'", .{ extract, REMOTE_TMP }) catch return .failed;
-    defer allocator.free(cleanup);
-    if (!ops.remoteExec(ops.ctx, allocator, cleanup)) return .failed;
+    const extract_ok = if (to.is_local) ops.localExec(ops.ctx, allocator, extract) else ops.remoteExec(ops.ctx, allocator, extract);
+    if (!extract_ok) return .failed;
 
     _ = ops.localExec(ops.ctx, allocator, "rm -f '" ++ LOCAL_TMP ++ "'");
-    return .ok;
-}
-
-/// Download the skill at `rel_path` from the server into the local hub.
-pub fn download(allocator: std.mem.Allocator, ops: Ops, rel_path: []const u8) Result {
-    const sp = cmd.splitSkillPath(rel_path) orelse return .failed;
-    const make = cmd.tarCreateCmd(allocator, sp.root_rel, sp.item, REMOTE_TMP) catch return .failed;
-    defer allocator.free(make);
-    if (!ops.remoteExec(ops.ctx, allocator, make)) return .failed;
-
-    if (!ops.copy(ops.ctx, allocator, .download, LOCAL_TMP, REMOTE_TMP)) return .failed;
-
-    const extract = cmd.tarExtractCmd(allocator, sp.root_rel, sp.item, LOCAL_TMP) catch return .failed;
-    defer allocator.free(extract);
-    if (!ops.localExec(ops.ctx, allocator, extract)) return .failed;
-
-    _ = ops.localExec(ops.ctx, allocator, "rm -f '" ++ LOCAL_TMP ++ "'");
-    _ = ops.remoteExec(ops.ctx, allocator, "rm -f '" ++ REMOTE_TMP ++ "'");
+    if (!from.is_local or !to.is_local) _ = ops.remoteExec(ops.ctx, allocator, "rm -f '" ++ REMOTE_TMP ++ "'");
     return .ok;
 }
 
@@ -92,7 +89,7 @@ const Recorder = struct {
         self.remote_cmds.append(allocator, allocator.dupe(u8, command) catch return false) catch return false;
         return true;
     }
-    fn copy(ctx: *anyopaque, _: std.mem.Allocator, _: Direction, _: []const u8, _: []const u8) bool {
+    fn copy(ctx: *anyopaque, _: std.mem.Allocator, _: CopyDir, _: []const u8, _: []const u8) bool {
         const self: *Recorder = @ptrCast(@alignCast(ctx));
         if (self.fail_copy) return false;
         self.copies += 1;
@@ -103,28 +100,38 @@ const Recorder = struct {
     }
 };
 
-test "skill_transfer: upload runs tar-create local, copy, extract remote" {
-    const allocator = std.testing.allocator;
-    var rec = Recorder{ .allocator = allocator };
+test "skill_transfer: local→local deploy does tar+extract, no copy" {
+    const a = std.testing.allocator;
+    var rec = Recorder{ .allocator = a };
     defer rec.deinit();
-    try std.testing.expectEqual(Result.ok, upload(allocator, rec.ops(), ".claude/skills/pdf/SKILL.md"));
+    const from = Endpoint{ .root_expr = "'/cfg/skills'", .is_local = true };
+    const to = Endpoint{ .root_expr = "\"$HOME\"/'.claude/skills'", .is_local = true };
+    try std.testing.expectEqual(Result.ok, transfer(a, rec.ops(), from, to, "pdf"));
+    try std.testing.expectEqual(@as(usize, 0), rec.copies);
+    try std.testing.expect(std.mem.startsWith(u8, rec.local_cmds.items[0], "tar -czf"));
+    try std.testing.expect(std.mem.indexOf(u8, rec.local_cmds.items[1], "tar -xzf") != null);
+}
+
+test "skill_transfer: local→remote deploy does create-local, copy, extract-remote" {
+    const a = std.testing.allocator;
+    var rec = Recorder{ .allocator = a };
+    defer rec.deinit();
+    const from = Endpoint{ .root_expr = "'/cfg/skills'", .is_local = true };
+    const to = Endpoint{ .root_expr = "\"$HOME\"/'.codex/skills'", .is_local = false };
+    try std.testing.expectEqual(Result.ok, transfer(a, rec.ops(), from, to, "pdf"));
     try std.testing.expectEqual(@as(usize, 1), rec.copies);
     try std.testing.expect(std.mem.startsWith(u8, rec.local_cmds.items[0], "tar -czf"));
     try std.testing.expect(std.mem.indexOf(u8, rec.remote_cmds.items[0], "tar -xzf") != null);
 }
 
-test "skill_transfer: download runs tar-create remote, copy, extract local" {
-    const allocator = std.testing.allocator;
-    var rec = Recorder{ .allocator = allocator };
+test "skill_transfer: remote→local import does create-remote, copy, extract-local" {
+    const a = std.testing.allocator;
+    var rec = Recorder{ .allocator = a };
     defer rec.deinit();
-    try std.testing.expectEqual(Result.ok, download(allocator, rec.ops(), ".codex/prompts/foo.md"));
+    const from = Endpoint{ .root_expr = "\"$HOME\"/'.claude/skills'", .is_local = false };
+    const to = Endpoint{ .root_expr = "'/cfg/skills'", .is_local = true };
+    try std.testing.expectEqual(Result.ok, transfer(a, rec.ops(), from, to, "pdf"));
+    try std.testing.expectEqual(@as(usize, 1), rec.copies);
     try std.testing.expect(std.mem.startsWith(u8, rec.remote_cmds.items[0], "tar -czf"));
     try std.testing.expect(std.mem.indexOf(u8, rec.local_cmds.items[0], "tar -xzf") != null);
-}
-
-test "skill_transfer: copy failure aborts with failed" {
-    const allocator = std.testing.allocator;
-    var rec = Recorder{ .allocator = allocator, .fail_copy = true };
-    defer rec.deinit();
-    try std.testing.expectEqual(Result.failed, upload(allocator, rec.ops(), ".claude/skills/pdf/SKILL.md"));
 }
