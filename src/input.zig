@@ -2105,9 +2105,13 @@ fn handleFileExplorerKey(ev: platform_input.KeyEvent) bool {
             }
             return true;
         },
-        0x52 => { // 'R' key = rename
+        0x52 => { // 'R': bare = rename, Ctrl/Cmd+R = refresh
             if (!ev.ctrl and !ev.alt and !ev.super) {
                 file_explorer.startRename();
+                return true;
+            }
+            if ((ev.ctrl or ev.super) and !ev.alt and !ev.shift) {
+                file_explorer.refresh();
                 return true;
             }
             return false;
@@ -2152,6 +2156,10 @@ fn handleFileExplorerKey(ev: platform_input.KeyEvent) bool {
                 }
             }
             return false;
+        },
+        platform_input.key_f5 => {
+            file_explorer.refresh();
+            return true;
         },
         else => return false,
     }
