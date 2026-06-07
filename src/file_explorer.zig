@@ -687,7 +687,10 @@ pub fn refresh() void {
     rescan();
 
     if (g_mode == .remote and g_has_ssh_conn) {
-        // Async rebuild; restore happens in tickAsync's .rescan completion.
+        // Async rebuild: rescanRemote() started or queued a job, whose tickAsync
+        // completion runs applyRefreshRestore() and clears `pending`. startAsyncList
+        // only fails to enqueue under OOM (root path is always < 512 bytes), so the
+        // pending flag is reliably consumed in normal operation.
         setTransferStatus(.in_progress, "Refreshing…");
     } else {
         applyRefreshRestore();
@@ -698,6 +701,7 @@ fn applyRefreshRestore() void {
     if (!g_refresh_restore_pending) return;
     g_refresh_restore_pending = false;
 
+    g_selected = null;
     if (g_refresh_keep_path_len > 0) {
         if (findEntryByPath(g_refresh_keep_path[0..g_refresh_keep_path_len])) |idx| {
             g_selected = idx;
@@ -2062,12 +2066,20 @@ test "file_explorer: refresh restore re-selects entry by path" {
     const saved_scroll = g_scroll_offset;
     const saved_pending = g_refresh_restore_pending;
     const saved_keep_len = g_refresh_keep_path_len;
+    const saved_keep_scroll = g_refresh_keep_scroll;
+    const saved_transfer_status = g_transfer_status;
+    const saved_transfer_msg_len = g_transfer_msg_len;
+    const saved_transfer_time = g_transfer_time;
     defer {
         g_entry_count = saved_entry_count;
         g_selected = saved_selected;
         g_scroll_offset = saved_scroll;
         g_refresh_restore_pending = saved_pending;
         g_refresh_keep_path_len = saved_keep_len;
+        g_refresh_keep_scroll = saved_keep_scroll;
+        g_transfer_status = saved_transfer_status;
+        g_transfer_msg_len = saved_transfer_msg_len;
+        g_transfer_time = saved_transfer_time;
     }
 
     g_entry_count = 3;
@@ -2091,13 +2103,23 @@ test "file_explorer: refresh restore re-selects entry by path" {
 test "file_explorer: refresh restore clears selection when path is gone" {
     const saved_entry_count = g_entry_count;
     const saved_selected = g_selected;
+    const saved_scroll = g_scroll_offset;
     const saved_pending = g_refresh_restore_pending;
     const saved_keep_len = g_refresh_keep_path_len;
+    const saved_keep_scroll = g_refresh_keep_scroll;
+    const saved_transfer_status = g_transfer_status;
+    const saved_transfer_msg_len = g_transfer_msg_len;
+    const saved_transfer_time = g_transfer_time;
     defer {
         g_entry_count = saved_entry_count;
         g_selected = saved_selected;
+        g_scroll_offset = saved_scroll;
         g_refresh_restore_pending = saved_pending;
         g_refresh_keep_path_len = saved_keep_len;
+        g_refresh_keep_scroll = saved_keep_scroll;
+        g_transfer_status = saved_transfer_status;
+        g_transfer_msg_len = saved_transfer_msg_len;
+        g_transfer_time = saved_transfer_time;
     }
 
     g_entry_count = 2;
