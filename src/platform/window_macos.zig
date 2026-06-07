@@ -50,6 +50,7 @@ extern fn wispterm_macos_app_consume_reopen() bool;
 extern fn wispterm_macos_app_consume_quit() bool;
 extern fn wispterm_macos_app_request_quit() void;
 extern fn wispterm_macos_app_pump_events(timeout_seconds: f64) void;
+extern fn wispterm_macos_post_wakeup() void;
 
 pub fn appMessage(offset: u32) MessageId {
     return wm_app + offset;
@@ -256,6 +257,11 @@ pub fn requestQuit() void {
 /// (needed for worker-thread dispatch_sync to the main thread).
 pub fn pumpAppEvents(timeout_seconds: f64) void {
     wispterm_macos_app_pump_events(timeout_seconds);
+}
+
+/// 从任意线程唤醒阻塞中的主线程事件泵。
+pub fn postWakeup() void {
+    wispterm_macos_post_wakeup();
 }
 
 test "macOS window constants defer caption controls to AppKit" {

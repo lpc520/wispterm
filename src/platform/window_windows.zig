@@ -215,6 +215,8 @@ pub fn pumpAppEvents(timeout_seconds: f64) void {
     _ = timeout_seconds;
 }
 
+pub fn postWakeup() void {}
+
 const wm_close: u32 = 0x0010;
 const wm_app: u32 = 0x8000;
 const sw_hide: i32 = 0;

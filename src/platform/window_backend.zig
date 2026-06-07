@@ -256,6 +256,11 @@ pub fn pumpAppEvents(timeout_seconds: f64) void {
     platform_window.pumpAppEvents(timeout_seconds);
 }
 
+/// 从任意线程唤醒阻塞中的主线程事件泵（app 级，无需 window 句柄）。
+pub fn postWakeup() void {
+    platform_window.postWakeup();
+}
+
 pub fn refreshClientSizeFromNative(window: *Window) bool {
     const rect = clientRect(window) orelse return false;
     setClientSize(window, rect.right - rect.left, rect.bottom - rect.top);

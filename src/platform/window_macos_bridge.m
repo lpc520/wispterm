@@ -1123,6 +1123,23 @@ void wispterm_macos_app_pump_events(double timeout_seconds) {
     }
 }
 
+// Wake the main thread's -nextEventMatchingMask: (used by the idle render loop)
+// from any thread, by posting an application-defined NSEvent. Safe off-main.
+void wispterm_macos_post_wakeup(void) {
+    @autoreleasepool {
+        NSEvent *event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                            location:NSMakePoint(0, 0)
+                                       modifierFlags:0
+                                           timestamp:0
+                                        windowNumber:0
+                                             context:nil
+                                             subtype:0
+                                               data1:0
+                                               data2:0];
+        if (event != nil) [NSApp postEvent:event atStart:NO];
+    }
+}
+
 bool wispterm_macos_window_close_requested(void *handle) {
     WispTermMacWindowState *state = wispterm_macos_state(handle);
     return state != NULL && state->close_requested;

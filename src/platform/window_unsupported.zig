@@ -170,3 +170,5 @@ pub fn requestQuit() void {}
 pub fn pumpAppEvents(timeout_seconds: f64) void {
     _ = timeout_seconds;
 }
+
+pub fn postWakeup() void {}
