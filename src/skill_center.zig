@@ -250,6 +250,49 @@ pub const ScanWork = struct {
     destroy: *const fn (*anyopaque, std.mem.Allocator) void,
 };
 
+/// Structured result of a background skill-center op, produced on the worker
+/// thread and consumed on the UI thread. Owns its strings/rows; `deinit` frees
+/// them. The UI thread builds overlays/toasts from this — the worker never
+/// touches UI state.
+pub const OpResult = union(enum) {
+    /// import-scan finished: show the import list built from `rows`.
+    import_scan: struct { target: Target, rows: []scan.SkillRow },
+    /// deploy-scan finished: UI decides noop/direct/confirm from `rows`.
+    deploy_scan: struct { target: Target, name: []u8, src_hash: ?[]u8, rows: []scan.SkillRow },
+    /// transfer finished: show success/failure toast.
+    transfer: struct { is_import: bool, ok: bool, err_summary: ?[]u8 },
+    /// generic failure before work could run (e.g. lost connection).
+    failed,
+
+    pub fn deinit(self: *OpResult, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .import_scan => |*v| {
+                v.target.deinit(allocator);
+                scan.freeRows(allocator, v.rows);
+            },
+            .deploy_scan => |*v| {
+                v.target.deinit(allocator);
+                allocator.free(v.name);
+                if (v.src_hash) |h| allocator.free(h);
+                scan.freeRows(allocator, v.rows);
+            },
+            .transfer => |*v| {
+                if (v.err_summary) |s| allocator.free(s);
+            },
+            .failed => {},
+        }
+        self.* = .failed;
+    }
+};
+
+/// Owned unit of background op work. `run` returns an `OpResult` (never errors —
+/// failures are encoded in the result). `destroy` frees `ctx`.
+pub const OpWork = struct {
+    ctx: *anyopaque,
+    run: *const fn (*anyopaque, std.mem.Allocator) OpResult,
+    destroy: *const fn (*anyopaque, std.mem.Allocator) void,
+};
+
 /// Concurrency-safe holder for the panel. `mutex` guards `model` + `status`; the
 /// worker runs I/O without the lock and takes it only to publish via
 /// `finishScan`; `closing` + join-on-deinit give UAF safety.
@@ -260,6 +303,10 @@ pub const Session = struct {
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     scan_generation: u64 = 0,
     scan_thread: ?std.Thread = null,
+    op_thread: ?std.Thread = null,
+    op_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+    op_pending: ?OpResult = null,
+    op_wake: ?*const fn () void = null,
     status: []u8 = &.{}, // owned "Scanning…"/"Failed"/""
 
     pub fn create(allocator: std.mem.Allocator) !*Session {
@@ -274,6 +321,14 @@ pub const Session = struct {
         if (self.scan_thread) |t| {
             t.join();
             self.scan_thread = null;
+        }
+        if (self.op_thread) |t| {
+            t.join();
+            self.op_thread = null;
+        }
+        if (self.op_pending) |*p| {
+            p.deinit(allocator);
+            self.op_pending = null;
         }
         self.model.deinit();
         if (self.status.len > 0) allocator.free(self.status);
@@ -337,6 +392,51 @@ pub const Session = struct {
             self.scan_thread = null;
         }
     }
+
+    /// Start a background op. Returns false if an op is already in flight (the
+    /// caller still owns `work` and is responsible for calling its destroy).
+    /// UI thread only.
+    pub fn startOp(self: *Session, work: OpWork, wake: *const fn () void, busy_msg: []const u8) bool {
+        if (self.op_thread != null and !self.op_done.load(.acquire)) {
+            return false; // busy — never join-wait a possibly-slow op on the UI thread
+        }
+        if (self.op_thread) |t| {
+            t.join(); // previous op already finished; non-blocking
+            self.op_thread = null;
+        }
+        self.op_wake = wake;
+        self.op_done.store(false, .release);
+
+        self.mutex.lock();
+        const msg = self.allocator.dupe(u8, busy_msg) catch null;
+        if (msg) |m| self.model.setOverlay(.{ .busy = m });
+        self.mutex.unlock();
+
+        const thread = std.Thread.spawn(.{}, opThreadMain, .{ self, work }) catch {
+            self.op_done.store(true, .release);
+            work.destroy(work.ctx, self.allocator);
+            return false;
+        };
+        self.op_thread = thread;
+        return true;
+    }
+
+    /// Take the published op result (if any), clearing it. UI thread only.
+    pub fn takePendingOp(self: *Session) ?OpResult {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const r = self.op_pending;
+        self.op_pending = null;
+        return r;
+    }
+
+    /// Test-only: wait for an in-flight op worker.
+    pub fn joinOpForTest(self: *Session) void {
+        if (self.op_thread) |t| {
+            t.join();
+            self.op_thread = null;
+        }
+    }
 };
 
 fn scanThreadMain(session: *Session, work: ScanWork, generation: u64) void {
@@ -346,6 +446,29 @@ fn scanThreadMain(session: *Session, work: ScanWork, generation: u64) void {
         return;
     };
     session.finishScan(generation, lib);
+}
+
+fn opThreadMain(session: *Session, work: OpWork) void {
+    defer work.destroy(work.ctx, session.allocator);
+    var result = work.run(work.ctx, session.allocator);
+
+    session.mutex.lock();
+    const closing = session.closing.load(.acquire);
+    if (closing) {
+        session.mutex.unlock();
+        result.deinit(session.allocator);
+    } else {
+        if (session.op_pending) |*p| p.deinit(session.allocator); // discard stale (shouldn't happen)
+        session.op_pending = result;
+        session.mutex.unlock();
+    }
+    // op_done stays unconditional so destroy/startOp see the thread as finished.
+    session.op_done.store(true, .release);
+    // Only wake when we actually published — waking during teardown is pointless
+    // and risks the woken main loop touching a Session being destroyed.
+    if (!closing) {
+        if (session.op_wake) |w| w();
+    }
 }
 
 // --- Tests ---
@@ -440,4 +563,59 @@ test "skill_center: Session.finishScan publishes then discards stale (no leak)" 
     session.scan_generation = 9;
     session.finishScan(3, try ownedLib(a, &.{"stale"})); // discarded + freed
     try std.testing.expectEqual(@as(usize, 2), session.model.library.?.len);
+}
+
+const OpTestCtx = struct {
+    a: std.mem.Allocator,
+    result_ok: bool,
+    fn run(ctx: *anyopaque, allocator: std.mem.Allocator) OpResult {
+        const self: *OpTestCtx = @ptrCast(@alignCast(ctx));
+        _ = allocator;
+        return .{ .transfer = .{ .is_import = false, .ok = self.result_ok, .err_summary = null } };
+    }
+    fn destroy(ctx: *anyopaque, allocator: std.mem.Allocator) void {
+        const self: *OpTestCtx = @ptrCast(@alignCast(ctx));
+        allocator.destroy(self);
+    }
+};
+
+fn noopWake() void {}
+
+test "startOp runs work and publishes a pending result" {
+    const a = std.testing.allocator;
+    const session = try Session.create(a);
+    defer session.destroy();
+
+    const ctx = try a.create(OpTestCtx);
+    ctx.* = .{ .a = a, .result_ok = true };
+    try std.testing.expect(session.startOp(.{ .ctx = ctx, .run = OpTestCtx.run, .destroy = OpTestCtx.destroy }, noopWake, "syncing"));
+    session.joinOpForTest();
+
+    var pending = session.takePendingOp() orelse return error.NoPending;
+    defer pending.deinit(a);
+    try std.testing.expect(pending == .transfer);
+    try std.testing.expect(pending.transfer.ok);
+    // consumed: a second take is empty
+    try std.testing.expectEqual(@as(?OpResult, null), session.takePendingOp());
+}
+
+test "startOp rejects a second op while one is in flight" {
+    const a = std.testing.allocator;
+    const session = try Session.create(a);
+    defer session.destroy();
+
+    // Manually mark an op in flight without spawning real work, to test the guard.
+    session.op_done.store(false, .release);
+    session.op_thread = try std.Thread.spawn(.{}, struct {
+        fn f() void {}
+    }.f, .{});
+
+    const ctx = try a.create(OpTestCtx);
+    ctx.* = .{ .a = a, .result_ok = true };
+    const accepted = session.startOp(.{ .ctx = ctx, .run = OpTestCtx.run, .destroy = OpTestCtx.destroy }, noopWake, "syncing");
+    try std.testing.expect(!accepted); // busy → rejected
+    // we own ctx since it was rejected; free it
+    OpTestCtx.destroy(@ptrCast(ctx), a);
+    // let the dummy thread be joinable at destroy
+    session.op_done.store(true, .release);
 }
