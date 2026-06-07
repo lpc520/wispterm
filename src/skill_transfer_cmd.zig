@@ -61,6 +61,22 @@ pub fn tarExtractCmd(allocator: std.mem.Allocator, root_expr: []const u8, name: 
     return buf.toOwnedSlice(allocator);
 }
 
+/// `cat <root_expr>/'<name>'/'SKILL.md'` — read one skill's SKILL.md under a
+/// shell root expression (e.g. `"$HOME"/'.claude/skills'` or `'/abs/lib'`).
+/// root_expr is already shell-ready (built by homeRootExpr/absRootExpr); name
+/// and the SKILL.md literal are single-quote-escaped.
+pub fn catSkillMdCmd(allocator: std.mem.Allocator, root_expr: []const u8, name: []const u8) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "cat ");
+    try buf.appendSlice(allocator, root_expr);
+    try buf.append(allocator, '/');
+    try appendQuoted(&buf, allocator, name);
+    try buf.append(allocator, '/');
+    try appendQuoted(&buf, allocator, "SKILL.md");
+    return buf.toOwnedSlice(allocator);
+}
+
 /// Shell expression for a target software root under $HOME, e.g.
 /// homeRootExpr(".claude/skills") → `"$HOME"/'<rel>'`.
 pub fn homeRootExpr(allocator: std.mem.Allocator, rel: []const u8) ![]u8 {
@@ -105,4 +121,22 @@ test "skill_transfer_cmd: absRootExpr + tarExtractCmd for the local library" {
 test "skill_transfer_cmd: splitSkillPath still derives a name" {
     const sp = splitSkillPath(".claude/skills/roundtable/SKILL.md").?;
     try std.testing.expectEqualStrings("roundtable", sp.item);
+}
+
+test "skill_transfer_cmd: catSkillMdCmd reads SKILL.md under a $HOME root" {
+    const a = std.testing.allocator;
+    const root = try homeRootExpr(a, ".claude/skills");
+    defer a.free(root);
+    const c = try catSkillMdCmd(a, root, "pdf");
+    defer a.free(c);
+    try std.testing.expectEqualStrings("cat \"$HOME\"/'.claude/skills'/'pdf'/'SKILL.md'", c);
+}
+
+test "skill_transfer_cmd: catSkillMdCmd shell-escapes a tricky name" {
+    const a = std.testing.allocator;
+    const root = try absRootExpr(a, "/cfg/skills");
+    defer a.free(root);
+    const c = try catSkillMdCmd(a, root, "it's mine");
+    defer a.free(c);
+    try std.testing.expectEqualStrings("cat '/cfg/skills'/'it'\\''s mine'/'SKILL.md'", c);
 }
