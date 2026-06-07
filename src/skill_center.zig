@@ -261,6 +261,8 @@ pub const OpResult = union(enum) {
     deploy_scan: struct { target: Target, name: []u8, src_hash: ?[]u8, rows: []scan.SkillRow },
     /// transfer finished: show success/failure toast.
     transfer: struct { is_import: bool, ok: bool, err_summary: ?[]u8 },
+    /// preview finished: show the fetched SKILL.md in the markdown preview panel.
+    preview: struct { title: []u8, content: []u8 },
     /// generic failure before work could run (e.g. lost connection).
     failed,
 
@@ -278,6 +280,10 @@ pub const OpResult = union(enum) {
             },
             .transfer => |*v| {
                 if (v.err_summary) |s| allocator.free(s);
+            },
+            .preview => |*v| {
+                allocator.free(v.title);
+                allocator.free(v.content);
             },
             .failed => {},
         }
@@ -673,4 +679,14 @@ test "importScanResult: reachable-but-empty source still opens an import list" {
     defer result.deinit(a);
     try std.testing.expect(result == .import_scan);
     try std.testing.expectEqual(@as(usize, 0), result.import_scan.rows.len);
+}
+
+test "OpResult.preview deinit frees title and content" {
+    const a = std.testing.allocator;
+    var r: OpResult = .{ .preview = .{
+        .title = try a.dupe(u8, "roundtable"),
+        .content = try a.dupe(u8, "# SKILL\nbody"),
+    } };
+    r.deinit(a); // must free both; testing allocator catches a leak
+    try std.testing.expect(r == .failed); // deinit resets to .failed
 }
