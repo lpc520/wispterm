@@ -5425,6 +5425,37 @@ pub fn anyBlockingOverlayVisible() bool {
         transferCancelConfirmVisible();
 }
 
+/// 脏门控用：是否有任何 overlay / 面板 / 时间动画处于活动状态。
+/// 与 `anyBlockingOverlayVisible`（仅模态遮挡 webview）不同 —— 这里要尽量全，
+/// 漏判会导致 overlay 动画卡住，所以宁可多列。`now` = std.time.milliTimestamp()。
+pub fn anyOverlayActive(now: i64) bool {
+    // 打开态 overlay
+    if (commandPaletteVisible()) return true;
+    if (commandPaletteAgentHistoryVisible()) return true;
+    if (settingsPageVisible()) return true;
+    if (sessionLauncherVisible()) return true;
+    if (whatsNewVisible()) return true;
+    if (windowCloseConfirmVisible()) return true;
+    if (restoreDefaultsConfirmVisible()) return true;
+    if (transferCancelConfirmVisible()) return true;
+    if (jupyter_picker.isVisible()) return true;
+    if (startup_shortcuts.g_startup_shortcuts_visible) return true;
+    if (browser_panel.urlBarFocused()) return true;
+
+    // 时间动画：到期前每帧需持续渲染
+    if (now < g_copy_toast_until_ms) return true;
+    if (g_transfer_toast_sticky or now < g_transfer_toast_until_ms) return true;
+    if (now < g_update_prompt_until_ms) return true;
+    if (now < g_close_shortcut_confirm_until_ms) return true;
+    if (now < g_remote_key_copied_until_ms) return true;
+    if (now < resize.g_split_resize_overlay_until) return true;
+
+    // FPS 叠层开启时每秒刷新
+    if (g_debug_fps) return true;
+
+    return false;
+}
+
 pub fn whatsNewHandleKey(ev: input_key.KeyEvent) void {
     if (!g_whats_new_visible) return;
     switch (ev.key) {
