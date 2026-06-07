@@ -695,10 +695,15 @@ pub fn refresh() void {
 
     if (g_mode == .remote and g_has_ssh_conn) {
         // Async rebuild: rescanRemote() started or queued a job, whose tickAsync
-        // completion runs applyRefreshRestore() and clears `pending`. startAsyncList
-        // only fails to enqueue under OOM (root path is always < 512 bytes), so the
-        // pending flag is reliably consumed in normal operation.
-        setTransferStatus(.in_progress, "Refreshing…");
+        // completion runs applyRefreshRestore() and clears `pending`.
+        if (g_async_job != null or g_pending_async_list != null) {
+            setTransferStatus(.in_progress, "Refreshing…");
+        } else {
+            // startAsyncList failed to enqueue (e.g. OOM): no completion will
+            // consume the pending restore, so clear it to avoid leaking a stale
+            // selection onto a future rescan.
+            g_refresh_restore_pending = false;
+        }
     } else {
         applyRefreshRestore();
     }
