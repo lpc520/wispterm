@@ -1063,6 +1063,23 @@ void *wispterm_macos_window_ns_window(void *handle) {
     return (void *)state->window;
 }
 
+// True iff the window is on-screen (not occluded) and not miniaturized.
+bool wispterm_macos_window_visible(void *handle) {
+    WispTermMacWindowState *state = wispterm_macos_state(handle);
+    if (state == NULL || state->window == NULL) return true;
+    NSWindowOcclusionState occ = [state->window occlusionState];
+    bool visible = (occ & NSWindowOcclusionStateVisible) != 0;
+    bool miniaturized = [state->window isMiniaturized];
+    return visible && !miniaturized;
+}
+
+// True iff the window is the key window (has keyboard focus).
+bool wispterm_macos_window_is_key(void *handle) {
+    WispTermMacWindowState *state = wispterm_macos_state(handle);
+    if (state == NULL || state->window == NULL) return true;
+    return [state->window isKeyWindow] ? true : false;
+}
+
 void wispterm_macos_window_poll(void *handle) {
     @autoreleasepool {
         WispTermMacWindowState *state = wispterm_macos_state(handle);
@@ -1120,6 +1137,23 @@ void wispterm_macos_app_pump_events(double timeout_seconds) {
             until = [NSDate distantPast];
         }
         [NSApp updateWindows];
+    }
+}
+
+// Wake the main thread's -nextEventMatchingMask: (used by the idle render loop)
+// from any thread, by posting an application-defined NSEvent. Safe off-main.
+void wispterm_macos_post_wakeup(void) {
+    @autoreleasepool {
+        NSEvent *event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                            location:NSMakePoint(0, 0)
+                                       modifierFlags:0
+                                           timestamp:0
+                                        windowNumber:0
+                                             context:nil
+                                             subtype:0
+                                               data1:0
+                                               data2:0];
+        if (event != nil) [NSApp postEvent:event atStart:NO];
     }
 }
 

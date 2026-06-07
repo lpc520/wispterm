@@ -170,3 +170,13 @@ pub fn requestQuit() void {}
 pub fn pumpAppEvents(timeout_seconds: f64) void {
     _ = timeout_seconds;
 }
+
+pub fn postWakeup() void {}
+
+pub fn registerEventWindow(hwnd: NativeHandle) void {
+    _ = hwnd;
+}
+
+pub fn unregisterEventWindow(hwnd: NativeHandle) void {
+    _ = hwnd;
+}
