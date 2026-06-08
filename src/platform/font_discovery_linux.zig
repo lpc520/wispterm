@@ -69,6 +69,14 @@ pub const FontDiscovery = struct {
         const family_z = try std.heap.c_allocator.dupeZ(u8, family_name);
         defer std.heap.c_allocator.free(family_z);
         _ = fc.FcPatternAddString(pat, fc.FC_FAMILY, @ptrCast(family_z.ptr));
+        // Secondary family: if the configured family is not installed, fontconfig
+        // falls back to a generic monospace font (terminals need uniform cells)
+        // instead of the proportional default. An installed configured family
+        // still wins — an exact match outranks this weaker secondary preference.
+        // (FC_SPACING=mono was tried first but is a no-op on some fontconfig
+        // configs; a secondary family is the reliable lever.)
+        const mono_fallback: [:0]const u8 = "monospace";
+        _ = fc.FcPatternAddString(pat, fc.FC_FAMILY, @ptrCast(mono_fallback.ptr));
         _ = fc.FcPatternAddInteger(pat, fc.FC_WEIGHT, fcw.fcWeight(@intCast(@intFromEnum(weight))));
         _ = fc.FcConfigSubstitute(null, pat, fc.FcMatchPattern);
         fc.FcDefaultSubstitute(pat);
