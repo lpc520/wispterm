@@ -181,6 +181,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
         .permission = app.ai_agent_permission,
         .command_timeout_ms = app.ai_agent_command_timeout_ms,
         .output_limit = app.ai_agent_output_limit,
+        .memory_enabled = app.ai_memory_enabled,
     });
     ai_chat.setDefaultWorkingDir(app.ai_agent_working_dir);
     @import("web_search.zig").setJinaApiKey(app.jina_api_key);
@@ -3581,6 +3582,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
         .permission = cfg.@"ai-agent-permission",
         .command_timeout_ms = cfg.@"ai-agent-command-timeout-ms",
         .output_limit = cfg.@"ai-agent-output-limit",
+        .memory_enabled = cfg.@"ai-memory-enabled",
     });
     ai_chat.setDefaultWorkingDir(cfg.@"ai-agent-working-dir");
     @import("web_search.zig").setJinaApiKey(cfg.@"jina-api-key");

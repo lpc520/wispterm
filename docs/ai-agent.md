@@ -112,6 +112,23 @@ The AI agent can read and edit files directly:
 
 To edit a file on a remote SSH server, the agent passes the `surface_id` of an open SSH terminal tab; the operation runs on that host over the existing connection. Local files (no `surface_id`) resolve relative paths against the conversation's working directory. Writes and edits display a diff and, depending on the permission level (confirm / auto / full), may ask you to approve before applying.
 
+## Long-term memory
+
+Copilot keeps two tiers of long-term memory under the config directory
+(`memory/global/` and `memory/projects/<key>/`): a **global** tier for facts
+about you (preferences, recurring tools) and a **project** tier keyed by the
+conversation working directory. At the start of each request a compact index of
+both tiers is injected as background context; the model fetches full entries on
+demand.
+
+- The agent saves/updates/deletes memories with the `memory_save`,
+  `memory_recall`, and `memory_delete` tools.
+- `/remember <fact>` saves a fact deterministically (project tier when the
+  conversation has a working directory, otherwise global).
+- `/memory` lists the currently remembered facts.
+- `/forget <name>` deletes a memory by its name.
+- Set `ai-memory-enabled = false` in the config to turn the system off.
+
 ## Markdown Export
 
 Use the command center to run `Export Copilot Markdown` for the full transcript,

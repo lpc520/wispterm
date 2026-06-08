@@ -144,6 +144,7 @@ const ai_chat_title = @import("ai_chat_title.zig");
 const ToolCall = ai_chat_protocol.ToolCall;
 const ai_chat_request = @import("ai_chat_request.zig");
 const web_search = @import("web_search.zig");
+const agent_memory = @import("agent_memory.zig");
 
 pub const ChatRequest = struct {
     allocator: std.mem.Allocator,
@@ -159,6 +160,7 @@ pub const ChatRequest = struct {
     stream: bool,
     max_tokens: u32 = 8192,
     agent_enabled: bool,
+    memory_enabled: bool = false,
     copilot: bool = false,
     tool_host: ?ToolHost,
     tool_snapshot: ?ToolSnapshot,
@@ -189,6 +191,7 @@ pub const ChatRequest = struct {
             .reasoning_effort = self.reasoning_effort,
             .stream = self.stream,
             .max_tokens = self.max_tokens,
+            .memory_enabled = self.memory_enabled,
         };
     }
 };
@@ -462,6 +465,9 @@ fn slashCommandOutput(allocator: std.mem.Allocator, command: SlashCommand) ![]u8
         // .loop and .watch suppress output and emit their own messages via
         // runLoopCommandLocked; this path is never reached.
         .loop, .watch => allocator.dupe(u8, ""),
+        // .remember, .memory, .forget suppress output and emit their own messages;
+        // this path is never reached, but the arm is required for exhaustiveness.
+        .remember, .memory, .forget => allocator.dupe(u8, ""),
     };
 }
 
@@ -1964,6 +1970,64 @@ pub const Session = struct {
         self.setStatusLocked("Ready");
     }
 
+    /// Append a memory-command result line and return the composer to Ready.
+    fn emitMemoryResultLocked(self: *Session, msg: []const u8) void {
+        self.appendLocalToolMessageLocked(msg) catch {};
+        self.clearSubmittedInputLocked();
+        self.setStatusLocked("Ready");
+    }
+
+    /// When the memory system is disabled, emit a notice and report true so the
+    /// command stops. Honors the `ai-memory-enabled` config switch.
+    fn memoryDisabledLocked(self: *Session) bool {
+        if (currentAgentSettings().memory_enabled) return false;
+        self.emitMemoryResultLocked("Memory is disabled. Set ai-memory-enabled = true in the config to use it.");
+        return true;
+    }
+
+    fn applyRememberLocked(self: *Session, arg: []const u8) void {
+        if (self.memoryDisabledLocked()) return;
+        const text = std.mem.trim(u8, arg, " \t\r\n");
+        if (text.len == 0) return self.emitMemoryResultLocked("Usage: /remember <fact>");
+        const wd = self.effectiveWorkingDirLocked();
+        const tier: agent_memory.Tier = if (wd != null and wd.?.len > 0) .project else .global;
+        var date_buf: [10]u8 = undefined;
+        const today = agent_memory.todayDate(&date_buf);
+        const base_slug = agent_memory.slugify(self.allocator, text, today) catch return self.emitMemoryResultLocked("Could not save memory.");
+        defer self.allocator.free(base_slug);
+        // Resolve a non-colliding slug in the target tier so /remember never
+        // silently overwrites a different fact that slugified to the same base.
+        const dir = (switch (tier) {
+            .global => agent_memory.globalDir(self.allocator),
+            .project => agent_memory.projectDir(self.allocator, wd.?),
+        }) catch return self.emitMemoryResultLocked("Could not save memory.");
+        defer self.allocator.free(dir);
+        const slug = agent_memory.uniqueSlugInDir(self.allocator, dir, base_slug) catch return self.emitMemoryResultLocked("Could not save memory.");
+        defer self.allocator.free(slug);
+        const desc = agent_memory.truncateUtf8(text, 80);
+        const msg = agent_memory.saveMemory(self.allocator, tier, wd, slug, desc, .user, text) catch return self.emitMemoryResultLocked("Could not save memory.");
+        defer self.allocator.free(msg);
+        self.emitMemoryResultLocked(msg);
+    }
+
+    fn applyMemoryListLocked(self: *Session) void {
+        if (self.memoryDisabledLocked()) return;
+        const wd = self.effectiveWorkingDirLocked() orelse "";
+        const msg = agent_memory.listForDisplay(self.allocator, wd) catch return self.emitMemoryResultLocked("Could not list memories.");
+        defer self.allocator.free(msg);
+        self.emitMemoryResultLocked(msg);
+    }
+
+    fn applyForgetLocked(self: *Session, arg: []const u8) void {
+        if (self.memoryDisabledLocked()) return;
+        const name = std.mem.trim(u8, arg, " \t\r\n");
+        if (name.len == 0) return self.emitMemoryResultLocked("Usage: /forget <name>");
+        const wd = self.effectiveWorkingDirLocked() orelse "";
+        const msg = agent_memory.deleteMemory(self.allocator, wd, name, null) catch return self.emitMemoryResultLocked("Could not delete memory.");
+        defer self.allocator.free(msg);
+        self.emitMemoryResultLocked(msg);
+    }
+
     /// Runs a built-in slash command's side-effects and appends its output as a
     /// tool message. Assumes self.mutex is held. Returns the captured history
     /// change (non-null only for /clear) plus any action the caller must fire
@@ -1998,6 +2062,18 @@ pub const Session = struct {
             },
             .loop => self.runLoopCommandLocked(.loop, arg, &result),
             .watch => self.runLoopCommandLocked(.watch, arg, &result),
+            .remember => {
+                self.applyRememberLocked(arg);
+                result.suppress_output = true;
+            },
+            .memory => {
+                self.applyMemoryListLocked();
+                result.suppress_output = true;
+            },
+            .forget => {
+                self.applyForgetLocked(arg);
+                result.suppress_output = true;
+            },
             else => {},
         }
         if (result.suppress_output) return result;
@@ -3154,7 +3230,8 @@ pub const Session = struct {
         const model_name = try self.allocator.dupe(u8, self.model());
         var model_owned = true;
         errdefer if (model_owned) self.allocator.free(model_name);
-        const system_prompt = try self.allocator.dupe(u8, self.systemPrompt());
+        const working_dir = self.effectiveWorkingDirLocked() orelse "";
+        const system_prompt = try composeSystemPromptWithMemory(self.allocator, self.systemPrompt(), settings.memory_enabled, working_dir);
         var system_prompt_owned = true;
         errdefer if (system_prompt_owned) self.allocator.free(system_prompt);
         const reasoning_effort = try self.allocator.dupe(u8, self.reasoningEffort());
@@ -3175,6 +3252,7 @@ pub const Session = struct {
             .stream = self.stream and !agent_enabled and self.protocol != .anthropic,
             .max_tokens = self.max_tokens,
             .agent_enabled = agent_enabled,
+            .memory_enabled = settings.memory_enabled,
             .copilot = self.copilot,
             .tool_host = tool_host,
             .tool_snapshot = tool_snapshot,
@@ -3364,6 +3442,21 @@ pub const Session = struct {
         @memcpy(self.status_buf[0..self.status_len], value[0..self.status_len]);
     }
 };
+
+/// Returns base prompt, or base + memory index block when memory is enabled.
+/// Best-effort: any memory error degrades to just the base prompt. Caller owns.
+fn composeSystemPromptWithMemory(
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    memory_enabled: bool,
+    working_dir: []const u8,
+) ![]u8 {
+    if (!memory_enabled) return allocator.dupe(u8, base);
+    const block = agent_memory.buildInjectionBlock(allocator, working_dir) catch return allocator.dupe(u8, base);
+    defer allocator.free(block);
+    if (block.len == 0) return allocator.dupe(u8, base);
+    return std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{ base, block });
+}
 
 fn allocUsageFooter(allocator: std.mem.Allocator, started_ms: i64, usage: ?ApiUsage) !?[]u8 {
     const u = usage orelse return null;
@@ -4995,7 +5088,7 @@ test "ai chat responses endpoint normalization" {
 }
 
 test "ai chat default system prompt comes from platform agent prompt" {
-    try std.testing.expect(DEFAULT_SYSTEM_PROMPT.len < 2400);
+    try std.testing.expect(DEFAULT_SYSTEM_PROMPT.len < 2700);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "wispterm_docs") != null);
     try std.testing.expectEqualStrings(platform_agent_prompt.defaultSystemPrompt, DEFAULT_SYSTEM_PROMPT);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "uv") != null);
@@ -6781,4 +6874,27 @@ test "copilot loop command lists and stops tasks from other sessions" {
     const remaining = try store.snapshotForSession(a, "old-copilot-session", .loop);
     defer ai_loop_store.freeSnapshot(a, remaining);
     try std.testing.expectEqual(@as(usize, 0), remaining.len);
+}
+
+test "composeSystemPromptWithMemory appends the index block when enabled" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(root);
+    const dirs_mod = @import("platform/dirs.zig");
+    dirs_mod.setTestConfigDirForCurrentThread(root);
+    defer dirs_mod.clearTestConfigDirForCurrentThread();
+    const am = @import("agent_memory.zig");
+    const m = try am.saveMemory(a, .global, null, "k1", "v1", .user, "body");
+    a.free(m);
+
+    const with = try composeSystemPromptWithMemory(a, "BASE", true, "");
+    defer a.free(with);
+    try std.testing.expect(std.mem.startsWith(u8, with, "BASE"));
+    try std.testing.expect(std.mem.indexOf(u8, with, "k1: v1") != null);
+
+    const without = try composeSystemPromptWithMemory(a, "BASE", false, "");
+    defer a.free(without);
+    try std.testing.expectEqualStrings("BASE", without);
 }

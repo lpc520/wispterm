@@ -293,6 +293,11 @@ theme: ?[]const u8 = null,
 /// that is running a full-screen (non-shell) program.
 @"confirm-close-running-program": bool = true,
 
+/// Master on/off switch for the Copilot long-term memory system.
+/// When true, memory index is injected into the system prompt and the
+/// memory_save/memory_recall/memory_delete tools are advertised to the model.
+@"ai-memory-enabled": bool = true,
+
 /// Agent command permission mode: ask, auto, or full.
 @"ai-agent-permission": ai_agent_config.AgentPermission = .confirm,
 
@@ -770,6 +775,14 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
             self.@"confirm-close-running-program" = false;
         } else {
             log.warn("invalid confirm-close-running-program: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "ai-memory-enabled")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"ai-memory-enabled" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"ai-memory-enabled" = false;
+        } else {
+            log.warn("invalid ai-memory-enabled: {s}", .{value});
         }
     } else if (std.mem.eql(u8, key, "right-click-action")) {
         if (RightClickAction.parse(value)) |action| {
@@ -2081,4 +2094,16 @@ test "config: jina-api-key parses from a config line" {
     defer cfg.deinit(allocator);
     cfg.applyKeyValue(allocator, "jina-api-key", "jina_abc", ".");
     try std.testing.expectEqualStrings("jina_abc", cfg.@"jina-api-key");
+}
+
+test "ai-memory-enabled parses true/false" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    // default is true
+    try std.testing.expect(cfg.@"ai-memory-enabled");
+    cfg.applyKeyValue(allocator, "ai-memory-enabled", "false", ".");
+    try std.testing.expect(!cfg.@"ai-memory-enabled");
+    cfg.applyKeyValue(allocator, "ai-memory-enabled", "true", ".");
+    try std.testing.expect(cfg.@"ai-memory-enabled");
 }
