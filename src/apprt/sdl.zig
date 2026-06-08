@@ -219,12 +219,12 @@ pub const Window = struct {
             .height = height,
         };
 
-        // Register in the window registry keyed by SDL window ID
-        const win_id = c.SDL_GetWindowID(sdl_win);
-        g_registry.set(win_id, @ptrCast(&win));
-
-        // Install custom hit-test for borderless drag/resize
-        _ = c.SDL_SetWindowHitTest(sdl_win, hitTest, @ptrCast(&win));
+        // NOTE: do NOT register &win or install the hit-test here. `init` returns
+        // the Window BY VALUE, so &win points at this stack temporary, not the
+        // caller's final storage — a registry entry made here would dangle and
+        // event routing would push input into a dead Window. Registration and
+        // the hit-test are installed in setGlobalWindow(), which receives the
+        // permanent, stable window pointer.
 
         // Query actual framebuffer size (HiDPI factor may differ from logical size)
         var pw: c_int = 0;
@@ -354,6 +354,13 @@ pub fn glGetProcAddress(name: [*:0]const u8) callconv(.c) ?*const anyopaque {
 
 pub fn setGlobalWindow(window: *Window) void {
     g_global_window = window;
+    // This is the first time apprt/sdl sees the window's permanent address
+    // (Window.init returns by value). Register it for event routing and point
+    // the hit-test callback at it, so processEvent pushes input into the same
+    // Window the main loop drains.
+    const win_id = c.SDL_GetWindowID(window.sdl_window);
+    g_registry.set(win_id, @ptrCast(window));
+    _ = c.SDL_SetWindowHitTest(window.sdl_window, hitTest, @ptrCast(window));
 }
 
 /// Pump SDL events, blocking up to `timeout_seconds`.  Sets the module-level
