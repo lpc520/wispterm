@@ -410,8 +410,9 @@ fn entryFileName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}.md", .{name});
 }
 
-/// List every `*.md` entry (except MEMORY.md) in `dir_path`, parsed. Missing
-/// directory -> empty list. Malformed files are skipped.
+/// List every `*.md` entry (except MEMORY.md) in `dir_path`, parsed in
+/// `updated` descending order. Missing directory returns an empty list.
+/// Malformed or unreadable files are skipped without error.
 pub fn loadDirEntries(allocator: std.mem.Allocator, dir_path: []const u8) ![]Entry {
     var list: std.ArrayListUnmanaged(Entry) = .empty;
     errdefer {
