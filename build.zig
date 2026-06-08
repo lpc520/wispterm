@@ -12,6 +12,8 @@ comptime {
     }
 }
 
+const linux_system_libraries = [_][]const u8{"SDL3"};
+
 const windows_system_libraries = [_][]const u8{
     "user32",
     "gdi32",
@@ -84,14 +86,15 @@ const PlatformFeatures = struct {
     fn forOs(os_tag: std.Target.Os.Tag) PlatformFeatures {
         const uses_windows_backend = os_tag == .windows;
         const uses_macos_backend = os_tag == .macos;
-        const has_desktop_backend = uses_windows_backend or uses_macos_backend;
+        const uses_linux_backend = os_tag == .linux;
+        const has_desktop_backend = uses_windows_backend or uses_macos_backend or uses_linux_backend;
         const has_app_bundle = os_tag == .macos;
         const embedded_browser_backend: EmbeddedBrowserBackend = if (uses_windows_backend)
             .webview2
         else if (uses_macos_backend)
             .webkit
         else
-            .none;
+            .none; // linux: webview disabled (SP5)
         return .{
             .supports_desktop_exe = has_desktop_backend,
             .supports_embedded_browser = embedded_browser_backend.isSupported(),
@@ -100,7 +103,7 @@ const PlatformFeatures = struct {
             .supports_gui_subsystem = uses_windows_backend,
             .supports_remote_transport = uses_windows_backend,
             .supports_app_bundle = has_app_bundle,
-            .system_libraries = if (uses_windows_backend) &windows_system_libraries else &.{},
+            .system_libraries = if (uses_windows_backend) &windows_system_libraries else if (uses_linux_backend) &linux_system_libraries else &.{},
             .app_frameworks = if (has_app_bundle) &macos_app_frameworks else &.{},
             .opengl_system_library = if (uses_windows_backend) "opengl32" else null,
         };
@@ -278,7 +281,7 @@ test "platform feature gates enable implemented desktop artifacts" {
     try std.testing.expectEqualStrings("opengl32", windows.opengl_system_library.?);
 
     const linux = PlatformFeatures.forOs(.linux);
-    try std.testing.expect(!linux.supports_desktop_exe);
+    try std.testing.expect(linux.supports_desktop_exe);
     try std.testing.expect(!linux.supports_embedded_browser);
     try std.testing.expectEqual(EmbeddedBrowserBackend.none, linux.embedded_browser_backend);
     try std.testing.expect(!linux.supports_resource_manifest);
@@ -306,7 +309,8 @@ test "windows system libraries are gated by platform" {
     try std.testing.expectEqualStrings("shcore", systemLibrariesFor(windows)[12]);
 
     const linux = PlatformFeatures.forOs(.linux);
-    try std.testing.expectEqual(@as(usize, 0), systemLibrariesFor(linux).len);
+    try std.testing.expectEqual(@as(usize, 1), systemLibrariesFor(linux).len);
+    try std.testing.expectEqualStrings("SDL3", systemLibrariesFor(linux)[0]);
 
     const macos = PlatformFeatures.forOs(.macos);
     try std.testing.expectEqual(@as(usize, 0), systemLibrariesFor(macos).len);
@@ -367,13 +371,13 @@ test "foreign target tests are compile-only by default" {
 
 test "desktop executable emission defaults to implemented platform backends" {
     try std.testing.expect(defaultEmitDesktopExe(PlatformFeatures.forOs(.windows)));
-    try std.testing.expect(!defaultEmitDesktopExe(PlatformFeatures.forOs(.linux)));
+    try std.testing.expect(defaultEmitDesktopExe(PlatformFeatures.forOs(.linux)));
     try std.testing.expect(defaultEmitDesktopExe(PlatformFeatures.forOs(.macos)));
 }
 
 test "shared compile checks default to platforms without desktop backends" {
     try std.testing.expect(!defaultEmitSharedCompileChecks(PlatformFeatures.forOs(.windows)));
-    try std.testing.expect(defaultEmitSharedCompileChecks(PlatformFeatures.forOs(.linux)));
+    try std.testing.expect(!defaultEmitSharedCompileChecks(PlatformFeatures.forOs(.linux)));
     try std.testing.expect(!defaultEmitSharedCompileChecks(PlatformFeatures.forOs(.macos)));
 }
 
@@ -988,6 +992,12 @@ fn createAppModuleWithRoot(
             .flags = &.{},
         });
         app_mod.linkSystemLibrary(library, .{});
+    }
+
+    if (target.result.os.tag == .linux) {
+        if (b.lazyDependency("sdl", .{})) |dep| {
+            app_mod.addImport("sdl", dep.module("sdl"));
+        }
     }
 
     if (platform.supports_app_bundle) {
