@@ -144,6 +144,7 @@ const ai_chat_title = @import("ai_chat_title.zig");
 const ToolCall = ai_chat_protocol.ToolCall;
 const ai_chat_request = @import("ai_chat_request.zig");
 const web_search = @import("web_search.zig");
+const agent_memory = @import("agent_memory.zig");
 
 pub const ChatRequest = struct {
     allocator: std.mem.Allocator,
@@ -3140,7 +3141,8 @@ pub const Session = struct {
         const model_name = try self.allocator.dupe(u8, self.model());
         var model_owned = true;
         errdefer if (model_owned) self.allocator.free(model_name);
-        const system_prompt = try self.allocator.dupe(u8, self.systemPrompt());
+        const working_dir = self.effectiveWorkingDirLocked() orelse "";
+        const system_prompt = try composeSystemPromptWithMemory(self.allocator, self.systemPrompt(), settings.memory_enabled, working_dir);
         var system_prompt_owned = true;
         errdefer if (system_prompt_owned) self.allocator.free(system_prompt);
         const reasoning_effort = try self.allocator.dupe(u8, self.reasoningEffort());
@@ -3161,6 +3163,7 @@ pub const Session = struct {
             .stream = self.stream and !agent_enabled and self.protocol != .anthropic,
             .max_tokens = self.max_tokens,
             .agent_enabled = agent_enabled,
+            .memory_enabled = settings.memory_enabled,
             .copilot = self.copilot,
             .tool_host = tool_host,
             .tool_snapshot = tool_snapshot,
@@ -3350,6 +3353,21 @@ pub const Session = struct {
         @memcpy(self.status_buf[0..self.status_len], value[0..self.status_len]);
     }
 };
+
+/// Returns base prompt, or base + memory index block when memory is enabled.
+/// Best-effort: any memory error degrades to just the base prompt. Caller owns.
+fn composeSystemPromptWithMemory(
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    memory_enabled: bool,
+    working_dir: []const u8,
+) ![]u8 {
+    if (!memory_enabled) return allocator.dupe(u8, base);
+    const block = agent_memory.buildInjectionBlock(allocator, working_dir) catch return allocator.dupe(u8, base);
+    defer allocator.free(block);
+    if (block.len == 0) return allocator.dupe(u8, base);
+    return std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{ base, block });
+}
 
 fn allocUsageFooter(allocator: std.mem.Allocator, started_ms: i64, usage: ?ApiUsage) !?[]u8 {
     const u = usage orelse return null;
@@ -6767,4 +6785,27 @@ test "copilot loop command lists and stops tasks from other sessions" {
     const remaining = try store.snapshotForSession(a, "old-copilot-session", .loop);
     defer ai_loop_store.freeSnapshot(a, remaining);
     try std.testing.expectEqual(@as(usize, 0), remaining.len);
+}
+
+test "composeSystemPromptWithMemory appends the index block when enabled" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(root);
+    const dirs_mod = @import("platform/dirs.zig");
+    dirs_mod.setTestConfigDirForCurrentThread(root);
+    defer dirs_mod.clearTestConfigDirForCurrentThread();
+    const am = @import("agent_memory.zig");
+    const m = try am.saveMemory(a, .global, null, "k1", "v1", .user, "body");
+    a.free(m);
+
+    const with = try composeSystemPromptWithMemory(a, "BASE", true, "");
+    defer a.free(with);
+    try std.testing.expect(std.mem.startsWith(u8, with, "BASE"));
+    try std.testing.expect(std.mem.indexOf(u8, with, "k1: v1") != null);
+
+    const without = try composeSystemPromptWithMemory(a, "BASE", false, "");
+    defer a.free(without);
+    try std.testing.expectEqualStrings("BASE", without);
 }
