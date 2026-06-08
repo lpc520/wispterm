@@ -93,9 +93,9 @@ fn hexEncode(src: []const u8, out: []u8) void {
     }
 }
 
-/// Slug from arbitrary text: lowercase ASCII alnum kept, runs of others -> '-',
-/// capped to SLUG_MAX_LEN, trailing dashes trimmed. Empty result (e.g. all-CJK
-/// text) falls back to `mem-<date>-<sha6>`.
+/// Slug from arbitrary text: lowercase ASCII alnum kept, runs of non-alnum
+/// replaced with a single '-', capped to SLUG_MAX_LEN, trailing dashes trimmed.
+/// Empty result (e.g. all-CJK text) falls back to `mem-<date>-<sha6>`.
 pub fn slugify(allocator: std.mem.Allocator, text: []const u8, date: []const u8) ![]u8 {
     var list: std.ArrayListUnmanaged(u8) = .empty;
     defer list.deinit(allocator);
