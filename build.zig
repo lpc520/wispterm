@@ -12,7 +12,7 @@ comptime {
     }
 }
 
-const linux_system_libraries = [_][]const u8{"SDL3"};
+const linux_system_libraries = [_][]const u8{ "SDL3", "fontconfig" };
 
 const windows_system_libraries = [_][]const u8{
     "user32",
@@ -309,8 +309,9 @@ test "windows system libraries are gated by platform" {
     try std.testing.expectEqualStrings("shcore", systemLibrariesFor(windows)[12]);
 
     const linux = PlatformFeatures.forOs(.linux);
-    try std.testing.expectEqual(@as(usize, 1), systemLibrariesFor(linux).len);
+    try std.testing.expectEqual(@as(usize, 2), systemLibrariesFor(linux).len);
     try std.testing.expectEqualStrings("SDL3", systemLibrariesFor(linux)[0]);
+    try std.testing.expectEqualStrings("fontconfig", systemLibrariesFor(linux)[1]);
 
     const macos = PlatformFeatures.forOs(.macos);
     try std.testing.expectEqual(@as(usize, 0), systemLibrariesFor(macos).len);
@@ -1005,6 +1006,9 @@ fn createAppModuleWithRoot(
     if (target.result.os.tag == .linux) {
         if (b.lazyDependency("sdl", .{ .target = target })) |dep| {
             app_mod.addImport("sdl", dep.module("sdl"));
+        }
+        if (b.lazyDependency("fontconfig", .{ .target = target })) |dep| {
+            app_mod.addImport("fontconfig", dep.module("fontconfig"));
         }
     }
 
