@@ -1010,6 +1010,11 @@ fn createAppModuleWithRoot(
         if (b.lazyDependency("fontconfig", .{ .target = target })) |dep| {
             app_mod.addImport("fontconfig", dep.module("fontconfig"));
         }
+        // Debian/Ubuntu multiarch paths: fontconfig/freetype headers live under
+        // /usr/include (not exported by pkg-config cflags on these systems) and
+        // libraries live under /usr/lib/x86_64-linux-gnu (not /usr/local/lib).
+        app_mod.addIncludePath(.{ .cwd_relative = "/usr/include" });
+        app_mod.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
     }
 
     if (platform.supports_app_bundle) {

@@ -11,4 +11,8 @@ pub fn build(b: *std.Build) void {
     // — no hardcoded prefix. The parent threads the resolved target via
     // b.lazyDependency("fontconfig", .{ .target = target }).
     module.linkSystemLibrary("fontconfig", .{});
+    // On Debian/Ubuntu the fontconfig headers live under /usr/include which is not
+    // emitted by pkg-config --cflags (it is implicit for native gcc but Zig's
+    // translate-c needs it explicit when the module is compiled in isolation).
+    module.addIncludePath(.{ .cwd_relative = "/usr/include" });
 }
