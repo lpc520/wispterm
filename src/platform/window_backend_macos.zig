@@ -434,6 +434,20 @@ test "macOS backend normalizes control-modified shortcut key codes" {
     try std.testing.expectEqual(@as(usize, 0xBC), wispterm_macos_window_test_map_key_code(43, ","));
     try std.testing.expectEqual(@as(usize, 0xDB), wispterm_macos_window_test_map_key_code(33, "["));
     try std.testing.expectEqual(@as(usize, 0xDD), wispterm_macos_window_test_map_key_code(30, "]"));
+
+    // Period (47), quote (39), semicolon (41), backslash (42) and slash (44) were
+    // missing from the ANSI map, so they fell through to their raw ASCII value —
+    // which collided with the hard-coded navigation/edit codes at the top of the
+    // switch: '.' -> 0x2E == key_delete rang the shell bell on every period (and
+    // '。', the same physical key), and '\'' -> 0x27 == key_right silently moved
+    // the cursor. They must map to their Windows VK_OEM codes instead.
+    try std.testing.expectEqual(@as(usize, 0xBE), wispterm_macos_window_test_map_key_code(47, "."));
+    try std.testing.expect(wispterm_macos_window_test_map_key_code(47, ".") != platform_input.key_delete);
+    try std.testing.expectEqual(@as(usize, 0xDE), wispterm_macos_window_test_map_key_code(39, "'"));
+    try std.testing.expect(wispterm_macos_window_test_map_key_code(39, "'") != platform_input.key_right);
+    try std.testing.expectEqual(@as(usize, 0xBA), wispterm_macos_window_test_map_key_code(41, ";"));
+    try std.testing.expectEqual(@as(usize, 0xDC), wispterm_macos_window_test_map_key_code(42, "\\"));
+    try std.testing.expectEqual(@as(usize, 0xBF), wispterm_macos_window_test_map_key_code(44, "/"));
 }
 
 test "macOS backend drains text, mouse, wheel, and IME preedit events" {

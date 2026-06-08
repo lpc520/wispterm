@@ -560,10 +560,15 @@ static uintptr_t wispterm_macos_map_ansi_key_code(unsigned short key_code) {
         case 35: return 'P';
         case 37: return 'L';
         case 38: return 'J';
+        case 39: return 0xDE; // ' / "
         case 40: return 'K';
+        case 41: return 0xBA; // ; / :
+        case 42: return 0xDC; // \ / |
         case 43: return 0xBC; // , / <
+        case 44: return 0xBF; // / / ?
         case 45: return 'N';
         case 46: return 'M';
+        case 47: return 0xBE; // . / >
         case 50: return 0xC0; // ` / ~
         default: return 0;
     }
