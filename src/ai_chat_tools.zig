@@ -32,6 +32,7 @@ const platform_agent_prompt = @import("platform/agent_prompt.zig");
 const ai_agent_access = @import("ai_agent_access.zig");
 const web_search = @import("web_search.zig");
 const web_read = @import("web_read.zig");
+const agent_memory = @import("agent_memory.zig");
 
 /// Number of output lines included in a copilot context block.
 pub const COPILOT_CONTEXT_LINES: usize = 40;
@@ -214,6 +215,37 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         defer args.deinit();
         const url = jsonStringArg(args.value, "url") orelse return ctx.allocator.dupe(u8, "Missing url");
         return webReadTool(ctx.allocator, url, ctx.settings.working_dir);
+    }
+    if (std.mem.eql(u8, call.name, "memory_save")) {
+        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        defer args.deinit();
+        const name = jsonStringArg(args.value, "name") orelse return ctx.allocator.dupe(u8, "Missing name");
+        const description = jsonStringArg(args.value, "description") orelse return ctx.allocator.dupe(u8, "Missing description");
+        const body = blk: {
+            if (args.value != .object) break :blk null;
+            const v = args.value.object.get("body") orelse break :blk null;
+            break :blk if (v == .string) v.string else null;
+        } orelse return ctx.allocator.dupe(u8, "Missing body");
+        const tier_text = jsonStringArg(args.value, "tier") orelse "global";
+        const tier: agent_memory.Tier = if (std.mem.eql(u8, tier_text, "project")) .project else .global;
+        const type_ = agent_memory.MemoryType.fromString(jsonStringArg(args.value, "type") orelse "user");
+        return agent_memory.saveMemory(ctx.allocator, tier, ctx.settings.working_dir, name, description, type_, body);
+    }
+    if (std.mem.eql(u8, call.name, "memory_recall")) {
+        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        defer args.deinit();
+        const name = jsonStringArg(args.value, "name") orelse return ctx.allocator.dupe(u8, "Missing name");
+        return agent_memory.recallMemory(ctx.allocator, ctx.settings.working_dir orelse "", name);
+    }
+    if (std.mem.eql(u8, call.name, "memory_delete")) {
+        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        defer args.deinit();
+        const name = jsonStringArg(args.value, "name") orelse return ctx.allocator.dupe(u8, "Missing name");
+        const tier_opt: ?agent_memory.Tier = if (jsonStringArg(args.value, "tier")) |t|
+            (if (std.mem.eql(u8, t, "project")) .project else if (std.mem.eql(u8, t, "global")) .global else null)
+        else
+            null;
+        return agent_memory.deleteMemory(ctx.allocator, ctx.settings.working_dir orelse "", name, tier_opt);
     }
     return std.fmt.allocPrint(ctx.allocator, "Unknown tool: {s}", .{call.name});
 }
@@ -3662,4 +3694,41 @@ test "read_file with an unknown surface_id returns a no-surface error" {
     const out = try readFileTool(&ctx, "/tmp/whatever.txt", "no-such-surface", 0, 0);
     defer a.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "No terminal surface matches") != null);
+}
+
+test "executeToolCall handles memory_save and memory_recall" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(root);
+    const dirs_mod = @import("platform/dirs.zig");
+    dirs_mod.setTestConfigDirForCurrentThread(root);
+    defer dirs_mod.clearTestConfigDirForCurrentThread();
+
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = a,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .settings = .{},
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    const save = try executeToolCall(&ctx, .{
+        .id = @constCast("1"),
+        .name = @constCast("memory_save"),
+        .arguments = @constCast("{\"tier\":\"global\",\"name\":\"t1\",\"description\":\"d1\",\"body\":\"b1\"}"),
+    });
+    defer a.free(save);
+    try std.testing.expect(std.mem.indexOf(u8, save, "t1") != null);
+
+    const recall = try executeToolCall(&ctx, .{
+        .id = @constCast("2"),
+        .name = @constCast("memory_recall"),
+        .arguments = @constCast("{\"name\":\"t1\"}"),
+    });
+    defer a.free(recall);
+    try std.testing.expect(std.mem.indexOf(u8, recall, "b1") != null);
 }
