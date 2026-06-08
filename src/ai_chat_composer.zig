@@ -18,6 +18,9 @@ pub const SlashCommand = enum {
     distill,
     loop,
     watch,
+    remember,
+    memory,
+    forget,
     unknown,
 };
 
@@ -116,6 +119,18 @@ pub const slash_command_entries = [_]SlashCommandEntry{
         .suggestion = .{ .command = "/watch", .description = "schedule, list, or stop timed prompts" },
         .action = .watch,
     },
+    .{
+        .suggestion = .{ .command = "/remember", .description = "remember a fact long-term" },
+        .action = .remember,
+    },
+    .{
+        .suggestion = .{ .command = "/memory", .description = "list remembered facts" },
+        .action = .memory,
+    },
+    .{
+        .suggestion = .{ .command = "/forget", .description = "delete a remembered fact by name" },
+        .action = .forget,
+    },
 };
 
 pub const SkillInvocation = struct {
@@ -138,6 +153,7 @@ pub fn parseSlashCommand(input: []const u8) ?SlashCommand {
     const trimmed = std.mem.trim(u8, input, " \t\r\n");
     if (!std.mem.startsWith(u8, trimmed, "/")) return null;
     if (isDistillAlias(trimmed)) return .distill;
+    if (memoryCommandAlias(trimmed)) |c| return c;
     for (slash_command_entries) |entry| {
         if (std.mem.eql(u8, trimmed, entry.suggestion.command)) return entry.action;
     }
@@ -148,6 +164,7 @@ pub fn parseSlashCommand(input: []const u8) ?SlashCommand {
 
 pub fn exactBuiltinCommand(token: []const u8) ?SlashCommand {
     if (isDistillAlias(token)) return .distill;
+    if (memoryCommandAlias(token)) |c| return c;
     for (slash_command_entries) |entry| {
         if (std.mem.eql(u8, token, entry.suggestion.command)) return entry.action;
     }
@@ -156,6 +173,13 @@ pub fn exactBuiltinCommand(token: []const u8) ?SlashCommand {
 
 pub fn isDistillAlias(token: []const u8) bool {
     return std.mem.eql(u8, token, "/distill") or std.mem.eql(u8, token, "/沉淀");
+}
+
+pub fn memoryCommandAlias(token: []const u8) ?SlashCommand {
+    if (std.mem.eql(u8, token, "/记住")) return .remember;
+    if (std.mem.eql(u8, token, "/记忆")) return .memory;
+    if (std.mem.eql(u8, token, "/忘记")) return .forget;
+    return null;
 }
 
 pub const CwdArg = union(enum) {
@@ -410,7 +434,7 @@ test "slash command suggestions filter by prefix" {
     try std.testing.expectEqual(@as(usize, 1), slashCommandSuggestionCountForInput("/sk", 3, &.{}));
     const s = slashCommandSuggestionAtForInput("/sk", 3, 0, &.{}).?;
     try std.testing.expectEqualStrings("/skills", s.command);
-    try std.testing.expectEqual(@as(usize, 14), slashCommandSuggestionCountForInput("/", 1, &.{}));
+    try std.testing.expectEqual(@as(usize, 17), slashCommandSuggestionCountForInput("/", 1, &.{}));
     try std.testing.expectEqual(@as(usize, 1), slashCommandSuggestionCountForInput("/di", 3, &.{}));
     try std.testing.expectEqualStrings("/distill", slashCommandSuggestionAtForInput("/di", 3, 0, &.{}).?.command);
 }
@@ -465,6 +489,20 @@ test "parseWebCommand matches $webread and still matches $websearch" {
     try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("$webreadx"));
     try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("/webread"));
     try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("webread"));
+}
+
+test "parseSlashCommand recognizes memory commands and aliases" {
+    try std.testing.expectEqual(SlashCommand.remember, parseSlashCommand("/remember").?);
+    try std.testing.expectEqual(SlashCommand.remember, parseSlashCommand("/记住").?);
+    try std.testing.expectEqual(SlashCommand.memory, parseSlashCommand("/memory").?);
+    try std.testing.expectEqual(SlashCommand.memory, parseSlashCommand("/记忆").?);
+    try std.testing.expectEqual(SlashCommand.forget, parseSlashCommand("/forget").?);
+    try std.testing.expectEqual(SlashCommand.forget, parseSlashCommand("/忘记").?);
+}
+
+test "exactBuiltinCommand resolves memory aliases for arg-bearing commands" {
+    try std.testing.expectEqual(SlashCommand.remember, exactBuiltinCommand("/记住").?);
+    try std.testing.expectEqual(SlashCommand.forget, exactBuiltinCommand("/忘记").?);
 }
 
 test "parseCwdArg classifies show, reset, and set" {

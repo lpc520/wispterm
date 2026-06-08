@@ -449,6 +449,9 @@ fn slashCommandOutput(allocator: std.mem.Allocator, command: SlashCommand) ![]u8
         // .loop and .watch suppress output and emit their own messages via
         // runLoopCommandLocked; this path is never reached.
         .loop, .watch => allocator.dupe(u8, ""),
+        // .remember, .memory, .forget suppress output and emit their own messages;
+        // this path is never reached, but the arm is required for exhaustiveness.
+        .remember, .memory, .forget => allocator.dupe(u8, ""),
     };
 }
 
@@ -1951,6 +1954,73 @@ pub const Session = struct {
         self.setStatusLocked("Ready");
     }
 
+    fn applyRememberLocked(self: *Session, arg: []const u8) void {
+        const text = std.mem.trim(u8, arg, " \t\r\n");
+        if (text.len == 0) {
+            self.appendLocalToolMessageLocked("Usage: /remember <fact>") catch {};
+            self.clearSubmittedInputLocked();
+            self.setStatusLocked("Ready");
+            return;
+        }
+        const wd = self.effectiveWorkingDirLocked();
+        const tier: agent_memory.Tier = if (wd != null and wd.?.len > 0) .project else .global;
+        var date_buf: [10]u8 = undefined;
+        const today = agent_memory.todayDate(&date_buf);
+        const slug = agent_memory.slugify(self.allocator, text, today) catch {
+            self.appendLocalToolMessageLocked("Could not save memory.") catch {};
+            self.clearSubmittedInputLocked();
+            self.setStatusLocked("Ready");
+            return;
+        };
+        defer self.allocator.free(slug);
+        const desc = if (text.len > 80) text[0..80] else text;
+        const msg = agent_memory.saveMemory(self.allocator, tier, wd, slug, desc, .user, text) catch {
+            self.appendLocalToolMessageLocked("Could not save memory.") catch {};
+            self.clearSubmittedInputLocked();
+            self.setStatusLocked("Ready");
+            return;
+        };
+        defer self.allocator.free(msg);
+        self.appendLocalToolMessageLocked(msg) catch {};
+        self.clearSubmittedInputLocked();
+        self.setStatusLocked("Ready");
+    }
+
+    fn applyMemoryListLocked(self: *Session) void {
+        const wd = self.effectiveWorkingDirLocked() orelse "";
+        const msg = agent_memory.listForDisplay(self.allocator, wd) catch {
+            self.appendLocalToolMessageLocked("Could not list memories.") catch {};
+            self.clearSubmittedInputLocked();
+            self.setStatusLocked("Ready");
+            return;
+        };
+        defer self.allocator.free(msg);
+        self.appendLocalToolMessageLocked(msg) catch {};
+        self.clearSubmittedInputLocked();
+        self.setStatusLocked("Ready");
+    }
+
+    fn applyForgetLocked(self: *Session, arg: []const u8) void {
+        const name = std.mem.trim(u8, arg, " \t\r\n");
+        if (name.len == 0) {
+            self.appendLocalToolMessageLocked("Usage: /forget <name>") catch {};
+            self.clearSubmittedInputLocked();
+            self.setStatusLocked("Ready");
+            return;
+        }
+        const wd = self.effectiveWorkingDirLocked() orelse "";
+        const msg = agent_memory.deleteMemory(self.allocator, wd, name, null) catch {
+            self.appendLocalToolMessageLocked("Could not delete memory.") catch {};
+            self.clearSubmittedInputLocked();
+            self.setStatusLocked("Ready");
+            return;
+        };
+        defer self.allocator.free(msg);
+        self.appendLocalToolMessageLocked(msg) catch {};
+        self.clearSubmittedInputLocked();
+        self.setStatusLocked("Ready");
+    }
+
     /// Runs a built-in slash command's side-effects and appends its output as a
     /// tool message. Assumes self.mutex is held. Returns the captured history
     /// change (non-null only for /clear) plus any action the caller must fire
@@ -1985,6 +2055,18 @@ pub const Session = struct {
             },
             .loop => self.runLoopCommandLocked(.loop, arg, &result),
             .watch => self.runLoopCommandLocked(.watch, arg, &result),
+            .remember => {
+                self.applyRememberLocked(arg);
+                result.suppress_output = true;
+            },
+            .memory => {
+                self.applyMemoryListLocked();
+                result.suppress_output = true;
+            },
+            .forget => {
+                self.applyForgetLocked(arg);
+                result.suppress_output = true;
+            },
             else => {},
         }
         if (result.suppress_output) return result;
