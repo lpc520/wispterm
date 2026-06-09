@@ -938,6 +938,14 @@ fn renderPortForwardingFrame(active_tab: *TabState, fb_width: c_int, fb_height: 
         .none, .form => "",
         .confirm_delete => |*c| c.text,
     };
+    const form_view: ?port_forwarding_renderer.FormView = switch (session.model.overlay) {
+        .form => |form| .{
+            .mode = if (form.mode == .new) "New forwarding rule" else "Edit forwarding rule",
+            .focus = form.focus,
+            .rule = form.rule,
+        },
+        else => null,
+    };
     const draw: port_forwarding_renderer.DrawContext = .{
         .bg = g_theme.background,
         .fg = g_theme.foreground,
@@ -957,6 +965,7 @@ fn renderPortForwardingFrame(active_tab: *TabState, fb_width: c_int, fb_height: 
         .ctx = @ptrCast(&app.port_forward_manager),
         .rowAt = pfRowAt,
         .overlay_text = overlay_text,
+        .form = form_view,
     };
     port_forwarding_renderer.render(
         draw,

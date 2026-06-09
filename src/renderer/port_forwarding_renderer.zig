@@ -44,6 +44,12 @@ pub const DrawContext = struct {
 
 pub const RowAt = *const fn (*anyopaque, usize) RowView;
 
+pub const FormView = struct {
+    mode: []const u8,
+    focus: usize,
+    rule: rule_mod.Rule,
+};
+
 pub const View = struct {
     title: []const u8,
     legend: []const u8,
@@ -53,6 +59,7 @@ pub const View = struct {
     ctx: *anyopaque,
     rowAt: RowAt,
     overlay_text: []const u8 = "",
+    form: ?FormView = null,
 };
 
 pub fn statusLabel(status: StatusKind) []const u8 {
@@ -74,6 +81,34 @@ pub fn directionLabel(direction: rule_mod.Direction) []const u8 {
 
 pub fn autoLabel(auto_start: bool) []const u8 {
     return if (auto_start) "Auto" else "Manual";
+}
+
+pub fn formFieldLabel(index: usize) []const u8 {
+    return switch (index) {
+        0 => "Name",
+        1 => "Profile",
+        2 => "Direction",
+        3 => "Local host",
+        4 => "Local port",
+        5 => "Remote host",
+        6 => "Remote port",
+        7 => "Auto start",
+        else => "",
+    };
+}
+
+pub fn formFieldValue(form: *const FormView, index: usize, buf: []u8) []const u8 {
+    return switch (index) {
+        0 => form.rule.name(),
+        1 => form.rule.profileName(),
+        2 => directionLabel(form.rule.direction),
+        3 => form.rule.localHost(),
+        4 => std.fmt.bufPrint(buf, "{d}", .{form.rule.local_port}) catch "",
+        5 => form.rule.remoteHost(),
+        6 => std.fmt.bufPrint(buf, "{d}", .{form.rule.remote_port}) catch "",
+        7 => autoLabel(form.rule.auto_start),
+        else => "",
+    };
 }
 
 pub fn clampedTextWidth(x: f32, content_right: f32, requested: f32) f32 {
@@ -158,6 +193,9 @@ pub fn render(
 
     if (view.overlay_text.len > 0) {
         renderOverlayText(draw, view.overlay_text, content_x, content_w, fg, accent);
+    }
+    if (view.form) |form| {
+        renderForm(draw, form, content_x, content_w, window_height, top, fg, accent);
     }
     renderLegend(draw, view.legend, content_x, content_w, muted, line);
 }
@@ -345,6 +383,35 @@ fn renderOverlayText(draw: DrawContext, text: []const u8, content_x: f32, conten
     _ = draw.renderTextLimited(text, text_x, text_y, fg, clampedTextWidth(text_x, content_right, content_w - PAD_X * 2));
 }
 
+fn renderForm(draw: DrawContext, form: FormView, content_x: f32, content_w: f32, window_height: f32, top: f32, fg: [3]f32, accent: [3]f32) void {
+    const box_w = @max(1.0, @min(content_w - 32, 720));
+    const box_h = @max(draw.cell_h * 11.0, 220);
+    const box_x = content_x + @max(0.0, (content_w - box_w) / 2);
+    const available_h = @max(1.0, window_height - top - legendHeight(draw.cell_h));
+    const box_top = top + @max(8.0, (available_h - box_h) / 2);
+    const box_y = yFromTop(window_height, box_top, box_h);
+    const content_right = box_x + box_w - 18;
+
+    draw.fillQuadAlpha(box_x, box_y, box_w, box_h, draw.bg, 0.96);
+    draw.fillQuadAlpha(box_x, box_y, box_w, box_h, accent, 0.22);
+    _ = draw.renderTextLimited(form.mode, box_x + 18, yTextFromTop(draw, window_height, box_top + 16), fg, box_w - 36);
+
+    var field: usize = 0;
+    while (field < 8) : (field += 1) {
+        const row_top = box_top + draw.cell_h * @as(f32, @floatFromInt(field + 3));
+        const row_y = yFromTop(window_height, row_top, draw.cell_h);
+        const text_y = yTextFromTop(draw, window_height, row_top);
+        if (field == form.focus) {
+            draw.fillQuadAlpha(box_x + 12, row_y - 2, box_w - 24, draw.cell_h + 6, accent, 0.20);
+        }
+        var value_buf: [32]u8 = undefined;
+        const label_x = box_x + 22;
+        const value_x = box_x + @min(190.0, @max(130.0, box_w * 0.34));
+        _ = draw.renderTextLimited(formFieldLabel(field), label_x, text_y, accent, clampedTextWidth(label_x, content_right, value_x - label_x - COL_GAP));
+        _ = draw.renderTextLimited(formFieldValue(&form, field, &value_buf), value_x, text_y, fg, clampedTextWidth(value_x, content_right, content_right - value_x));
+    }
+}
+
 fn renderLegend(draw: DrawContext, legend: []const u8, content_x: f32, content_w: f32, muted: [3]f32, line: [3]f32) void {
     const legend_h = legendHeight(draw.cell_h);
     const text_x = content_x + PAD_X;
@@ -381,6 +448,34 @@ test "port_forwarding_renderer: direction and auto labels" {
     try std.testing.expectEqualStrings("Local", directionLabel(.local));
     try std.testing.expectEqualStrings("Auto", autoLabel(true));
     try std.testing.expectEqualStrings("Manual", autoLabel(false));
+}
+
+test "port_forwarding_renderer: form field labels" {
+    try std.testing.expectEqualStrings("Name", formFieldLabel(0));
+    try std.testing.expectEqualStrings("Profile", formFieldLabel(1));
+    try std.testing.expectEqualStrings("Direction", formFieldLabel(2));
+    try std.testing.expectEqualStrings("Local host", formFieldLabel(3));
+    try std.testing.expectEqualStrings("Local port", formFieldLabel(4));
+    try std.testing.expectEqualStrings("Remote host", formFieldLabel(5));
+    try std.testing.expectEqualStrings("Remote port", formFieldLabel(6));
+    try std.testing.expectEqualStrings("Auto start", formFieldLabel(7));
+    try std.testing.expectEqualStrings("", formFieldLabel(99));
+}
+
+test "port_forwarding_renderer: form field values" {
+    var rule = rule_mod.defaultReverseProxy("devbox");
+    rule.setName("Proxy");
+    rule.local_port = 18080;
+    rule.remote_port = 7890;
+    rule.auto_start = false;
+    var buf: [32]u8 = undefined;
+    const form = FormView{ .mode = "Edit forwarding rule", .focus = 4, .rule = rule };
+
+    try std.testing.expectEqualStrings("Proxy", formFieldValue(&form, 0, &buf));
+    try std.testing.expectEqualStrings("devbox", formFieldValue(&form, 1, &buf));
+    try std.testing.expectEqualStrings("Reverse", formFieldValue(&form, 2, &buf));
+    try std.testing.expectEqualStrings("18080", formFieldValue(&form, 4, &buf));
+    try std.testing.expectEqualStrings("Manual", formFieldValue(&form, 7, &buf));
 }
 
 test "port_forwarding_renderer: clamp scroll keeps selected row visible" {
