@@ -155,6 +155,7 @@ pub const Manager = struct {
     entries: std.ArrayListUnmanaged(Entry) = .empty,
     next_entry_id: u64 = 1,
     next_generation: u64 = 1,
+    storage_path: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) Manager {
         return .{ .allocator = allocator };
@@ -163,7 +164,52 @@ pub const Manager = struct {
     pub fn deinit(self: *Manager) void {
         self.stopAll();
         self.entries.deinit(self.allocator);
+        if (self.storage_path) |path| self.allocator.free(path);
         self.* = undefined;
+    }
+
+    pub fn setStoragePath(self: *Manager, path: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, path);
+        self.mutex.lock();
+        const old = self.storage_path;
+        self.storage_path = owned;
+        self.mutex.unlock();
+        if (old) |old_path| self.allocator.free(old_path);
+    }
+
+    pub fn setStoragePathForTest(self: *Manager, path: []const u8) void {
+        self.setStoragePath(path) catch @panic("setStoragePathForTest failed");
+    }
+
+    pub fn load(self: *Manager) !bool {
+        const path = self.storagePathSnapshot() orelse return false;
+        defer self.allocator.free(path);
+
+        const content = std.fs.cwd().readFileAlloc(self.allocator, path, 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        defer self.allocator.free(content);
+
+        try self.loadFromContent(content);
+        return true;
+    }
+
+    pub fn save(self: *Manager) bool {
+        const path = self.storagePathSnapshot() orelse return false;
+        defer self.allocator.free(path);
+
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        defer out.deinit(self.allocator);
+        self.encode(self.allocator, &out) catch return false;
+
+        if (std.fs.path.dirname(path)) |dir| {
+            std.fs.cwd().makePath(dir) catch return false;
+        }
+        const file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch return false;
+        defer file.close();
+        file.writeAll(out.items) catch return false;
+        return true;
     }
 
     pub fn count(self: *Manager) usize {
@@ -465,6 +511,13 @@ pub const Manager = struct {
         entry.generation = self.nextGenerationLocked();
         entry.setStatus(.stopped, "");
         return .{ .child_to_stop = child_to_stop };
+    }
+
+    fn storagePathSnapshot(self: *Manager) ?[]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const path = self.storage_path orelse return null;
+        return self.allocator.dupe(u8, path) catch null;
     }
 
     fn beginStart(self: *Manager, index: usize) ?StartLease {
@@ -812,6 +865,39 @@ test "port_forward_manager: add save load and toggle auto start" {
     try loaded.loadFromContent(out.items);
     try std.testing.expectEqual(@as(usize, 1), loaded.count());
     try std.testing.expect(!loaded.rowAt(0).?.auto_start);
+}
+
+test "port_forward_manager: save and load from explicit path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_root);
+    const storage_path = try std.fs.path.join(std.testing.allocator, &.{ tmp_root, "nested", "port_forwards" });
+    defer std.testing.allocator.free(storage_path);
+
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    manager.setStoragePathForTest(storage_path);
+
+    var rule = rule_mod.defaultReverseProxy("devbox");
+    rule.setName("Proxy");
+    rule.auto_start = false;
+    try manager.addRule(rule);
+
+    try std.testing.expect(manager.save());
+
+    var loaded = Manager.init(std.testing.allocator);
+    defer loaded.deinit();
+    loaded.setStoragePathForTest(storage_path);
+
+    try std.testing.expect(try loaded.load());
+    try std.testing.expectEqual(@as(usize, 1), loaded.count());
+    const row = loaded.rowAt(0).?;
+    try std.testing.expectEqualStrings("Proxy", row.rule.name());
+    try std.testing.expectEqualStrings("devbox", row.rule.profileName());
+    try std.testing.expect(!row.auto_start);
+    try std.testing.expectEqual(StatusKind.stopped, row.status);
 }
 
 test "port_forward_manager: missing profile records status without spawning" {

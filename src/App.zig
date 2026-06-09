@@ -20,6 +20,7 @@ const window_backend = @import("platform/window_backend.zig");
 const remote = @import("remote_client.zig");
 const weixin = @import("weixin/controller.zig");
 const weixin_types = @import("weixin/types.zig");
+const port_forward_manager_mod = @import("port_forward_manager.zig");
 const platform_dirs = @import("platform/dirs.zig");
 const platform_open_url = @import("platform/open_url.zig");
 const update_check = @import("update_check.zig");
@@ -96,6 +97,8 @@ remote_client: ?*remote.Client,
 
 // WeChat direct (embedded ilink). Independent from the remote relay client.
 weixin_controller: ?*weixin.Controller,
+
+port_forward_manager: port_forward_manager_mod.Manager,
 
 // AI agent config
 ai_agent_enabled: bool,
@@ -197,6 +200,24 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
     errdefer allocator.free(ai_agent_working_dir);
     const jina_api_key = try dupeStr(allocator, cfg.@"jina-api-key");
     errdefer allocator.free(jina_api_key);
+    var forward_manager = port_forward_manager_mod.Manager.init(allocator);
+    errdefer forward_manager.deinit();
+    if (platform_dirs.pathInConfigDir(allocator, "port_forwards")) |path| {
+        defer allocator.free(path);
+        forward_manager.setStoragePath(path) catch |err| {
+            std.debug.print("Port forwarding storage disabled: {}\n", .{err});
+        };
+        if (forward_manager.load()) |loaded| {
+            if (loaded) {
+                std.debug.print("Port forwarding rules loaded from {s}\n", .{path});
+            }
+        } else |err| {
+            std.debug.print("Port forwarding rules load failed: {}\n", .{err});
+        }
+    } else |err| {
+        std.debug.print("Port forwarding storage unavailable: {}\n", .{err});
+    }
+    forward_manager.startAuto(cfg.@"ssh-legacy-algorithms");
 
     var app = App{
         .allocator = allocator,
@@ -242,6 +263,7 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
         .remote_client = remote_client_ptr,
         // Created later by startWeixin(), once App lives at a stable address.
         .weixin_controller = null,
+        .port_forward_manager = forward_manager,
         .ai_agent_enabled = cfg.@"ai-agent-enabled",
         .ai_agent_permission = cfg.@"ai-agent-permission",
         .ai_agent_command_timeout_ms = cfg.@"ai-agent-command-timeout-ms",
@@ -1052,6 +1074,8 @@ pub fn deinit(self: *App) void {
         }
         self.weixin_controller = null;
     }
+
+    self.port_forward_manager.deinit();
 
     // Free owned string copies
     self.allocator.free(self.font_family);
