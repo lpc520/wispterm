@@ -32,6 +32,7 @@ const platform_agent_prompt = @import("platform/agent_prompt.zig");
 const ai_agent_access = @import("ai_agent_access.zig");
 const web_search = @import("web_search.zig");
 const web_read = @import("web_read.zig");
+const pubmed = @import("pubmed.zig");
 const agent_memory = @import("agent_memory.zig");
 
 /// Number of output lines included in a copilot context block.
@@ -216,6 +217,13 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         const url = jsonStringArg(args.value, "url") orelse return ctx.allocator.dupe(u8, "Missing url");
         return webReadTool(ctx.allocator, url, ctx.settings.working_dir);
     }
+    if (std.mem.eql(u8, call.name, "pubmed")) {
+        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        defer args.deinit();
+        const query = jsonStringArg(args.value, "query") orelse return ctx.allocator.dupe(u8, "Missing query");
+        const max_results = jsonIntArg(args.value, "max_results");
+        return pubMedTool(ctx.allocator, query, max_results);
+    }
     if (std.mem.startsWith(u8, call.name, "memory_") and !ctx.settings.memory_enabled) {
         return ctx.allocator.dupe(u8, "Memory is disabled (ai-memory-enabled = false).");
     }
@@ -361,6 +369,15 @@ fn webReadTool(allocator: std.mem.Allocator, target_in: []const u8, working_dir:
         return web_read.formatErrorText(allocator, err);
     defer result.deinit();
     return web_read.formatForAgent(allocator, target, &result);
+}
+
+/// Agent `pubmed` tool: NCBI PubMed search with abstracts, formatted for the model.
+fn pubMedTool(allocator: std.mem.Allocator, query: []const u8, max_results: ?u32) ![]u8 {
+    const max: usize = if (max_results) |m| @min(@max(m, 1), 20) else 10;
+    var results = pubmed.executeSearch(allocator, query, .{ .max_results = max }) catch |err|
+        return pubmed.formatErrorText(allocator, err);
+    defer results.deinit();
+    return pubmed.formatForAgent(allocator, query, results.items);
 }
 
 // ---------------------------------------------------------------------------
@@ -3755,4 +3772,11 @@ test "executeToolCall reports memory disabled when ai-memory-enabled is off" {
     });
     defer a.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "disabled") != null);
+}
+
+test "pubmed dispatch reports missing query" {
+    const a = std.testing.allocator;
+    // Build a minimal ToolContext-free check: call pubMedTool's guard via the
+    // dispatcher requires a ctx; instead verify the empty-query path of the core.
+    try std.testing.expectError(error.MissingQuery, pubmed.executeSearch(a, "", .{}));
 }
