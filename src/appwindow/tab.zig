@@ -680,7 +680,7 @@ fn rightEdgeRatio() f16 {
 ///   create() → refcount 1
 ///   initPane (pane.ref()) → refcount 2  (insert tree owns it)
 ///   split (refNodes) → refcount 3  (new_tree owns another ref)
-///   old_tree.deinit() → refcount 2  (insert's copy still there; new_tree still owns 2... wait)
+///   old_tree.deinit() → refcount 3  (unrefs the OLD tree's terminal, not the preview)
 ///   defer insert.deinit() → refcount 2  (insert's ref released)
 ///   p.unref(gpa) → refcount 1  (local create() ref released; new_tree holds the one owning ref)
 pub fn splitIntoPreview(gpa: std.mem.Allocator) ?*PreviewPane {

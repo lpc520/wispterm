@@ -4,7 +4,6 @@ const std = @import("std");
 const AppWindow = @import("../AppWindow.zig");
 const markdown_preview = @import("../markdown_preview.zig");
 const text_wrap = @import("../text_wrap.zig");
-const hit_test = @import("../input/hit_test.zig");
 const ui_perf = @import("../ui_perf.zig");
 const PreviewPane = @import("../preview_pane.zig");
 const titlebar = AppWindow.titlebar;
@@ -67,7 +66,7 @@ pub fn renderInto(
     // Side background: fillQuad(x, gl_y, w, h) — gl_y = pane_gl_bottom
     ui_pipeline.fillQuad(panel_x, pane_gl_bottom, panel_w, panel_h, panel_bg);
 
-    renderHeader(panel_x, panel_w, window_height, panel_top, card_bg, border, muted, normal);
+    renderHeader(panel_x, panel_w, window_height, panel_top, card_bg, border);
     renderFooter(pane, panel_x, panel_w, pane_gl_bottom, card_bg, border, muted, normal, accent);
 
     renderDocument(pane, panel_x, panel_w, window_height, panel_top, panel_h, pane_gl_bottom, normal, muted, strong, accent, code_bg, border);
@@ -84,35 +83,13 @@ fn renderHeader(
     panel_top: f32,
     card_bg: [3]f32,
     border: [3]f32,
-    muted: [3]f32,
-    normal: [3]f32,
 ) void {
-    // header_y (GL): window_height - panel_top - HEADER_HEIGHT
-    // Dock check: window_height - titlebar_h - HEADER_HEIGHT ✓
+    // A preview pane closes via the standard close-split keybind (like a terminal
+    // pane), so the header is just a top separator bar — no close button.
+    // header_y (GL): window_height - panel_top - HEADER_HEIGHT.
     const header_y = window_height - panel_top - HEADER_HEIGHT;
     ui_pipeline.fillQuad(panel_x, header_y, panel_w, HEADER_HEIGHT, card_bg);
     ui_pipeline.fillQuad(panel_x, header_y, panel_w, 1, border);
-
-    const layout: hit_test.PanelHeaderLayout = .{
-        .visible = true,
-        .left = panel_x,
-        .right = panel_x + panel_w,
-        .top = panel_top,
-        .height = HEADER_HEIGHT,
-    };
-    const close = hit_test.panelCloseButtonRect(layout) orelse return;
-    const close_x: f32 = @floatCast(close.left);
-    const close_w: f32 = @floatCast(close.width);
-
-    const hovered = blk: {
-        const win = AppWindow.g_window orelse break :blk false;
-        if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
-        break :blk hit_test.panelHeaderCloseButton(layout, @floatFromInt(win.mouse_x), @floatFromInt(win.mouse_y));
-    };
-    if (hovered) {
-        ui_pipeline.fillQuadAlpha(close_x + 6, header_y + @round((HEADER_HEIGHT - 20) / 2), 20, 20, blend(AppWindow.g_theme.background, AppWindow.g_theme.foreground, 0.14), 0.95);
-    }
-    titlebar.renderCloseIcon(close_x, header_y, close_w, HEADER_HEIGHT, if (hovered) normal else muted);
 }
 
 fn renderFooter(
