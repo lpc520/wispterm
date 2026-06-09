@@ -11,6 +11,115 @@ pub const Option = struct {
     label: []const u8 = "",
 };
 
+pub const Intent = enum { approve, approve_all, reject, enter, esc, option };
+
+pub const Keystroke = struct {
+    bytes: []const u8,
+    confirm_enter: bool = false,
+};
+
+const digit_keys = "0123456789";
+
+pub fn parseIntent(answer: []const u8) ?Intent {
+    const a = std.mem.trim(u8, answer, " \t\r\n");
+    if (eqlIgnoreCase(a, "approve") or eqlIgnoreCase(a, "yes") or eqlIgnoreCase(a, "y")) return .approve;
+    if (eqlIgnoreCase(a, "approve_all") or eqlIgnoreCase(a, "always") or eqlIgnoreCase(a, "all")) return .approve_all;
+    if (eqlIgnoreCase(a, "reject") or eqlIgnoreCase(a, "no") or eqlIgnoreCase(a, "n") or eqlIgnoreCase(a, "deny")) return .reject;
+    if (eqlIgnoreCase(a, "enter")) return .enter;
+    if (eqlIgnoreCase(a, "esc") or eqlIgnoreCase(a, "escape")) return .esc;
+    if (a.len == 1 and a[0] >= '1' and a[0] <= '9') return .option;
+    return null;
+}
+
+pub fn parseOptionNumber(answer: []const u8) ?u8 {
+    const a = std.mem.trim(u8, answer, " \t\r\n");
+    if (a.len == 1 and a[0] >= '1' and a[0] <= '9') return a[0] - '0';
+    return null;
+}
+
+/// Map a semantic answer to the keystroke to send. `option_number` is only used
+/// when `intent == .option`. Returns null when the intent cannot be matched to
+/// anything on screen (caller should then ask for an explicit option number).
+pub fn resolveAnswer(options: []const Option, screen: []const u8, intent: Intent, option_number: u8) ?Keystroke {
+    const confirm = containsIgnoreCase(screen, "press enter to confirm");
+
+    if (options.len == 0 and hasInlineYesNo(screen)) {
+        return switch (intent) {
+            .approve, .approve_all => Keystroke{ .bytes = "y", .confirm_enter = true },
+            .reject => Keystroke{ .bytes = "n", .confirm_enter = true },
+            .enter => Keystroke{ .bytes = "\r" },
+            .esc => Keystroke{ .bytes = "\x1b" },
+            .option => null,
+        };
+    }
+
+    return switch (intent) {
+        .enter => Keystroke{ .bytes = "\r" },
+        .esc, .reject => Keystroke{ .bytes = "\x1b" },
+        .option => digitKeystroke(option_number, confirm),
+        .approve => blk: {
+            const opt = firstAffirmative(options) orelse break :blk null;
+            break :blk digitKeystroke(opt.number, confirm);
+        },
+        .approve_all => blk: {
+            const opt = firstAllowAll(options) orelse break :blk null;
+            break :blk digitKeystroke(opt.number, confirm);
+        },
+    };
+}
+
+fn digitKeystroke(number: u8, confirm: bool) ?Keystroke {
+    if (number < 1 or number > 9) return null;
+    return .{ .bytes = digit_keys[number .. number + 1], .confirm_enter = confirm };
+}
+
+fn firstAffirmative(options: []const Option) ?Option {
+    for (options) |o| {
+        if (startsWithIgnoreCase(o.label, "yes") and !isAllowAllLabel(o.label)) return o;
+    }
+    for (options) |o| {
+        if (o.number == 1 and !isAllowAllLabel(o.label)) return o;
+    }
+    return null;
+}
+
+fn firstAllowAll(options: []const Option) ?Option {
+    for (options) |o| {
+        if (isAllowAllLabel(o.label)) return o;
+    }
+    return null;
+}
+
+fn isAllowAllLabel(label: []const u8) bool {
+    return containsIgnoreCase(label, "all") or
+        containsIgnoreCase(label, "don't ask") or
+        containsIgnoreCase(label, "dont ask") or
+        containsIgnoreCase(label, "this session");
+}
+
+fn hasInlineYesNo(screen: []const u8) bool {
+    return containsIgnoreCase(screen, "[y/n]") or containsIgnoreCase(screen, "(y/n)");
+}
+
+fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(a, b);
+}
+
+fn startsWithIgnoreCase(haystack: []const u8, prefix: []const u8) bool {
+    if (prefix.len > haystack.len) return false;
+    return std.ascii.eqlIgnoreCase(haystack[0..prefix.len], prefix);
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
 /// Parse numbered option lines out of `screen`, writing up to `out.len` of them.
 /// Returns the count written. An option line is, after optional leading spaces:
 /// an optional selection marker (`>` or `❯`), a digit 1-9, `.` or `)`, then the
@@ -108,4 +217,83 @@ test "parsePromptOptions ignores non-option lines" {
     const screen = "just some output\nno menu here\n$ ls -la";
     var buf: [8]Option = undefined;
     try std.testing.expectEqual(@as(usize, 0), parsePromptOptions(screen, &buf));
+}
+
+test "parseIntent maps answer words and digits" {
+    try std.testing.expectEqual(Intent.approve, parseIntent("approve").?);
+    try std.testing.expectEqual(Intent.approve, parseIntent("yes").?);
+    try std.testing.expectEqual(Intent.approve_all, parseIntent("approve_all").?);
+    try std.testing.expectEqual(Intent.reject, parseIntent("reject").?);
+    try std.testing.expectEqual(Intent.reject, parseIntent("no").?);
+    try std.testing.expectEqual(Intent.esc, parseIntent("esc").?);
+    try std.testing.expectEqual(Intent.enter, parseIntent("enter").?);
+    try std.testing.expectEqual(Intent.option, parseIntent("2").?);
+    try std.testing.expectEqual(@as(?Intent, null), parseIntent("banana"));
+    try std.testing.expectEqual(@as(?u8, 2), parseOptionNumber("2"));
+}
+
+test "resolveAnswer picks the plain Yes for approve" {
+    const screen =
+        \\Do you want to make this edit?
+        \\  1. Yes
+        \\  2. Yes, allow all edits during this session (shift+tab)
+        \\  3. No
+    ;
+    var buf: [8]Option = undefined;
+    const n = parsePromptOptions(screen, &buf);
+    const k = resolveAnswer(buf[0..n], screen, .approve, 0).?;
+    try std.testing.expectEqualStrings("1", k.bytes);
+    try std.testing.expect(!k.confirm_enter);
+}
+
+test "resolveAnswer picks the allow-all option for approve_all" {
+    const screen =
+        \\  1. Yes
+        \\  2. Yes, allow all edits during this session (shift+tab)
+        \\  3. No
+    ;
+    var buf: [8]Option = undefined;
+    const n = parsePromptOptions(screen, &buf);
+    const k = resolveAnswer(buf[0..n], screen, .approve_all, 0).?;
+    try std.testing.expectEqualStrings("2", k.bytes);
+}
+
+test "resolveAnswer rejects with esc" {
+    const screen = "  1. Yes\n  3. No";
+    var buf: [8]Option = undefined;
+    const n = parsePromptOptions(screen, &buf);
+    const k = resolveAnswer(buf[0..n], screen, .reject, 0).?;
+    try std.testing.expectEqualStrings("\x1b", k.bytes);
+}
+
+test "resolveAnswer follows Codex 'press enter to confirm' with a confirm Enter" {
+    const screen =
+        \\> 1. Yes, proceed (y)
+        \\  3. No, and tell codex what to do differently (esc)
+        \\Press enter to confirm or esc to cancel
+    ;
+    var buf: [8]Option = undefined;
+    const n = parsePromptOptions(screen, &buf);
+    const k = resolveAnswer(buf[0..n], screen, .approve, 0).?;
+    try std.testing.expectEqualStrings("1", k.bytes);
+    try std.testing.expect(k.confirm_enter);
+}
+
+test "resolveAnswer handles an inline [y/N] prompt with no numbered options" {
+    const screen = "Overwrite existing file? [y/N]";
+    var buf: [8]Option = undefined;
+    const n = parsePromptOptions(screen, &buf);
+    try std.testing.expectEqual(@as(usize, 0), n);
+    const yes = resolveAnswer(buf[0..n], screen, .approve, 0).?;
+    try std.testing.expectEqualStrings("y", yes.bytes);
+    try std.testing.expect(yes.confirm_enter);
+    const no = resolveAnswer(buf[0..n], screen, .reject, 0).?;
+    try std.testing.expectEqualStrings("n", no.bytes);
+}
+
+test "resolveAnswer returns null when approve has no matching option" {
+    const screen = "some text, no menu";
+    var buf: [8]Option = undefined;
+    const n = parsePromptOptions(screen, &buf);
+    try std.testing.expectEqual(@as(?Keystroke, null), resolveAnswer(buf[0..n], screen, .approve, 0));
 }
