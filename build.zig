@@ -557,6 +557,16 @@ pub fn build(b: *std.Build) void {
             .name = "wispterm",
             .root_module = exe_mod,
         });
+        if (target.result.os.tag == .linux) {
+            // libSDL3.so / libfontconfig reference glibc symbols (pthread_*,
+            // dlsym, stat) at versions above Zig's default glibc stubs for
+            // x86_64-linux-gnu; they are resolved at runtime by the system
+            // glibc. Let the linker leave those system-shared-library undefined
+            // symbols unresolved — ReleaseFast enforces
+            // --no-allow-shlib-undefined (Debug does not), so a release build
+            // would otherwise fail to link.
+            exe.linker_allow_shlib_undefined = true;
+        }
         if (platform.supports_app_bundle) {
             apple_sdk.addPaths(b, exe) catch @panic("failed to locate native Apple SDK for macOS app executable");
         }
