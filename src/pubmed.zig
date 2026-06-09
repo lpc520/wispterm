@@ -410,7 +410,9 @@ pub fn parseEfetchXml(arena: std.mem.Allocator, xml: []const u8) ![]Article {
         const pmid = std.mem.trim(u8, pmid_el.?.content, " \t\r\n");
         const title = try cleanText(arena, title_el.?.content);
         if (pmid.len == 0 or title.len == 0) continue;
-        const year = if (findElement(ax, "Year", 0)) |y| std.mem.trim(u8, y.content, " \t\r\n") else "";
+        const year = if (findElement(ax, "PubDate", 0)) |pd|
+            (if (findElement(pd.content, "Year", 0)) |y| std.mem.trim(u8, y.content, " \t\r\n") else "")
+        else "";
         try list.append(arena, .{
             .pmid = try arena.dupe(u8, pmid),
             .title = title,
@@ -471,6 +473,23 @@ test "parseEfetchXml extracts metadata, multi-section abstract, authors, doi" {
     try std.testing.expectEqualStrings("No abstract here", items[1].title);
     try std.testing.expectEqualStrings("", items[1].abstract);
     try std.testing.expectEqualStrings("", items[1].doi);
+}
+
+test "parseEfetchXml takes publication year, not DateCompleted/DateRevised" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const xml =
+        \\<PubmedArticle><MedlineCitation>
+        \\<PMID>5</PMID>
+        \\<DateCompleted><Year>2019</Year></DateCompleted>
+        \\<DateRevised><Year>2020</Year></DateRevised>
+        \\<Article><ArticleTitle>T</ArticleTitle>
+        \\<Journal><JournalIssue><PubDate><Year>2023</Year></PubDate></JournalIssue></Journal>
+        \\</Article></MedlineCitation></PubmedArticle>
+    ;
+    const items = try parseEfetchXml(arena.allocator(), xml);
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("2023", items[0].year);
 }
 
 test "parseEfetchXml caps authors with et al" {
