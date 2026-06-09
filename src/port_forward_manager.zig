@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const rule_mod = @import("port_forward_rule.zig");
 const platform_process = @import("platform/process.zig");
 const platform_pty_command = @import("platform/pty_command.zig");
+const platform_atomic_file = @import("platform/atomic_file.zig");
 const ssh_connection = @import("ssh_connection.zig");
 const ssh_profile_store = @import("ssh_profile_store.zig");
 
@@ -206,9 +207,7 @@ pub const Manager = struct {
         if (std.fs.path.dirname(path)) |dir| {
             std.fs.cwd().makePath(dir) catch return false;
         }
-        const file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch return false;
-        defer file.close();
-        file.writeAll(out.items) catch return false;
+        platform_atomic_file.writeFileReplaceSafe(path, out.items) catch return false;
         return true;
     }
 
