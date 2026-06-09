@@ -1386,84 +1386,6 @@ fn waitForReplPromptReturn(
     return truncateOwned(ctx.allocator, ctx.settings, combined);
 }
 
-fn rSessionEvalTool(ctx: *const ToolContext, host: ToolHost, surface: ToolSurface, code: []const u8, timeout_ms: u32) ![]u8 {
-    const nonce = std.time.milliTimestamp();
-    const code_literal = try rStringLiteral(ctx.allocator, code);
-    defer ctx.allocator.free(code_literal);
-
-    const wrapped = try std.fmt.allocPrint(
-        ctx.allocator,
-        "cat(\"\\n__WISPTERM_AGENT_START_{d}__\\n\", sep=\"\")\n.wispterm_agent_status <- 0L\n.wispterm_agent_code <- {s}\ntryCatch({{\n  eval(parse(text=.wispterm_agent_code), envir=.GlobalEnv)\n}}, error=function(e) {{\n  .wispterm_agent_status <<- 1L\n  message(\"Error: \", conditionMessage(e))\n}})\ncat(\"\\n__WISPTERM_AGENT_END_{d}__:\", .wispterm_agent_status, \"\\n\", sep=\"\")\nrm(.wispterm_agent_status, .wispterm_agent_code)\r",
-        .{ nonce, code_literal, nonce },
-    );
-    defer ctx.allocator.free(wrapped);
-
-    if (!host.writeSurface(host.ctx, surface.ptr, wrapped)) {
-        return ctx.allocator.dupe(u8, "Failed to write to R terminal surface.");
-    }
-
-    const start_marker = try std.fmt.allocPrint(ctx.allocator, "__WISPTERM_AGENT_START_{d}__", .{nonce});
-    defer ctx.allocator.free(start_marker);
-    const end_marker = try std.fmt.allocPrint(ctx.allocator, "__WISPTERM_AGENT_END_{d}__", .{nonce});
-    defer ctx.allocator.free(end_marker);
-    return waitForSentinelResult(ctx, host, surface, "R", start_marker, end_marker, timeout_ms);
-}
-
-fn pythonSessionEvalTool(ctx: *const ToolContext, host: ToolHost, surface: ToolSurface, code: []const u8, timeout_ms: u32) ![]u8 {
-    const nonce = std.time.milliTimestamp();
-    const code_literal = try pythonStringLiteral(ctx.allocator, code);
-    defer ctx.allocator.free(code_literal);
-
-    const wrapper = try std.fmt.allocPrint(
-        ctx.allocator,
-        "print(\"\\\\n__WISPTERM_AGENT_START_{d}__\")\n__wispterm_agent_status = 0\n__wispterm_agent_code = {s}\ntry:\n    exec(__wispterm_agent_code, globals())\nexcept Exception:\n    __wispterm_agent_status = 1\n    import traceback\n    traceback.print_exc()\nprint(\"\\\\n__WISPTERM_AGENT_END_{d}__:%s\" % __wispterm_agent_status)\ndel __wispterm_agent_status, __wispterm_agent_code",
-        .{ nonce, code_literal, nonce },
-    );
-    defer ctx.allocator.free(wrapper);
-
-    const wrapper_literal = try pythonStringLiteral(ctx.allocator, wrapper);
-    defer ctx.allocator.free(wrapper_literal);
-    const wrapped = try std.fmt.allocPrint(ctx.allocator, "exec({s})\r", .{wrapper_literal});
-    defer ctx.allocator.free(wrapped);
-
-    if (!host.writeSurface(host.ctx, surface.ptr, wrapped)) {
-        return ctx.allocator.dupe(u8, "Failed to write to Python terminal surface.");
-    }
-
-    const start_marker = try std.fmt.allocPrint(ctx.allocator, "__WISPTERM_AGENT_START_{d}__", .{nonce});
-    defer ctx.allocator.free(start_marker);
-    const end_marker = try std.fmt.allocPrint(ctx.allocator, "__WISPTERM_AGENT_END_{d}__", .{nonce});
-    defer ctx.allocator.free(end_marker);
-    return waitForSentinelResult(ctx, host, surface, "Python", start_marker, end_marker, timeout_ms);
-}
-
-pub fn rStringLiteral(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    return doubleQuotedStringLiteral(allocator, text);
-}
-
-pub fn pythonStringLiteral(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    return doubleQuotedStringLiteral(allocator, text);
-}
-
-fn doubleQuotedStringLiteral(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    try out.append(allocator, '"');
-    for (text) |ch| {
-        switch (ch) {
-            '\\' => try out.appendSlice(allocator, "\\\\"),
-            '"' => try out.appendSlice(allocator, "\\\""),
-            '\n' => try out.appendSlice(allocator, "\\n"),
-            '\r' => try out.appendSlice(allocator, "\\r"),
-            '\t' => try out.appendSlice(allocator, "\\t"),
-            else => try out.append(allocator, ch),
-        }
-    }
-    try out.append(allocator, '"');
-    return out.toOwnedSlice(allocator);
-}
-
 /// The trailing prompt of a terminal snapshot: the last non-empty line, trimmed
 /// of surrounding whitespace. Returns "" when no non-empty line exists. Used to
 /// learn a REPL's prompt dynamically so completion detection is language-agnostic.
@@ -2994,14 +2916,6 @@ test "shell exec refuses bare REPL launchers but allows run-and-exit invocations
     }
 }
 
-test "ai chat R string literal escapes code for REPL eval" {
-    const allocator = std.testing.allocator;
-    const literal = try rStringLiteral(allocator, "print(\"hello\")\npath <- \"C:\\\\tmp\"");
-    defer allocator.free(literal);
-
-    try std.testing.expectEqualStrings("\"print(\\\"hello\\\")\\npath <- \\\"C:\\\\\\\\tmp\\\"\"", literal);
-}
-
 test "extractPromptLine returns the trailing non-empty prompt line" {
     try std.testing.expectEqualStrings(">>>", extractPromptLine("hello\nworld\n>>> "));
     try std.testing.expectEqualStrings("In [3]:", extractPromptLine("Out[2]: 5\n\nIn [3]: "));
@@ -3139,14 +3053,6 @@ test "line REPL eval types raw code and settles on the returned prompt" {
     try std.testing.expect(std.mem.indexOf(u8, result, "__WISPTERM_AGENT_START_") == null);
     // The REPL's own output is handed back for the model to read.
     try std.testing.expect(std.mem.indexOf(u8, result, "2") != null);
-}
-
-test "ai chat Python string literal escapes code for REPL eval" {
-    const allocator = std.testing.allocator;
-    const literal = try pythonStringLiteral(allocator, "print(\"hello\")\npath = \"C:\\\\tmp\"");
-    defer allocator.free(literal);
-
-    try std.testing.expectEqualStrings("\"print(\\\"hello\\\")\\npath = \\\"C:\\\\\\\\tmp\\\"\"", literal);
 }
 
 test "agent control-key tokens parse to raw bytes, plain text is unaffected" {
