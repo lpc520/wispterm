@@ -389,23 +389,32 @@ fn renderForm(draw: DrawContext, form: FormView, content_x: f32, content_w: f32,
     const desired_h = @max(draw.cell_h * 11.0, 220);
     const box_h = @min(desired_h, available_h);
     const box_x = content_x + @max(0.0, (content_w - box_w) / 2);
-    const box_top = top + @max(8.0, (available_h - box_h) / 2);
+    const box_top = top + @min(@max(0.0, available_h - box_h), @max(0.0, (available_h - box_h) / 2));
     const box_y = yFromTop(window_height, box_top, box_h);
+    const box_bottom_y = box_y;
+    const box_top_y = box_y + box_h;
+    const box_bottom_top_px = box_top + box_h;
     const content_right = @max(box_x, box_x + box_w - 18);
 
     draw.fillQuadAlpha(box_x, box_y, box_w, box_h, draw.bg, 0.96);
     draw.fillQuadAlpha(box_x, box_y, box_w, box_h, accent, 0.22);
     const title_x = box_x + @min(18.0, box_w);
-    _ = draw.renderTextLimited(form.mode, title_x, yTextFromTop(draw, window_height, box_top + 16), fg, clampedTextWidth(title_x, content_right, content_right - title_x));
+    const title_top = box_top + @min(16.0, @max(0.0, box_h - draw.cell_h));
+    if (title_top + draw.cell_h <= box_bottom_top_px) {
+        _ = draw.renderTextLimited(form.mode, title_x, yTextFromTop(draw, window_height, title_top), fg, clampedTextWidth(title_x, content_right, content_right - title_x));
+    }
 
     var field: usize = 0;
     while (field < 8) : (field += 1) {
         const row_top = box_top + draw.cell_h * @as(f32, @floatFromInt(field + 3));
+        if (row_top + draw.cell_h > box_bottom_top_px) break;
         const row_y = yFromTop(window_height, row_top, draw.cell_h);
         const text_y = yTextFromTop(draw, window_height, row_top);
         if (field == form.focus) {
             const focus_x = box_x + @min(12.0, box_w);
-            draw.fillQuadAlpha(focus_x, row_y - 2, clampedTextWidth(focus_x, box_x + box_w, box_w), draw.cell_h + 6, accent, 0.20);
+            const focus_y = @max(box_bottom_y, row_y - 2);
+            const focus_h = @max(0.0, @min(draw.cell_h + 6, box_top_y - focus_y));
+            draw.fillQuadAlpha(focus_x, focus_y, clampedTextWidth(focus_x, box_x + box_w, box_w), focus_h, accent, 0.20);
         }
         var value_buf: [32]u8 = undefined;
         const label_x = box_x + @min(22.0, box_w);
@@ -678,15 +687,16 @@ test "port_forwarding_renderer: narrow row text widths stay within content" {
 test "port_forwarding_renderer: narrow form stays within non-negative draw bounds" {
     const InstrumentedDraw = struct {
         var bad_width: bool = false;
+        var window_h: f32 = 0;
 
-        fn fillQuad(_: f32, _: f32, w: f32, h: f32, _: [3]f32) void {
-            if (std.math.isNan(w) or std.math.isNan(h) or w < 0.0 or h < 0.0) bad_width = true;
+        fn fillQuad(_: f32, y: f32, w: f32, h: f32, _: [3]f32) void {
+            if (std.math.isNan(w) or std.math.isNan(h) or std.math.isNan(y) or w < 0.0 or h < 0.0 or y < 0.0 or y + h > window_h + 0.01) bad_width = true;
         }
-        fn fillQuadAlpha(_: f32, _: f32, w: f32, h: f32, _: [3]f32, _: f32) void {
-            if (std.math.isNan(w) or std.math.isNan(h) or w < 0.0 or h < 0.0) bad_width = true;
+        fn fillQuadAlpha(_: f32, y: f32, w: f32, h: f32, _: [3]f32, _: f32) void {
+            if (std.math.isNan(w) or std.math.isNan(h) or std.math.isNan(y) or w < 0.0 or h < 0.0 or y < 0.0 or y + h > window_h + 0.01) bad_width = true;
         }
-        fn renderTextLimited(text: []const u8, x: f32, _: f32, _: [3]f32, max_w: f32) f32 {
-            if (std.math.isNan(max_w) or max_w < 0.0) bad_width = true;
+        fn renderTextLimited(text: []const u8, x: f32, y: f32, _: [3]f32, max_w: f32) f32 {
+            if (std.math.isNan(max_w) or std.math.isNan(y) or max_w < 0.0 or y < 0.0 or y > window_h + 0.01) bad_width = true;
             return x + @min(max_w, @as(f32, @floatFromInt(text.len)) * 8.0);
         }
         fn glyphAdvance(_: u32) f32 {
@@ -706,6 +716,7 @@ test "port_forwarding_renderer: narrow form stays within non-negative draw bound
     };
 
     InstrumentedDraw.bad_width = false;
+    InstrumentedDraw.window_h = 80;
     const draw = DrawContext{
         .bg = .{ 0.02, 0.02, 0.02 },
         .fg = .{ 0.95, 0.95, 0.95 },
@@ -716,6 +727,7 @@ test "port_forwarding_renderer: narrow form stays within non-negative draw bound
         .renderTextLimited = InstrumentedDraw.renderTextLimited,
         .glyphAdvance = InstrumentedDraw.glyphAdvance,
     };
+    var rows = Rows{};
 
     render(draw, .{
         .title = "Port Forwarding",
@@ -723,7 +735,7 @@ test "port_forwarding_renderer: narrow form stays within non-negative draw bound
         .count = 1,
         .selected = 0,
         .scroll = 0,
-        .ctx = undefined,
+        .ctx = &rows,
         .rowAt = Rows.rowAt,
         .form = .{
             .mode = "New forwarding rule",
