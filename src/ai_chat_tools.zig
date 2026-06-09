@@ -1210,7 +1210,10 @@ fn terminalAnswerPromptTool(ctx: *ToolContext, surface_id: ?[]const u8, answer: 
     };
 
     // Approval gate mirrors terminal_repl_exec: the payload is a single selector
-    // key, not a destructive command, so auto runs it and confirm prompts.
+    // key, not a destructive command, so auto runs it and confirm prompts. Note
+    // the gate sees only the keystroke, not the command the agent app would run
+    // on confirmation — like terminal_repl_exec control keys, the app's own
+    // approval prompt is the real boundary for that command.
     const gate = accessGate(ctx, keystroke.bytes, null);
     if (approvalRequiredForGate(ctx.settings.permission, gate)) {
         if (!ctx.requestApproval("terminal_answer_prompt", answer, "Answer a Claude Code/Codex approval prompt")) {

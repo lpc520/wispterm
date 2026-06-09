@@ -77,10 +77,14 @@ the most recent scrollback rows up to a small budget (instead of dumping up to
 - The active-screen rows are emitted unconditionally; history is capped to the
   most-recent `agent_max_history_rows` rows (the existing `history_start` math
   already takes the most-recent slice — only the cap shrinks).
-- `default_max_history_rows` is left intact for any caller that still wants the
-  full history; the agent path (`buildRemoteSurfaceSnapshot` →
-  `agentSurfaceSnapshot` / `collectAgentToolSnapshot` per-surface `.snapshot`,
-  and `activeSurfaceSnapshot`) passes the smaller cap.
+- `default_max_history_rows` is left intact for callers that still want the full
+  history. `buildRemoteSurfaceSnapshot` is **shared** — it also feeds the
+  cc-remote **web** layout JSON (`buildRemoteLayoutJson`) and the Jupyter-URL
+  detector (`activeSurfaceSnapshot`), both of which keep the full history. It is
+  therefore parameterized with `max_history_rows`, and only the agent-tool
+  callers (`agentSurfaceSnapshot` live read + `makeAgentToolSurface` per-surface
+  `.snapshot`) pass the smaller `agent_max_history_rows`; the web-remote and
+  Jupyter callers pass `default_max_history_rows`.
 
 Net effect: in the common case the snapshot is well under 16 KB and never gets
 truncated at all, and the bottom-of-buffer live screen is always present.
