@@ -331,15 +331,22 @@ fn extractAuthors(arena: std.mem.Allocator, article_xml: []const u8) ![]const u8
 
 /// Concatenate all `<AbstractText>` sections, prefixing `Label="X"` as "X: ".
 fn extractAbstract(arena: std.mem.Allocator, article_xml: []const u8) ![]const u8 {
+    // Scope to the primary <Abstract> element so a sibling <OtherAbstract>
+    // (e.g. a publisher-supplied translated abstract, whose children are also
+    // <AbstractText>) does not leak into the result. findElement matches
+    // <Abstract> only — not <AbstractText> (boundary char) nor <OtherAbstract>
+    // (preceding '<' check).
+    const abstract = findElement(article_xml, "Abstract", 0) orelse return "";
+    const scope = abstract.content;
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(arena);
     var pos: usize = 0;
-    while (std.mem.indexOfPos(u8, article_xml, pos, "<AbstractText")) |open| {
-        const open_close = std.mem.indexOfScalarPos(u8, article_xml, open, '>') orelse break;
-        const open_tag = article_xml[open .. open_close + 1];
+    while (std.mem.indexOfPos(u8, scope, pos, "<AbstractText")) |open| {
+        const open_close = std.mem.indexOfScalarPos(u8, scope, open, '>') orelse break;
+        const open_tag = scope[open .. open_close + 1];
         const content_start = open_close + 1;
-        const close_at = std.mem.indexOfPos(u8, article_xml, content_start, "</AbstractText>") orelse break;
-        const raw = article_xml[content_start..close_at];
+        const close_at = std.mem.indexOfPos(u8, scope, content_start, "</AbstractText>") orelse break;
+        const raw = scope[content_start..close_at];
         pos = close_at + "</AbstractText>".len;
 
         const label = attrValue(open_tag, "Label");
@@ -490,6 +497,20 @@ test "parseEfetchXml takes publication year, not DateCompleted/DateRevised" {
     const items = try parseEfetchXml(arena.allocator(), xml);
     try std.testing.expectEqual(@as(usize, 1), items.len);
     try std.testing.expectEqualStrings("2023", items[0].year);
+}
+
+test "parseEfetchXml ignores OtherAbstract, keeps primary Abstract only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const xml =
+        \\<PubmedArticle><PMID>7</PMID><ArticleTitle>T</ArticleTitle>
+        \\<Abstract><AbstractText>Primary English abstract.</AbstractText></Abstract>
+        \\<OtherAbstract Language="fre"><AbstractText>Resume traduit.</AbstractText></OtherAbstract>
+        \\</PubmedArticle>
+    ;
+    const items = try parseEfetchXml(arena.allocator(), xml);
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("Primary English abstract.", items[0].abstract);
 }
 
 test "parseEfetchXml caps authors with et al" {
