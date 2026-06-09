@@ -3774,9 +3774,23 @@ test "executeToolCall reports memory disabled when ai-memory-enabled is off" {
     try std.testing.expect(std.mem.indexOf(u8, out, "disabled") != null);
 }
 
-test "pubmed dispatch reports missing query" {
+test "executeToolCall pubmed reports missing query" {
     const a = std.testing.allocator;
-    // Build a minimal ToolContext-free check: call pubMedTool's guard via the
-    // dispatcher requires a ctx; instead verify the empty-query path of the core.
-    try std.testing.expectError(error.MissingQuery, pubmed.executeSearch(a, "", .{}));
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = a,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .settings = .{},
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    const out = try executeToolCall(&ctx, .{
+        .id = @constCast("1"),
+        .name = @constCast("pubmed"),
+        .arguments = @constCast("{}"),
+    });
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Missing query") != null);
 }
