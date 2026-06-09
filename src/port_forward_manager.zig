@@ -33,6 +33,7 @@ pub const RowView = struct {
 
 const Entry = struct {
     rule: rule_mod.Rule,
+    generation: u64 = 0,
     status: StatusKind = .stopped,
     reason_buf: [REASON_MAX]u8 = undefined,
     reason_len: usize = 0,
@@ -53,6 +54,17 @@ const ChildState = union(enum) {
     fake: FakeChild,
 };
 
+const PendingStart = struct {
+    index: usize,
+    generation: u64,
+    rule: rule_mod.Rule,
+};
+
+const StartLease = struct {
+    pending: PendingStart,
+    child_to_stop: ?ChildState,
+};
+
 const FakeChild = struct {
     pid: u32,
     exited: bool = false,
@@ -69,30 +81,17 @@ const FakeChild = struct {
     }
 };
 
-const ChildList = struct {
-    items: [MAX_RULES]ChildState = undefined,
-    len: usize = 0,
-
-    fn append(self: *ChildList, child: ChildState) void {
-        std.debug.assert(self.len < self.items.len);
-        self.items[self.len] = child;
-        self.len += 1;
-    }
-
-    fn slice(self: *ChildList) []ChildState {
-        return self.items[0..self.len];
-    }
-};
-
 const ExitedChild = struct {
     index: usize,
+    generation: u64,
     child: ChildState,
     reason_buf: [REASON_MAX]u8 = undefined,
     reason_len: usize = 0,
 
-    fn init(index: usize, child: ChildState) ExitedChild {
+    fn init(index: usize, generation: u64, child: ChildState) ExitedChild {
         var item: ExitedChild = .{
             .index = index,
+            .generation = generation,
             .child = child,
         };
         item.reason_len = copyBounded(item.reason_buf[0..], childExitReason(&item.child));
@@ -119,10 +118,32 @@ const ExitedChildList = struct {
     }
 };
 
+const StoppedEntry = struct {
+    index: usize,
+    generation: u64,
+    child: ?ChildState,
+};
+
+const StopList = struct {
+    items: [MAX_RULES]StoppedEntry = undefined,
+    len: usize = 0,
+
+    fn append(self: *StopList, stopped: StoppedEntry) void {
+        std.debug.assert(self.len < self.items.len);
+        self.items[self.len] = stopped;
+        self.len += 1;
+    }
+
+    fn slice(self: *StopList) []StoppedEntry {
+        return self.items[0..self.len];
+    }
+};
+
 pub const Manager = struct {
     allocator: std.mem.Allocator,
     mutex: std.Thread.Mutex = .{},
     entries: std.ArrayListUnmanaged(Entry) = .empty,
+    next_generation: u64 = 1,
 
     pub fn init(allocator: std.mem.Allocator) Manager {
         return .{ .allocator = allocator };
@@ -158,11 +179,15 @@ pub const Manager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.entries.items.len >= MAX_RULES) return error.TooManyRules;
-        try self.entries.append(self.allocator, .{ .rule = rule });
+        try self.entries.append(self.allocator, .{
+            .rule = rule,
+            .generation = self.nextGenerationLocked(),
+        });
     }
 
     pub fn updateRule(self: *Manager, index: usize, rule: rule_mod.Rule) bool {
         var child_to_stop: ?ChildState = null;
+        var generation: u64 = 0;
 
         self.mutex.lock();
         if (index >= self.entries.items.len) {
@@ -171,13 +196,15 @@ pub const Manager = struct {
         }
         child_to_stop = self.entries.items[index].child;
         self.entries.items[index].child = null;
+        generation = self.nextGenerationLocked();
+        self.entries.items[index].generation = generation;
         self.mutex.unlock();
 
         if (child_to_stop) |*child| stopChildState(child);
 
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (index >= self.entries.items.len) return false;
+        if (!self.entryGenerationMatchesLocked(index, generation)) return false;
         self.entries.items[index].rule = rule;
         self.entries.items[index].setStatus(.stopped, "");
         return true;
@@ -191,6 +218,7 @@ pub const Manager = struct {
             self.mutex.unlock();
             return false;
         }
+        _ = self.nextGenerationLocked();
         removed = self.entries.orderedRemove(index);
         self.mutex.unlock();
 
@@ -203,6 +231,7 @@ pub const Manager = struct {
         defer self.mutex.unlock();
         if (index >= self.entries.items.len) return false;
         self.entries.items[index].rule.auto_start = !self.entries.items[index].rule.auto_start;
+        self.entries.items[index].generation = self.nextGenerationLocked();
         return true;
     }
 
@@ -236,61 +265,39 @@ pub const Manager = struct {
     fn replaceEntriesLocked(self: *Manager, entries: *std.ArrayListUnmanaged(Entry)) void {
         std.debug.assert(self.entries.items.len == 0);
         self.entries.deinit(self.allocator);
+        for (entries.items) |*entry| {
+            entry.generation = self.nextGenerationLocked();
+        }
         self.entries = entries.*;
         entries.* = .empty;
     }
 
     pub fn startIndex(self: *Manager, index: usize, legacy_algorithms: bool) bool {
-        var child_to_stop: ?ChildState = null;
+        var lease = self.beginStart(index) orelse return false;
+        if (lease.child_to_stop) |*child| stopChildState(child);
+        const pending = lease.pending;
 
-        self.mutex.lock();
-        if (index >= self.entries.items.len) {
-            self.mutex.unlock();
-            return false;
-        }
-        const rule = self.entries.items[index].rule;
-        child_to_stop = self.entries.items[index].child;
-        self.entries.items[index].child = null;
-        self.entries.items[index].setStatus(.starting, "");
-        self.mutex.unlock();
-
-        if (child_to_stop) |*child| stopChildState(child);
-
-        const conn = ssh_profile_store.connectionByName(self.allocator, rule.profileName(), legacy_algorithms) orelse {
-            self.mutex.lock();
-            if (index < self.entries.items.len) self.entries.items[index].setStatus(.missing_profile, "profile missing");
-            self.mutex.unlock();
+        const conn = ssh_profile_store.connectionByName(self.allocator, pending.rule.profileName(), legacy_algorithms) orelse {
+            _ = self.completePendingStartFailure(pending, .missing_profile, "profile missing");
             return false;
         };
 
-        const child = spawnForward(self.allocator, &rule, &conn) catch |err| {
+        const child = spawnForward(self.allocator, &pending.rule, &conn) catch |err| {
             var buf: [REASON_MAX]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "spawn failed: {}", .{err}) catch "spawn failed";
-            self.mutex.lock();
-            if (index < self.entries.items.len) self.entries.items[index].setStatus(.error_, msg);
-            self.mutex.unlock();
+            _ = self.completePendingStartFailure(pending, .error_, msg);
             return false;
         };
 
         var spawned_state: ChildState = .{ .real = child };
-        var replaced_child: ?ChildState = null;
-        var accepted = false;
-        self.mutex.lock();
-        if (index < self.entries.items.len) {
-            replaced_child = self.entries.items[index].child;
-            self.entries.items[index].child = spawned_state;
-            self.entries.items[index].setStatus(.running, "");
-            accepted = true;
-        }
-        self.mutex.unlock();
-
-        if (replaced_child) |*old_child| stopChildState(old_child);
+        const accepted = self.completePendingStartInstall(pending, spawned_state);
         if (!accepted) stopChildState(&spawned_state);
         return accepted;
     }
 
     pub fn stopIndex(self: *Manager, index: usize) bool {
         var child_to_stop: ?ChildState = null;
+        var generation: u64 = 0;
 
         self.mutex.lock();
         if (index >= self.entries.items.len) {
@@ -299,13 +306,15 @@ pub const Manager = struct {
         }
         child_to_stop = self.entries.items[index].child;
         self.entries.items[index].child = null;
+        generation = self.nextGenerationLocked();
+        self.entries.items[index].generation = generation;
         self.mutex.unlock();
 
         if (child_to_stop) |*child| stopChildState(child);
 
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (index >= self.entries.items.len) return false;
+        if (!self.entryGenerationMatchesLocked(index, generation)) return false;
         self.entries.items[index].setStatus(.stopped, "");
         return true;
     }
@@ -334,10 +343,9 @@ pub const Manager = struct {
 
         self.mutex.lock();
         for (self.entries.items, 0..) |*entry, index| {
-            const child = entry.child orelse continue;
-            if (!childHasExited(&child)) continue;
-            entry.child = null;
-            exited.append(ExitedChild.init(index, child));
+            if (takeExitedChildFromEntry(entry, index)) |child| {
+                exited.append(child);
+            }
         }
         self.mutex.unlock();
 
@@ -345,12 +353,8 @@ pub const Manager = struct {
             stopChildState(&item.child);
         }
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
         for (exited.slice()) |*item| {
-            if (item.index < self.entries.items.len) {
-                self.entries.items[item.index].setStatus(.error_, item.reason());
-            }
+            _ = self.finishExitedChild(item);
         }
         return exited.len > 0;
     }
@@ -373,6 +377,7 @@ pub const Manager = struct {
         }
         child_to_stop = self.entries.items[index].child;
         self.entries.items[index].child = .{ .fake = .{ .pid = pid } };
+        self.entries.items[index].generation = self.nextGenerationLocked();
         self.entries.items[index].setStatus(.running, "");
         self.mutex.unlock();
 
@@ -392,27 +397,120 @@ pub const Manager = struct {
         return true;
     }
 
+    fn beginPendingStartForTest(self: *Manager, index: usize) ?PendingStart {
+        var lease = self.beginStart(index) orelse return null;
+        if (lease.child_to_stop) |*child| stopChildState(child);
+        return lease.pending;
+    }
+
+    fn completePendingStartFailureForTest(self: *Manager, pending: PendingStart, status: StatusKind, reason: []const u8) bool {
+        return self.completePendingStartFailure(pending, status, reason);
+    }
+
+    fn completePendingStartFakeForTest(self: *Manager, pending: PendingStart, pid: u32) bool {
+        return self.completePendingStartInstall(pending, .{ .fake = .{ .pid = pid } });
+    }
+
+    fn takeExitedChildForTest(self: *Manager, index: usize) ?ExitedChild {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (index >= self.entries.items.len) return null;
+        return takeExitedChildFromEntry(&self.entries.items[index], index);
+    }
+
+    fn finishExitedChildForTest(self: *Manager, exited: *ExitedChild) bool {
+        return self.finishExitedChild(exited);
+    }
+
     pub fn stopAll(self: *Manager) void {
-        var children: ChildList = .{};
+        var stopped: StopList = .{};
 
         self.mutex.lock();
-        for (self.entries.items) |*entry| {
-            if (entry.child) |child| {
-                children.append(child);
-                entry.child = null;
-            }
+        for (self.entries.items, 0..) |*entry, index| {
+            const child = entry.child;
+            entry.child = null;
+            entry.generation = self.nextGenerationLocked();
+            stopped.append(.{
+                .index = index,
+                .generation = entry.generation,
+                .child = child,
+            });
         }
         self.mutex.unlock();
 
-        for (children.slice()) |*child| {
-            stopChildState(child);
+        for (stopped.slice()) |*item| {
+            if (item.child) |*child| stopChildState(child);
         }
 
         self.mutex.lock();
         defer self.mutex.unlock();
-        for (self.entries.items) |*entry| {
-            entry.setStatus(.stopped, "");
+        for (stopped.slice()) |item| {
+            if (self.entryGenerationMatchesLocked(item.index, item.generation)) {
+                self.entries.items[item.index].setStatus(.stopped, "");
+            }
         }
+    }
+
+    fn beginStart(self: *Manager, index: usize) ?StartLease {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (index >= self.entries.items.len) return null;
+        const entry = &self.entries.items[index];
+        const child_to_stop = entry.child;
+        const generation = self.nextGenerationLocked();
+        entry.child = null;
+        entry.generation = generation;
+        entry.setStatus(.starting, "");
+        return .{
+            .pending = .{
+                .index = index,
+                .generation = generation,
+                .rule = entry.rule,
+            },
+            .child_to_stop = child_to_stop,
+        };
+    }
+
+    fn completePendingStartFailure(self: *Manager, pending: PendingStart, status: StatusKind, reason: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (!self.pendingStartMatchesLocked(pending)) return false;
+        self.entries.items[pending.index].setStatus(status, reason);
+        return true;
+    }
+
+    fn completePendingStartInstall(self: *Manager, pending: PendingStart, child: ChildState) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (!self.pendingStartMatchesLocked(pending)) return false;
+        self.entries.items[pending.index].child = child;
+        self.entries.items[pending.index].setStatus(.running, "");
+        return true;
+    }
+
+    fn finishExitedChild(self: *Manager, exited: *const ExitedChild) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (!self.entryGenerationMatchesLocked(exited.index, exited.generation)) return false;
+        if (self.entries.items[exited.index].child != null) return false;
+        self.entries.items[exited.index].setStatus(.error_, exited.reason());
+        return true;
+    }
+
+    fn pendingStartMatchesLocked(self: *Manager, pending: PendingStart) bool {
+        if (!self.entryGenerationMatchesLocked(pending.index, pending.generation)) return false;
+        const entry = &self.entries.items[pending.index];
+        return entry.child == null and rulesEqual(&entry.rule, &pending.rule);
+    }
+
+    fn entryGenerationMatchesLocked(self: *Manager, index: usize, generation: u64) bool {
+        return index < self.entries.items.len and self.entries.items[index].generation == generation;
+    }
+
+    fn nextGenerationLocked(self: *Manager) u64 {
+        const generation = self.next_generation;
+        self.next_generation = if (self.next_generation == std.math.maxInt(u64)) 1 else self.next_generation + 1;
+        return generation;
     }
 };
 
@@ -503,6 +601,7 @@ fn spawnForward(allocator: std.mem.Allocator, rule: *const rule_mod.Rule, conn: 
     child.stderr_behavior = .Inherit;
     if (env_map) |*map| child.env_map = map;
     try child.spawn();
+    try child.waitForSpawn();
     return child;
 }
 
@@ -540,6 +639,13 @@ fn childHasExited(child: *const ChildState) bool {
     };
 }
 
+fn takeExitedChildFromEntry(entry: *Entry, index: usize) ?ExitedChild {
+    const child = entry.child orelse return null;
+    if (!childHasExited(&child)) return null;
+    entry.child = null;
+    return ExitedChild.init(index, entry.generation, child);
+}
+
 fn childHasExitedReal(child: *const std.process.Child) bool {
     return switch (platform_process.childExited(child.id, 0)) {
         .running => false,
@@ -552,6 +658,18 @@ fn childExitReason(child: *const ChildState) []const u8 {
         .real => "ssh exited",
         .fake => |*fake| if (fake.reason().len > 0) fake.reason() else "ssh exited",
     };
+}
+
+fn rulesEqual(a: *const rule_mod.Rule, b: *const rule_mod.Rule) bool {
+    return std.mem.eql(u8, a.name(), b.name()) and
+        std.mem.eql(u8, a.profileName(), b.profileName()) and
+        a.direction == b.direction and
+        std.mem.eql(u8, a.localHost(), b.localHost()) and
+        a.local_port == b.local_port and
+        std.mem.eql(u8, a.remoteHost(), b.remoteHost()) and
+        a.remote_port == b.remote_port and
+        a.enabled == b.enabled and
+        a.auto_start == b.auto_start;
 }
 
 fn copyBounded(dest: []u8, text: []const u8) usize {
@@ -715,7 +833,7 @@ test "port_forward_manager: builds reverse ssh argv without connection sharing" 
     const rule = rule_mod.defaultReverseProxy("devbox");
     const argv = try buildSshArgvForTest(allocator, &rule, &conn);
 
-    try std.testing.expectEqualStrings("ssh", argv[0]);
+    try std.testing.expectEqualStrings(platform_pty_command.sshExecutableName(), argv[0]);
     try std.testing.expect(argvContainsForTest(argv, "-N"));
     try std.testing.expect(argvContainsForTest(argv, "-T"));
     try std.testing.expect(argvContainsForTest(argv, "-R"));
@@ -846,6 +964,75 @@ test "port_forward_manager: stop all clears fake children after stopping" {
     const row = manager.rowAt(0).?;
     try std.testing.expectEqual(StatusKind.stopped, row.status);
     try std.testing.expectEqualStrings("", row.reason());
+}
+
+test "port_forward_manager: stale pending start failure leaves replacement row alone" {
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    try manager.addRule(rule_mod.defaultReverseProxy("old"));
+
+    const pending = manager.beginPendingStartForTest(0) orelse return error.ExpectedPendingStart;
+    try std.testing.expect(manager.updateRule(0, rule_mod.defaultReverseProxy("replacement")));
+
+    try std.testing.expect(!manager.completePendingStartFailureForTest(pending, .missing_profile, "profile missing"));
+
+    const row = manager.rowAt(0).?;
+    try std.testing.expectEqual(StatusKind.stopped, row.status);
+    try std.testing.expectEqualStrings("", row.reason());
+    try std.testing.expectEqualStrings("replacement", row.rule.profileName());
+}
+
+test "port_forward_manager: stale pending start install leaves replacement row alone" {
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    try manager.addRule(rule_mod.defaultReverseProxy("old"));
+
+    const pending = manager.beginPendingStartForTest(0) orelse return error.ExpectedPendingStart;
+    try std.testing.expect(manager.updateRule(0, rule_mod.defaultReverseProxy("replacement")));
+
+    try std.testing.expect(!manager.completePendingStartFakeForTest(pending, 444));
+
+    const row = manager.rowAt(0).?;
+    try std.testing.expectEqual(StatusKind.stopped, row.status);
+    try std.testing.expectEqualStrings("", row.reason());
+    try std.testing.expectEqualStrings("replacement", row.rule.profileName());
+    try std.testing.expect(!manager.markExitedForTest(0, "stale child should not exist"));
+}
+
+test "port_forward_manager: stale exited child does not mark restarted row error" {
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    try manager.addRule(rule_mod.defaultReverseProxy("devbox"));
+    try std.testing.expect(manager.markRunningForTest(0, 111));
+    try std.testing.expect(manager.markExitedForTest(0, "old ssh exited"));
+
+    var exited = manager.takeExitedChildForTest(0) orelse return error.ExpectedExitedChild;
+    try std.testing.expect(manager.markRunningForTest(0, 222));
+
+    try std.testing.expect(!manager.finishExitedChildForTest(&exited));
+
+    const row = manager.rowAt(0).?;
+    try std.testing.expectEqual(StatusKind.running, row.status);
+    try std.testing.expectEqualStrings("", row.reason());
+    try std.testing.expect(manager.markExitedForTest(0, "new ssh exited"));
+}
+
+test "port_forward_manager: stale exited child does not mark replacement row error" {
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    try manager.addRule(rule_mod.defaultReverseProxy("old"));
+    try std.testing.expect(manager.markRunningForTest(0, 111));
+    try std.testing.expect(manager.markExitedForTest(0, "old ssh exited"));
+
+    var exited = manager.takeExitedChildForTest(0) orelse return error.ExpectedExitedChild;
+    try std.testing.expect(manager.updateRule(0, rule_mod.defaultReverseProxy("replacement")));
+
+    try std.testing.expect(!manager.finishExitedChildForTest(&exited));
+
+    const row = manager.rowAt(0).?;
+    try std.testing.expectEqual(StatusKind.stopped, row.status);
+    try std.testing.expectEqualStrings("", row.reason());
+    try std.testing.expectEqualStrings("replacement", row.rule.profileName());
 }
 
 fn sshConnectionForTest(
