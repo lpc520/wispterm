@@ -76,6 +76,7 @@ test {
     _ = @import("skill_inventory_cache.zig");
     _ = @import("skill_center.zig");
     _ = @import("renderer/skill_center_renderer.zig");
+    _ = @import("renderer/port_forwarding_renderer.zig");
     _ = @import("skill_pairing.zig");
     _ = @import("skill_transfer_cmd.zig");
     _ = @import("skill_transfer.zig");
