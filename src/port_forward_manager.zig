@@ -182,7 +182,7 @@ pub const Manager = struct {
     }
 
     pub fn load(self: *Manager) !bool {
-        const path = self.storagePathSnapshot() orelse return false;
+        const path = try self.storagePathSnapshot() orelse return false;
         defer self.allocator.free(path);
 
         const content = std.fs.cwd().readFileAlloc(self.allocator, path, 1024 * 1024) catch |err| switch (err) {
@@ -196,7 +196,7 @@ pub const Manager = struct {
     }
 
     pub fn save(self: *Manager) bool {
-        const path = self.storagePathSnapshot() orelse return false;
+        const path = (self.storagePathSnapshot() catch return false) orelse return false;
         defer self.allocator.free(path);
 
         var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -513,11 +513,11 @@ pub const Manager = struct {
         return .{ .child_to_stop = child_to_stop };
     }
 
-    fn storagePathSnapshot(self: *Manager) ?[]u8 {
+    fn storagePathSnapshot(self: *Manager) !?[]u8 {
         self.mutex.lock();
         defer self.mutex.unlock();
         const path = self.storage_path orelse return null;
-        return self.allocator.dupe(u8, path) catch null;
+        return try self.allocator.dupe(u8, path);
     }
 
     fn beginStart(self: *Manager, index: usize) ?StartLease {
@@ -898,6 +898,17 @@ test "port_forward_manager: save and load from explicit path" {
     try std.testing.expectEqualStrings("devbox", row.rule.profileName());
     try std.testing.expect(!row.auto_start);
     try std.testing.expectEqual(StatusKind.stopped, row.status);
+}
+
+test "port_forward_manager: load reports storage path snapshot allocation failure" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 1,
+    });
+    var manager = Manager.init(failing_allocator.allocator());
+    defer manager.deinit();
+    try manager.setStoragePath("port_forwards");
+
+    try std.testing.expectError(error.OutOfMemory, manager.load());
 }
 
 test "port_forward_manager: missing profile records status without spawning" {
