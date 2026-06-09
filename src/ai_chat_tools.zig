@@ -1419,6 +1419,16 @@ fn looksLikeReadyPrompt(line: []const u8) bool {
     };
 }
 
+/// True when the snapshot's trailing line shows the REPL is back at a ready
+/// prompt: it equals the prompt captured before we typed, or it matches the
+/// generic ready-prompt heuristic. The exact match handles prompts that stayed
+/// the same; the heuristic handles prompts that changed (e.g. `$ ` -> `>>> `).
+fn promptReturned(snapshot: []const u8, captured_prompt: []const u8) bool {
+    const line = extractPromptLine(snapshot);
+    if (captured_prompt.len != 0 and std.mem.eql(u8, line, captured_prompt)) return true;
+    return looksLikeReadyPrompt(line);
+}
+
 const AGENT_START_PREFIX = "__WISPTERM_AGENT_START_";
 
 /// Whether the surface's most recent agent command is still running: find the
@@ -2940,6 +2950,12 @@ test "looksLikeReadyPrompt accepts prompts and rejects output" {
     try std.testing.expect(!looksLikeReadyPrompt("2"));
     try std.testing.expect(!looksLikeReadyPrompt("TypeError: unsupported operand"));
     try std.testing.expect(!looksLikeReadyPrompt("this is a very long line of output that should not be treated as a prompt at all"));
+}
+
+test "promptReturned matches the captured prompt or a generic prompt" {
+    try std.testing.expect(promptReturned("foo\n>>> ", ">>>"));
+    try std.testing.expect(promptReturned("$ python\nPython 3.12\n>>> ", "$"));
+    try std.testing.expect(!promptReturned("computing...\n42", ">>>"));
 }
 
 test "ai chat REPL kind parses Python Codex and Claude Code aliases" {
