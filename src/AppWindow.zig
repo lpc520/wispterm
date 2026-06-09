@@ -292,7 +292,6 @@ pub fn deinit(self: *AppWindow) void {
         }
     }
     markdown_preview_renderer.deinit();
-    markdown_preview_panel.deinit();
     browser_panel.deinit();
 }
 
@@ -782,7 +781,6 @@ fn renderAiChatFrame(fb_width: c_int, fb_height: c_int, titlebar_offset: f32, le
     clearWithBackground(fb_width, fb_height);
     titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-    markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
     file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     if (activeAiChat()) |session| {
         const chat_x = left_panels_w;
@@ -808,7 +806,6 @@ fn renderAiHistoryFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_int
     clearWithBackground(fb_width, fb_height);
     titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-    markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
     file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     if (active_tab.ai_history_session) |session| {
         const draw: ai_history_renderer.DrawContext = .{
@@ -841,7 +838,6 @@ fn renderSkillCenterFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_i
     clearWithBackground(fb_width, fb_height);
     titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-    markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
     file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     if (active_tab.skill_center_session) |session| {
         const draw: skill_center_renderer.DrawContext = .{
@@ -2407,7 +2403,6 @@ pub fn toggleAiCopilot() void {
     }
     // Exclusive right slot: close the other right panels first.
     browser_panel.close();
-    markdown_preview_panel.close();
     _ = tab.setActiveCopilotVisible(true);
     _ = ensureActiveCopilotSession();
     input.focusAiCopilot();
@@ -2417,17 +2412,18 @@ pub fn toggleAiCopilot() void {
 
 pub fn rightPanelsWidth() f32 {
     const copilot_w = if (aiCopilotVisible()) ai_sidebar.g_width else 0;
-    return markdown_preview_panel.width() + browser_panel.width() + copilot_w;
+    return browser_panel.width() + copilot_w;
 }
 
 pub fn rightPanelsWidthForWindow(window_width: i32) f32 {
-    const preview_w = markdown_preview_panel.width();
-    const browser_w = browser_panel.panelWidthForWindow(window_width, leftPanelsWidth(), preview_w);
-    return preview_w + browser_w + aiCopilotWidth(window_width);
+    const browser_w = browser_panel.panelWidthForWindow(window_width, leftPanelsWidth(), 0);
+    return browser_w + aiCopilotWidth(window_width);
 }
 
 pub fn browserPanelRightOffset() f32 {
-    return markdown_preview_panel.width();
+    // The preview is a split-tree leaf now, not a right-dock, so it reserves no
+    // right-edge space for the browser panel.
+    return 0;
 }
 
 fn aiChatExportRoot(allocator: std.mem.Allocator) ![]const u8 {
@@ -2545,8 +2541,6 @@ fn clearUiStateOnTabChange() void {
     input.g_sidebar_resize_dragging = false;
     input.g_explorer_resize_hover = false;
     input.g_explorer_resize_dragging = false;
-    input.g_markdown_preview_resize_hover = false;
-    input.g_markdown_preview_resize_dragging = false;
     input.g_browser_resize_hover = false;
     input.g_browser_resize_dragging = false;
     input.blurAiCopilot();
@@ -3047,7 +3041,6 @@ pub fn closeTab(idx: usize) void {
     if (tab.g_tab_count <= 1 or idx >= tab.g_tab_count) return;
     tab.closeTab(idx, allocator);
     file_explorer.onTabClosed(idx);
-    markdown_preview_panel.onTabClosed(idx);
     browser_panel.onTabClosed(idx);
     clearUiStateOnTabChange();
 }
@@ -3066,7 +3059,6 @@ pub fn switchTab(idx: usize) void {
 pub fn reorderTab(from_idx: usize, to_idx: usize) bool {
     if (!tab.reorderTab(from_idx, to_idx)) return false;
     file_explorer.onTabReordered(from_idx, to_idx);
-    markdown_preview_panel.onTabReordered(from_idx, to_idx);
     browser_panel.onTabReordered(from_idx, to_idx);
     clearUiStateOnTabChange();
     return true;
@@ -3110,7 +3102,6 @@ pub fn closeFocusedSplit() void {
         },
         .closed_tab => {
             file_explorer.onTabClosed(closing_tab_idx);
-            markdown_preview_panel.onTabClosed(closing_tab_idx);
             browser_panel.onTabClosed(closing_tab_idx);
             clearUiStateOnTabChange();
         },
@@ -3415,7 +3406,6 @@ fn renderResizeFrame(width: i32, height: i32) void {
                 const pad_top = @as(f32, @floatFromInt(pad.top)) + titlebar_offset;
                 titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                 titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-                markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
                 file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                 cell_renderer.drawCells(rend, @floatFromInt(fb_height), left_panels_w + @as(f32, @floatFromInt(pad.left)), pad_top);
                 overlays.renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
@@ -3429,7 +3419,6 @@ fn renderResizeFrame(width: i32, height: i32) void {
 
             titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
             titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-            markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
             file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
 
             for (0..split_count) |i| {
@@ -3479,7 +3468,6 @@ fn renderResizeFrame(width: i32, height: i32) void {
                             @floatFromInt(rect.width),
                             @floatFromInt(rect.height),
                             @floatFromInt(fb_height),
-                            false,
                         );
                         if (is_focused) drawPaneFocusRing(rect, @floatFromInt(fb_height));
                     },
@@ -3497,7 +3485,6 @@ fn renderResizeFrame(width: i32, height: i32) void {
         clearWithBackground(fb_width, fb_height);
         titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-        markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
         file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     }
 
@@ -6226,10 +6213,6 @@ fn runMainLoop(self: *AppWindow) !void {
             g_cells_valid = false;
         }
         syncTransferToastFromFileExplorer();
-        if (markdown_preview_panel.tickAsync()) {
-            g_force_rebuild = true;
-            g_cells_valid = false;
-        }
         if (tickAllPreviewPanes()) {
             g_force_rebuild = true;
             g_cells_valid = false;
@@ -6478,7 +6461,6 @@ fn runMainLoop(self: *AppWindow) !void {
                     const pad_top = @as(f32, @floatFromInt(pad.top)) + titlebar_offset;
                     titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                     titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-                    markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
                     file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                     cell_renderer.drawCells(rend, @floatFromInt(fb_height), left_panels_w + @as(f32, @floatFromInt(pad.left)), pad_top);
                     overlays.renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
@@ -6494,7 +6476,6 @@ fn runMainLoop(self: *AppWindow) !void {
 
                 titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                 titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-                markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
                 file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
 
                 // Render each split surface directly to screen using viewport
@@ -6569,7 +6550,6 @@ fn runMainLoop(self: *AppWindow) !void {
                                     @floatFromInt(rect.width),
                                     @floatFromInt(rect.height),
                                     @floatFromInt(fb_height),
-                                    false,
                                 );
                                 if (is_focused) drawPaneFocusRing(rect, @floatFromInt(fb_height));
 
@@ -6614,7 +6594,6 @@ fn runMainLoop(self: *AppWindow) !void {
             clearWithBackground(fb_width, fb_height);
             titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
             titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-            markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
             file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         }
 
@@ -6691,7 +6670,6 @@ fn runMainLoop(self: *AppWindow) !void {
     weixin_qr_panel.deinit();
     clearWeixinTranscriptCache();
     markdown_preview_renderer.deinit();
-    markdown_preview_panel.deinit();
     browser_panel.deinit();
 
     // Tab cleanup is handled by AppWindow.deinit()

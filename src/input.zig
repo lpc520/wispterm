@@ -393,12 +393,6 @@ pub threadlocal var g_sidebar_resize_hover: bool = false; // Mouse is over the s
 pub threadlocal var g_sidebar_resize_dragging: bool = false; // Currently dragging the sidebar edge
 pub threadlocal var g_explorer_resize_hover: bool = false; // Mouse is over the file explorer resize edge
 pub threadlocal var g_explorer_resize_dragging: bool = false; // Currently dragging the file explorer edge
-pub threadlocal var g_markdown_preview_resize_hover: bool = false; // Mouse is over the preview resize edge
-pub threadlocal var g_markdown_preview_resize_dragging: bool = false; // Currently dragging the preview edge
-threadlocal var g_markdown_preview_image_dragging: bool = false;
-threadlocal var g_markdown_preview_image_hover: bool = false;
-threadlocal var g_markdown_preview_image_drag_last_x: f64 = 0;
-threadlocal var g_markdown_preview_image_drag_last_y: f64 = 0;
 pub threadlocal var g_browser_resize_hover: bool = false; // Mouse is over the embedded browser edge
 pub threadlocal var g_browser_resize_dragging: bool = false; // Currently dragging the browser edge
 pub threadlocal var g_ai_copilot_resize_hover: bool = false; // Mouse is over the AI copilot left edge
@@ -525,12 +519,6 @@ pub fn cancelTransientMouseState(win: anytype) void {
     g_sidebar_resize_dragging = false;
     g_explorer_resize_hover = false;
     g_explorer_resize_dragging = false;
-    g_markdown_preview_resize_hover = false;
-    g_markdown_preview_resize_dragging = false;
-    g_markdown_preview_image_dragging = false;
-    g_markdown_preview_image_hover = false;
-    g_markdown_preview_image_drag_last_x = 0;
-    g_markdown_preview_image_drag_last_y = 0;
     g_browser_resize_hover = false;
     g_browser_resize_dragging = false;
     g_ai_copilot_resize_hover = false;
@@ -673,16 +661,6 @@ pub fn refreshBrowserPanel() void {
     AppWindow.g_cells_valid = false;
 }
 
-fn closeMarkdownPreviewPanel() void {
-    g_close_shortcut_confirm_until_ms = 0;
-    markdown_preview_panel.close();
-    if (AppWindow.g_window) |win| {
-        syncPanelGridFromWindow(win);
-    }
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
-}
-
 fn closeAiCopilotPanel() void {
     AppWindow.hideAiCopilot();
     if (AppWindow.g_window) |win| {
@@ -693,10 +671,6 @@ fn closeAiCopilotPanel() void {
 }
 
 pub fn closePanelOrTab() void {
-    if (markdown_preview_panel.isVisibleForActiveTab()) {
-        closeMarkdownPreviewPanel();
-        return;
-    }
     if (browser_panel.isVisibleForActiveTab()) {
         closeBrowserPanel();
         return;
@@ -2063,41 +2037,6 @@ fn hitTestFileExplorerRefreshButton(xpos: f64, ypos: f64) bool {
     return hit_test.panelHeaderSecondButton(fileExplorerHeaderLayout() orelse return false, xpos, ypos);
 }
 
-fn hitTestMarkdownPreviewPanel(xpos: f64, ypos: f64) bool {
-    if (!markdown_preview_panel.isVisibleForActiveTab()) return false;
-    if (ypos < titlebarHeight()) return false;
-    const win = AppWindow.g_window orelse return false;
-    const size = clientSize(win);
-    const preview_w: f64 = @floatCast(markdown_preview_panel.width());
-    const panel_x: f64 = @as(f64, @floatFromInt(size.width)) - preview_w;
-    return xpos >= panel_x and xpos < panel_x + preview_w;
-}
-
-fn markdownPreviewHeaderLayout() ?hit_test.PanelHeaderLayout {
-    if (!markdown_preview_panel.isVisibleForActiveTab()) return null;
-    const win = AppWindow.g_window orelse return null;
-    const size = clientSize(win);
-    const preview_w: f64 = @floatCast(markdown_preview_panel.width());
-    const panel_x: f64 = @as(f64, @floatFromInt(size.width)) - preview_w;
-    return .{
-        .visible = true,
-        .left = panel_x,
-        .right = panel_x + preview_w,
-        .top = titlebarHeight(),
-        .height = @floatCast(AppWindow.markdown_preview_renderer.HEADER_HEIGHT),
-    };
-}
-
-fn hitTestMarkdownPreviewCloseButton(xpos: f64, ypos: f64) bool {
-    return hit_test.panelHeaderCloseButton(markdownPreviewHeaderLayout() orelse return false, xpos, ypos);
-}
-
-fn hitTestMarkdownPreviewHeader(xpos: f64, ypos: f64) bool {
-    const layout = markdownPreviewHeaderLayout() orelse return false;
-    return xpos >= layout.left and xpos < layout.right and
-        ypos >= layout.top and ypos < layout.top + layout.height;
-}
-
 fn browserPanelBounds() ?browser_panel.Bounds {
     if (!browser_panel.isVisibleForActiveTab()) return null;
     const win = AppWindow.g_window orelse return null;
@@ -2236,28 +2175,6 @@ fn applyAiCopilotWidthFromMouse(xpos: f64) void {
     const new_width = right_edge - xpos;
     const available_width: f32 = @as(f32, @floatFromInt(fb.width)) - AppWindow.leftPanelsWidth();
     if (!ai_sidebar.setWidth(@floatCast(new_width), available_width)) return;
-    syncGridFromWindow(win);
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
-}
-
-fn hitTestMarkdownPreviewResizeHandle(xpos: f64, ypos: f64) bool {
-    if (!markdown_preview_panel.isVisibleForActiveTab()) return false;
-    if (ypos < titlebarHeight()) return false;
-    const win = AppWindow.g_window orelse return false;
-    const size = clientSize(win);
-    const preview_w: f64 = @floatCast(markdown_preview_panel.width());
-    const panel_x: f64 = @as(f64, @floatFromInt(size.width)) - preview_w;
-    const half_hit: f64 = @as(f64, @floatCast(markdown_preview_panel.RESIZE_HIT_WIDTH)) / 2;
-    return xpos >= panel_x - half_hit and xpos <= panel_x + half_hit;
-}
-
-fn applyMarkdownPreviewWidthFromMouse(xpos: f64) void {
-    const win = AppWindow.g_window orelse return;
-    const size = clientSize(win);
-    const right_edge = @as(f64, @floatFromInt(size.width));
-    const new_width = right_edge - xpos;
-    if (!markdown_preview_panel.setWidth(@floatCast(new_width), @floatFromInt(size.width))) return;
     syncGridFromWindow(win);
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
@@ -2999,7 +2916,7 @@ fn updateInteractiveUnderlineAtMouse(xpos: f64, ypos: f64, ctrl: bool, shift: bo
         clearUrlUnderline();
         return;
     }
-    if (ypos < titlebarHeight() or hitTestFileExplorer(xpos, ypos) or hitTestMarkdownPreviewPanel(xpos, ypos) or hitTestBrowserPanel(xpos, ypos)) {
+    if (ypos < titlebarHeight() or hitTestFileExplorer(xpos, ypos) or hitTestBrowserPanel(xpos, ypos)) {
         clearUrlUnderline();
         return;
     }
@@ -3485,10 +3402,6 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 closeBrowserPanel();
                 return;
             }
-            if (hitTestMarkdownPreviewCloseButton(xpos, ypos)) {
-                closeMarkdownPreviewPanel();
-                return;
-            }
             if (hitTestAiCopilotCloseButton(xpos, ypos)) {
                 closeAiCopilotPanel();
                 return;
@@ -3504,12 +3417,6 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             if (hitTestFileExplorerResizeHandle(xpos, ypos)) {
                 g_explorer_resize_dragging = true;
                 g_explorer_resize_hover = true;
-                platform_cursor.set(.size_we);
-                return;
-            }
-            if (hitTestMarkdownPreviewResizeHandle(xpos, ypos)) {
-                g_markdown_preview_resize_dragging = true;
-                g_markdown_preview_resize_hover = true;
                 platform_cursor.set(.size_we);
                 return;
             }
@@ -3551,20 +3458,6 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             // File explorer left sidebar click
             if (hitTestFileExplorer(xpos, ypos)) {
                 handleFileExplorerPress(xpos, ypos, ev.ctrl, ev.shift, ev.alt, ev.super);
-                return;
-            }
-
-            if (hitTestMarkdownPreviewPanel(xpos, ypos)) {
-                file_explorer.g_focused = false;
-                if (file_explorer.g_op_mode != .none) file_explorer.cancelOp();
-                if (hitTestMarkdownPreviewHeader(xpos, ypos)) return;
-                if (markdown_preview_panel.kind() == .image and markdown_preview_panel.loadStatus() == .ready) {
-                    g_markdown_preview_image_dragging = true;
-                    g_markdown_preview_image_hover = true;
-                    g_markdown_preview_image_drag_last_x = xpos;
-                    g_markdown_preview_image_drag_last_y = ypos;
-                    platform_cursor.set(.size_all);
-                }
                 return;
             }
 
@@ -3963,16 +3856,6 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 platform_cursor.set(.arrow);
                 return;
             }
-            if (g_markdown_preview_image_dragging) {
-                g_markdown_preview_image_dragging = false;
-                const cursor_shape: platform_cursor.Shape = if (hitTestMarkdownPreviewPanel(xpos, ypos) and markdown_preview_panel.kind() == .image and markdown_preview_panel.loadStatus() == .ready)
-                    .size_all
-                else
-                    .arrow;
-                g_markdown_preview_image_hover = cursor_shape == .size_all;
-                platform_cursor.set(cursor_shape);
-                return;
-            }
             if (g_sidebar_resize_dragging) {
                 g_sidebar_resize_dragging = false;
                 g_sidebar_resize_hover = hitTestSidebarResizeHandle(xpos, ypos);
@@ -3983,12 +3866,6 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 g_explorer_resize_dragging = false;
                 g_explorer_resize_hover = hitTestFileExplorerResizeHandle(xpos, ypos);
                 platform_cursor.set(if (g_explorer_resize_hover) .size_we else .arrow);
-                return;
-            }
-            if (g_markdown_preview_resize_dragging) {
-                g_markdown_preview_resize_dragging = false;
-                g_markdown_preview_resize_hover = hitTestMarkdownPreviewResizeHandle(xpos, ypos);
-                platform_cursor.set(if (g_markdown_preview_resize_hover) .size_we else .arrow);
                 return;
             }
             if (g_browser_resize_dragging) {
@@ -4227,11 +4104,6 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         platform_cursor.set(.size_we);
         return;
     }
-    if (g_markdown_preview_resize_dragging) {
-        applyMarkdownPreviewWidthFromMouse(xpos);
-        platform_cursor.set(.size_we);
-        return;
-    }
     if (g_browser_resize_dragging) {
         applyBrowserWidthFromMouse(xpos);
         platform_cursor.set(.size_we);
@@ -4255,18 +4127,6 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         platform_cursor.set(.ibeam);
         return;
     }
-    if (g_markdown_preview_image_dragging) {
-        const delta_x: f32 = @floatCast(xpos - g_markdown_preview_image_drag_last_x);
-        const delta_y: f32 = @floatCast(ypos - g_markdown_preview_image_drag_last_y);
-        g_markdown_preview_image_drag_last_x = xpos;
-        g_markdown_preview_image_drag_last_y = ypos;
-        if (markdown_preview_panel.panImageBy(delta_x, delta_y)) {
-            AppWindow.g_force_rebuild = true;
-        }
-        platform_cursor.set(.size_all);
-        return;
-    }
-
     // Alt-drag panel swap: track the drop target / dim the source. Owns the move
     // while a swap source is recorded, so it must precede PTY mouse-report and
     // selection handling below.
@@ -4353,10 +4213,7 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         return;
     }
     if (!g_selecting and !overlays.scrollbar.g_scrollbar_dragging) {
-        if (hitTestMarkdownPreviewHeader(xpos, ypos) or hitTestAiCopilotCloseButton(xpos, ypos)) {
-            if (g_markdown_preview_image_hover) {
-                g_markdown_preview_image_hover = false;
-            }
+        if (hitTestAiCopilotCloseButton(xpos, ypos)) {
             platform_cursor.set(.arrow);
             return;
         }
@@ -4377,24 +4234,6 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         } else if (g_explorer_resize_hover) {
             platform_cursor.set(.arrow);
             g_explorer_resize_hover = false;
-        }
-        const over_preview_resize = hitTestMarkdownPreviewResizeHandle(xpos, ypos);
-        if (over_preview_resize) {
-            platform_cursor.set(.size_we);
-            g_markdown_preview_resize_hover = true;
-            return;
-        } else if (g_markdown_preview_resize_hover) {
-            platform_cursor.set(.arrow);
-            g_markdown_preview_resize_hover = false;
-        }
-        const over_preview_image = hitTestMarkdownPreviewPanel(xpos, ypos) and markdown_preview_panel.kind() == .image and markdown_preview_panel.loadStatus() == .ready;
-        if (over_preview_image) {
-            platform_cursor.set(.size_all);
-            g_markdown_preview_image_hover = true;
-            return;
-        } else if (g_markdown_preview_image_hover) {
-            platform_cursor.set(.arrow);
-            g_markdown_preview_image_hover = false;
         }
         const over_browser_resize = hitTestBrowserResizeHandle(xpos, ypos);
         if (over_browser_resize) {
@@ -4642,7 +4481,6 @@ fn terminalMouseReportTarget(x_i: i32, y_i: i32) ?*Surface {
     if (hitTestFileExplorer(xf, yf)) return null;
     if (hitTestBrowserUrlBar(xf, yf)) return null;
     if (hitTestBrowserPanel(xf, yf)) return null;
-    if (hitTestMarkdownPreviewPanel(xf, yf)) return null;
     if (aiCopilotRegionContains(xf, yf)) return null;
     const surface = split_layout.surfaceAtPoint(x_i, y_i) orelse return null;
     surface.render_state.mutex.lock();
@@ -4717,16 +4555,6 @@ fn handleMouseWheel(ev: platform_input.MouseWheelEvent) void {
     }
     if (tab.g_sidebar_visible and ev.xpos >= 0 and ev.xpos < @as(i32, @intFromFloat(titlebar.sidebarWidth()))) return;
     if (hitTestBrowserPanel(@floatFromInt(ev.xpos), @floatFromInt(ev.ypos))) return;
-    if (hitTestMarkdownPreviewPanel(@floatFromInt(ev.xpos), @floatFromInt(ev.ypos))) {
-        if (markdown_preview_panel.kind() == .image) {
-            _ = markdown_preview_panel.zoomImageBySteps(mouseWheelUnits(ev.delta), ev.delta > 0);
-        } else {
-            const delta: f32 = -@as(f32, @floatFromInt(ev.delta)) * 72.0 / 120.0;
-            markdown_preview_panel.scrollBy(delta);
-        }
-        AppWindow.g_force_rebuild = true;
-        return;
-    }
     // Scroll in file explorer
     if (file_explorer.isVisibleForActiveTab()) {
         const panel_x = @as(i32, @intFromFloat(titlebar.sidebarWidth()));

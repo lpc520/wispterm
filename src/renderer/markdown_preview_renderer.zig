@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const AppWindow = @import("../AppWindow.zig");
-const panel = @import("../markdown_preview_panel.zig");
 const markdown_preview = @import("../markdown_preview.zig");
 const text_wrap = @import("../text_wrap.zig");
 const hit_test = @import("../input/hit_test.zig");
@@ -40,7 +39,6 @@ fn blend(a: [3]f32, b: [3]f32, t: f32) [3]f32 {
 /// Core renderer: draws the preview pane into the given pixel rect.
 /// panel_top    = distance from window top to this pane's top edge (pixels)
 /// panel_h      = height of this pane in pixels
-/// show_chrome  = draw the resize edge (dock=true; split-tree leaf=false)
 pub fn renderInto(
     pane: *PreviewPane,
     panel_x: f32,
@@ -48,13 +46,11 @@ pub fn renderInto(
     panel_w: f32,
     panel_h: f32,
     window_height: f32,
-    show_chrome: bool,
 ) void {
     if (panel_h <= 0) return;
 
     // GL origin is bottom-left, so the pane's bottom edge in GL space is:
     //   window_height - panel_top - panel_h
-    // which equals 0 when panel_top==titlebar_h and panel_h==window_height-titlebar_h (dock case).
     const pane_gl_bottom = window_height - panel_top - panel_h;
 
     const bg = AppWindow.g_theme.background;
@@ -71,39 +67,10 @@ pub fn renderInto(
     // Side background: fillQuad(x, gl_y, w, h) — gl_y = pane_gl_bottom
     ui_pipeline.fillQuad(panel_x, pane_gl_bottom, panel_w, panel_h, panel_bg);
 
-    if (show_chrome) {
-        const resize_hovered = blk: {
-            const win = AppWindow.g_window orelse break :blk false;
-            if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
-            const mx: f32 = @floatFromInt(win.mouse_x);
-            const my: f32 = @floatFromInt(win.mouse_y);
-            const half_hit = panel.RESIZE_HIT_WIDTH / 2;
-            break :blk mx >= panel_x - half_hit and mx <= panel_x + half_hit and my >= panel_top and my < panel_top + panel_h;
-        };
-        const edge_color = if (resize_hovered or AppWindow.input.g_markdown_preview_resize_dragging) blend(bg, accent, 0.38) else border;
-        ui_pipeline.fillQuad(panel_x, pane_gl_bottom, if (resize_hovered or AppWindow.input.g_markdown_preview_resize_dragging) 2 else 1, panel_h, edge_color);
-    }
-
     renderHeader(panel_x, panel_w, window_height, panel_top, card_bg, border, muted, normal);
     renderFooter(pane, panel_x, panel_w, pane_gl_bottom, card_bg, border, muted, normal, accent);
 
     renderDocument(pane, panel_x, panel_w, window_height, panel_top, panel_h, pane_gl_bottom, normal, muted, strong, accent, code_bg, border);
-}
-
-/// Thin dock wrapper: derives rect from panel singleton and calls renderInto.
-pub fn render(window_width: f32, window_height: f32, titlebar_h: f32, right_offset: f32) void {
-    if (!panel.isVisibleForActiveTab()) {
-        panel.dockPane().unloadImageTexture();
-        return;
-    }
-    const perf = ui_perf.begin("markdown_preview_renderer.render");
-    defer perf.end();
-
-    const panel_w = panel.width();
-    if (panel_w <= 0) return;
-
-    const panel_x = window_width - right_offset - panel_w;
-    renderInto(panel.dockPane(), panel_x, titlebar_h, panel_w, window_height - titlebar_h, window_height, true);
 }
 
 pub fn deinit() void {
