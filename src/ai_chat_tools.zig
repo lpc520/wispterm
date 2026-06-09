@@ -1143,10 +1143,8 @@ fn terminalReplExecTool(ctx: *ToolContext, surface_id: []const u8, repl_name: []
     }
 
     return switch (repl) {
-        .r => rSessionEvalTool(ctx, host, surface, code, timeout_ms),
-        .python => pythonSessionEvalTool(ctx, host, surface, code, timeout_ms),
+        .r, .python, .plain => lineReplEvalTool(ctx, host, surface, repl, code, timeout_ms),
         .codex, .claude_code => plainReplInputTool(ctx, host, surface, repl, code, timeout_ms),
-        .plain => plainReplInputTool(ctx, host, surface, repl, code, timeout_ms),
     };
 }
 
@@ -1189,19 +1187,9 @@ pub fn plainReplInputTool(ctx: *const ToolContext, host: ToolHost, surface: Tool
         }
     }
 
-    if (repl == .codex or repl == .claude_code) {
-        return waitForAgentAppReplResult(ctx, host, surface, repl, timeout_ms);
-    }
-
-    const wait_ms = @min(@max(timeout_ms, 500), 5000);
-    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(wait_ms));
-    while (std.time.milliTimestamp() < deadline) {
-        if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
-        std.Thread.sleep(100 * std.time.ns_per_ms);
-    }
-
-    const latest = host.surfaceSnapshot(host.ctx, ctx.allocator, surface.ptr) catch return ctx.allocator.dupe(u8, "Input sent; failed to read terminal snapshot.");
-    return truncateOwned(ctx.allocator, ctx.settings, latest);
+    // Only Codex / Claude Code reach this tool now (line REPLs use
+    // lineReplEvalTool); both settle on the busy-marker-aware waiter.
+    return waitForAgentAppReplResult(ctx, host, surface, repl, timeout_ms);
 }
 
 fn replSnapshotLooksBusy(repl: ReplKind, snapshot: []const u8) bool {
@@ -1313,6 +1301,83 @@ fn waitForAgentAppReplResult(ctx: *const ToolContext, host: ToolHost, surface: T
         note,
         last_text,
     );
+}
+
+/// Run code in a line-oriented REPL (Python, R, Node, IPython, Julia, psql, ...)
+/// the way a human does: capture the current prompt, type the raw code + Enter,
+/// then wait until the screen settles back at a ready prompt. No sentinel wrapper
+/// is injected, so the REPL echoes the user's code verbatim and the value of a
+/// bare expression (e.g. `1+1`) is displayed normally. Errors appear as the REPL's
+/// native traceback in the returned snapshot; there is no synthetic status code.
+fn lineReplEvalTool(ctx: *const ToolContext, host: ToolHost, surface: ToolSurface, repl: ReplKind, code: []const u8, timeout_ms: u32) ![]u8 {
+    // Learn the prompt currently shown so we can recognise its return. Read the
+    // live per-surface snapshot (collectSnapshot is empty on the worker thread).
+    const before = host.surfaceSnapshot(host.ctx, ctx.allocator, surface.ptr) catch
+        try ctx.allocator.dupe(u8, surface.snapshot);
+    defer ctx.allocator.free(before);
+    const captured_prompt = try ctx.allocator.dupe(u8, extractPromptLine(before));
+    defer ctx.allocator.free(captured_prompt);
+
+    const input = try allocPlainReplInput(ctx.allocator, repl, surface, code);
+    defer ctx.allocator.free(input);
+    if (!host.writeSurface(host.ctx, surface.ptr, input)) {
+        return ctx.allocator.dupe(u8, "Failed to write to terminal surface.");
+    }
+
+    return waitForReplPromptReturn(ctx, host, surface, repl, captured_prompt, timeout_ms);
+}
+
+/// Poll the live per-surface snapshot until the screen has been unchanged for
+/// `quiet_ms` (after a `min_wait_ms` floor) AND a ready prompt has returned, then
+/// hand back the screen. On timeout, return the latest screen tagged as still in
+/// progress so the model does not treat a partial result as final.
+fn waitForReplPromptReturn(
+    ctx: *const ToolContext,
+    host: ToolHost,
+    surface: ToolSurface,
+    repl: ReplKind,
+    captured_prompt: []const u8,
+    timeout_ms: u32,
+) ![]u8 {
+    const wait_ms = @max(timeout_ms, 1000);
+    const quiet_ms: i64 = 1000;
+    const min_wait_ms: i64 = 500;
+    const started = std.time.milliTimestamp();
+    const deadline = started + @as(i64, @intCast(wait_ms));
+
+    var last_text = host.surfaceSnapshot(host.ctx, ctx.allocator, surface.ptr) catch
+        try ctx.allocator.dupe(u8, surface.snapshot);
+    defer ctx.allocator.free(last_text);
+    var last_change_ms = started;
+
+    while (std.time.milliTimestamp() < deadline) {
+        if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
+        std.Thread.sleep(150 * std.time.ns_per_ms);
+        const now = std.time.milliTimestamp();
+
+        const text = host.surfaceSnapshot(host.ctx, ctx.allocator, surface.ptr) catch continue;
+        if (std.mem.eql(u8, last_text, text)) {
+            ctx.allocator.free(text);
+        } else {
+            ctx.allocator.free(last_text);
+            last_text = text;
+            last_change_ms = now;
+        }
+
+        const quiesced = now - started >= min_wait_ms and now - last_change_ms >= quiet_ms;
+        if (quiesced and promptReturned(last_text, captured_prompt)) {
+            return truncateOwned(ctx.allocator, ctx.settings, try ctx.allocator.dupe(u8, last_text));
+        }
+    }
+
+    const note = try std.fmt.allocPrint(
+        ctx.allocator,
+        "\n[{s} REPL still busy after {d} ms; treat this as in progress, not a final result]",
+        .{ repl.label(), wait_ms },
+    );
+    defer ctx.allocator.free(note);
+    const combined = try std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ last_text, note });
+    return truncateOwned(ctx.allocator, ctx.settings, combined);
 }
 
 fn rSessionEvalTool(ctx: *const ToolContext, host: ToolHost, surface: ToolSurface, code: []const u8, timeout_ms: u32) ![]u8 {
@@ -3030,6 +3095,44 @@ test "codex repl input submits the Enter keystroke separately from the message b
     // text, so the body and the Enter keystroke must be two separate writes.
     try std.testing.expectEqual(@as(usize, 2), host_ctx.write_calls);
     try std.testing.expectEqualStrings("hello codex\r", host_ctx.all_writes[0..host_ctx.all_len]);
+}
+
+test "line REPL eval types raw code and settles on the returned prompt" {
+    const allocator = std.testing.allocator;
+    var host_ctx = ReplWaitTestHost.Ctx{ .busy_until = 2, .settled_text = ">>> 1+1\n2\n>>> " };
+    var dummy: u8 = 0;
+    const ctx = ToolContext{
+        .allocator = allocator,
+        .ctx = &dummy,
+        .tool_host = ReplWaitTestHost.host(&host_ctx),
+        .tool_snapshot = null,
+        .settings = .{},
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    const surface = ToolSurface{
+        .id = @constCast("surface-py"),
+        .title = @constCast("python"),
+        .cwd = @constCast("/home/xzg"),
+        .snapshot = @constCast(">>> "),
+        .tab_index = 0,
+        .focused = true,
+        .is_ssh = false,
+        .is_wsl = false,
+        .agent_app = .none,
+        .agent_state = .none,
+        .agent_confidence = 0,
+        .ptr = @ptrCast(&host_ctx),
+    };
+
+    const result = try lineReplEvalTool(&ctx, ReplWaitTestHost.host(&host_ctx), surface, .python, "1+1", 5000);
+    defer allocator.free(result);
+
+    // Raw code typed (code + Enter), NOT an exec()-wrapped sentinel blob.
+    try std.testing.expectEqualStrings("1+1\r", host_ctx.all_writes[0..host_ctx.all_len]);
+    try std.testing.expect(std.mem.indexOf(u8, result, "__WISPTERM_AGENT_START_") == null);
+    // The REPL's own output is handed back for the model to read.
+    try std.testing.expect(std.mem.indexOf(u8, result, "2") != null);
 }
 
 test "ai chat Python string literal escapes code for REPL eval" {
