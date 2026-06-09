@@ -221,6 +221,32 @@ test "input: settings page arrow navigation requests a repaint" {
     try std.testing.expect(!AppWindow.g_cells_valid);
 }
 
+test "input: port forwarding arrow navigation requests a repaint" {
+    const allocator = std.testing.allocator;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    if (!tab.spawnPortForwardingTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > previous_count) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+        active_tab_state.g_active_tab = previous_active;
+    }
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(arrow_down_event);
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+}
+
 // Ties the fix end-to-end: a consumed overlay key must make the next render-gate
 // evaluation decide to render (the exact signal the main loop builds), instead of
 // blocking until an incidental wake — that decision IS the anti-lag invariant.
@@ -1136,6 +1162,12 @@ fn handleChar(ev: platform_input.CharEvent) void {
         }
         return;
     }
+    if (AppWindow.activePortForwarding() != null) {
+        if (!ev.ctrl and !ev.alt and !ev.super) {
+            _ = AppWindow.portForwardingInsertChar(ev.codepoint);
+        }
+        return;
+    }
     // Skill Center has no text input; swallow character input so the rescan
     // hotkey ('r') and other keys never leak to the terminal/copilot.
     if (AppWindow.activeSkillCenter() != null) {
@@ -1599,6 +1631,63 @@ fn handleKey(ev: platform_input.KeyEvent) void {
             },
             0x52 => if (plain and !ev.shift) {
                 g_ai_history_suppress_refresh_char = AppWindow.aiHistoryScanLocalNow();
+                return;
+            },
+            else => {},
+        }
+        return;
+    }
+
+    if (AppWindow.activePortForwarding() != null) {
+        const plain = !ev.ctrl and !ev.alt and !ev.super;
+        switch (ev.key_code) {
+            platform_input.key_up => {
+                _ = AppWindow.portForwardingMove(-1);
+                return;
+            },
+            platform_input.key_down => {
+                _ = AppWindow.portForwardingMove(1);
+                return;
+            },
+            platform_input.key_tab => {
+                _ = AppWindow.portForwardingFormMove(1);
+                return;
+            },
+            platform_input.key_enter => {
+                _ = AppWindow.portForwardingConfirmOrApply();
+                return;
+            },
+            platform_input.key_escape => {
+                _ = AppWindow.portForwardingCancelOrClose();
+                return;
+            },
+            platform_input.key_backspace => {
+                _ = AppWindow.portForwardingBackspace();
+                return;
+            },
+            platform_input.key_space => if (plain and !ev.shift) {
+                if (AppWindow.portForwardingFormToggle()) return;
+                _ = AppWindow.portForwardingToggleSelected();
+                return;
+            },
+            0x4E => if (plain and !ev.shift) {
+                _ = AppWindow.portForwardingOpenNew();
+                return;
+            },
+            0x45 => if (plain and !ev.shift) {
+                _ = AppWindow.portForwardingOpenEdit();
+                return;
+            },
+            0x44 => if (plain and !ev.shift) {
+                _ = AppWindow.portForwardingOpenDeleteConfirm();
+                return;
+            },
+            0x52 => if (plain and !ev.shift) {
+                _ = AppWindow.portForwardingRestartSelected();
+                return;
+            },
+            0x41 => if (plain and !ev.shift) {
+                _ = AppWindow.portForwardingToggleAutoStart();
                 return;
             },
             else => {},

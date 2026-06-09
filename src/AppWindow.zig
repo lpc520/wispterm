@@ -1106,10 +1106,10 @@ fn activePortForwardManager() ?*port_forward_manager.Manager {
 
 pub fn portForwardingMove(delta: isize) bool {
     const session = activePortForwarding() orelse return false;
-    const manager = activePortForwardManager() orelse return false;
+    const row_count = if (activePortForwardManager()) |manager| manager.count() else 0;
     session.mutex.lock();
     defer session.mutex.unlock();
-    session.model.move(delta, manager.count());
+    session.model.move(delta, row_count);
     markUiDirty();
     return true;
 }
@@ -1152,6 +1152,143 @@ pub fn portForwardingToggleAutoStart() bool {
     if (ok) _ = manager.save();
     markUiDirty();
     return ok;
+}
+
+pub fn portForwardingOpenNew() bool {
+    const session = activePortForwarding() orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    session.model.openNewForm("") catch return false;
+    markUiDirty();
+    return true;
+}
+
+pub fn portForwardingOpenEdit() bool {
+    const session = activePortForwarding() orelse return false;
+    const manager = activePortForwardManager() orelse return false;
+    session.mutex.lock();
+    const idx = session.model.sel_row;
+    session.mutex.unlock();
+    const row = manager.rowAt(idx) orelse return false;
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    session.model.openEditForm(idx, row.rule) catch return false;
+    markUiDirty();
+    return true;
+}
+
+pub fn portForwardingOpenDeleteConfirm() bool {
+    const session = activePortForwarding() orelse return false;
+    const manager = activePortForwardManager() orelse return false;
+    session.mutex.lock();
+    const idx = session.model.sel_row;
+    session.mutex.unlock();
+    const row = manager.rowAt(idx) orelse return false;
+    const label = if (row.rule.name().len > 0) row.rule.name() else row.rule.profileName();
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    session.model.openDeleteConfirm(idx, label) catch return false;
+    markUiDirty();
+    return true;
+}
+
+pub fn portForwardingConfirmOrApply() bool {
+    const session = activePortForwarding() orelse return false;
+    const manager = activePortForwardManager() orelse return false;
+
+    var form_copy: ?port_forwarding.FormState = null;
+    var delete_index: ?usize = null;
+    session.mutex.lock();
+    switch (session.model.overlay) {
+        .form => |form| form_copy = form,
+        .confirm_delete => |confirm| delete_index = confirm.index,
+        .none => {
+            session.mutex.unlock();
+            return false;
+        },
+    }
+    session.mutex.unlock();
+
+    var ok = false;
+    if (form_copy) |form| {
+        if (!form.rule.validate()) return false;
+        ok = switch (form.mode) {
+            .new => blk: {
+                manager.addRule(form.rule) catch break :blk false;
+                break :blk true;
+            },
+            .edit => if (form.edit_index) |idx| manager.updateRule(idx, form.rule) else false,
+        };
+    } else if (delete_index) |idx| {
+        ok = manager.deleteRule(idx);
+    }
+
+    if (!ok) return false;
+    _ = manager.save();
+    const row_count = manager.count();
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    session.model.clearOverlay();
+    session.model.move(0, row_count);
+    markUiDirty();
+    return true;
+}
+
+pub fn portForwardingCancelOrClose() bool {
+    const session = activePortForwarding() orelse return false;
+    session.mutex.lock();
+    const had_overlay = session.model.overlay != .none;
+    if (had_overlay) session.model.clearOverlay();
+    session.mutex.unlock();
+    if (had_overlay) {
+        markUiDirty();
+        return true;
+    }
+    input.closePanelOrTab();
+    return true;
+}
+
+pub fn portForwardingFormMove(delta: isize) bool {
+    const session = activePortForwarding() orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    const form = session.model.form() orelse return false;
+    form.moveFocus(delta);
+    markUiDirty();
+    return true;
+}
+
+pub fn portForwardingFormToggle() bool {
+    const session = activePortForwarding() orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    const form = session.model.form() orelse return false;
+    form.toggleFocused();
+    markUiDirty();
+    return true;
+}
+
+pub fn portForwardingInsertChar(codepoint: u21) bool {
+    if (codepoint > std.math.maxInt(u8)) return false;
+    const session = activePortForwarding() orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    const form = session.model.form() orelse return false;
+    form.insertChar(@intCast(codepoint));
+    markUiDirty();
+    return true;
+}
+
+pub fn portForwardingBackspace() bool {
+    const session = activePortForwarding() orelse return false;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    const form = session.model.form() orelse return false;
+    form.backspace();
+    markUiDirty();
+    return true;
 }
 
 fn scMoveSel(sel: *usize, len: usize, delta: isize) void {
