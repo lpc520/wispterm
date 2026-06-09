@@ -536,7 +536,7 @@ fn terminalSnapshotTool(ctx: *const ToolContext, surface_id: ?[]const u8) ![]u8 
         if (surface_id) |sid| return allocNoSurfaceError(ctx.allocator, snapshot, sid);
         try out.appendSlice(ctx.allocator, "No matching terminal surface.");
     }
-    return truncateOwned(ctx.allocator, ctx.settings, try out.toOwnedSlice(ctx.allocator));
+    return truncateTailOwned(ctx.allocator, ctx.settings, try out.toOwnedSlice(ctx.allocator));
 }
 
 fn terminalSelectTool(ctx: *ToolContext, surface_id: []const u8) ![]u8 {
@@ -1109,7 +1109,7 @@ fn sendControlKey(ctx: *const ToolContext, host: ToolHost, surface: ToolSurface,
         return std.fmt.allocPrint(ctx.allocator, "Sent {s}; failed to read terminal snapshot.", .{label});
     defer ctx.allocator.free(latest);
     const out = try std.fmt.allocPrint(ctx.allocator, "Sent {s} to terminal.\nLatest snapshot:\n{s}", .{ label, latest });
-    return truncateOwned(ctx.allocator, ctx.settings, out);
+    return truncateTailOwned(ctx.allocator, ctx.settings, out);
 }
 
 fn terminalReplExecTool(ctx: *ToolContext, surface_id: []const u8, repl_name: []const u8, code: []const u8, timeout_ms: u32) ![]u8 {
@@ -1201,7 +1201,7 @@ pub fn plainReplInputTool(ctx: *const ToolContext, host: ToolHost, surface: Tool
     }
 
     const latest = host.surfaceSnapshot(host.ctx, ctx.allocator, surface.ptr) catch return ctx.allocator.dupe(u8, "Input sent; failed to read terminal snapshot.");
-    return truncateOwned(ctx.allocator, ctx.settings, latest);
+    return truncateTailOwned(ctx.allocator, ctx.settings, latest);
 }
 
 fn replSnapshotLooksBusy(repl: ReplKind, snapshot: []const u8) bool {
@@ -1244,7 +1244,7 @@ fn allocAgentAppReplResult(
         .{ repl.label(), note, app.label(), state.label(), confidence },
     );
     try out.appendSlice(allocator, snapshot);
-    return truncateOwned(allocator, settings, try out.toOwnedSlice(allocator));
+    return truncateTailOwned(allocator, settings, try out.toOwnedSlice(allocator));
 }
 
 fn waitForAgentAppReplResult(ctx: *const ToolContext, host: ToolHost, surface: ToolSurface, repl: ReplKind, timeout_ms: u32) ![]u8 {
@@ -3788,4 +3788,52 @@ test "truncateTailOwned returns short text unchanged" {
     const out = try truncateTailOwned(a, settings, text);
     defer a.free(out);
     try std.testing.expectEqualStrings("small", out);
+}
+
+test "terminal_snapshot keeps the live screen tail when output exceeds the limit" {
+    const a = std.testing.allocator;
+    // A long screen whose only prompt marker is at the very bottom.
+    var big: std.ArrayListUnmanaged(u8) = .empty;
+    defer big.deinit(a);
+    var i: usize = 0;
+    while (i < 2000) : (i += 1) try big.appendSlice(a, "old scrollback line\n");
+    try big.appendSlice(a, "Do you want to proceed? PROMPT_AT_BOTTOM");
+
+    var host_ctx = ReplWaitTestHost.Ctx{ .busy_until = 0, .settled_text = big.items };
+    var dummy: u8 = 0;
+
+    const surfaces = try a.alloc(ToolSurface, 1);
+    surfaces[0] = .{
+        .id = @constCast("surface-claude"),
+        .title = @constCast("Claude Code"),
+        .cwd = @constCast("/home/xzg"),
+        .snapshot = @constCast(""),
+        .tab_index = 0,
+        .focused = true,
+        .is_ssh = false,
+        .is_wsl = false,
+        .agent_app = .claude_code,
+        .agent_state = .waiting_approval,
+        .agent_confidence = 90,
+        .ptr = @ptrCast(&host_ctx),
+    };
+    var ctx = ToolContext{
+        .allocator = a,
+        .ctx = &dummy,
+        .tool_host = ReplWaitTestHost.host(&host_ctx),
+        .tool_snapshot = .{ .surfaces = surfaces, .active_tab = 0 },
+        .settings = .{ .output_limit = 4096 },
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    // Free only the slice we allocated; the surface string fields are literals,
+    // so do NOT call snap.deinit (it would free static memory). The tool operates
+    // on a clone internally, so the literal-backed originals are never freed.
+    defer if (ctx.tool_snapshot) |snap| a.free(snap.surfaces);
+
+    const result = try terminalSnapshotTool(&ctx, @as(?[]const u8, "surface-claude"));
+    defer a.free(result);
+
+    try std.testing.expect(std.mem.indexOf(u8, result, "PROMPT_AT_BOTTOM") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "older output truncated") != null);
 }
