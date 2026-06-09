@@ -612,7 +612,9 @@ pub fn parseEfetchXml(arena: std.mem.Allocator, xml: []const u8) ![]Article {
         const pmid = std.mem.trim(u8, pmid_el.?.content, " \t\r\n");
         const title = try cleanText(arena, title_el.?.content);
         if (pmid.len == 0 or title.len == 0) continue;
-        const year = if (findElement(ax, "Year", 0)) |y| std.mem.trim(u8, y.content, " \t\r\n") else "";
+        const year = if (findElement(ax, "PubDate", 0)) |pd|
+            (if (findElement(pd.content, "Year", 0)) |y| std.mem.trim(u8, y.content, " \t\r\n") else "")
+        else ""; // scope to PubDate so DateCompleted/DateRevised <Year> are not picked up
         try list.append(arena, .{
             .pmid = try arena.dupe(u8, pmid),
             .title = title,
