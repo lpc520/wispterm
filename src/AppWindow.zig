@@ -11,6 +11,7 @@ const Config = @import("config.zig");
 const build_options = @import("build_options");
 const Surface = @import("Surface.zig");
 const SplitTree = @import("split_tree.zig");
+const PreviewPane = @import("preview_pane.zig");
 const renderer = @import("renderer.zig");
 const window_backend = @import("platform/window_backend.zig");
 const App = @import("App.zig");
@@ -2324,6 +2325,21 @@ pub fn activeCopilotSessionForInput() ?*ai_chat.Session {
     if (!aiCopilotVisible()) return null;
     const t = tab.activeTab() orelse return null;
     return t.copilot_session;
+}
+
+/// The preview pane that currently has split-tree focus, or null if the
+/// focused leaf is a terminal (or there is no active tab / the handle is
+/// stale). Used to route keyboard scroll/zoom to a focused preview leaf.
+pub fn focusedPreviewPane() ?*PreviewPane {
+    const t = tab.activeTab() orelse return null;
+    if (t.focused.idx() >= t.tree.nodes.len) return null;
+    return switch (t.tree.nodes[t.focused.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .preview => |p| p,
+            else => null,
+        },
+        .split => null,
+    };
 }
 
 /// Inserts `text` into a visible AI chat composer when a file is dropped at
@@ -6519,6 +6535,30 @@ fn runMainLoop(self: *AppWindow) !void {
                                     false,
                                 );
                                 if (is_focused) drawPaneFocusRing(rect, @floatFromInt(fb_height));
+
+                                // Alt-drag panel swap feedback for preview leaves,
+                                // mirroring the terminal branch. The highlight
+                                // overlays draw in panel-local coords, so switch to
+                                // this rect's viewport/projection first, then restore
+                                // the full-window viewport for the next leaf.
+                                const is_swap_target = input.g_panel_swap_active and
+                                    input.g_panel_swap_target != null and
+                                    rect.handle == input.g_panel_swap_target.?;
+                                const is_swap_source = input.g_panel_swap_active and
+                                    input.g_panel_swap_source != null and
+                                    rect.handle == input.g_panel_swap_source.?;
+                                if (is_swap_target or is_swap_source) {
+                                    const vp_y = fb_height - rect.y - rect.height;
+                                    gpu.state.setViewport(rect.x, vp_y, rect.width, rect.height);
+                                    gpu.gl_init.setProjection(@floatFromInt(rect.width), @floatFromInt(rect.height));
+                                    if (is_swap_target) {
+                                        overlays.renderSwapTargetHighlight(@floatFromInt(rect.width), @floatFromInt(rect.height));
+                                    } else {
+                                        overlays.renderUnfocusedOverlaySimple(@floatFromInt(rect.width), @floatFromInt(rect.height));
+                                    }
+                                    gpu.state.setViewport(0, 0, @intCast(fb_width), @intCast(fb_height));
+                                    gpu.gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
+                                }
                             },
                         }
                     }

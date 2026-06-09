@@ -1195,6 +1195,26 @@ fn handleChar(ev: platform_input.CharEvent) void {
             return;
         }
     }
+    // A focused image preview consumes +/=/- as zoom in/out. Only image previews
+    // claim these chars (markdown previews ignore them so they reach nothing),
+    // and only when such a preview holds focus — terminals are never affected.
+    if (AppWindow.focusedPreviewPane()) |p| {
+        if (p.kind == .image and !ev.ctrl and !ev.alt) {
+            const zoomed = switch (ev.codepoint) {
+                '+', '=' => p.zoomImageBySteps(1, true),
+                '-', '_' => p.zoomImageBySteps(1, false),
+                else => false,
+            };
+            if (zoomed) {
+                AppWindow.g_force_rebuild = true;
+                AppWindow.g_cells_valid = false;
+            }
+            switch (ev.codepoint) {
+                '+', '=', '-', '_' => return,
+                else => {},
+            }
+        }
+    }
     if (!AppWindow.isActiveTabTerminal()) return;
     // Skip chars when Alt is held without Ctrl — those are part of Alt+key
     // combos (e.g. Shift+Alt+4) and shouldn't produce text input.
@@ -1716,6 +1736,44 @@ fn handleKey(ev: platform_input.KeyEvent) void {
             if (isAiChatKey(ev)) {
                 AppWindow.resetCursorBlink();
                 chat.handleKeyWithWrapCols(key_event, aiCopilotInputWrapCols());
+                AppWindow.g_force_rebuild = true;
+                AppWindow.g_cells_valid = false;
+                return;
+            }
+        }
+    }
+
+    // A focused preview leaf consumes plain navigation keys for scroll/pan.
+    // Only engaged when a preview actually holds focus; otherwise this block is
+    // skipped entirely and terminal/copilot key handling is unchanged. Modified
+    // keys (ctrl/alt/super) are left for keybinds and the terminal.
+    if (AppWindow.focusedPreviewPane()) |p| {
+        if (!ev.ctrl and !ev.alt and !ev.super) {
+            var consumed = true;
+            switch (ev.key_code) {
+                platform_input.key_page_up => p.scrollBy(-360),
+                platform_input.key_page_down => p.scrollBy(360),
+                platform_input.key_up => if (p.kind == .image) {
+                    _ = p.panImageBy(0, 40);
+                } else p.scrollBy(-60),
+                platform_input.key_down => if (p.kind == .image) {
+                    _ = p.panImageBy(0, -40);
+                } else p.scrollBy(60),
+                platform_input.key_left => if (p.kind == .image) {
+                    _ = p.panImageBy(40, 0);
+                } else {
+                    consumed = false;
+                },
+                platform_input.key_right => if (p.kind == .image) {
+                    _ = p.panImageBy(-40, 0);
+                } else {
+                    consumed = false;
+                },
+                platform_input.key_home => p.scrollBy(-1_000_000),
+                platform_input.key_end => p.scrollBy(1_000_000),
+                else => consumed = false,
+            }
+            if (consumed) {
                 AppWindow.g_force_rebuild = true;
                 AppWindow.g_cells_valid = false;
                 return;
@@ -3773,6 +3831,25 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 return;
             }
 
+            // A click on a preview leaf focuses it (so keyboard/wheel scroll-zoom
+            // route there) and consumes the event — previews have no terminal
+            // grid to select into. Terminal leaves fall through to the surface
+            // focus + selection path below, so non-preview clicks are unchanged.
+            if (split_layout.paneAtPoint(ev.x, ev.y)) |hit| {
+                switch (hit.pane) {
+                    .preview => {
+                        const tb = AppWindow.activeTab() orelse return;
+                        if (tb.focused != hit.handle) {
+                            tb.focused = hit.handle;
+                            AppWindow.g_force_rebuild = true;
+                            AppWindow.g_cells_valid = false;
+                        }
+                        return;
+                    },
+                    .terminal => {},
+                }
+            }
+
             // Find which surface was clicked and focus it
             const clicked_surface = split_layout.surfaceAtPoint(@intFromFloat(xpos), @intFromFloat(ypos)) orelse AppWindow.activeSurface() orelse return;
 
@@ -4720,6 +4797,23 @@ fn handleMouseWheel(ev: platform_input.MouseWheelEvent) void {
                 AppWindow.g_force_rebuild = true;
                 return;
             }
+        }
+    }
+    // Wheel over a preview leaf scrolls/zooms that pane (mirroring the dock
+    // preview wheel logic above) and consumes the event. Terminal leaves fall
+    // through to the surface-scroll path below, so the default behavior is
+    // unchanged when the cursor is not over a preview.
+    if (split_layout.paneAtPoint(ev.xpos, ev.ypos)) |hit| {
+        if (hit.pane == .preview) {
+            const p = hit.pane.preview;
+            if (p.kind == .image) {
+                _ = p.zoomImageBySteps(mouseWheelUnits(ev.delta), ev.delta > 0);
+            } else {
+                const delta: f32 = -@as(f32, @floatFromInt(ev.delta)) * 72.0 / 120.0;
+                p.scrollBy(delta);
+            }
+            AppWindow.g_force_rebuild = true;
+            return;
         }
     }
     // Scroll the surface under the mouse cursor (like Ghostty), not the focused surface.
