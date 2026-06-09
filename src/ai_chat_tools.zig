@@ -1393,6 +1393,18 @@ fn doubleQuotedStringLiteral(allocator: std.mem.Allocator, text: []const u8) ![]
     return out.toOwnedSlice(allocator);
 }
 
+/// The trailing prompt of a terminal snapshot: the last non-empty line, trimmed
+/// of surrounding whitespace. Returns "" when no non-empty line exists. Used to
+/// learn a REPL's prompt dynamically so completion detection is language-agnostic.
+fn extractPromptLine(snapshot: []const u8) []const u8 {
+    var it = std.mem.splitBackwardsScalar(u8, snapshot, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len != 0) return trimmed;
+    }
+    return "";
+}
+
 const AGENT_START_PREFIX = "__WISPTERM_AGENT_START_";
 
 /// Whether the surface's most recent agent command is still running: find the
@@ -2893,6 +2905,14 @@ test "ai chat R string literal escapes code for REPL eval" {
     defer allocator.free(literal);
 
     try std.testing.expectEqualStrings("\"print(\\\"hello\\\")\\npath <- \\\"C:\\\\\\\\tmp\\\"\"", literal);
+}
+
+test "extractPromptLine returns the trailing non-empty prompt line" {
+    try std.testing.expectEqualStrings(">>>", extractPromptLine("hello\nworld\n>>> "));
+    try std.testing.expectEqualStrings("In [3]:", extractPromptLine("Out[2]: 5\n\nIn [3]: "));
+    try std.testing.expectEqualStrings("julia>", extractPromptLine("julia> "));
+    try std.testing.expectEqualStrings("", extractPromptLine("\n  \n"));
+    try std.testing.expectEqualStrings("", extractPromptLine(""));
 }
 
 test "ai chat REPL kind parses Python Codex and Claude Code aliases" {
