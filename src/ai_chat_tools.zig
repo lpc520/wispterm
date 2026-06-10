@@ -2461,6 +2461,7 @@ fn deniedResult(allocator: std.mem.Allocator, command: []const u8, reason: []con
 fn truncateOwned(allocator: std.mem.Allocator, settings: AgentSettings, text: []u8) ![]u8 {
     const limit = settings.output_limit;
     if (text.len <= limit) return text;
+    errdefer allocator.free(text); // owned: must not leak when allocPrint fails
     const truncated = try std.fmt.allocPrint(allocator, "{s}\n...[truncated to {d} bytes]", .{ text[0..limit], limit });
     allocator.free(text);
     return truncated;
@@ -2473,6 +2474,7 @@ fn truncateOwned(allocator: std.mem.Allocator, settings: AgentSettings, text: []
 fn truncateTailOwned(allocator: std.mem.Allocator, settings: AgentSettings, text: []u8) ![]u8 {
     const limit: usize = settings.output_limit;
     if (text.len <= limit) return text;
+    errdefer allocator.free(text); // owned: must not leak when allocPrint fails
     const tail = text[text.len - limit ..];
     const truncated = try std.fmt.allocPrint(allocator, "...[older output truncated to {d} bytes]\n{s}", .{ limit, tail });
     allocator.free(text);
@@ -3981,6 +3983,24 @@ test "truncateTailOwned returns short text unchanged" {
     const out = try truncateTailOwned(a, settings, text);
     defer a.free(out);
     try std.testing.expectEqualStrings("small", out);
+}
+
+test "truncate helpers free the owned input when the truncation alloc fails" {
+    // Both helpers take ownership of `text`; if the replacement allocPrint
+    // hits OOM they must free it. std.testing.allocator's leak check is the
+    // assertion here (allocation #0 = the input dupe, #1 = the failing
+    // allocPrint).
+    const settings = AgentSettings{ .output_limit = 4 };
+
+    var failing_tail = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const tail_alloc = failing_tail.allocator();
+    const tail_text = try tail_alloc.dupe(u8, "0123456789");
+    try std.testing.expectError(error.OutOfMemory, truncateTailOwned(tail_alloc, settings, tail_text));
+
+    var failing_head = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const head_alloc = failing_head.allocator();
+    const head_text = try head_alloc.dupe(u8, "0123456789");
+    try std.testing.expectError(error.OutOfMemory, truncateOwned(head_alloc, settings, head_text));
 }
 
 test "terminal_snapshot keeps the live screen tail when output exceeds the limit" {
