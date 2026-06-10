@@ -927,6 +927,14 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
         } else {
             log.warn("invalid wispterm-debug-memory: {s}", .{value});
         }
+    } else if (std.mem.eql(u8, key, "wispterm-debug-render")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"wispterm-debug-render" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"wispterm-debug-render" = false;
+        } else {
+            log.warn("invalid wispterm-debug-render: {s}", .{value});
+        }
     } else if (std.mem.eql(u8, key, "wispterm-d3d-present")) {
         if (std.mem.eql(u8, value, "true")) {
             self.@"wispterm-d3d-present" = true;
@@ -2165,4 +2173,18 @@ test "config: wispterm-d3d-present defaults on and parses false" {
     try std.testing.expect(cfg.@"wispterm-d3d-present");
     cfg.applyKeyValue(allocator, "wispterm-d3d-present", "maybe", ".");
     try std.testing.expect(cfg.@"wispterm-d3d-present");
+}
+
+test "config: wispterm-debug-render parses from a config line" {
+    // Regression: the field existed (read by main.zig to gate the render
+    // diagnostics log) but applyKeyValue had no branch for it, so the key
+    // users were asked to set in #88 was silently ignored.
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    try std.testing.expect(!cfg.@"wispterm-debug-render");
+    cfg.applyKeyValue(allocator, "wispterm-debug-render", "true", ".");
+    try std.testing.expect(cfg.@"wispterm-debug-render");
+    cfg.applyKeyValue(allocator, "wispterm-debug-render", "false", ".");
+    try std.testing.expect(!cfg.@"wispterm-debug-render");
 }
