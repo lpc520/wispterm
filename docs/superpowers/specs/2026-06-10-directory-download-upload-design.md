@@ -112,12 +112,15 @@ included for a given `recursive` flag) so the fast suite can assert it.
     (worker may still be running); cleanup waits for the real completion.
   - Uploads remain non-cancelable (out of scope; dst is remote-side).
 
-- **Folder download progress**: no code change needed. `observedTransferBytes`
-  → `localFileSize` opens the dst as a file; for a directory that open fails and
-  returns null, so the toast already falls back to "\<name\> - calculating…".
-  This is intentional — recursively walking the growing tree on every 500 ms
-  tick would be O(n) per tick for large folders, so we accept the indeterminate
-  readout for folders. File downloads keep their byte-rate readout unchanged.
+- **Folder download progress**: `observedTransferBytes` → `localFileSize` returns
+  null when the dst is a directory, so the toast shows "\<name\> - calculating…".
+  `localFileSize` `stat`s the opened dst and returns null for `.directory` (on
+  Windows opening a dir as a file already fails → null; on POSIX the open
+  succeeds and returns the inode size, so the explicit `stat` kind check is
+  required for consistent behavior across platforms). This is intentional —
+  recursively walking the growing tree on every 500 ms tick would be O(n) per
+  tick for large folders, so we accept the indeterminate readout for folders.
+  File downloads keep their byte-rate readout unchanged.
 
 ### 3. Folder picker — `src/platform/file_dialog*.zig`
 
