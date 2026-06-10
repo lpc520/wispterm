@@ -13,6 +13,7 @@ const windows = std.os.windows;
 const platform_input = @import("../platform/input_events.zig");
 const platform_window = @import("../platform/window.zig");
 const render_diagnostics = @import("../render_diagnostics.zig");
+const dx_present = @import("win32_dx_present.zig");
 
 // ============================================================================
 // Win32 API types
@@ -674,7 +675,21 @@ extern "opengl32" fn wglGetProcAddress(lpszProc: [*:0]const u8) callconv(.winapi
 var g_wgl_swap_interval: ?*const fn (c_int) callconv(.winapi) BOOL = null;
 var g_swap_interval_loaded: bool = false;
 
+/// Desired vsync interval, consumed by the DXGI flip-model presenter's
+/// `Present` call (wglSwapIntervalEXT only affects the GDI fallback path).
+var g_present_interval: c_int = 1;
+
+/// Config gate for the DXGI flip-model present path (`wispterm-d3d-present`,
+/// default on). Read once at window creation; the GDI SwapBuffers path is the
+/// automatic fallback whenever the presenter can't initialize or fails.
+var g_flip_present_enabled: bool = true;
+
+pub fn setFlipPresentEnabled(enabled: bool) void {
+    g_flip_present_enabled = enabled;
+}
+
 fn setSwapInterval(interval: c_int) void {
+    g_present_interval = interval;
     if (!g_swap_interval_loaded) {
         g_swap_interval_loaded = true;
         if (wglGetProcAddress("wglSwapIntervalEXT")) |p| {
@@ -822,6 +837,9 @@ pub const Window = struct {
     hwnd: HWND,
     hdc: HDC,
     hglrc: HGLRC,
+    /// DXGI flip-model presenter; null = legacy GDI SwapBuffers path (either
+    /// disabled by config or unavailable/failed on this machine).
+    dx: ?dx_present.Presenter = null,
     should_close: bool = false,
     close_requested: bool = false,
     width: i32 = 800,
@@ -1165,10 +1183,31 @@ pub const Window = struct {
             physical_width, physical_height, dpi, rect.right - rect.left, rect.bottom - rect.top,
         });
 
+        // Prefer a DXGI flip-model swapchain over GDI SwapBuffers: the legacy
+        // BLT present composites through the DWM redirection surface, which is
+        // what produced the cross-DPI / resize artifacts of #46/#47/#88 on
+        // Intel Arc and AMD iGPU drivers. Requires the GL context current.
+        const dx: ?dx_present.Presenter = if (g_flip_present_enabled)
+            dx_present.Presenter.init(hwnd, rect.right - rect.left, rect.bottom - rect.top) catch |err| blk: {
+                render_diagnostics.log("dx-present unavailable ({s}) — using GDI SwapBuffers", .{@errorName(err)});
+                std.debug.print("Win32: DXGI flip present unavailable ({s}), using SwapBuffers\n", .{@errorName(err)});
+                break :blk null;
+            }
+        else
+            null;
+        if (dx != null) {
+            render_diagnostics.log(
+                "dx-present active: flip-model swapchain {}x{}",
+                .{ rect.right - rect.left, rect.bottom - rect.top },
+            );
+            std.debug.print("Win32: presenting via DXGI flip-model swapchain\n", .{});
+        }
+
         var window = Window{
             .hwnd = hwnd,
             .hdc = hdc,
             .hglrc = hglrc,
+            .dx = dx,
             .width = rect.right - rect.left,
             .height = rect.bottom - rect.top,
             .dpi = dpi,
@@ -1197,6 +1236,11 @@ pub const Window = struct {
 
     pub fn deinit(self: *Window) void {
         platform_window.unregisterEventWindow(self.hwnd);
+        // Interop teardown needs the GL context still current.
+        if (self.dx) |*dx| {
+            dx.deinit();
+            self.dx = null;
+        }
         _ = wglMakeCurrent(self.hdc, null);
         _ = wglDeleteContext(self.hglrc);
         _ = DestroyWindow(self.hwnd);
@@ -1207,6 +1251,16 @@ pub const Window = struct {
     }
 
     pub fn swapBuffers(self: *Window) void {
+        if (self.dx) |*dx| {
+            const size = self.getFramebufferSize();
+            if (dx.presentFrame(size.width, size.height, g_present_interval)) return;
+            // The presenter latched a failure; tear it down and finish the
+            // session on the GDI path (this frame included).
+            render_diagnostics.log("dx-present failed mid-session — reverting to GDI SwapBuffers", .{});
+            std.debug.print("Win32: DXGI present failed, reverting to SwapBuffers\n", .{});
+            dx.deinit();
+            self.dx = null;
+        }
         _ = SwapBuffers(self.hdc);
     }
 

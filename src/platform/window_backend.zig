@@ -83,6 +83,12 @@ pub const EventHandlers = struct {
 };
 
 pub const setGlobalWindow = impl.setGlobalWindow;
+
+/// Windows-only config gate for the DXGI flip-model present path
+/// (`wispterm-d3d-present`). No-op on backends without the seam.
+pub fn setFlipPresentEnabled(enabled: bool) void {
+    if (comptime @hasDecl(impl, "setFlipPresentEnabled")) impl.setFlipPresentEnabled(enabled);
+}
 /// Renderer surface seam (host → GPU backend). This is OpenGL-shaped: the host
 /// supplies a GL proc-address loader, which `gpu.Context.init` consumes. The
 /// seam is per-backend by design — a macOS/AppKit host pairs with the Metal
