@@ -52,9 +52,15 @@ flow through the same machinery.
 2. **Folder upload trigger: `Shift+U`.** Keep `U` = upload file. `Shift+U` opens
    a folder picker and uploads the chosen directory recursively. Mirrors the
    existing `N` / `Shift+N` (new file / new dir) convention.
-3. **Cancel cleanup: delete the partial.** When a download is cancelled, remove
-   the partially-transferred destination (half file, or incomplete folder tree
-   under `Downloads/<name>`). The dst is always a fresh path, so deletion is safe.
+3. **Cancel cleanup: delete the partial — only if this transfer created it.**
+   When a download is cancelled, remove the partially-transferred destination
+   (half file, or incomplete folder tree under `Downloads/<name>`). The dst is
+   NOT always fresh — `scp -r` nests into an existing same-name directory, and
+   a file dst may be an earlier completed download — so dst existence is
+   snapshotted before scp starts and a pre-existing dst is never deleted.
+   Cleanup runs on the transfer worker thread (before `done` is stored) so a
+   large partial tree never stalls the UI and the next queued transfer cannot
+   race it.
 
 ## Design
 
