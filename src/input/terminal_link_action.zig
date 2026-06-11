@@ -58,9 +58,16 @@ pub fn interactiveUnderlineTokenKind(action: TerminalPathClickAction, text: []co
 pub fn looksLikeDownloadPath(text: []const u8) bool {
     if (text.len == 0 or looksLikeUrl(text)) return false;
     if (looksLikePreviewPath(text)) return true;
+    if (text[0] == '-') return false;
 
-    const dot_idx = std.mem.lastIndexOfScalar(u8, text, '.') orelse return false;
-    return dot_idx > 0 and dot_idx + 1 < text.len;
+    if (std.mem.lastIndexOfScalar(u8, text, '.')) |dot_idx| {
+        if (dot_idx > 0 and dot_idx + 1 < text.len) return true;
+    }
+
+    // In SSH download mode the exact remote type is only known after the click,
+    // when input.zig runs `test -d/-e` over SSH. Keep hover permissive enough
+    // for extensionless directory names such as `results` or `build`.
+    return true;
 }
 
 pub fn looksLikeUrl(text: []const u8) bool {
@@ -132,6 +139,13 @@ test "interactive underline includes plain filenames for ssh download hover" {
     try std.testing.expectEqual(
         InteractiveUnderlineTokenKind.preview_path,
         interactiveUnderlineTokenKind(.download_ssh_file, "xx.h5ad"),
+    );
+}
+
+test "interactive underline includes bare directory names for ssh download hover" {
+    try std.testing.expectEqual(
+        InteractiveUnderlineTokenKind.preview_path,
+        interactiveUnderlineTokenKind(.download_ssh_file, "results"),
     );
 }
 

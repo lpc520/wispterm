@@ -13,6 +13,7 @@ const app_metadata = @import("app_metadata.zig");
 const platform_console = @import("platform/console.zig");
 const font_backend = @import("platform/font_backend.zig");
 const render_diagnostics = @import("render_diagnostics.zig");
+const window_backend = @import("platform/window_backend.zig");
 const i18n = @import("i18n.zig");
 const ai_chat = @import("ai_chat.zig");
 
@@ -168,14 +169,21 @@ pub fn main() !void {
     // exists, so the very first WM_SIZE/WM_DPICHANGED events are captured.
     render_diagnostics.enableFromConfig(cfg.@"wispterm-debug-render");
 
+    // Present-path selection must be decided before the first window is
+    // created (the presenter is built right after the GL context).
+    window_backend.setFlipPresentEnabled(cfg.@"wispterm-d3d-present");
+
     // Create the App and run (first window on main thread, spawned windows on separate threads)
     var app = try App.init(allocator, cfg);
     defer ai_chat.deinitAccessRules();
     defer app.deinit();
     ai_chat.loadAccessRules(allocator);
 
-    // App now lives at a stable address; start the WeChat direct bridge (no-op
-    // unless weixin-direct-enabled is set).
+    // App now lives at a stable address; start app-owned background services
+    // before opening the first window.
+    app.startPortForwarding(&cfg);
+
+    // Start the WeChat direct bridge (no-op unless weixin-direct-enabled is set).
     app.startWeixin(&cfg);
 
     try app.run();

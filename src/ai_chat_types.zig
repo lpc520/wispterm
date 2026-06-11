@@ -25,6 +25,9 @@ pub const AgentSettings = struct {
     /// Master switch for the Copilot long-term memory system (config
     /// `ai-memory-enabled`). Gates index injection and memory tool advertisement.
     memory_enabled: bool = false,
+    /// When true, the Copilot may append a "distill this into a skill?" prompt
+    /// after tool-heavy turns (config `ai-distill-suggest`). Off by default.
+    distill_suggest_enabled: bool = false,
 };
 
 // AgentPermission lives in ai_agent_config.zig (extracted on main so config.zig
@@ -143,8 +146,8 @@ pub const SavedSshProfile = struct {
 pub const ToolHost = struct {
     ctx: *anyopaque,
     collectSnapshot: *const fn (*anyopaque, std.mem.Allocator) anyerror!ToolSnapshot,
-    surfaceSnapshot: *const fn (*anyopaque, std.mem.Allocator, *anyopaque) anyerror![]u8,
-    writeSurface: *const fn (*anyopaque, *anyopaque, []const u8) bool,
+    surfaceSnapshot: *const fn (*anyopaque, std.mem.Allocator, []const u8, *anyopaque) anyerror![]u8,
+    writeSurface: *const fn (*anyopaque, []const u8, *anyopaque, []const u8) bool,
     spawnTab: *const fn (*anyopaque, std.mem.Allocator, []const u8, ?[]const u8) anyerror!ToolSurface,
     closeTab: *const fn (*anyopaque, std.mem.Allocator, ?usize, ?[]const u8, ?[]const u8) anyerror!ToolClosedTab,
     saveSshProfile: *const fn (*anyopaque, std.mem.Allocator, SshProfileSaveArgs) anyerror!SavedSshProfile,

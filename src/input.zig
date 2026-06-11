@@ -26,6 +26,7 @@ const render_diagnostics = @import("render_diagnostics.zig");
 const link_open = @import("link_open.zig");
 const platform_dirs = @import("platform/dirs.zig");
 const platform_local_path = @import("platform/local_path.zig");
+const platform_remote_file = @import("platform/remote_file.zig");
 const platform_open_url = @import("platform/open_url.zig");
 const platform_file_dialog = @import("platform/file_dialog.zig");
 const input_shortcuts = @import("input_shortcuts.zig");
@@ -55,6 +56,7 @@ const mouse_report = @import("input/mouse_report.zig");
 const close_confirm = @import("close_confirm.zig");
 const jupyter_picker = @import("jupyter_picker.zig");
 const jupyter_detect = @import("jupyter_detect.zig");
+const scp = @import("scp.zig");
 const writeToPty = clipboard.writeToPty;
 pub const copyTextToClipboard = clipboard.copyTextToClipboard;
 const activeTerminalSelectionExists = clipboard.activeTerminalSelectionExists;
@@ -152,6 +154,22 @@ test "input: browser toolbar has a refresh action entrypoint" {
 // incidental wake (cursor blink ~530ms / mouse move), which felt like lag ("不跟手").
 const arrow_down_event = platform_input.KeyEvent{
     .key_code = platform_input.key_down,
+    .ctrl = false,
+    .shift = false,
+    .alt = false,
+    .super = false,
+};
+
+const arrow_left_event = platform_input.KeyEvent{
+    .key_code = platform_input.key_left,
+    .ctrl = false,
+    .shift = false,
+    .alt = false,
+    .super = false,
+};
+
+const arrow_right_event = platform_input.KeyEvent{
+    .key_code = platform_input.key_right,
     .ctrl = false,
     .shift = false,
     .alt = false,
@@ -258,6 +276,145 @@ test "input: settings page arrow navigation requests a repaint" {
 
     try std.testing.expect(AppWindow.g_force_rebuild);
     try std.testing.expect(!AppWindow.g_cells_valid);
+}
+
+test "input: port forwarding arrow navigation requests a repaint" {
+    const allocator = std.testing.allocator;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    if (!tab.spawnPortForwardingTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > previous_count) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+        active_tab_state.g_active_tab = previous_active;
+    }
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(arrow_down_event);
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+}
+
+test "input: port forwarding form left/right arrows toggle Direction and request a repaint" {
+    const allocator = std.testing.allocator;
+    AppWindow.setSshHostsContentForTest("");
+    defer AppWindow.setSshHostsContentForTest(null);
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    if (!tab.spawnPortForwardingTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > previous_count) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+        active_tab_state.g_active_tab = previous_active;
+    }
+
+    try std.testing.expect(AppWindow.portForwardingOpenNew());
+    handleKey(arrow_down_event); // Name -> Profile
+    handleKey(arrow_down_event); // Profile -> Direction
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(arrow_right_event);
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+    {
+        const session = AppWindow.activePortForwarding() orelse return error.ExpectedPortForwardingTab;
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        const form = session.model.form() orelse return error.ExpectedPortForwardingForm;
+        try std.testing.expect(form.rule.direction == .local);
+    }
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(arrow_left_event);
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+    const session = AppWindow.activePortForwarding() orelse return error.ExpectedPortForwardingTab;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    const form = session.model.form() orelse return error.ExpectedPortForwardingForm;
+    try std.testing.expect(form.rule.direction == .reverse);
+}
+
+test "input: port forwarding form letter keys remain text input" {
+    const allocator = std.testing.allocator;
+    AppWindow.setSshHostsContentForTest("");
+    defer AppWindow.setSshHostsContentForTest(null);
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    if (!tab.spawnPortForwardingTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > previous_count) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+        active_tab_state.g_active_tab = previous_active;
+    }
+
+    try std.testing.expect(AppWindow.portForwardingOpenNew());
+    handleChar(.{ .codepoint = 'P' });
+    handleKey(.{ .key_code = 0x4E, .ctrl = false, .shift = false, .alt = false });
+    handleChar(.{ .codepoint = 'n' });
+
+    const session = AppWindow.activePortForwarding() orelse return error.ExpectedPortForwardingTab;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    const form = session.model.form() orelse return error.ExpectedPortForwardingForm;
+    try std.testing.expectEqualStrings("Local proxyPn", form.rule.name());
+}
+
+test "input: port forwarding new command suppresses its follow-up char event" {
+    const allocator = std.testing.allocator;
+    AppWindow.setSshHostsContentForTest("");
+    defer AppWindow.setSshHostsContentForTest(null);
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    if (!tab.spawnPortForwardingTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > previous_count) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+        active_tab_state.g_active_tab = previous_active;
+    }
+
+    handleKey(.{ .key_code = 0x4E, .ctrl = false, .shift = false, .alt = false });
+    handleChar(.{ .codepoint = 'n' });
+
+    const session = AppWindow.activePortForwarding() orelse return error.ExpectedPortForwardingTab;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    const form = session.model.form() orelse return error.ExpectedPortForwardingForm;
+    try std.testing.expectEqualStrings("Local proxy", form.rule.name());
 }
 
 // Ties the fix end-to-end: a consumed overlay key must make the next render-gate
@@ -389,6 +546,7 @@ threadlocal var g_ai_transcript_selecting: bool = false;
 threadlocal var g_ai_transcript_select_chat: ?*AppWindow.ai_chat.Session = null;
 threadlocal var g_ai_transcript_select_auto_copy: bool = false;
 threadlocal var g_ai_history_suppress_refresh_char: bool = false;
+threadlocal var g_port_forwarding_suppress_command_char: ?u21 = null;
 pub threadlocal var g_sidebar_resize_hover: bool = false; // Mouse is over the sidebar resize edge
 pub threadlocal var g_sidebar_resize_dragging: bool = false; // Currently dragging the sidebar edge
 pub threadlocal var g_explorer_resize_hover: bool = false; // Mouse is over the file explorer resize edge
@@ -1151,6 +1309,17 @@ fn handleChar(ev: platform_input.CharEvent) void {
         }
         return;
     }
+    if (AppWindow.activePortForwarding() != null) {
+        if (g_port_forwarding_suppress_command_char) |codepoint| {
+            const suppress = !ev.ctrl and !ev.alt and !ev.super and ev.codepoint == codepoint;
+            g_port_forwarding_suppress_command_char = null;
+            if (suppress) return;
+        }
+        if (!ev.ctrl and !ev.alt and !ev.super) {
+            _ = AppWindow.portForwardingInsertChar(ev.codepoint);
+        }
+        return;
+    }
     // Skill Center has no text input; swallow character input so the rescan
     // hotkey ('r') and other keys never leak to the terminal/copilot.
     if (AppWindow.activeSkillCenter() != null) {
@@ -1634,6 +1803,89 @@ fn handleKey(ev: platform_input.KeyEvent) void {
             },
             0x52 => if (plain and !ev.shift) {
                 g_ai_history_suppress_refresh_char = AppWindow.aiHistoryScanLocalNow();
+                return;
+            },
+            else => {},
+        }
+        return;
+    }
+
+    if (AppWindow.activePortForwarding() != null) {
+        const plain = !ev.ctrl and !ev.alt and !ev.super;
+        const overlay_kind = AppWindow.portForwardingOverlayKind() orelse .none;
+        const form_active = overlay_kind == .form;
+        const overlay_active = overlay_kind != .none;
+        switch (ev.key_code) {
+            platform_input.key_up => {
+                if (form_active) {
+                    _ = AppWindow.portForwardingFormMove(-1);
+                } else if (!overlay_active) {
+                    _ = AppWindow.portForwardingMove(-1);
+                }
+                return;
+            },
+            platform_input.key_down => {
+                if (form_active) {
+                    _ = AppWindow.portForwardingFormMove(1);
+                } else if (!overlay_active) {
+                    _ = AppWindow.portForwardingMove(1);
+                }
+                return;
+            },
+            platform_input.key_left => {
+                if (form_active) _ = AppWindow.portForwardingFormAdjust(-1);
+                return;
+            },
+            platform_input.key_right => {
+                if (form_active) _ = AppWindow.portForwardingFormAdjust(1);
+                return;
+            },
+            platform_input.key_tab => {
+                if (form_active) _ = AppWindow.portForwardingFormMove(1);
+                return;
+            },
+            platform_input.key_enter => {
+                if (overlay_active) _ = AppWindow.portForwardingConfirmOrApply();
+                return;
+            },
+            platform_input.key_escape => {
+                _ = AppWindow.portForwardingCancelOrClose();
+                return;
+            },
+            platform_input.key_backspace => {
+                if (form_active) _ = AppWindow.portForwardingBackspace();
+                return;
+            },
+            platform_input.key_space => if (plain and !ev.shift) {
+                if (form_active) {
+                    _ = AppWindow.portForwardingFormAdjust(1);
+                } else if (!overlay_active) {
+                    _ = AppWindow.portForwardingToggleSelected();
+                }
+                return;
+            },
+            0x4E => if (plain and !ev.shift) {
+                if (!overlay_active and AppWindow.portForwardingOpenNew()) {
+                    g_port_forwarding_suppress_command_char = 'n';
+                }
+                return;
+            },
+            0x45 => if (plain and !ev.shift) {
+                if (!overlay_active and AppWindow.portForwardingOpenEdit()) {
+                    g_port_forwarding_suppress_command_char = 'e';
+                }
+                return;
+            },
+            0x44 => if (plain and !ev.shift) {
+                if (!overlay_active) _ = AppWindow.portForwardingOpenDeleteConfirm();
+                return;
+            },
+            0x52 => if (plain and !ev.shift) {
+                if (!overlay_active) _ = AppWindow.portForwardingRestartSelected();
+                return;
+            },
+            0x41 => if (plain and !ev.shift) {
+                if (!overlay_active) _ = AppWindow.portForwardingToggleAutoStart();
                 return;
             },
             else => {},
@@ -2296,12 +2548,14 @@ fn handleFileExplorerKey(ev: platform_input.KeyEvent) bool {
             }
             return false;
         },
-        0x55 => { // 'U' key = upload local file to remote
-            if (!ev.ctrl and !ev.alt and !ev.shift and !ev.super) {
-                if (file_explorer.g_mode == .remote) {
+        0x55 => { // 'U' = upload file; Shift+U = upload folder
+            if (file_explorer.g_mode == .remote and !ev.ctrl and !ev.alt and !ev.super) {
+                if (ev.shift) {
+                    openFolderDialogAndUpload();
+                } else {
                     openFileDialogAndUpload();
-                    return true;
                 }
+                return true;
             }
             return false;
         },
@@ -2369,6 +2623,23 @@ fn openFileDialogAndUpload() void {
     defer allocator.free(path);
 
     file_explorer.uploadFile(path);
+}
+
+fn openFolderDialogAndUpload() void {
+    const allocator = AppWindow.g_allocator orelse return;
+    const filters = [_]platform_file_dialog.Filter{.{ .name = "All Files", .pattern = "*.*" }};
+    const owner: platform_file_dialog.Owner = if (AppWindow.currentNativeHandleBits()) |handle_bits|
+        platform_file_dialog.windowOwner(handle_bits)
+    else
+        .{};
+    const path = platform_file_dialog.pickFolder(allocator, .{
+        .owner = owner,
+        .title = "Upload folder to remote",
+        .filters = &filters,
+    }) orelse return;
+    defer allocator.free(path);
+
+    file_explorer.uploadFolder(path);
 }
 
 fn handleFileExplorerPress(xpos: f64, ypos: f64, ctrl: bool, shift: bool, alt: bool, super: bool) void {
@@ -3069,6 +3340,37 @@ fn openPreviewPanelForCell(surface: *Surface, cell_pos: CellPos, shift: bool) bo
     return true;
 }
 
+fn buildRemotePathKindCommand(buf: []u8, remote_path: []const u8) ?[]const u8 {
+    var path_expr_buf: [1024]u8 = undefined;
+    const path_expr = platform_remote_file.shellPathExpr(&path_expr_buf, remote_path) orelse return null;
+    return std.fmt.bufPrint(
+        buf,
+        "if test -d {s}; then printf d; elif test -e {s}; then printf f; else exit 1; fi",
+        .{ path_expr, path_expr },
+    ) catch null;
+}
+
+fn remotePathIsDirectoryForDownload(allocator: std.mem.Allocator, conn: *const @import("ssh_connection.zig").SshConnection, remote_path: []const u8) ?bool {
+    var cmd_buf: [2300]u8 = undefined;
+    const cmd = buildRemotePathKindCommand(cmd_buf[0..], remote_path) orelse return null;
+    const output = scp.sshExecCapped(allocator, conn, cmd, 8) orelse return null;
+    defer allocator.free(output);
+
+    const trimmed = std.mem.trim(u8, output, " \t\r\n");
+    if (std.mem.eql(u8, trimmed, "d")) return true;
+    if (std.mem.eql(u8, trimmed, "f")) return false;
+    return null;
+}
+
+test "input: remote download path kind command shell-quotes paths" {
+    var buf: [2300]u8 = undefined;
+    const cmd = buildRemotePathKindCommand(buf[0..], "/tmp/it's here") orelse return error.CommandTooLong;
+    try std.testing.expectEqualStrings(
+        "if test -d '/tmp/it'\\''s here'; then printf d; elif test -e '/tmp/it'\\''s here'; then printf f; else exit 1; fi",
+        cmd,
+    );
+}
+
 fn downloadTerminalFileAtCell(surface: *Surface, cell_pos: CellPos) bool {
     if (surface.launch_kind != .ssh) return false;
     const conn = surface.ssh_connection orelse return false;
@@ -3093,6 +3395,7 @@ fn downloadTerminalFileAtCell(surface: *Surface, cell_pos: CellPos) bool {
 
     const name = basenameForPreview(resolved_path);
     if (name.len == 0) return false;
+    const is_dir = remotePathIsDirectoryForDownload(allocator, &conn, resolved_path) orelse false;
 
     var dl_buf: [260]u8 = undefined;
     const dl_path = getDownloadsFolder(&dl_buf);
@@ -3107,7 +3410,7 @@ fn downloadTerminalFileAtCell(surface: *Surface, cell_pos: CellPos) bool {
         return true;
     };
 
-    _ = file_explorer.downloadRemoteFileToPath(resolved_path, dst, name, &conn);
+    _ = file_explorer.downloadRemotePathToPath(resolved_path, dst, name, &conn, is_dir);
     return true;
 }
 

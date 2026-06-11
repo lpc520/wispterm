@@ -37,6 +37,7 @@ test {
     _ = @import("command_palette_model.zig");
     _ = @import("command_center_state.zig");
     _ = @import("platform/window_state_codec.zig");
+    _ = @import("platform/dxgi_core.zig");
     _ = @import("whats_new_gate.zig");
     _ = @import("startup_tabs.zig");
     _ = @import("config.zig");
@@ -45,12 +46,18 @@ test {
     _ = @import("agent_file_edit.zig");
     _ = @import("agent_file_copy.zig");
     _ = @import("ssh_connection.zig");
+    _ = @import("port_forward_rule.zig");
+    _ = @import("ssh_profile_store.zig");
+    _ = @import("port_forward_manager.zig");
+    _ = @import("port_forwarding.zig");
     _ = @import("openssh_config_import.zig");
     _ = @import("apprt/window_drag_region.zig");
     _ = @import("apprt/window_registry.zig");
     _ = @import("appwindow/active_tab.zig");
     _ = @import("appwindow/frame_latency.zig");
     _ = @import("scp.zig");
+    _ = @import("surface_registry.zig");
+    _ = @import("png_dimensions.zig");
     _ = @import("file_backend.zig");
     _ = @import("file_explorer.zig");
     _ = @import("i18n.zig");
@@ -59,8 +66,10 @@ test {
     _ = @import("ai_chat_input_text.zig");
     _ = @import("ai_chat_composer.zig");
     _ = @import("web_search.zig");
+    _ = @import("agent_prompt_answer.zig");
     _ = @import("web_read.zig");
     _ = @import("web_read_cache.zig");
+    _ = @import("pubmed.zig");
     _ = @import("ai_loop_schedule.zig");
     _ = @import("ai_skill_distill.zig");
     _ = @import("ai_history_types.zig");
@@ -75,6 +84,7 @@ test {
     _ = @import("skill_inventory_cache.zig");
     _ = @import("skill_center.zig");
     _ = @import("renderer/skill_center_renderer.zig");
+    _ = @import("renderer/port_forwarding_renderer.zig");
     _ = @import("skill_pairing.zig");
     _ = @import("skill_transfer_cmd.zig");
     _ = @import("skill_transfer.zig");
@@ -86,6 +96,7 @@ test {
     _ = @import("ssh_prompt.zig");
     _ = @import("selection_unit.zig");
     _ = @import("scrollbar_model.zig");
+    _ = @import("resize_gate.zig");
     _ = @import("preview_token.zig");
     _ = @import("ime_caret.zig");
     _ = @import("sync_output.zig");

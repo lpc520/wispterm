@@ -298,6 +298,11 @@ theme: ?[]const u8 = null,
 /// memory_save/memory_recall/memory_delete tools are advertised to the model.
 @"ai-memory-enabled": bool = true,
 
+/// When true, the Copilot appends a "This task looks reusable. Distill it into
+/// a skill?" prompt after tool-heavy turns. Off by default so the suggestion
+/// never appears unless the user opts in (see settings page / issue #184).
+@"ai-distill-suggest": bool = false,
+
 /// Agent command permission mode: ask, auto, or full.
 @"ai-agent-permission": ai_agent_config.AgentPermission = .confirm,
 
@@ -376,6 +381,13 @@ language: i18n.LanguageSetting = .auto,
 /// the `WISPTERM_RENDER_DIAGNOSTICS=1` env var, but survives restarts and needs
 /// no shell setup — intended for users helping debug resize/DPI render glitches.
 @"wispterm-debug-render": bool = false,
+/// Present frames through a DXGI flip-model swapchain instead of GDI
+/// SwapBuffers (Windows only). The legacy BLT present goes through the DWM
+/// redirection surface, which on some iGPU drivers (Intel Arc, AMD) produces
+/// ghosting/black regions on cross-DPI drags and resizes (#46/#47/#88). Set to
+/// false to force the legacy path; machines where DXGI/interop is unavailable
+/// fall back automatically. Read at startup.
+@"wispterm-d3d-present": bool = true,
 
 // ============================================================================
 // Split pane configuration
@@ -784,6 +796,14 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
         } else {
             log.warn("invalid ai-memory-enabled: {s}", .{value});
         }
+    } else if (std.mem.eql(u8, key, "ai-distill-suggest")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"ai-distill-suggest" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"ai-distill-suggest" = false;
+        } else {
+            log.warn("invalid ai-distill-suggest: {s}", .{value});
+        }
     } else if (std.mem.eql(u8, key, "right-click-action")) {
         if (RightClickAction.parse(value)) |action| {
             self.@"right-click-action" = action;
@@ -906,6 +926,22 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
             self.@"wispterm-debug-memory" = false;
         } else {
             log.warn("invalid wispterm-debug-memory: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "wispterm-debug-render")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"wispterm-debug-render" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"wispterm-debug-render" = false;
+        } else {
+            log.warn("invalid wispterm-debug-render: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "wispterm-d3d-present")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"wispterm-d3d-present" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"wispterm-d3d-present" = false;
+        } else {
+            log.warn("invalid wispterm-d3d-present: {s}", .{value});
         }
     } else if (std.mem.eql(u8, key, "unfocused-split-opacity")) {
         if (std.fmt.parseFloat(f32, value)) |opacity| {
@@ -1551,6 +1587,7 @@ pub const settings_reset_keys = [_][]const u8{
     "weixin-direct-enabled",
     "language",
     "restore-tabs-on-startup",
+    "ai-distill-suggest",
 };
 
 /// Revert every settings-page option to its built-in default by removing its
@@ -1662,6 +1699,7 @@ const default_config_template =
     \\# ai-agent-command-timeout-ms = 60000
     \\# ai-agent-output-limit = 16384
     \\# ai-agent-working-dir =          # default dir for downloads/clones (empty = unset)
+    \\# ai-distill-suggest = false      # auto-suggest distilling reusable tasks into a skill
     \\
     \\# Jina API key — used by $websearch / websearch and $webread / webread
     \\# (optional for $webread: r.jina.ai reads anonymously)
@@ -2106,4 +2144,47 @@ test "ai-memory-enabled parses true/false" {
     try std.testing.expect(!cfg.@"ai-memory-enabled");
     cfg.applyKeyValue(allocator, "ai-memory-enabled", "true", ".");
     try std.testing.expect(cfg.@"ai-memory-enabled");
+}
+
+test "ai-distill-suggest parses true/false and defaults off" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    // default is off: the Copilot does not auto-suggest distilling skills
+    try std.testing.expect(!cfg.@"ai-distill-suggest");
+    cfg.applyKeyValue(allocator, "ai-distill-suggest", "true", ".");
+    try std.testing.expect(cfg.@"ai-distill-suggest");
+    cfg.applyKeyValue(allocator, "ai-distill-suggest", "false", ".");
+    try std.testing.expect(!cfg.@"ai-distill-suggest");
+    // unknown value leaves it unchanged (still false)
+    cfg.applyKeyValue(allocator, "ai-distill-suggest", "maybe", ".");
+    try std.testing.expect(!cfg.@"ai-distill-suggest");
+}
+
+test "config: wispterm-d3d-present defaults on and parses false" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    // default on: flip-model present is the primary path, GDI is the fallback
+    try std.testing.expect(cfg.@"wispterm-d3d-present");
+    cfg.applyKeyValue(allocator, "wispterm-d3d-present", "false", ".");
+    try std.testing.expect(!cfg.@"wispterm-d3d-present");
+    cfg.applyKeyValue(allocator, "wispterm-d3d-present", "true", ".");
+    try std.testing.expect(cfg.@"wispterm-d3d-present");
+    cfg.applyKeyValue(allocator, "wispterm-d3d-present", "maybe", ".");
+    try std.testing.expect(cfg.@"wispterm-d3d-present");
+}
+
+test "config: wispterm-debug-render parses from a config line" {
+    // Regression: the field existed (read by main.zig to gate the render
+    // diagnostics log) but applyKeyValue had no branch for it, so the key
+    // users were asked to set in #88 was silently ignored.
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    try std.testing.expect(!cfg.@"wispterm-debug-render");
+    cfg.applyKeyValue(allocator, "wispterm-debug-render", "true", ".");
+    try std.testing.expect(cfg.@"wispterm-debug-render");
+    cfg.applyKeyValue(allocator, "wispterm-debug-render", "false", ".");
+    try std.testing.expect(!cfg.@"wispterm-debug-render");
 }
