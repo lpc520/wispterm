@@ -1207,6 +1207,16 @@ fn localPathExists(path: []const u8) bool {
     return true;
 }
 
+fn localPathIsDirectory(path: []const u8) bool {
+    if (path.len == 0) return false;
+    var dir = if (std.fs.path.isAbsolute(path))
+        std.fs.openDirAbsolute(path, .{}) catch return false
+    else
+        std.fs.cwd().openDir(path, .{}) catch return false;
+    dir.close();
+    return true;
+}
+
 /// Remove a partially-transferred download destination — a half-written file or
 /// an incomplete folder tree. Best-effort: any error (e.g. already gone) is
 /// ignored.
@@ -1597,7 +1607,19 @@ pub fn latestTransferNotification() ?TransferNotification {
 /// Choose the transfer function for a download based on whether the selected
 /// entry is a directory (recursive `scp -r`) or a regular file.
 fn pickDownloadTransferFn(is_dir: bool) TransferFn {
-    return if (is_dir) scp.transferDirWithControl else scp.transferWithControl;
+    return pickDownloadTransferFnWith(is_dir, scp.transferWithControl, scp.transferDirWithControl);
+}
+
+fn pickDownloadTransferFnWith(is_dir: bool, file_transfer_fn: TransferFn, dir_transfer_fn: TransferFn) TransferFn {
+    return if (is_dir) dir_transfer_fn else file_transfer_fn;
+}
+
+fn pickUploadTransferFn(local_path: []const u8) TransferFn {
+    return pickUploadTransferFnWith(local_path, scp.transferWithControl, scp.transferDirWithControl);
+}
+
+fn pickUploadTransferFnWith(local_path: []const u8, file_transfer_fn: TransferFn, dir_transfer_fn: TransferFn) TransferFn {
+    return if (localPathIsDirectory(local_path)) dir_transfer_fn else file_transfer_fn;
 }
 
 /// Remote entry names come from `ls -1p` output, where `\` is a legal file
@@ -1653,7 +1675,7 @@ pub fn uploadFile(local_path: []const u8) void {
 
     const filename = platform_local_path.basename(local_path);
 
-    _ = startTransferJob(.upload, &g_ssh_conn, local_path, dst, filename, scp.transferWithControl);
+    _ = startTransferJob(.upload, &g_ssh_conn, local_path, dst, filename, pickUploadTransferFn(local_path));
 }
 
 /// Upload a local folder (recursively) to the current remote directory.
@@ -1672,11 +1694,29 @@ pub fn uploadFolder(local_path: []const u8) void {
 }
 
 pub fn uploadLocalFileToRemoteSpec(local_path: []const u8, dst_spec: []const u8, display_name: []const u8, conn: *const ssh_connection.SshConnection) bool {
-    return uploadLocalFileToRemoteSpecWithTransfer(local_path, dst_spec, display_name, conn, scp.transferWithControl);
+    return uploadLocalPathToRemoteSpecWithTransferFns(
+        local_path,
+        dst_spec,
+        display_name,
+        conn,
+        scp.transferWithControl,
+        scp.transferDirWithControl,
+    );
 }
 
 fn uploadLocalFileToRemoteSpecWithTransfer(local_path: []const u8, dst_spec: []const u8, display_name: []const u8, conn: *const ssh_connection.SshConnection, transfer_fn: TransferFn) bool {
     return startTransferJob(.upload, conn, local_path, dst_spec, display_name, transfer_fn);
+}
+
+fn uploadLocalPathToRemoteSpecWithTransferFns(
+    local_path: []const u8,
+    dst_spec: []const u8,
+    display_name: []const u8,
+    conn: *const ssh_connection.SshConnection,
+    file_transfer_fn: TransferFn,
+    dir_transfer_fn: TransferFn,
+) bool {
+    return startTransferJob(.upload, conn, local_path, dst_spec, display_name, pickUploadTransferFnWith(local_path, file_transfer_fn, dir_transfer_fn));
 }
 
 fn uploadLocalFileToRemoteSpecWithTransferAndCallback(
@@ -1697,14 +1737,48 @@ pub fn uploadLocalFileToRemoteSpecWithCompletion(
     conn: *const ssh_connection.SshConnection,
     completion: TransferCompletion,
 ) bool {
-    return startTransferJobWithCompletion(.upload, conn, local_path, dst_spec, display_name, scp.transferWithControl, completion);
+    return startTransferJobWithCompletion(.upload, conn, local_path, dst_spec, display_name, pickUploadTransferFn(local_path), completion);
 }
 
 pub fn downloadRemoteFileToPath(remote_path: []const u8, local_path: []const u8, display_name: []const u8, conn: *const ssh_connection.SshConnection) bool {
-    return downloadRemoteFileToPathWithTransfer(remote_path, local_path, display_name, conn, scp.transferWithControl);
+    return downloadRemotePathToPath(remote_path, local_path, display_name, conn, false);
+}
+
+pub fn downloadRemotePathToPath(remote_path: []const u8, local_path: []const u8, display_name: []const u8, conn: *const ssh_connection.SshConnection, is_dir: bool) bool {
+    return downloadRemotePathToPathWithTransferFns(
+        remote_path,
+        local_path,
+        display_name,
+        conn,
+        is_dir,
+        scp.transferWithControl,
+        scp.transferDirWithControl,
+    );
 }
 
 fn downloadRemoteFileToPathWithTransfer(remote_path: []const u8, local_path: []const u8, display_name: []const u8, conn: *const ssh_connection.SshConnection, transfer_fn: TransferFn) bool {
+    return downloadRemotePathToPathWithTransfer(remote_path, local_path, display_name, conn, transfer_fn);
+}
+
+fn downloadRemotePathToPathWithTransferFns(
+    remote_path: []const u8,
+    local_path: []const u8,
+    display_name: []const u8,
+    conn: *const ssh_connection.SshConnection,
+    is_dir: bool,
+    file_transfer_fn: TransferFn,
+    dir_transfer_fn: TransferFn,
+) bool {
+    return downloadRemotePathToPathWithTransfer(
+        remote_path,
+        local_path,
+        display_name,
+        conn,
+        pickDownloadTransferFnWith(is_dir, file_transfer_fn, dir_transfer_fn),
+    );
+}
+
+fn downloadRemotePathToPathWithTransfer(remote_path: []const u8, local_path: []const u8, display_name: []const u8, conn: *const ssh_connection.SshConnection, transfer_fn: TransferFn) bool {
     if (conn.user_len + conn.host_len + remote_path.len + 2 > 512) {
         setTransferStatusForKind(.download, .failed, "Path too long");
         return false;
@@ -1726,6 +1800,28 @@ test "setTransferStatus stores message" {
 }
 
 fn transferOkForTest(_: std.mem.Allocator, _: *const ssh_connection.SshConnection, _: []const u8, _: []const u8, _: *scp.TransferControl) scp.TransferResult {
+    return .ok;
+}
+
+const TransferProbeKind = enum(u8) { none = 0, file = 1, directory = 2 };
+
+var g_transfer_probe_kind_for_test = std.atomic.Value(u8).init(@intFromEnum(TransferProbeKind.none));
+
+fn resetTransferProbeForTest() void {
+    g_transfer_probe_kind_for_test.store(@intFromEnum(TransferProbeKind.none), .release);
+}
+
+fn transferProbeKindForTest() TransferProbeKind {
+    return @enumFromInt(g_transfer_probe_kind_for_test.load(.acquire));
+}
+
+fn transferFileProbeForTest(_: std.mem.Allocator, _: *const ssh_connection.SshConnection, _: []const u8, _: []const u8, _: *scp.TransferControl) scp.TransferResult {
+    g_transfer_probe_kind_for_test.store(@intFromEnum(TransferProbeKind.file), .release);
+    return .ok;
+}
+
+fn transferDirectoryProbeForTest(_: std.mem.Allocator, _: *const ssh_connection.SshConnection, _: []const u8, _: []const u8, _: *scp.TransferControl) scp.TransferResult {
+    g_transfer_probe_kind_for_test.store(@intFromEnum(TransferProbeKind.directory), .release);
     return .ok;
 }
 
@@ -1822,6 +1918,31 @@ test "file_explorer: upload helper starts transfer with explicit remote spec" {
     try std.testing.expect(g_transfer_job != null);
 }
 
+test "file_explorer: upload helper picks recursive transfer for local directories" {
+    resetTransferStateForTest();
+    defer resetTransferStateForTest();
+    resetTransferProbeForTest();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+
+    var conn: ssh_connection.SshConnection = .{};
+    try std.testing.expect(uploadLocalPathToRemoteSpecWithTransferFns(
+        dir_path,
+        "user@host:/tmp",
+        "folder",
+        &conn,
+        transferFileProbeForTest,
+        transferDirectoryProbeForTest,
+    ));
+
+    tickTransfersUntilIdleForTest();
+
+    try std.testing.expectEqual(TransferProbeKind.directory, transferProbeKindForTest());
+}
+
 test "file_explorer: download helper starts transfer with explicit remote path" {
     resetTransferStateForTest();
     defer resetTransferStateForTest();
@@ -1836,6 +1957,32 @@ test "file_explorer: download helper starts transfer with explicit remote path" 
     try std.testing.expectEqual(TransferStatus.in_progress, g_transfer_status);
     try std.testing.expectEqualStrings("file.txt - calculating...", g_transfer_msg[0..g_transfer_msg_len]);
     try std.testing.expect(g_transfer_job != null);
+}
+
+test "file_explorer: download helper picks recursive transfer for remote directories" {
+    resetTransferStateForTest();
+    defer resetTransferStateForTest();
+    resetTransferProbeForTest();
+
+    var conn: ssh_connection.SshConnection = .{};
+    conn.user_buf[0] = 'u';
+    conn.user_len = 1;
+    conn.host_buf[0] = 'h';
+    conn.host_len = 1;
+
+    try std.testing.expect(downloadRemotePathToPathWithTransferFns(
+        "/tmp/folder",
+        "C:\\Users\\me\\Downloads\\folder",
+        "folder",
+        &conn,
+        true,
+        transferFileProbeForTest,
+        transferDirectoryProbeForTest,
+    ));
+
+    tickTransfersUntilIdleForTest();
+
+    try std.testing.expectEqual(TransferProbeKind.directory, transferProbeKindForTest());
 }
 
 test "file_explorer: download picks recursive transfer for directories" {

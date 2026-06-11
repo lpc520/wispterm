@@ -26,6 +26,7 @@ const render_diagnostics = @import("render_diagnostics.zig");
 const link_open = @import("link_open.zig");
 const platform_dirs = @import("platform/dirs.zig");
 const platform_local_path = @import("platform/local_path.zig");
+const platform_remote_file = @import("platform/remote_file.zig");
 const platform_open_url = @import("platform/open_url.zig");
 const platform_file_dialog = @import("platform/file_dialog.zig");
 const input_shortcuts = @import("input_shortcuts.zig");
@@ -54,6 +55,7 @@ const mouse_report = @import("input/mouse_report.zig");
 const close_confirm = @import("close_confirm.zig");
 const jupyter_picker = @import("jupyter_picker.zig");
 const jupyter_detect = @import("jupyter_detect.zig");
+const scp = @import("scp.zig");
 const writeToPty = clipboard.writeToPty;
 pub const copyTextToClipboard = clipboard.copyTextToClipboard;
 const activeTerminalSelectionExists = clipboard.activeTerminalSelectionExists;
@@ -3331,6 +3333,37 @@ fn openPreviewPanelForCell(surface: *Surface, cell_pos: CellPos) bool {
     return true;
 }
 
+fn buildRemotePathKindCommand(buf: []u8, remote_path: []const u8) ?[]const u8 {
+    var path_expr_buf: [1024]u8 = undefined;
+    const path_expr = platform_remote_file.shellPathExpr(&path_expr_buf, remote_path) orelse return null;
+    return std.fmt.bufPrint(
+        buf,
+        "if test -d {s}; then printf d; elif test -e {s}; then printf f; else exit 1; fi",
+        .{ path_expr, path_expr },
+    ) catch null;
+}
+
+fn remotePathIsDirectoryForDownload(allocator: std.mem.Allocator, conn: *const @import("ssh_connection.zig").SshConnection, remote_path: []const u8) ?bool {
+    var cmd_buf: [2300]u8 = undefined;
+    const cmd = buildRemotePathKindCommand(cmd_buf[0..], remote_path) orelse return null;
+    const output = scp.sshExecCapped(allocator, conn, cmd, 8) orelse return null;
+    defer allocator.free(output);
+
+    const trimmed = std.mem.trim(u8, output, " \t\r\n");
+    if (std.mem.eql(u8, trimmed, "d")) return true;
+    if (std.mem.eql(u8, trimmed, "f")) return false;
+    return null;
+}
+
+test "input: remote download path kind command shell-quotes paths" {
+    var buf: [2300]u8 = undefined;
+    const cmd = buildRemotePathKindCommand(buf[0..], "/tmp/it's here") orelse return error.CommandTooLong;
+    try std.testing.expectEqualStrings(
+        "if test -d '/tmp/it'\\''s here'; then printf d; elif test -e '/tmp/it'\\''s here'; then printf f; else exit 1; fi",
+        cmd,
+    );
+}
+
 fn downloadTerminalFileAtCell(surface: *Surface, cell_pos: CellPos) bool {
     if (surface.launch_kind != .ssh) return false;
     const conn = surface.ssh_connection orelse return false;
@@ -3355,6 +3388,7 @@ fn downloadTerminalFileAtCell(surface: *Surface, cell_pos: CellPos) bool {
 
     const name = basenameForPreview(resolved_path);
     if (name.len == 0) return false;
+    const is_dir = remotePathIsDirectoryForDownload(allocator, &conn, resolved_path) orelse false;
 
     var dl_buf: [260]u8 = undefined;
     const dl_path = getDownloadsFolder(&dl_buf);
@@ -3369,7 +3403,7 @@ fn downloadTerminalFileAtCell(surface: *Surface, cell_pos: CellPos) bool {
         return true;
     };
 
-    _ = file_explorer.downloadRemoteFileToPath(resolved_path, dst, name, &conn);
+    _ = file_explorer.downloadRemotePathToPath(resolved_path, dst, name, &conn, is_dir);
     return true;
 }
 
