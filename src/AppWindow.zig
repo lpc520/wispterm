@@ -1206,8 +1206,17 @@ fn firstSshProfileName(buf: []u8) []const u8 {
     return ssh_profile_store.cycleProfileName(content, "", 0, buf);
 }
 
+/// Test seam: when set, readSshHostsContent serves a copy of this instead of
+/// the real store, so tests never depend on the host's ssh_hosts file.
+threadlocal var g_ssh_hosts_content_for_test: ?[]const u8 = null;
+
+pub fn setSshHostsContentForTest(content: ?[]const u8) void {
+    g_ssh_hosts_content_for_test = content;
+}
+
 /// Read the encoded ssh_hosts file. Caller frees. Returns null when unavailable.
 fn readSshHostsContent(allocator: std.mem.Allocator) ?[]u8 {
+    if (g_ssh_hosts_content_for_test) |content| return allocator.dupe(u8, content) catch null;
     const path = platform_dirs.sshHostsPath(allocator) catch return null;
     defer allocator.free(path);
     return std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch null;
@@ -1310,8 +1319,8 @@ pub fn portForwardingFormMove(delta: isize) bool {
     return true;
 }
 
-/// Adjust the focused selector field by `delta` steps. Profile (field 1) cycles
-/// through the SSH profiles in the store; Direction and Auto start flip. Other
+/// Adjust the focused selector field by `delta` steps. Profile cycles through
+/// the SSH profiles in the store; Direction and Auto start flip. Other
 /// (text/port) fields are unaffected. Used by Space (+1) and the ←/→ arrows.
 pub fn portForwardingFormAdjust(delta: isize) bool {
     const session = activePortForwarding() orelse return false;
@@ -1325,7 +1334,7 @@ pub fn portForwardingFormAdjust(delta: isize) bool {
     };
     var current_buf: [port_forward_rule.PROFILE_MAX]u8 = undefined;
     var current_len: usize = 0;
-    if (focus == 1) {
+    if (focus == port_forwarding.FIELD_PROFILE) {
         const form = session.model.form().?;
         const current = form.rule.profileName();
         current_len = @min(current_buf.len, current.len);
@@ -1333,7 +1342,7 @@ pub fn portForwardingFormAdjust(delta: isize) bool {
     }
     session.mutex.unlock();
 
-    if (focus == 1) {
+    if (focus == port_forwarding.FIELD_PROFILE) {
         const manager = activePortForwardManager() orelse return false;
         const allocator = manager.allocator;
         const content = readSshHostsContent(allocator) orelse return false;
@@ -1345,6 +1354,9 @@ pub fn portForwardingFormAdjust(delta: isize) bool {
         session.mutex.lock();
         defer session.mutex.unlock();
         const form = session.model.form() orelse return false;
+        // The lock was released across the ssh_hosts read; re-verify the
+        // Profile field still has focus before writing the cycled name.
+        if (form.focus != port_forwarding.FIELD_PROFILE) return false;
         form.rule.setProfileName(next);
         markUiDirty();
         return true;
@@ -1353,7 +1365,7 @@ pub fn portForwardingFormAdjust(delta: isize) bool {
     session.mutex.lock();
     defer session.mutex.unlock();
     const form = session.model.form() orelse return false;
-    if (form.focus != 2 and form.focus != 7) return false;
+    if (form.focus != port_forwarding.FIELD_DIRECTION and form.focus != port_forwarding.FIELD_AUTO_START) return false;
     form.toggleFocused();
     markUiDirty();
     return true;
