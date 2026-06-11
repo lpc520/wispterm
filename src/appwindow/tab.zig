@@ -9,6 +9,7 @@ const Config = @import("../config.zig");
 const Surface = @import("../Surface.zig");
 const SplitTree = @import("../split_tree.zig");
 const PreviewPane = @import("../preview_pane.zig");
+const markdown_preview = @import("../markdown_preview.zig");
 const input_key = @import("../input/key.zig");
 const remote_client = @import("../remote_client.zig");
 const session_persist = @import("../session_persist.zig");
@@ -803,6 +804,39 @@ pub fn firstPreviewForReuse(gpa: std.mem.Allocator, t: *const TabState) ?SplitTr
         switch (t.tree.nodes[h.idx()]) {
             .leaf => |pane| switch (pane) {
                 .preview => return h,
+                else => {},
+            },
+            .split => {},
+        }
+    }
+    return null;
+}
+
+/// Handle of the preview pane to reuse for `kind`: the focused leaf if it is a
+/// preview of that kind, else the first same-kind preview in reading order,
+/// else null (caller creates a new pane). Per-kind reuse keeps one pane per
+/// content type so e.g. an image preview never evicts the markdown preview.
+pub fn previewForReuse(gpa: std.mem.Allocator, t: *const TabState, kind: markdown_preview.Kind) ?SplitTree.Node.Handle {
+    // Fast path: focused node is a same-kind preview leaf.
+    if (t.focused.idx() < t.tree.nodes.len) {
+        switch (t.tree.nodes[t.focused.idx()]) {
+            .leaf => |pane| switch (pane) {
+                .preview => |p| if (p.kind == kind) return t.focused,
+                else => {},
+            },
+            .split => {},
+        }
+    }
+
+    // Scan in reading order (top-left → bottom-right) for the first
+    // same-kind preview.
+    const order = t.tree.readingOrder(gpa) catch return null;
+    defer gpa.free(order);
+
+    for (order) |h| {
+        switch (t.tree.nodes[h.idx()]) {
+            .leaf => |pane| switch (pane) {
+                .preview => |p| if (p.kind == kind) return h,
                 else => {},
             },
             .split => {},
@@ -2799,4 +2833,148 @@ test "tab: firstPreviewForReuse returns the preview leaf, null when only termina
         },
         .split => return error.HandlePointsToSplit,
     }
+}
+
+test "tab: previewForReuse matches preview panes by kind" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    // No preview pane at all → null for every kind.
+    try std.testing.expect(previewForReuse(gpa, t, .markdown) == null);
+
+    // One markdown pane: markdown matches it, image does not.
+    const p1 = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    p1.kind = .markdown;
+    const h_md = previewForReuse(gpa, t, .markdown) orelse return error.NoMarkdownMatch;
+    switch (t.tree.nodes[h_md.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .preview => |p| try std.testing.expectEqual(p1, p),
+            .terminal => return error.MatchedTerminal,
+        },
+        .split => return error.MatchedSplit,
+    }
+    try std.testing.expect(previewForReuse(gpa, t, .image) == null);
+
+    // Add an image pane: each kind now resolves to its own pane.
+    const p2 = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    p2.kind = .image;
+    const h_img = previewForReuse(gpa, t, .image) orelse return error.NoImageMatch;
+    switch (t.tree.nodes[h_img.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .preview => |p| try std.testing.expectEqual(p2, p),
+            .terminal => return error.MatchedTerminal,
+        },
+        .split => return error.MatchedSplit,
+    }
+    const h_md2 = previewForReuse(gpa, t, .markdown) orelse return error.NoMarkdownMatch;
+    switch (t.tree.nodes[h_md2.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .preview => |p| try std.testing.expectEqual(p1, p),
+            .terminal => return error.MatchedTerminal,
+        },
+        .split => return error.MatchedSplit,
+    }
+    // No csv pane exists → null even though other kinds do.
+    try std.testing.expect(previewForReuse(gpa, t, .csv) == null);
+}
+
+test "tab: previewForReuse prefers the focused same-kind preview" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    // Two markdown panes; reading order would pick p1, but focusing p2's leaf
+    // must win.
+    const p1 = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    p1.kind = .markdown;
+    const p2 = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    p2.kind = .markdown;
+
+    var h_p2: ?SplitTree.Node.Handle = null;
+    for (t.tree.nodes, 0..) |node, i| switch (node) {
+        .leaf => |pane| switch (pane) {
+            .preview => |p| if (p == p2) {
+                h_p2 = @enumFromInt(i);
+            },
+            .terminal => {},
+        },
+        .split => {},
+    };
+    t.focused = h_p2 orelse return error.P2NotInTree;
+
+    const h = previewForReuse(gpa, t, .markdown) orelse return error.NoMatch;
+    try std.testing.expectEqual(t.focused, h);
 }
