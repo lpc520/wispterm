@@ -72,6 +72,16 @@ pub fn cachedRectIsLive(rect: SplitRect) bool {
     };
 }
 
+/// The lone visible leaf's terminal surface, or null when the active layout is
+/// not exactly one terminal pane (several panes, or a single non-terminal pane
+/// such as a preview). The render paths use this to gate the simple
+/// single-surface fast path; preview-only layouts must take the generic
+/// pane-dispatching path so they still paint.
+pub fn soleTerminalSurface() ?*Surface {
+    if (g_split_rect_count != 1) return null;
+    return g_split_rects[0].surface();
+}
+
 /// Find the terminal surface under a given point (window coordinates).
 /// Returns null if no terminal surface is found at that position (non-terminal
 /// panes such as previews are skipped).
@@ -306,4 +316,55 @@ pub fn computeSplitLayout(
 
     g_split_rect_count = count;
     return count;
+}
+
+test "split_layout: soleTerminalSurface only for a single terminal rect" {
+    const PreviewPane = @import("../preview_pane.zig");
+    const saved_count = g_split_rect_count;
+    const saved_rect = g_split_rects[0];
+    defer {
+        g_split_rect_count = saved_count;
+        g_split_rects[0] = saved_rect;
+    }
+
+    var surface: Surface = undefined;
+    var preview: PreviewPane = undefined;
+    const terminal_rect = SplitRect{
+        .x = 0,
+        .y = 0,
+        .width = 100,
+        .height = 100,
+        .cols = 80,
+        .rows = 24,
+        .pane = .{ .terminal = &surface },
+        .handle = .root,
+    };
+    const preview_rect = SplitRect{
+        .x = 0,
+        .y = 0,
+        .width = 100,
+        .height = 100,
+        .cols = 0,
+        .rows = 0,
+        .pane = .{ .preview = &preview },
+        .handle = .root,
+    };
+
+    // No rects → null.
+    g_split_rect_count = 0;
+    try std.testing.expect(soleTerminalSurface() == null);
+
+    // One terminal rect → its surface.
+    g_split_rects[0] = terminal_rect;
+    g_split_rect_count = 1;
+    try std.testing.expectEqual(@as(?*Surface, &surface), soleTerminalSurface());
+
+    // One preview rect → null (preview-only layouts must take the generic path).
+    g_split_rects[0] = preview_rect;
+    try std.testing.expect(soleTerminalSurface() == null);
+
+    // Multiple rects → null even if the first is a terminal.
+    g_split_rects[0] = terminal_rect;
+    g_split_rect_count = 2;
+    try std.testing.expect(soleTerminalSurface() == null);
 }

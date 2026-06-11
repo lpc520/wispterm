@@ -811,6 +811,51 @@ pub fn firstPreviewForReuse(gpa: std.mem.Allocator, t: *const TabState) ?SplitTr
     return null;
 }
 
+/// Close the active tab's preview pane: the focused leaf when it is a preview,
+/// else the first preview in reading order (the same pane Ctrl+click reuses).
+/// Declines (returns false) when the tab has no preview pane, or when the
+/// preview is the tab's only pane — closing the last pane is tab/window-close
+/// territory, which the caller's standard close path already handles.
+pub fn closePreviewPane(allocator: std.mem.Allocator) bool {
+    const t = activeTab() orelse return false;
+    if (t.kind != .terminal) return false;
+    if (!t.tree.isSplit()) return false;
+    const handle = firstPreviewForReuse(allocator, t) orelse return false;
+
+    // Handles renumber on removal, so capture the focused leaf's pane VALUE to
+    // re-find it afterwards. Tag+pointer comparison only — never dereferenced.
+    const keep_focused: ?SplitTree.Pane = if (handle != t.focused and t.focused.idx() < t.tree.nodes.len)
+        switch (t.tree.nodes[t.focused.idx()]) {
+            .leaf => |pane| pane,
+            .split => null,
+        }
+    else
+        null;
+
+    const new_tree = t.tree.remove(allocator, handle) catch {
+        std.debug.print("Failed to remove preview pane from tree\n", .{});
+        return false;
+    };
+    var old_tree = t.tree;
+    t.tree = new_tree;
+    old_tree.deinit();
+
+    t.focused = focus: {
+        if (keep_focused) |pane| {
+            var it = t.tree.panes();
+            while (it.next()) |entry| {
+                if (std.meta.eql(entry.pane, pane)) break :focus entry.handle;
+            }
+        }
+        // Fall back to the first terminal, then to the first leaf pane.
+        var sit = t.tree.surfaces();
+        if (sit.next()) |entry| break :focus entry.handle;
+        var pit = t.tree.panes();
+        break :focus if (pit.next()) |entry| entry.handle else .root;
+    };
+    return true;
+}
+
 /// Split the focused surface in the given direction.
 /// Returns true on success. The caller handles g_resize_active and rebuild flags.
 pub fn splitFocused(
@@ -1024,7 +1069,10 @@ pub fn closeFocusedSplit(allocator: std.mem.Allocator) CloseResult {
             t.focused = entry.handle;
         }
     } else {
-        t.focused = .root;
+        // No terminal remains (preview-only tab): focus the first leaf pane so
+        // keyboard routing still targets a real pane, never the root split node.
+        var pit = t.tree.panes();
+        t.focused = if (pit.next()) |pane_entry| pane_entry.handle else .root;
     }
 
     std.debug.print("Split closed, new focused handle: {}, tree nodes: {}\n", .{ @intFromEnum(t.focused), t.tree.nodes.len });
@@ -2465,6 +2513,232 @@ test "tab: splitIntoPreview adds a preview leaf and grows the tree by 2 nodes" {
     // t.deinit (deferred) will call tree.deinit(), which unrefs the preview pane
     // (freeing it) and decrements the surface refcount. The testing allocator
     // must report no leak after the defer runs.
+}
+
+test "tab: closePreviewPane closes the unfocused preview and keeps the terminal focused" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    // No preview pane yet → nothing to close.
+    try std.testing.expect(!closePreviewPane(gpa));
+
+    _ = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    // Tree: [0]=split, [1]=preview, [2]=terminal; focus stayed on the terminal.
+    const focused_before = t.focused;
+    try std.testing.expect(focused_before.idx() == 2);
+
+    try std.testing.expect(closePreviewPane(gpa));
+
+    // Only the terminal leaf remains and it keeps focus.
+    try std.testing.expectEqual(@as(usize, 1), t.tree.nodes.len);
+    try std.testing.expect(t.focused.idx() < t.tree.nodes.len);
+    switch (t.tree.nodes[t.focused.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .terminal => {},
+            .preview => return error.FocusedIsPreview,
+        },
+        .split => return error.FocusedIsSplit,
+    }
+}
+
+test "tab: closePreviewPane closes a focused preview and refocuses the terminal" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    _ = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    t.focused = firstPreviewForReuse(gpa, t) orelse return error.NoPreviewAfterSplit;
+
+    try std.testing.expect(closePreviewPane(gpa));
+
+    // The surviving terminal leaf takes focus.
+    try std.testing.expectEqual(@as(usize, 1), t.tree.nodes.len);
+    try std.testing.expect(t.focused.idx() < t.tree.nodes.len);
+    switch (t.tree.nodes[t.focused.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .terminal => {},
+            .preview => return error.FocusedIsPreview,
+        },
+        .split => return error.FocusedIsSplit,
+    }
+}
+
+test "tab: closePreviewPane leaves a lone preview pane for the standard close path" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    // Preview-only tab (single preview leaf, no terminal).
+    const p = try PreviewPane.create(gpa);
+    var tree = try SplitTree.initPane(gpa, .{ .preview = p });
+    p.unref(gpa); // tree holds the sole owning ref
+    errdefer tree.deinit();
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = tree,
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    // A lone preview pane is the whole tab; closing it is tab/window-close
+    // territory, so closePreviewPane declines and the caller falls through.
+    try std.testing.expect(!closePreviewPane(gpa));
+    try std.testing.expectEqual(@as(usize, 1), t.tree.nodes.len);
+}
+
+test "tab: closeFocusedSplit on the last terminal focuses a preview leaf, not a split node" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    // Two preview panes around the focused terminal, then close the terminal.
+    _ = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    _ = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+
+    try std.testing.expectEqual(CloseResult.closed_split, closeFocusedSplit(gpa));
+
+    // Remaining tree: [split, preview, preview]. Focus must land on a LEAF
+    // pane (a preview), never on the root split node, so keyboard routing
+    // (focusedPreviewPane) still targets a real pane.
+    try std.testing.expect(t.focused.idx() < t.tree.nodes.len);
+    switch (t.tree.nodes[t.focused.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .preview => {},
+            .terminal => return error.TerminalSurvivedClose,
+        },
+        .split => return error.FocusedIsSplitNode,
+    }
 }
 
 test "tab: firstPreviewForReuse returns the preview leaf, null when only terminals" {

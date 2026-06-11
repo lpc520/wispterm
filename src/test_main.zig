@@ -645,6 +645,7 @@ comptime {
     _ = @import("surface_registry.zig");
     _ = @import("png_dimensions.zig");
     _ = @import("appwindow/flush_scheduler.zig");
+    _ = @import("appwindow/split_layout.zig");
     _ = @import("appwindow/tab.zig");
     _ = @import("appwindow/thread_message.zig");
     _ = @import("scp.zig");

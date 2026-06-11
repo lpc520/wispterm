@@ -829,6 +829,10 @@ fn closeAiCopilotPanel() void {
 }
 
 pub fn closePanelOrTab() void {
+    // A preview pane closes first, mirroring the old right-dock behavior:
+    // opening a preview keeps the terminal focused, so without this the
+    // shortcut would close the focused terminal instead of the preview.
+    if (AppWindow.closeActivePreviewPane()) return;
     if (browser_panel.isVisibleForActiveTab()) {
         closeBrowserPanel();
         return;

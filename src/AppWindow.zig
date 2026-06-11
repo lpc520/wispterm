@@ -3481,6 +3481,21 @@ pub fn splitFocusedReturningSurface(direction: SplitTree.Split.Direction) ?*Surf
     return surface;
 }
 
+/// Close the active tab's preview pane if it has one (the focused preview, else
+/// the first in reading order), keeping the focused terminal focused. Returns
+/// false when there is no preview pane — or the preview is the tab's only pane —
+/// so the caller falls through to the standard split/tab close path. This is the
+/// pane-world successor of the right-dock close that Ctrl+Shift+W used to do
+/// first: opening a preview deliberately keeps the terminal focused, so a plain
+/// focused-split close would silently kill the terminal instead.
+pub fn closeActivePreviewPane() bool {
+    const allocator = g_allocator orelse return false;
+    if (!tab.closePreviewPane(allocator)) return false;
+    handleActiveSurfaceChangeWithinTab();
+    requestImmediateLayoutResize();
+    return true;
+}
+
 pub fn closeFocusedSplit() void {
     const allocator = g_allocator orelse return;
     const closing_tab_idx = active_tab_state.g_active_tab;
@@ -3771,7 +3786,9 @@ fn renderResizeFrame(width: i32, height: i32) void {
         };
         if (g_allocator) |alloc| syncRemoteLayout(alloc);
 
-        if (split_count <= 1) {
+        // A lone PREVIEW pane has no terminal surface and must take the generic
+        // split path below so it still paints (preview-only tabs are legal).
+        if (split_count == 0 or split_layout.soleTerminalSurface() != null) {
             if (active_tab.kind == .ai_chat) {
                 renderAiChatFrame(fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
             } else if (active_tab.kind == .ai_history) {
@@ -3780,7 +3797,7 @@ fn renderResizeFrame(width: i32, height: i32) void {
                 renderSkillCenterFrame(active_tab, fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
             } else if (active_tab.kind == .port_forwarding) {
                 renderPortForwardingFrame(active_tab, fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
-            } else if (activeSurface()) |surface| {
+            } else if (split_layout.soleTerminalSurface()) |surface| {
                 // Single surface: simple render path
                 const rend = &surface.surface_renderer;
                 var needs_rebuild: bool = false;
@@ -6846,8 +6863,10 @@ fn runMainLoop(self: *AppWindow) !void {
                 renderSkillCenterFrame(active_tab, fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
             } else if (active_tab.kind == .port_forwarding) {
                 renderPortForwardingFrame(active_tab, fb_width, fb_height, titlebar_offset, left_panels_w, right_panels_w);
-            } else if (post_process.g_post_enabled) {
-                // Post-processing path: only render focused surface for now
+            } else if (post_process.g_post_enabled and activeSurface() != null) {
+                // Post-processing path: only render focused surface for now.
+                // (With no focused terminal — e.g. a preview pane focused — fall
+                // through to the generic split path so the frame still paints.)
                 if (activeSurface()) |surface| {
                     var needs_rebuild: bool = false;
                     const rend = &surface.surface_renderer;
@@ -6862,10 +6881,12 @@ fn runMainLoop(self: *AppWindow) !void {
                     if (needs_rebuild) cell_renderer.rebuildCells(rend);
                     post_process.renderFrameWithPostFromCells(rend, fb_width, fb_height, padding);
                 }
-            } else if (split_count == 1) {
-                // Single surface (no splits): use original simple rendering path
+            } else if (split_layout.soleTerminalSurface()) |surface| {
+                // Single terminal pane (no splits): original simple rendering
+                // path. A lone PREVIEW pane has no terminal surface and must take
+                // the generic split path below so it still paints.
                 // The surface padding is set by computeSplitLayout, so we use it here
-                if (activeSurface()) |surface| {
+                {
                     const rend = &surface.surface_renderer;
                     var needs_rebuild: bool = false;
                     {
