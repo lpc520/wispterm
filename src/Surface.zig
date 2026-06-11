@@ -16,10 +16,10 @@ const renderer = @import("renderer.zig");
 const termio = @import("termio.zig");
 const Config = @import("config.zig");
 const Renderer = @import("renderer/Renderer.zig");
-const RendererThread = @import("RendererThread.zig");
 const remote = @import("remote_client.zig");
 const threading = @import("threading.zig");
 const agent_detector = @import("agent_detector.zig");
+const agent_detect_throttle = @import("agent_detect_throttle.zig");
 const sync_output = @import("sync_output.zig");
 const notification = @import("notification.zig");
 const platform_pty_command = @import("platform/pty_command.zig");
@@ -186,11 +186,8 @@ io_reader_thread: ?std.Thread = null,
 /// Per-surface renderer with its own cell buffers
 surface_renderer: Renderer,
 
-/// Per-surface renderer thread (processes frames independently)
-renderer_thread: RendererThread,
-
-/// Dirty flag — set by IO thread (Phase 2), read by render loop.
-/// For Phase 1 this is always effectively true (we render every frame).
+/// Dirty flag — set by the IO thread on new PTY output, consumed by the main
+/// render loop's event-driven render gate.
 dirty: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
 
 /// Deadline state for DEC synchronized output mode (2026).
@@ -302,6 +299,9 @@ initial_cwd_path_len: usize = 0,
 agent_detection: agent_detector.Detection = .{},
 agent_recent_output: [4096]u8 = undefined,
 agent_recent_output_len: usize = 0,
+// Throttles the (substring-scan heavy) agent detection during output floods.
+// Mutated only under render_state.mutex; pendingPeek is the lock-free UI probe.
+agent_throttle: agent_detect_throttle.Throttle = .{},
 
 // ============================================================================
 // VT stream
@@ -417,7 +417,6 @@ pub fn init(
 
     // Initialize per-surface renderer (Ghostty architecture)
     surface.surface_renderer = Renderer.init(surface);
-    surface.renderer_thread = RendererThread.init(&surface.surface_renderer, surface);
 
     // Init OSC state
     surface.window_title_len = 0;
@@ -434,6 +433,7 @@ pub fn init(
     surface.initial_cwd_path_len = 0;
     surface.agent_detection = .{};
     surface.agent_recent_output_len = 0;
+    surface.agent_throttle = .{};
     surface.captureInitialCwd(cwd);
 
     // Init bell state
@@ -494,8 +494,7 @@ pub fn deinit(self: *Surface, allocator: std.mem.Allocator) void {
     // finishes, so nothing below can tear state out from under it.
     surface_registry.unregister(self);
 
-    // 1. Stop the renderer thread first (it accesses terminal state)
-    self.renderer_thread.stop();
+    // 1. Release renderer-owned CPU buffers.
     self.surface_renderer.deinit();
 
     if (self.remote_client) |client| {
@@ -726,6 +725,14 @@ pub fn setTitleOverride(self: *Surface, title: []const u8) void {
 }
 
 pub fn noteAgentOutput(self: *Surface, data: []const u8) void {
+    self.noteAgentOutputAt(data, std.time.milliTimestamp());
+}
+
+/// Record recent PTY output for agent detection. The ring buffer always
+/// updates, but the detection scan itself is throttled (it runs dozens of
+/// substring searches over the ring); skipped scans are caught up by
+/// `flushAgentDetection` from the UI thread. Caller holds render_state.mutex.
+pub fn noteAgentOutputAt(self: *Surface, data: []const u8, now_ms: i64) void {
     if (data.len == 0) return;
 
     if (data.len >= self.agent_recent_output.len) {
@@ -742,7 +749,16 @@ pub fn noteAgentOutput(self: *Surface, data: []const u8) void {
         self.agent_recent_output_len = keep_existing + data.len;
     }
 
+    if (self.agent_throttle.noteOutput(now_ms)) self.refreshAgentDetection();
+}
+
+/// Run a deferred agent detection if one is due (trailing edge of an output
+/// burst, e.g. an approval prompt arriving as the last chunk). Returns whether
+/// a detection ran. Caller holds render_state.mutex.
+pub fn flushAgentDetection(self: *Surface, now_ms: i64) bool {
+    if (!self.agent_throttle.flush(now_ms)) return false;
     self.refreshAgentDetection();
+    return true;
 }
 
 fn refreshAgentDetection(self: *Surface) void {
@@ -832,6 +848,14 @@ pub fn takeClipboardWrite(self: *Surface) ?[]u8 {
     const text = self.clipboard_write_pending;
     self.clipboard_write_pending = null;
     return text;
+}
+
+/// Mark PTY output pending for the render loop. Returns true when this is the
+/// first mark since the UI last consumed the flag — the caller should post
+/// exactly one wakeup then, instead of flooding the platform event queue with
+/// one message per output chunk.
+pub fn markOutputDirty(self: *Surface) bool {
+    return !self.dirty.swap(true, .release);
 }
 
 /// Track DEC synchronized output mode (2026) transitions. This mirrors

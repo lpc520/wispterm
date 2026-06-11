@@ -65,7 +65,10 @@ pub fn renderChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
 
 /// Update terminal cells for a specific surface in a split tree.
 /// is_focused controls cursor appearance (unfocused shows block_hollow).
+/// A focus transition forces a rebuild: the cursor cell's background color is
+/// baked into the bg buffer and depends on the effective style (block/hollow).
 pub fn updateTerminalCellsForSurface(rend: *Renderer, terminal: *ghostty_vt.Terminal, is_focused: bool) bool {
+    if (rend.is_focused != is_focused) rend.force_rebuild = true;
     rend.is_focused = is_focused;
     return updateTerminalCells(rend, terminal);
 }

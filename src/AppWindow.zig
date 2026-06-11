@@ -5511,6 +5511,31 @@ fn recordFrameLatencyIfInputDriven() void {
     g_frame_latency.resetWindow();
 }
 
+/// Run deferred agent detections (throttled on the IO thread during output
+/// floods, see Surface.agent_throttle) so detection converges once output
+/// stops — e.g. an approval prompt arriving as the last chunk of a burst.
+/// Repaints only when the detection result actually changed.
+fn flushAgentDetectionSweep() void {
+    const now = std.time.milliTimestamp();
+    for (0..tab.g_tab_count) |ti| {
+        if (tab.g_tabs[ti]) |tb| {
+            var it = tb.tree.iterator();
+            while (it.next()) |entry| {
+                const surface = entry.surface;
+                if (!surface.agent_throttle.pendingPeek()) continue;
+                const before = surface.agent_detection;
+                surface.render_state.mutex.lock();
+                const ran = surface.flushAgentDetection(now);
+                surface.render_state.mutex.unlock();
+                if (ran and !std.meta.eql(before, surface.agent_detection)) {
+                    g_force_rebuild = true;
+                    g_cells_valid = false;
+                }
+            }
+        }
+    }
+}
+
 fn anySurfaceDirtyLoad() bool {
     for (0..tab.g_tab_count) |ti| {
         if (tab.g_tabs[ti]) |tb| {
@@ -6644,6 +6669,8 @@ fn runMainLoop(self: *AppWindow) !void {
         rememberWindowedPosition(win);
         // Fire any due /loop or /watch tasks (UI thread: tab.g_tabs is populated).
         ai_loop_store.tick(std.time.milliTimestamp());
+        // Catch up agent detections deferred by the IO-thread throttle.
+        flushAgentDetectionSweep();
 
         // Update focus state
         const focused = window_backend.isFocused(win);
@@ -6845,15 +6872,23 @@ fn runMainLoop(self: *AppWindow) !void {
                         gpu.gl_init.setProjection(@floatFromInt(rect.width), @floatFromInt(rect.height));
 
                         // Update cells for this surface
+                        var needs_rebuild: bool = false;
                         {
                             rect.surface.render_state.mutex.lock();
                             defer rect.surface.render_state.mutex.unlock();
                             if (is_focused) updateCursorBlinkForRenderer(rend);
-                            rend.force_rebuild = true;
+                            // One-shot global invalidations (window focus, theme
+                            // or layout events that set g_force_rebuild) must
+                            // reach every pane. Otherwise the per-renderer dirty
+                            // check decides, so panes whose content did not
+                            // change skip the full snapshot+rebuild — with one
+                            // pane streaming output, the others no longer pay
+                            // a per-frame full-grid rebuild.
+                            if (g_force_rebuild or !g_cells_valid) rend.force_rebuild = true;
                             cell_renderer.g_current_render_surface = rect.surface;
-                            _ = cell_renderer.updateTerminalCellsForSurface(rend, &rect.surface.terminal, is_focused);
+                            needs_rebuild = cell_renderer.updateTerminalCellsForSurface(rend, &rect.surface.terminal, is_focused);
                         }
-                        cell_renderer.rebuildCells(rend);
+                        if (needs_rebuild) cell_renderer.rebuildCells(rend);
 
                         // Draw cells using the surface's computed padding
                         const pad = rect.surface.getPadding();

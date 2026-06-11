@@ -138,7 +138,7 @@ cached_cursor_effective: ?CursorStyle,
 cached_cursor_visible: bool,
 cached_cursor_in_viewport: bool,
 
-/// Cursor blink state (managed by renderer thread)
+/// Cursor blink state (toggled per frame by the main render loop)
 cursor_blink_visible: bool,
 last_cursor_blink_time: i64,
 
@@ -148,7 +148,7 @@ is_focused: bool,
 /// Mutex for protecting render state during updates
 mutex: std.Thread.Mutex,
 
-/// Signal that this surface needs redraw (set by renderer thread, read by main thread)
+/// Signal that this surface needs redraw
 needs_redraw: std.atomic.Value(bool),
 
 // ============================================================================
@@ -379,15 +379,6 @@ pub fn setFocused(self: *Renderer, focused: bool) void {
     if (self.is_focused != focused) {
         self.is_focused = focused;
         self.force_rebuild = true;
-        self.needs_redraw.store(true, .release);
-    }
-}
-
-/// Update cursor blink state. Called periodically by renderer thread.
-pub fn updateCursorBlink(self: *Renderer, now_ms: i64, interval_ms: i64) void {
-    if (now_ms - self.last_cursor_blink_time >= interval_ms) {
-        self.cursor_blink_visible = !self.cursor_blink_visible;
-        self.last_cursor_blink_time = now_ms;
         self.needs_redraw.store(true, .release);
     }
 }
