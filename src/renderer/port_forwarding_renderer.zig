@@ -100,7 +100,10 @@ pub fn formFieldLabel(index: usize) []const u8 {
 pub fn formFieldValue(form: *const FormView, index: usize, buf: []u8) []const u8 {
     return switch (index) {
         0 => form.rule.name(),
-        1 => form.rule.profileName(),
+        // The Profile selector cannot be typed into; an empty name means the
+        // ssh_hosts store has no decodable profiles, so hint at that instead
+        // of rendering a silently dead blank field.
+        1 => if (form.rule.profileName().len > 0) form.rule.profileName() else "No SSH profiles found",
         2 => directionLabel(form.rule.direction),
         3 => form.rule.localHost(),
         4 => std.fmt.bufPrint(buf, "{d}", .{form.rule.local_port}) catch "",
@@ -507,6 +510,13 @@ test "port_forwarding_renderer: form field values" {
     try std.testing.expectEqualStrings("Reverse", formFieldValue(&form, 2, &buf));
     try std.testing.expectEqualStrings("18080", formFieldValue(&form, 4, &buf));
     try std.testing.expectEqualStrings("Manual", formFieldValue(&form, 7, &buf));
+}
+
+test "port_forwarding_renderer: empty profile renders a store hint" {
+    var buf: [32]u8 = undefined;
+    const rule = rule_mod.defaultReverseProxy("");
+    const form = FormView{ .mode = "New forwarding rule", .focus = 1, .rule = rule };
+    try std.testing.expectEqualStrings("No SSH profiles found", formFieldValue(&form, 1, &buf));
 }
 
 test "port_forwarding_renderer: clamp scroll keeps selected row visible" {
