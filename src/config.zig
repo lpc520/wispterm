@@ -381,6 +381,13 @@ language: i18n.LanguageSetting = .auto,
 /// the `WISPTERM_RENDER_DIAGNOSTICS=1` env var, but survives restarts and needs
 /// no shell setup — intended for users helping debug resize/DPI render glitches.
 @"wispterm-debug-render": bool = false,
+/// Present frames through a DXGI flip-model swapchain instead of GDI
+/// SwapBuffers (Windows only). The legacy BLT present goes through the DWM
+/// redirection surface, which on some iGPU drivers (Intel Arc, AMD) produces
+/// ghosting/black regions on cross-DPI drags and resizes (#46/#47/#88). Set to
+/// false to force the legacy path; machines where DXGI/interop is unavailable
+/// fall back automatically. Read at startup.
+@"wispterm-d3d-present": bool = true,
 
 // ============================================================================
 // Split pane configuration
@@ -919,6 +926,22 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
             self.@"wispterm-debug-memory" = false;
         } else {
             log.warn("invalid wispterm-debug-memory: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "wispterm-debug-render")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"wispterm-debug-render" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"wispterm-debug-render" = false;
+        } else {
+            log.warn("invalid wispterm-debug-render: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "wispterm-d3d-present")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"wispterm-d3d-present" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"wispterm-d3d-present" = false;
+        } else {
+            log.warn("invalid wispterm-d3d-present: {s}", .{value});
         }
     } else if (std.mem.eql(u8, key, "unfocused-split-opacity")) {
         if (std.fmt.parseFloat(f32, value)) |opacity| {
@@ -2136,4 +2159,32 @@ test "ai-distill-suggest parses true/false and defaults off" {
     // unknown value leaves it unchanged (still false)
     cfg.applyKeyValue(allocator, "ai-distill-suggest", "maybe", ".");
     try std.testing.expect(!cfg.@"ai-distill-suggest");
+}
+
+test "config: wispterm-d3d-present defaults on and parses false" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    // default on: flip-model present is the primary path, GDI is the fallback
+    try std.testing.expect(cfg.@"wispterm-d3d-present");
+    cfg.applyKeyValue(allocator, "wispterm-d3d-present", "false", ".");
+    try std.testing.expect(!cfg.@"wispterm-d3d-present");
+    cfg.applyKeyValue(allocator, "wispterm-d3d-present", "true", ".");
+    try std.testing.expect(cfg.@"wispterm-d3d-present");
+    cfg.applyKeyValue(allocator, "wispterm-d3d-present", "maybe", ".");
+    try std.testing.expect(cfg.@"wispterm-d3d-present");
+}
+
+test "config: wispterm-debug-render parses from a config line" {
+    // Regression: the field existed (read by main.zig to gate the render
+    // diagnostics log) but applyKeyValue had no branch for it, so the key
+    // users were asked to set in #88 was silently ignored.
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    try std.testing.expect(!cfg.@"wispterm-debug-render");
+    cfg.applyKeyValue(allocator, "wispterm-debug-render", "true", ".");
+    try std.testing.expect(cfg.@"wispterm-debug-render");
+    cfg.applyKeyValue(allocator, "wispterm-debug-render", "false", ".");
+    try std.testing.expect(!cfg.@"wispterm-debug-render");
 }

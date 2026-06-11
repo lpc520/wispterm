@@ -37,6 +37,7 @@ test {
     _ = @import("command_palette_model.zig");
     _ = @import("command_center_state.zig");
     _ = @import("platform/window_state_codec.zig");
+    _ = @import("platform/dxgi_core.zig");
     _ = @import("whats_new_gate.zig");
     _ = @import("startup_tabs.zig");
     _ = @import("config.zig");
@@ -93,6 +94,7 @@ test {
     _ = @import("ssh_prompt.zig");
     _ = @import("selection_unit.zig");
     _ = @import("scrollbar_model.zig");
+    _ = @import("resize_gate.zig");
     _ = @import("preview_token.zig");
     _ = @import("ime_caret.zig");
     _ = @import("sync_output.zig");

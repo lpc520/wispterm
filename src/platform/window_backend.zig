@@ -83,6 +83,12 @@ pub const EventHandlers = struct {
 };
 
 pub const setGlobalWindow = impl.setGlobalWindow;
+
+/// Windows-only config gate for the DXGI flip-model present path
+/// (`wispterm-d3d-present`). No-op on backends without the seam.
+pub fn setFlipPresentEnabled(enabled: bool) void {
+    if (comptime @hasDecl(impl, "setFlipPresentEnabled")) impl.setFlipPresentEnabled(enabled);
+}
 /// Renderer surface seam (host → GPU backend). This is OpenGL-shaped: the host
 /// supplies a GL proc-address loader, which `gpu.Context.init` consumes. The
 /// seam is per-backend by design — a macOS/AppKit host pairs with the Metal
@@ -444,6 +450,15 @@ pub fn consumeSizeChanged(window: *Window) bool {
     const changed = window.size_changed;
     window.size_changed = false;
     return changed;
+}
+
+/// True while the OS-modal interactive move/size loop is running for this
+/// window (Windows border drag: WM_ENTERSIZEMOVE..WM_EXITSIZEMOVE). Backends
+/// without that concept report false; in-app drags (split dividers, panel
+/// edges) are tracked separately by input.zig flags.
+pub fn inSizeMove(window: *const Window) bool {
+    if (comptime @hasField(Window, "in_size_move")) return window.in_size_move;
+    return false;
 }
 
 pub fn clearTransientInput(window: *Window) void {
