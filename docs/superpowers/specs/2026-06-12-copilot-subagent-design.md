@@ -43,7 +43,7 @@ complementary future work, explicitly out of scope here.
    credentials. Never an error.
 4. **Implementation route A — nested loop**: intercept the `subagent` tool
    call in `ai_chat_request.zig`'s `executeToolCall` wrapper and run a nested
-   mini agent loop (`runSubagentTask`) synchronously on the same worker
+   mini agent loop (`runSubagentTaskWithModel`) synchronously on the same worker
    thread. No hidden Session, no UI machinery, reuse
    `runChatRequestForMessages` for the network layer.
 5. **Sequential v1**: multiple `subagent` calls in one assistant turn run one
@@ -82,15 +82,15 @@ Defense in depth: the nested loop's dispatcher also checks
 hallucinated tool name outside the restricted set is rejected with a plain
 "tool not available in subagent" tool result.
 
-## Nested loop: `runSubagentTask` (src/ai_chat_request.zig)
+## Nested loop: `runSubagentTaskWithModel` (src/ai_chat_request.zig)
 
 Interception: in `executeToolCall(request, call)` — the wrapper that already
 bridges `ChatRequest` → `ai_chat_tools.executeToolCall` — a `call.name ==
-"subagent"` branch parses `task` and calls `runSubagentTask` instead of
+"subagent"` branch parses `task` and calls `runSubagentTaskWithModel` instead of
 entering `ai_chat_tools` (the leaf tool module stays free of network/loop
 dependencies).
 
-`runSubagentTask(request, task)`:
+`runSubagentTaskWithModel(request, task, model)`:
 
 1. Builds a fresh transcript: one user message containing `task`.
 2. Builds a stack-local `ChatRequest` derived from the parent:
@@ -175,7 +175,7 @@ No new renderer work.
   all exec/write tools — across all three protocols.
 - **Pure helpers**: `subagentToolAllowed` allow-list; `task` argument parsing;
   report truncation; profile fallback resolution (set/unset/not-found).
-- **Loop behavior**: `runSubagentTask` takes the model call as an injectable
+- **Loop behavior**: `runSubagentTaskWithModel` takes the model call as an injectable
   function (test seam, same spirit as existing tool-host seams) so tests can
   stub responses and cover: two-round happy path, cancellation mid-loop,
   disallowed-tool rejection, usage accumulation.
