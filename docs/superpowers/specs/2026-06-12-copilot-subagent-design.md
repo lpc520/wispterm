@@ -151,9 +151,10 @@ No new renderer work.
 
 ## Limits and error handling
 
-- **Round cap**: `SUBAGENT_MAX_ROUNDS = 16` model calls. On exceeding it,
-  return the last assistant content plus a `[subagent reached round limit]`
-  marker as the report.
+- **No round cap**: the subagent decides when it is done, exactly like the
+  main loop — the loop ends when the model returns no tool calls. The manual
+  escape is the same as today: the user's stop action cancels the request
+  (and with it the nested loop).
 - **Report size**: final report passes through the existing `truncateOwned`
   (head-keeping, `settings.output_limit`) before returning.
 - **Sub-model API/HTTP errors**: the error text becomes the report (existing
@@ -164,8 +165,7 @@ No new renderer work.
   path (sub and main loop die together).
 - **Bad args**: missing/empty `task` → tool result "Missing task".
 - **Intermediate bloat inside the subagent** is bounded by the existing
-  per-tool truncation plus the round cap; a sub-transcript budget is YAGNI for
-  v1.
+  per-tool truncation; a sub-transcript budget is YAGNI for v1.
 
 ## Testing (TDD)
 
@@ -177,7 +177,7 @@ No new renderer work.
   report truncation; profile fallback resolution (set/unset/not-found).
 - **Loop behavior**: `runSubagentTask` takes the model call as an injectable
   function (test seam, same spirit as existing tool-host seams) so tests can
-  stub responses and cover: two-round happy path, round-limit exhaustion,
-  cancellation mid-loop, disallowed-tool rejection, usage accumulation.
+  stub responses and cover: two-round happy path, cancellation mid-loop,
+  disallowed-tool rejection, usage accumulation.
 - Suites: `zig build test` and `zig build test-full` green; no network in
   tests.
