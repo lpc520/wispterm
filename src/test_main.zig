@@ -703,6 +703,7 @@ comptime {
     _ = @import("platform/notifications.zig");
     _ = @import("platform/open_url.zig");
     _ = @import("platform/process.zig");
+    _ = @import("platform/console_host_policy.zig");
     _ = @import("platform/pty.zig");
     _ = @import("platform/pty_command.zig");
     _ = @import("platform/remote_file.zig");
