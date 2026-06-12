@@ -229,3 +229,8 @@ MIT
 <a href="https://star-history.com/#xuzhougeng/wispterm&Date">
   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=xuzhougeng/wispterm&type=Date" />
 </a>
+
+## Citation
+
+Xu, Z.-G. (2026). *WispTerm* (Version 1.19.0) [Computer software]. Zenodo.
+https://doi.org/10.5281/zenodo.20660542

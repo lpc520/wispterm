@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use WispTerm in academic work, please cite it using these metadata."
+title: "WispTerm"
+version: "1.19.0"
+doi: "10.5281/zenodo.20660542"
+date-released: "2026-06-12"
+url: "https://github.com/xuzhougeng/wispterm"
+repository-code: "https://github.com/xuzhougeng/wispterm"
+license: "MIT"
+authors:
+  - family-names: "Xu"
+    given-names: "Zhou-Geng"

@@ -1,0 +1,24 @@
+{
+  "title": "WispTerm",
+  "upload_type": "software",
+  "creators": [
+    {
+      "name": "Xu, Zhou-Geng"
+    }
+  ],
+  "description": "WispTerm is a terminal emulator written in Zig, using libghostty-vt for terminal emulation.",
+  "license": "MIT",
+  "keywords": [
+    "terminal-emulator",
+    "zig",
+    "ghostty",
+    "wispterm"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/xuzhougeng/wispterm",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ]
+}
