@@ -2,6 +2,7 @@ const std = @import("std");
 const release_package = @import("../release_package.zig");
 
 const embedded_browser_payload_path = "WebView2Loader.dll";
+const bundled_console_host_payload_path = "conpty.dll";
 
 const AssetNameParts = struct {
     prefix: []const u8,
@@ -12,14 +13,21 @@ pub fn currentPackage(allocator: std.mem.Allocator, webview_enabled: bool) !rele
     const exe_path = try std.fs.selfExePathAlloc(allocator);
     defer allocator.free(exe_path);
     const exe_dir = std.fs.path.dirname(exe_path) orelse return release_package.Package.init(.windows, .baseline);
-    const payload_path = try std.fs.path.join(allocator, &.{ exe_dir, embeddedBrowserPayloadPath() });
-    defer allocator.free(payload_path);
-    const has_embedded_browser_payload = blk: {
-        var file = std.fs.openFileAbsolute(payload_path, .{}) catch break :blk false;
-        file.close();
-        break :blk true;
-    };
-    return release_package.Package.init(.windows, runtimeFlavor(webview_enabled, has_embedded_browser_payload));
+    // Either payload marks a compat install: webview2-flavor installs from
+    // before the compat package existed carry only the embedded-browser
+    // loader, and their next auto-update migrates them onto the compat asset
+    // (a superset that adds the bundled console host).
+    const has_compat_payload = payloadExists(allocator, exe_dir, embeddedBrowserPayloadPath()) or
+        payloadExists(allocator, exe_dir, bundled_console_host_payload_path);
+    return release_package.Package.init(.windows, runtimeFlavor(webview_enabled, has_compat_payload));
+}
+
+fn payloadExists(allocator: std.mem.Allocator, exe_dir: []const u8, name: []const u8) bool {
+    const path = std.fs.path.join(allocator, &.{ exe_dir, name }) catch return false;
+    defer allocator.free(path);
+    var file = std.fs.openFileAbsolute(path, .{}) catch return false;
+    file.close();
+    return true;
 }
 
 fn assetNameParts(package: release_package.Package) ?AssetNameParts {
@@ -29,8 +37,8 @@ fn assetNameParts(package: release_package.Package) ?AssetNameParts {
             .prefix = "wispterm-windows-portable-",
             .suffix = ".zip",
         },
-        .with_required_embedded_browser_payload => .{
-            .prefix = "wispterm-windows-portable-webview2-",
+        .compat => .{
+            .prefix = "wispterm-windows-portable-compat-",
             .suffix = ".zip",
         },
         .without_embedded_browser_payload => .{
@@ -57,8 +65,8 @@ pub fn embeddedBrowserPayloadPath() []const u8 {
     return embedded_browser_payload_path;
 }
 
-fn runtimeFlavor(webview_enabled: bool, has_embedded_browser_payload: bool) release_package.Flavor {
+fn runtimeFlavor(webview_enabled: bool, has_compat_payload: bool) release_package.Flavor {
     if (!webview_enabled) return .without_embedded_browser_payload;
-    if (has_embedded_browser_payload) return .with_required_embedded_browser_payload;
+    if (has_compat_payload) return .compat;
     return .baseline;
 }
