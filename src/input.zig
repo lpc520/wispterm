@@ -42,6 +42,7 @@ const Config = @import("config.zig");
 const Surface = @import("Surface.zig");
 const SplitTree = @import("split_tree.zig");
 const PreviewPane = @import("preview_pane.zig");
+const PreviewImageDrag = @import("input/preview_image_drag.zig");
 const selection_unit = @import("selection_unit.zig");
 const Selection = Surface.Selection;
 const CellPos = struct { col: usize, row: usize };
@@ -614,11 +615,9 @@ threadlocal var g_panel_swap_start_x: f64 = 0;
 threadlocal var g_panel_swap_start_y: f64 = 0;
 
 // Left-drag pan of a ready image preview pane (the pane-world successor of the
-// old right-dock image drag). The pane is ref'd for the drag's lifetime so a
-// mid-drag tree edit (e.g. a keyboard close) cannot free it under the cursor.
-threadlocal var g_preview_image_drag_pane: ?*PreviewPane = null;
-threadlocal var g_preview_image_drag_last_x: f64 = 0;
-threadlocal var g_preview_image_drag_last_y: f64 = 0;
+// old right-dock image drag). All state and the drag-lifetime pane ref live in
+// the tested state machine; input.zig only routes press/move/release into it.
+threadlocal var g_preview_image_drag: PreviewImageDrag = .{};
 threadlocal var g_scrollbar_drag_surface: ?*Surface = null;
 threadlocal var g_scrollbar_drag_view_y: f32 = 0;
 threadlocal var g_scrollbar_drag_view_h: f32 = 0;
@@ -1190,10 +1189,8 @@ fn resetPanelSwapState() void {
 
 /// End an image-preview pan drag, dropping the drag's pane reference.
 fn releasePreviewImageDrag() void {
-    const p = g_preview_image_drag_pane orelse return;
-    g_preview_image_drag_pane = null;
     const gpa = AppWindow.g_allocator orelse return; // drag only starts when set
-    p.unref(gpa);
+    g_preview_image_drag.release(gpa);
 }
 
 /// Begin a potential Alt-drag panel swap if the active terminal tab is split and
@@ -4173,12 +4170,9 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                             AppWindow.g_force_rebuild = true;
                             AppWindow.g_cells_valid = false;
                         }
-                        if (p.kind == .image and p.load_status == .ready and AppWindow.g_allocator != null) {
-                            releasePreviewImageDrag();
-                            g_preview_image_drag_pane = p.ref();
-                            g_preview_image_drag_last_x = xpos;
-                            g_preview_image_drag_last_y = ypos;
-                            platform_cursor.set(.size_all);
+                        if (AppWindow.g_allocator) |gpa| {
+                            if (g_preview_image_drag.begin(gpa, p, xpos, ypos))
+                                platform_cursor.set(.size_all);
                         }
                         return;
                     },
@@ -4250,7 +4244,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             }
         } else {
             // Mouse up
-            if (g_preview_image_drag_pane != null) {
+            if (g_preview_image_drag.active()) {
                 releasePreviewImageDrag();
                 platform_cursor.set(.arrow);
                 return;
@@ -4547,12 +4541,8 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
     }
     // Left-drag pans a ready image preview (the renderer clamps the pan to the
     // image's overflow each frame).
-    if (g_preview_image_drag_pane) |p| {
-        const delta_x: f32 = @floatCast(xpos - g_preview_image_drag_last_x);
-        const delta_y: f32 = @floatCast(ypos - g_preview_image_drag_last_y);
-        g_preview_image_drag_last_x = xpos;
-        g_preview_image_drag_last_y = ypos;
-        if (p.panImageBy(delta_x, delta_y)) AppWindow.g_force_rebuild = true;
+    if (g_preview_image_drag.active()) {
+        if (g_preview_image_drag.move(xpos, ypos)) AppWindow.g_force_rebuild = true;
         platform_cursor.set(.size_all);
         return;
     }

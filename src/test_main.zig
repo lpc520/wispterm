@@ -668,6 +668,7 @@ comptime {
     _ = @import("input/hit_test.zig");
     _ = @import("input/key.zig");
     _ = @import("input/preview_source.zig");
+    _ = @import("input/preview_image_drag.zig");
     _ = @import("input_shortcuts.zig");
     _ = @import("html_server.zig");
     _ = @import("keybind.zig");
