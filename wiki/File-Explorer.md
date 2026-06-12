@@ -2,7 +2,7 @@
 
 *English · [中文](File-Explorer-zh)*
 
-> Browse local, WSL, and SSH files in a side panel, and preview Markdown, text, tables, and images without leaving the terminal.
+> Browse local, WSL, and SSH files in a side panel, and preview Markdown, text, tables, images, and PDFs without leaving the terminal.
 
 ## Opening the explorer
 
@@ -18,8 +18,8 @@ active environment:
 Open the right-side preview panel in either of two ways:
 
 - Hold `Ctrl` (`Cmd` on macOS) and click a `.md`, `.txt`, `.csv`, `.tsv`, a
-  source-code or script file (including R scripts `.r` / `.R`), or a supported
-  image file in terminal output, **or**
+  source-code or script file (including R scripts `.r` / `.R`), a supported
+  image file, or a `.pdf` in terminal output, **or**
 - double-click a supported file in the File Explorer.
 
 What each type renders:
@@ -30,6 +30,13 @@ What each type renders:
   `.sh`, `.json`, and similar).
 - **CSV / TSV** — shown as a grid table.
 - **Images** — PNG, JPEG, GIF, BMP, and WebP are decoded directly into the panel.
+- **PDFs** — rasterized one page at a time by the operating system's own PDF
+  engine: `Windows.Data.Pdf` on Windows 10+, CoreGraphics on macOS, and the
+  `poppler-utils` tools (`pdfinfo` / `pdftoppm`) on Linux (install with, for
+  example, `sudo apt install poppler-utils` if the preview reports them
+  missing). With the PDF preview focused, `PageUp` / `PageDown` turn pages, and
+  the footer shows the current page as `N/M` next to the `PDF` badge. Encrypted
+  PDFs are not supported.
 
 ## Terminal path detection
 
@@ -55,7 +62,8 @@ without `Ctrl` always performs the configured `right-click-action`.
 - Drag the inner edges of the explorer and preview panels to resize them.
 - Markdown, text, CSV, and TSV previews scroll with the mouse wheel; CSV/TSV
   cells show a larger hover popup when content does not fit.
-- Image previews zoom with the mouse wheel and can be dragged to pan once zoomed.
+- Image and PDF previews zoom with the mouse wheel and can be dragged to pan
+  once zoomed.
 - `Ctrl+Shift+W` closes the preview panel before it closes a split.
 
 ## Downloading remote files
