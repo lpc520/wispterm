@@ -82,10 +82,12 @@ jobs:
           $portableExe = "zig-out\dist\portable\wispterm.exe"
           $portableVersion = "zig-out\dist\portable\version.txt"
           $portablePluginSkills = "zig-out\dist\portable\plugins\skills"
-          $portableWebView2Exe = "zig-out\dist\portable-webview2\wispterm.exe"
-          $portableWebView2Version = "zig-out\dist\portable-webview2\version.txt"
-          $portableWebView2Loader = "zig-out\dist\portable-webview2\WebView2Loader.dll"
-          $portableWebView2PluginSkills = "zig-out\dist\portable-webview2\plugins\skills"
+          $portableCompatExe = "zig-out\dist\portable-compat\wispterm.exe"
+          $portableCompatVersion = "zig-out\dist\portable-compat\version.txt"
+          $portableCompatWebView2Loader = "zig-out\dist\portable-compat\WebView2Loader.dll"
+          $portableCompatConPty = "zig-out\dist\portable-compat\conpty.dll"
+          $portableCompatConsoleHost = "zig-out\dist\portable-compat\OpenConsole.exe"
+          $portableCompatPluginSkills = "zig-out\dist\portable-compat\plugins\skills"
           $portableNoWebViewExe = "zig-out\dist\portable-no-webview\wispterm.exe"
           $portableNoWebViewVersion = "zig-out\dist\portable-no-webview\version.txt"
           $portableNoWebViewPluginSkills = "zig-out\dist\portable-no-webview\plugins\skills"
@@ -106,20 +108,28 @@ jobs:
             throw "Portable plugin skills directory not found: $portablePluginSkills"
           }
 
-          if (!(Test-Path $portableWebView2Exe)) {
-            throw "Portable WebView2 executable not found: $portableWebView2Exe"
+          if (!(Test-Path $portableCompatExe)) {
+            throw "Portable compat executable not found: $portableCompatExe"
           }
 
-          if (!(Test-Path $portableWebView2Version)) {
-            throw "Portable WebView2 version file not found: $portableWebView2Version"
+          if (!(Test-Path $portableCompatVersion)) {
+            throw "Portable compat version file not found: $portableCompatVersion"
           }
 
-          if (!(Test-Path $portableWebView2Loader)) {
-            throw "Portable WebView2 loader not found: $portableWebView2Loader"
+          if (!(Test-Path $portableCompatWebView2Loader)) {
+            throw "Portable compat WebView2 loader not found: $portableCompatWebView2Loader"
           }
 
-          if (!(Test-Path $portableWebView2PluginSkills -PathType Container)) {
-            throw "Portable WebView2 plugin skills directory not found: $portableWebView2PluginSkills"
+          if (!(Test-Path $portableCompatConPty)) {
+            throw "Portable compat conpty.dll not found: $portableCompatConPty"
+          }
+
+          if (!(Test-Path $portableCompatConsoleHost)) {
+            throw "Portable compat OpenConsole.exe not found: $portableCompatConsoleHost"
+          }
+
+          if (!(Test-Path $portableCompatPluginSkills -PathType Container)) {
+            throw "Portable compat plugin skills directory not found: $portableCompatPluginSkills"
           }
 
           if (!(Test-Path $portableNoWebViewExe)) {
@@ -134,7 +144,7 @@ jobs:
             throw "Portable no-WebView plugin skills directory not found: $portableNoWebViewPluginSkills"
           }
 
-          foreach ($distDir in @("zig-out\dist\portable", "zig-out\dist\portable-webview2", "zig-out\dist\portable-no-webview")) {
+          foreach ($distDir in @("zig-out\dist\portable", "zig-out\dist\portable-compat", "zig-out\dist\portable-no-webview")) {
             foreach ($skillFile in $skillFiles) {
               $path = Join-Path $distDir $skillFile
               if (!(Test-Path $path)) {
@@ -148,21 +158,21 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $portableAsset = "wispterm-windows-portable-$tag.zip"
-          $portableWebView2Asset = "wispterm-windows-portable-webview2-$tag.zip"
+          $portableCompatAsset = "wispterm-windows-portable-compat-$tag.zip"
           $portableNoWebViewAsset = "wispterm-windows-portable-no-webview-$tag.zip"
 
           if (Test-Path $portableAsset) {
             Remove-Item $portableAsset -Force
           }
-          if (Test-Path $portableWebView2Asset) {
-            Remove-Item $portableWebView2Asset -Force
+          if (Test-Path $portableCompatAsset) {
+            Remove-Item $portableCompatAsset -Force
           }
           if (Test-Path $portableNoWebViewAsset) {
             Remove-Item $portableNoWebViewAsset -Force
           }
 
           Compress-Archive -Path zig-out\dist\portable\* -DestinationPath $portableAsset -Force
-          Compress-Archive -Path zig-out\dist\portable-webview2\* -DestinationPath $portableWebView2Asset -Force
+          Compress-Archive -Path zig-out\dist\portable-compat\* -DestinationPath $portableCompatAsset -Force
           Compress-Archive -Path zig-out\dist\portable-no-webview\* -DestinationPath $portableNoWebViewAsset -Force
 
       - name: Upload portable artifact
@@ -172,11 +182,11 @@ jobs:
           path: wispterm-windows-portable-${{ github.ref_name }}.zip
           if-no-files-found: error
 
-      - name: Upload portable WebView2 artifact
+      - name: Upload portable compat artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wispterm-windows-portable-webview2-${{ github.ref_name }}
-          path: wispterm-windows-portable-webview2-${{ github.ref_name }}.zip
+          name: wispterm-windows-portable-compat-${{ github.ref_name }}
+          path: wispterm-windows-portable-compat-${{ github.ref_name }}.zip
           if-no-files-found: error
 
       - name: Upload portable no-WebView artifact
@@ -193,14 +203,14 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $portableAsset = "wispterm-windows-portable-$tag.zip"
-          $portableWebView2Asset = "wispterm-windows-portable-webview2-$tag.zip"
+          $portableCompatAsset = "wispterm-windows-portable-compat-$tag.zip"
           $portableNoWebViewAsset = "wispterm-windows-portable-no-webview-$tag.zip"
 
           if (!(Test-Path $portableAsset)) {
             throw "Portable release asset not found: $portableAsset"
           }
-          if (!(Test-Path $portableWebView2Asset)) {
-            throw "Portable WebView2 release asset not found: $portableWebView2Asset"
+          if (!(Test-Path $portableCompatAsset)) {
+            throw "Portable compat release asset not found: $portableCompatAsset"
           }
           if (!(Test-Path $portableNoWebViewAsset)) {
             throw "Portable no-WebView release asset not found: $portableNoWebViewAsset"
@@ -208,13 +218,13 @@ jobs:
 
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $portableAsset $portableWebView2Asset $portableNoWebViewAsset --repo $env:GITHUB_REPOSITORY --clobber
+            gh release upload $tag $portableAsset $portableCompatAsset $portableNoWebViewAsset --repo $env:GITHUB_REPOSITORY --clobber
           } else {
             $assetNotes = @(
               "Windows assets included in this release:",
               "",
               "- Portable: lightweight zip archive containing wispterm.exe",
-              "- Portable WebView2: zip archive containing wispterm.exe and WebView2Loader.dll for the embedded browser",
+              "- Portable compat: zip archive for older Windows 10 machines - bundles WebView2Loader.dll for the embedded browser plus a modern ConPTY (conpty.dll + OpenConsole.exe) so TUI apps like Codex and Claude Code get mouse scrolling and scrollbars",
               "- Portable no-WebView: zip archive containing wispterm.exe, built with embedded WebView2 disabled",
               "",
               "The unsigned IExpress setup executable is not published because Windows Defender can quarantine it as a false positive. Use one of the portable zip assets for now."
@@ -232,7 +242,7 @@ jobs:
               $notes = $assetNotes
             }
 
-            gh release create $tag $portableAsset $portableWebView2Asset $portableNoWebViewAsset `
+            gh release create $tag $portableAsset $portableCompatAsset $portableNoWebViewAsset `
               --repo $env:GITHUB_REPOSITORY `
               --verify-tag `
               --generate-notes `
