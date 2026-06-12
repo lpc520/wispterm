@@ -42,6 +42,7 @@ test {
     _ = @import("command_center_state.zig");
     _ = @import("platform/window_state_codec.zig");
     _ = @import("platform/dxgi_core.zig");
+    _ = @import("platform/console_host_policy.zig");
     _ = @import("whats_new_gate.zig");
     _ = @import("startup_tabs.zig");
     _ = @import("config.zig");

@@ -26,9 +26,9 @@ const impl = switch (backendForOs(builtin.os.tag)) {
     .unsupported => @import("update_package_unsupported.zig"),
 };
 
-fn runtimeFlavor(webview_enabled: bool, has_embedded_browser_payload: bool) release_package.Flavor {
+fn runtimeFlavor(webview_enabled: bool, has_compat_payload: bool) release_package.Flavor {
     if (!webview_enabled) return .without_embedded_browser_payload;
-    if (has_embedded_browser_payload) return .with_required_embedded_browser_payload;
+    if (has_compat_payload) return .compat;
     return .baseline;
 }
 
@@ -76,17 +76,17 @@ pub fn defaultPackage() release_package.Package {
 pub fn runtimePackageForOs(
     os_tag: std.Target.Os.Tag,
     webview_enabled: bool,
-    has_embedded_browser_payload: bool,
+    has_compat_payload: bool,
 ) release_package.Package {
     return switch (backendForOs(os_tag)) {
-        .windows => release_package.Package.init(.windows, runtimeFlavor(webview_enabled, has_embedded_browser_payload)),
+        .windows => release_package.Package.init(.windows, runtimeFlavor(webview_enabled, has_compat_payload)),
         .macos => defaultPackageForOs(os_tag),
         .unsupported => defaultPackageForOs(os_tag),
     };
 }
 
-pub fn runtimePackage(webview_enabled: bool, has_embedded_browser_payload: bool) release_package.Package {
-    return runtimePackageForOs(builtin.os.tag, webview_enabled, has_embedded_browser_payload);
+pub fn runtimePackage(webview_enabled: bool, has_compat_payload: bool) release_package.Package {
+    return runtimePackageForOs(builtin.os.tag, webview_enabled, has_compat_payload);
 }
 
 pub fn currentPackage(allocator: std.mem.Allocator, webview_enabled: bool) !release_package.Package {
@@ -108,9 +108,9 @@ test "platform update package maps non-Windows targets to non-Windows packages" 
 
 test "platform update package keeps Windows portable flavor logic in platform layer" {
     try std.testing.expectEqual(release_package.Flavor.without_embedded_browser_payload, runtimeFlavor(false, true));
-    try std.testing.expectEqual(release_package.Flavor.with_required_embedded_browser_payload, runtimeFlavor(true, true));
+    try std.testing.expectEqual(release_package.Flavor.compat, runtimeFlavor(true, true));
     try std.testing.expectEqual(release_package.Flavor.baseline, runtimeFlavor(true, false));
-    try std.testing.expect(release_package.Package.init(.windows, .with_required_embedded_browser_payload).requiresEmbeddedBrowserPayload());
+    try std.testing.expect(release_package.Package.init(.windows, .compat).requiresEmbeddedBrowserPayload());
 }
 
 test "platform update package builds Windows portable asset names" {
@@ -118,8 +118,8 @@ test "platform update package builds Windows portable asset names" {
     const normal = try assetNameForScenario("v0.28.0", .baseline, &buf);
     try std.testing.expectEqualStrings("wispterm-windows-portable-v0.28.0.zip", normal);
 
-    const embedded_browser = try assetNameForScenario("v0.28.0", .with_required_embedded_browser_payload, &buf);
-    try std.testing.expectEqualStrings("wispterm-windows-portable-webview2-v0.28.0.zip", embedded_browser);
+    const compat = try assetNameForScenario("v0.28.0", .compat, &buf);
+    try std.testing.expectEqualStrings("wispterm-windows-portable-compat-v0.28.0.zip", compat);
 
     const no_embedded_browser = try assetNameForScenario("v0.28.0", .without_embedded_browser_payload, &buf);
     try std.testing.expectEqualStrings("wispterm-windows-portable-no-webview-v0.28.0.zip", no_embedded_browser);
@@ -127,14 +127,14 @@ test "platform update package builds Windows portable asset names" {
 
 test "platform update package matches exact target asset names only" {
     try std.testing.expect(matchesAssetName(
-        "wispterm-windows-portable-webview2-v0.28.0.zip",
+        "wispterm-windows-portable-compat-v0.28.0.zip",
         "v0.28.0",
-        packageForScenario(.with_required_embedded_browser_payload),
+        packageForScenario(.compat),
     ));
     try std.testing.expect(!matchesAssetName(
         "wispterm-windows-portable-v0.28.0.zip",
         "v0.28.0",
-        packageForScenario(.with_required_embedded_browser_payload),
+        packageForScenario(.compat),
     ));
 }
 

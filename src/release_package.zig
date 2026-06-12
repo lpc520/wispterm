@@ -9,7 +9,9 @@ pub const Platform = enum {
 
 pub const Flavor = enum {
     baseline,
-    with_required_embedded_browser_payload,
+    /// Full-featured package for older Windows machines: ships the embedded
+    /// browser loader plus a modern bundled console host.
+    compat,
     without_embedded_browser_payload,
 };
 
@@ -25,12 +27,12 @@ pub const Package = struct {
     }
 
     pub fn requiresEmbeddedBrowserPayload(self: Package) bool {
-        return self.flavor == .with_required_embedded_browser_payload;
+        return self.flavor == .compat;
     }
 };
 
 test "release package exposes embedded browser payload requirement" {
-    try std.testing.expect(Package.init(.windows, .with_required_embedded_browser_payload).requiresEmbeddedBrowserPayload());
+    try std.testing.expect(Package.init(.windows, .compat).requiresEmbeddedBrowserPayload());
     try std.testing.expect(!Package.init(.windows, .baseline).requiresEmbeddedBrowserPayload());
     try std.testing.expect(!(Package{ .platform = .linux }).requiresEmbeddedBrowserPayload());
 }
