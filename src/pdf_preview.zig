@@ -42,8 +42,9 @@ pub fn formatPageIndicator(buf: []u8, page_index: u32, page_count: u32) []const 
 }
 
 /// argv for rendering a single 0-based page as PNG on stdout. Slices in the
-/// result point into `num_buf` (page/width digits) and `pdf_path`.
-pub const PDFTOPPM_ARGC = 11;
+/// result point into `num_buf` (page/width digits) and `pdf_path`. The crop
+/// box is used so Linux output matches the Windows/macOS backends.
+pub const PDFTOPPM_ARGC = 12;
 pub fn pdftoppmArgv(
     num_buf: *[32]u8,
     pdf_path: []const u8,
@@ -60,11 +61,11 @@ pub fn pdftoppmArgv(
     const width = num_buf[width_start..fbs.pos];
     return .{
         "pdftoppm",    "-png",
-        "-f",          page,
-        "-l",          page,
-        "-scale-to-x", width,
-        "-scale-to-y", "-1",
-        pdf_path,
+        "-cropbox",    "-f",
+        page,          "-l",
+        page,          "-scale-to-x",
+        width,         "-scale-to-y",
+        "-1",          pdf_path,
     };
 }
 
@@ -99,18 +100,19 @@ test "page indicator formats 1-based" {
     try std.testing.expectEqualStrings("1/1", formatPageIndicator(&buf, 0, 1));
 }
 
-test "pdftoppm argv renders one page to stdout" {
+test "pdftoppm argv renders one cropbox page to stdout" {
     var nums: [32]u8 = undefined;
     const argv = pdftoppmArgv(&nums, "/tmp/a.pdf", 2, 1600);
     try std.testing.expectEqualStrings("pdftoppm", argv[0]);
     try std.testing.expectEqualStrings("-png", argv[1]);
-    try std.testing.expectEqualStrings("-f", argv[2]);
-    try std.testing.expectEqualStrings("3", argv[3]);
-    try std.testing.expectEqualStrings("-l", argv[4]);
-    try std.testing.expectEqualStrings("3", argv[5]);
-    try std.testing.expectEqualStrings("-scale-to-x", argv[6]);
-    try std.testing.expectEqualStrings("1600", argv[7]);
-    try std.testing.expectEqualStrings("-scale-to-y", argv[8]);
-    try std.testing.expectEqualStrings("-1", argv[9]);
-    try std.testing.expectEqualStrings("/tmp/a.pdf", argv[10]);
+    try std.testing.expectEqualStrings("-cropbox", argv[2]);
+    try std.testing.expectEqualStrings("-f", argv[3]);
+    try std.testing.expectEqualStrings("3", argv[4]);
+    try std.testing.expectEqualStrings("-l", argv[5]);
+    try std.testing.expectEqualStrings("3", argv[6]);
+    try std.testing.expectEqualStrings("-scale-to-x", argv[7]);
+    try std.testing.expectEqualStrings("1600", argv[8]);
+    try std.testing.expectEqualStrings("-scale-to-y", argv[9]);
+    try std.testing.expectEqualStrings("-1", argv[10]);
+    try std.testing.expectEqualStrings("/tmp/a.pdf", argv[11]);
 }

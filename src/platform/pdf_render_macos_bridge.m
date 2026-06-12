@@ -55,8 +55,15 @@ int wisp_pdf_render_page_macos(const uint8_t *pdf, size_t pdf_len,
 
     CGRect box = CGPDFPageGetBoxRect(page, kCGPDFCropBox);
     if (box.size.width <= 0 || box.size.height <= 0) goto done;
+    // /Rotate 90/270 swaps the displayed width/height; the drawing transform
+    // below applies the rotation itself, it just needs a target rect with the
+    // rotated dimensions.
+    int rotation = ((CGPDFPageGetRotationAngle(page) % 360) + 360) % 360;
+    int swap_axes = rotation == 90 || rotation == 270;
+    double box_w = swap_axes ? box.size.height : box.size.width;
+    double box_h = swap_axes ? box.size.width : box.size.height;
     size_t px_w = target_width;
-    size_t px_h = (size_t)((double)target_width * box.size.height / box.size.width + 0.5);
+    size_t px_h = (size_t)((double)target_width * box_h / box_w + 0.5);
     if (px_h == 0 || px_h > 32768) goto done;
 
     space = CGColorSpaceCreateDeviceRGB();
@@ -66,8 +73,13 @@ int wisp_pdf_render_page_macos(const uint8_t *pdf, size_t pdf_len,
     CGContextSetRGBFillColor(ctx, 1, 1, 1, 1);
     CGContextFillRect(ctx, CGRectMake(0, 0, (CGFloat)px_w, (CGFloat)px_h));
     CGContextSaveGState(ctx);
-    CGContextScaleCTM(ctx, (CGFloat)px_w / box.size.width, (CGFloat)px_h / box.size.height);
-    CGContextTranslateCTM(ctx, -box.origin.x, -box.origin.y);
+    // CGPDFPageGetDrawingTransform never scales up, so upscale to the pixel
+    // canvas first and let the transform handle rotation/translation at 1:1
+    // against a rect exactly matching the rotated box size.
+    CGContextScaleCTM(ctx, (CGFloat)(px_w / box_w), (CGFloat)(px_h / box_h));
+    CGAffineTransform draw_xf = CGPDFPageGetDrawingTransform(
+        page, kCGPDFCropBox, CGRectMake(0, 0, (CGFloat)box_w, (CGFloat)box_h), 0, true);
+    CGContextConcatCTM(ctx, draw_xf);
     CGContextDrawPDFPage(ctx, page);
     CGContextRestoreGState(ctx);
 

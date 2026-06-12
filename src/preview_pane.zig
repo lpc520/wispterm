@@ -211,6 +211,11 @@ pub fn tickAsync(self: *PreviewPane) bool {
                 }
                 if (keep_zoom) |z| self.image_zoom = z;
             }
+        } else if (job.is_pdf_flip) {
+            // A failed flip keeps the currently displayed page; only the
+            // optimistic pending target is rolled back.
+            self.pdf_pending_page = null;
+            continue;
         } else {
             const msg = job.fail_msg orelse if (job.status == .too_large) TOO_LARGE_SOURCE else FAILED_SOURCE;
             self.applyOwned(job.kind, job.title_buf[0..job.title_len], job.path_buf[0..job.path_len], std.heap.page_allocator.dupe(u8, msg) catch null, job.status);
@@ -286,9 +291,12 @@ pub fn flipPdfPage(self: *PreviewPane, forward: bool) bool {
 
     const alloc = std.heap.page_allocator;
     const copy = alloc.dupe(u8, data) catch return false;
+    // The request_id bump below invalidates any in-flight flip, so failed
+    // spawn paths must also roll back the optimistic pending page.
     self.request_id +%= 1;
     const job = alloc.create(PreviewJob) catch {
         alloc.free(copy);
+        self.pdf_pending_page = null;
         return false;
     };
     job.* = .{
@@ -307,11 +315,13 @@ pub fn flipPdfPage(self: *PreviewPane, forward: bool) bool {
     @memcpy(job.title_buf[0..job.title_len], self.title());
     self.jobs.append(alloc, job) catch {
         destroyJob(job);
+        self.pdf_pending_page = null;
         return false;
     };
     job.thread = std.Thread.spawn(.{}, jobThread, .{job}) catch {
         _ = self.jobs.pop();
         destroyJob(job);
+        self.pdf_pending_page = null;
         return false;
     };
     self.pdf_pending_page = target;
@@ -503,6 +513,31 @@ test "PreviewPane: pdf render failure surfaces a specific message" {
     try std.testing.expectEqual(LoadStatus.failed, p.load_status);
     try std.testing.expect(std.mem.indexOf(u8, p.sourceText(), "poppler-utils") != null);
     try std.testing.expect(!p.flipPdfPage(true));
+}
+
+test "PreviewPane: failed pdf flip keeps the current page" {
+    const gpa = std.testing.allocator;
+    var p = try create(gpa);
+    defer p.unref(gpa);
+    p.pdf_render_fn = fakePdfRenderOk;
+    try std.testing.expect(p.beginAsyncLoadWith(.pdf, "a.pdf", "a.pdf", .local, fakePdfReadOk));
+    drainJobs(p);
+
+    p.pdf_render_fn = fakePdfRenderFail;
+    try std.testing.expect(p.flipPdfPage(true));
+    drainJobs(p);
+    try std.testing.expectEqual(LoadStatus.ready, p.load_status);
+    try std.testing.expectEqualStrings("PNG-page-0", p.sourceText());
+    try std.testing.expect(p.pdf_data != null);
+    try std.testing.expectEqual(@as(u32, 0), p.pdf_page);
+    try std.testing.expectEqual(@as(?u32, null), p.pdf_pending_page);
+
+    // The pane stays usable: a later flip with a working rasterizer succeeds.
+    p.pdf_render_fn = fakePdfRenderOk;
+    try std.testing.expect(p.flipPdfPage(true));
+    drainJobs(p);
+    try std.testing.expectEqual(@as(u32, 1), p.pdf_page);
+    try std.testing.expectEqualStrings("PNG-page-1", p.sourceText());
 }
 
 test "PreviewPane: non-pdf open clears pdf document state" {

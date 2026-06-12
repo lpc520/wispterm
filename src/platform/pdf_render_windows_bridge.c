@@ -72,6 +72,9 @@ static int wisp_load_entries(void) {
     HMODULE shlwapi = LoadLibraryW(L"shlwapi.dll");
     HMODULE shcore = LoadLibraryW(L"shcore.dll");
     if (!combase || !shlwapi || !shcore) {
+        if (combase) FreeLibrary(combase);
+        if (shlwapi) FreeLibrary(shlwapi);
+        if (shcore) FreeLibrary(shcore);
         InterlockedExchange(&g_entries_state, -1);
         return 0;
     }
