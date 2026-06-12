@@ -45,6 +45,22 @@ the terminal.
    toast already bound the worst case; `Ctrl+Shift+W` closes previews one per
    press, and dividers resize the stack.
 
+## Addendum (2026-06-12, owner feedback on the shipped #185 behavior)
+
+Two changes shipped on this branch alongside the per-kind work, superseding
+the "unchanged behavior" notes below:
+
+1. **Close is focused-pane, not preview-first.** `Ctrl+Shift+W` closes the
+   focused pane (terminal or preview alike); select a preview by clicking it
+   or via `Ctrl+1-9`. The preview-first path (`closeActivePreviewPane` /
+   `tab.closePreviewPane` / `tab.firstPreviewForReuse`) was removed — the
+   owner reported the old behavior kept evicting previews instead of closing
+   the selected pane. The browser side panel still closes first (it is an
+   unfocusable dock, so the shortcut is its only keyboard close).
+2. **Image drag-to-pan restored.** The right-dock image preview supported
+   left-drag panning; the #185 pane migration dropped that wiring (keyboard
+   arrows only). A press on a ready image pane now starts a pan drag again.
+
 ## Behavior
 
 ### Reuse algorithm (`Ctrl+click`, file-explorer click)
@@ -70,9 +86,10 @@ same philosophy as today's preview open.
 
 ### Unchanged behavior (verified, zero work)
 
-- **Close:** `Ctrl+Shift+W` closes one preview per press (focused preview,
+- **Close:** ~~`Ctrl+Shift+W` closes one preview per press (focused preview,
   else first in reading order; `tab.closePreviewPane`), then falls through to
-  splits/tab.
+  splits/tab.~~ Superseded by the 2026-06-12 addendum: close targets the
+  focused pane.
 - **Persistence:** `session_persist.LeafSnap.preview` stores `kind` + `path`
   per leaf; multiple preview panes round-trip automatically.
 - **Pane mechanics:** focus ring, `Ctrl+1-9`, Alt+drag swap, divider resize,
