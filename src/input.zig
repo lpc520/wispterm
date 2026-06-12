@@ -3306,7 +3306,7 @@ fn openPreviewAsync(kind: markdown_preview.Kind, title: []const u8, path: []cons
 
     const t = tab.activeTab() orelse return false;
     const gpa = AppWindow.g_allocator orelse return false;
-    const pane: *PreviewPane = if (tab.firstPreviewForReuse(gpa, t)) |h|
+    const pane: *PreviewPane = if (tab.previewForReuse(gpa, t, kind)) |h|
         switch (t.tree.nodes[h.idx()]) {
             .leaf => |pn| switch (pn) {
                 .preview => |p| p,
@@ -3315,7 +3315,7 @@ fn openPreviewAsync(kind: markdown_preview.Kind, title: []const u8, path: []cons
             .split => return false,
         }
     else
-        (tab.splitIntoPreview(gpa) orelse return false);
+        (tab.splitIntoPreviewStacked(gpa) orelse return false);
     if (!pane.beginAsyncLoad(kind, title, path, source_kind)) {
         file_explorer.setTransferStatus(.failed, "Preview failed");
         return true;
@@ -3330,7 +3330,7 @@ fn openPreviewNew(kind: markdown_preview.Kind, title: []const u8, path: []const 
     defer perf.end();
 
     const gpa = AppWindow.g_allocator orelse return false;
-    const pane = tab.splitIntoPreview(gpa) orelse return false;
+    const pane = tab.splitIntoPreviewStacked(gpa) orelse return false;
     if (!pane.beginAsyncLoad(kind, title, path, source_kind)) {
         file_explorer.setTransferStatus(.failed, "Preview failed");
         return true;

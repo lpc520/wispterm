@@ -3982,7 +3982,7 @@ fn pollSkillUpdate(app: *App) void {
 /// Open a SKILL.md preview in a reused-or-new preview leaf. UI thread.
 fn openSkillMdInPreviewLeaf(allocator: std.mem.Allocator, title: []const u8, content: []const u8) void {
     const at = tab.activeTab() orelse return;
-    const pane = if (tab.firstPreviewForReuse(allocator, at)) |h|
+    const pane = if (tab.previewForReuse(allocator, at, .markdown)) |h|
         switch (at.tree.nodes[h.idx()]) {
             .leaf => |pn| switch (pn) {
                 .preview => |p| p,
@@ -3991,7 +3991,7 @@ fn openSkillMdInPreviewLeaf(allocator: std.mem.Allocator, title: []const u8, con
             .split => return,
         }
     else
-        (tab.splitIntoPreview(allocator) orelse return);
+        (tab.splitIntoPreviewStacked(allocator) orelse return);
     pane.open(.markdown, title, "SKILL.md", content);
 }
 
