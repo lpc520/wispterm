@@ -60,10 +60,11 @@ pub fn waitMatch(haystack: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, haystack, needle) != null;
 }
 
-/// Parse argv[1..] into an Action. An unknown command is an error (so the CLI
-/// exits non-zero), distinct from an explicit help request.
+/// Parse argv[1..] into an Action. A missing or unknown command is an error
+/// (so the CLI exits non-zero), distinct from an explicit help request
+/// (`help`/`-h`/`--help`), which prints usage to stdout and exits 0.
 pub fn parseArgs(args: []const []const u8) !Action {
-    if (args.len == 0) return .help;
+    if (args.len == 0) return error.NoCommand;
     const cmd = args[0];
     if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help")) return .help;
     if (std.mem.eql(u8, cmd, "panes")) return .panes;
@@ -167,8 +168,11 @@ test "parseArgs covers every command and required-flag errors" {
 
     try t.expectError(error.MissingTarget, parseArgs(&.{"get-text"}));
     try t.expectError(error.MissingText, parseArgs(&.{ "send-text", "-t", "s1" }));
-    try t.expectEqual(Action.help, try parseArgs(&.{}));
+    // No command at all is an error (non-zero exit), like an unknown command —
+    // only an explicit help request prints usage and exits 0.
+    try t.expectError(error.NoCommand, parseArgs(&.{}));
     try t.expectEqual(Action.help, try parseArgs(&.{"help"}));
+    try t.expectEqual(Action.help, try parseArgs(&.{"-h"}));
     try t.expectEqual(Action.help, try parseArgs(&.{"--help"}));
     // Unknown command is an error (non-zero exit), not silent help.
     try t.expectError(error.UnknownCommand, parseArgs(&.{"bogus"}));
