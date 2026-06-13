@@ -60,10 +60,28 @@ const ImageOscParseState = enum {
     image_overflow_esc,
     passthrough_osc,
     passthrough_osc_esc,
+    /// Waiting for the ';' that follows "7748" in an agent-state OSC.
+    agent_osc_prefix,
+    /// Collecting the payload bytes of an OSC 7748 agent-state marker.
+    agent_osc,
+    /// Saw ESC inside an agent_osc payload; next byte should be '\' (ST).
+    agent_osc_esc,
+    /// Agent OSC payload overflowed the cap; drain until terminator.
+    agent_overflow,
+    /// Saw ESC inside agent_overflow; next byte should be '\' (ST).
+    agent_overflow_esc,
 };
 
 const WISPTERM_IMAGE_OSC_PREFIX = "7747;WispTermImage=";
 const WISPTERM_IMAGE_OSC_MAX = 16 * 1024;
+
+/// OSC number prefix shared by image (7747) and agent (7748): the bytes "774".
+const WISPTERM_PRIVATE_OSC_SHARED = "774";
+/// Full OSC prefix for the agent-state marker (OSC 7748).
+const WISPTERM_AGENT_OSC_PREFIX = "7748;";
+/// Maximum agent marker payload size (bytes after "7748;"); sequences longer
+/// than this are silently discarded via the overflow states.
+const WISPTERM_AGENT_OSC_MAX = 256;
 
 /// Coarse launch environment for terminal-side integrations such as path paste.
 pub const LaunchKind = platform_pty_command.LaunchKind;
@@ -288,6 +306,16 @@ got_osc7_this_batch: bool = false,
 wispterm_image_osc_state: ImageOscParseState = .ground,
 wispterm_image_osc_buf: std.ArrayListUnmanaged(u8) = .empty,
 
+/// Fixed-size payload buffer for OSC 7748 agent-state markers. Sized to
+/// WISPTERM_AGENT_OSC_MAX; no heap allocation needed for these small sequences.
+wispterm_agent_osc_buf: [WISPTERM_AGENT_OSC_MAX]u8 = undefined,
+wispterm_agent_osc_buf_len: usize = 0,
+
+/// True once this surface has received an authoritative OSC 7748 agent-state
+/// marker. While true, the heuristic `refreshAgentDetection` is skipped (the
+/// hook signal is ground truth). Reset is handled elsewhere (B3, on command change).
+agent_osc_active: bool = false,
+
 // Raw CWD path from OSC 7 (Unix-style, e.g., "/home/user/dir")
 cwd_path: [512]u8 = undefined,
 cwd_path_len: usize = 0,
@@ -444,6 +472,8 @@ fn finishInit(
     surface.got_osc7_this_batch = false;
     surface.wispterm_image_osc_state = .ground;
     surface.wispterm_image_osc_buf = .empty;
+    surface.wispterm_agent_osc_buf_len = 0;
+    surface.agent_osc_active = false;
     surface.cwd_path_len = 0;
     surface.initial_cwd_path_len = 0;
     surface.agent_detection = .{};
@@ -801,6 +831,8 @@ pub fn noteAgentOutput(self: *Surface, data: []const u8) void {
 }
 
 fn refreshAgentDetection(self: *Surface) void {
+    // OSC 7748 marker is authoritative; don't let the heuristic clobber it.
+    if (self.agent_osc_active) return;
     self.agent_detection = agent_detector.detect(
         self.getTitle(),
         self.agent_recent_output[0..self.agent_recent_output_len],
@@ -979,6 +1011,14 @@ pub fn feedVtWithWispTermImageFallback(self: *Surface, data: []const u8) void {
                         self.wispterm_image_osc_state = .image_osc;
                     }
                     passthrough_start = i + 1;
+                } else if (matched == WISPTERM_PRIVATE_OSC_SHARED.len and byte == '8') {
+                    // The first 3 bytes ("774") are shared between image (7747)
+                    // and agent (7748) OSCs.  Seeing '8' here means this is the
+                    // private agent-state OSC — transition to wait for the ';'.
+                    self.wispterm_image_osc_buf.clearRetainingCapacity();
+                    self.wispterm_agent_osc_buf_len = 0;
+                    self.wispterm_image_osc_state = .agent_osc_prefix;
+                    passthrough_start = i + 1;
                 } else {
                     self.replayNonImageOscPrefix();
                     self.vt_stream.nextSlice(data[i .. i + 1]);
@@ -989,6 +1029,82 @@ pub fn feedVtWithWispTermImageFallback(self: *Surface, data: []const u8) void {
                     };
                     passthrough_start = i + 1;
                 }
+            },
+            .agent_osc_prefix => {
+                // Waiting for the ';' that completes "7748;" after the shared "774" + "8".
+                if (byte == ';') {
+                    self.wispterm_image_osc_state = .agent_osc;
+                } else {
+                    // Not a valid agent OSC — replay "\x1b]7748" + this byte as
+                    // passthrough so the VT sees it and the byte is not swallowed.
+                    self.vt_stream.nextSlice("\x1b]7748");
+                    self.vt_stream.nextSlice(data[i .. i + 1]);
+                    self.wispterm_image_osc_state = switch (byte) {
+                        0x07 => .ground,
+                        0x1b => .passthrough_osc_esc,
+                        else => .passthrough_osc,
+                    };
+                }
+                passthrough_start = i + 1;
+            },
+            .agent_osc => switch (byte) {
+                0x07 => {
+                    // BEL terminator — complete marker.
+                    self.handleWispTermAgentOsc();
+                    self.wispterm_image_osc_state = .ground;
+                    passthrough_start = i + 1;
+                },
+                0x1b => {
+                    // Possible ST (ESC \) terminator.
+                    self.wispterm_image_osc_state = .agent_osc_esc;
+                    passthrough_start = i + 1;
+                },
+                else => {
+                    if (self.wispterm_agent_osc_buf_len < WISPTERM_AGENT_OSC_MAX) {
+                        self.wispterm_agent_osc_buf[self.wispterm_agent_osc_buf_len] = byte;
+                        self.wispterm_agent_osc_buf_len += 1;
+                    } else {
+                        // Payload exceeded cap — switch to overflow drain.
+                        self.wispterm_agent_osc_buf_len = 0;
+                        self.wispterm_image_osc_state = .agent_overflow;
+                    }
+                    passthrough_start = i + 1;
+                },
+            },
+            .agent_osc_esc => {
+                if (byte == '\\') {
+                    // ST terminator — complete marker.
+                    self.handleWispTermAgentOsc();
+                    self.wispterm_image_osc_state = .ground;
+                } else {
+                    // Not a valid ST; treat the ESC + this byte as part of payload.
+                    if (self.wispterm_agent_osc_buf_len + 2 <= WISPTERM_AGENT_OSC_MAX) {
+                        self.wispterm_agent_osc_buf[self.wispterm_agent_osc_buf_len] = 0x1b;
+                        self.wispterm_agent_osc_buf_len += 1;
+                        self.wispterm_agent_osc_buf[self.wispterm_agent_osc_buf_len] = byte;
+                        self.wispterm_agent_osc_buf_len += 1;
+                        self.wispterm_image_osc_state = .agent_osc;
+                    } else {
+                        self.wispterm_agent_osc_buf_len = 0;
+                        self.wispterm_image_osc_state = .agent_overflow;
+                    }
+                }
+                passthrough_start = i + 1;
+            },
+            .agent_overflow => switch (byte) {
+                0x07 => {
+                    self.wispterm_image_osc_state = .ground;
+                    passthrough_start = i + 1;
+                },
+                0x1b => {
+                    self.wispterm_image_osc_state = .agent_overflow_esc;
+                    passthrough_start = i + 1;
+                },
+                else => passthrough_start = i + 1,
+            },
+            .agent_overflow_esc => {
+                self.wispterm_image_osc_state = if (byte == '\\') .ground else .agent_overflow;
+                passthrough_start = i + 1;
             },
             .image_osc => switch (byte) {
                 0x07 => {
@@ -1085,6 +1201,19 @@ fn replayNonImageOscPrefix(self: *Surface) void {
     if (self.wispterm_image_osc_buf.items.len > 0) {
         self.vt_stream.nextSlice(self.wispterm_image_osc_buf.items);
         self.wispterm_image_osc_buf.clearRetainingCapacity();
+    }
+}
+
+/// Called when a complete OSC 7748 agent-state marker has been received.
+/// The payload (bytes after "7748;") is in wispterm_agent_osc_buf[0..len].
+/// If parseMarker succeeds, the Detection is applied and the heuristic is
+/// suppressed. The marker is consumed (not forwarded to the VT).
+fn handleWispTermAgentOsc(self: *Surface) void {
+    const payload = self.wispterm_agent_osc_buf[0..self.wispterm_agent_osc_buf_len];
+    self.wispterm_agent_osc_buf_len = 0;
+    if (agent_detector.parseMarker(payload)) |det| {
+        self.agent_detection = det;
+        self.agent_osc_active = true;
     }
 }
 
