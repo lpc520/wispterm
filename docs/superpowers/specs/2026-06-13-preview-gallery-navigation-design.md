@@ -22,8 +22,10 @@ When a focused preview pane is showing an image or PDF:
 - `Left` opens the previous supported image/PDF in the same directory.
 - `Right` opens the next supported image/PDF in the same directory.
 - `Up` and `Down` keep the existing pan behavior for raster previews.
-- `PageUp` and `PageDown` keep the existing PDF page flip behavior.
+- `PageUp` and `PageDown` keep the existing PDF page flip behavior within the current PDF document.
 - Modified arrow keys (`Ctrl`, `Alt`, `Super`) remain available to app keybinds or terminal input.
+
+For a multi-page PDF, the PDF document itself is one gallery item. `Left` and `Right` never turn pages inside that document; they leave the current PDF and open the neighboring image/PDF file. Page-level movement remains exclusively on `PageUp` and `PageDown`.
 
 At the first or last media file, the corresponding direction is a no-op. The pane remains focused and no terminal input is sent.
 
@@ -47,9 +49,11 @@ The input layer should call a narrow navigation helper only from the existing fo
 1. User opens an image or PDF preview.
 2. The pane stores `kind`, `path`, `title`, and `source_kind`.
 3. User focuses that pane and presses `Left` or `Right`.
-4. Input asks the gallery helper for a sibling target.
-5. If a target exists, the same pane begins an async load for that target.
+4. Input asks the gallery helper for a sibling file target, not a PDF page target.
+5. If a target file exists, the same pane begins an async load for that target.
 6. The existing preview async tick path applies the loaded content and triggers repaint.
+
+PDF page flips remain on the existing `flipPdfPage` path and are only triggered by `PageUp` and `PageDown`.
 
 ## Error Handling
 
@@ -65,6 +69,7 @@ Add unit tests for the pure gallery helper:
 - Filters unsupported files and directories.
 - Handles first/last file boundaries.
 - Handles mixed image/PDF sequences.
+- Treats a multi-page PDF as one gallery entry; page count does not affect sibling selection.
 - Handles Unix-style `/` paths and Windows-style `\` paths in pure path-splitting tests.
 
 Add a focused `PreviewPane` test proving `beginAsyncLoad` preserves the current `source_kind`. Because `input.zig` only compiles in the full app test binary, route-level input coverage belongs in `zig build test-full`; pure helper coverage should run in `zig build test`.
