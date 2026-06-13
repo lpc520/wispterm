@@ -10,7 +10,11 @@ active environment:
 Hold `Ctrl` (`Cmd` on macOS) and click a `.md`, `.txt`, `.csv`, `.tsv`, a
 source-code or script file (including R scripts `.r` / `.R`), a supported
 image file, or a `.pdf` in terminal output, or double-click a supported file in
-the File Explorer, to open the right-side preview panel.
+the File Explorer, to open a preview pane on the right. Each content type
+(Markdown, plain text, CSV/TSV, image, PDF) keeps its own pane: previewing
+another file of the same type replaces that pane's content, while a different
+type opens a new pane stacked below the existing previews — a Markdown file, an
+image, and a CSV table can stay on screen at the same time.
 Markdown previews render headings, lists, blockquotes, code blocks, inline code,
 links, and horizontal rules. Text, source-code, and script files (such as `.r`,
 `.R`, `.py`, `.zig`, `.sh`, `.json`) are shown as plain text. CSV and TSV
@@ -62,7 +66,8 @@ dragging their inner edges. Markdown, text, CSV, and TSV previews scroll with
 the mouse wheel; CSV and TSV cells show a larger hover popup when their content
 does not fit in the visible cell. Image and PDF previews zoom in and out with
 the mouse wheel and can be dragged to pan after zooming. `Ctrl+Shift+W` closes
-the preview panel before closing a split.
+the focused pane — click a preview pane (or press `Ctrl+1-9`) to select it, then
+close it like any other split.
 
 SSH previews require WispTerm's SSH profile metadata, so sessions launched from
 the built-in SSH launcher are supported. Manually typing `ssh user@host` inside

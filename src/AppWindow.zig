@@ -192,6 +192,8 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
         .distill_suggest_enabled = app.ai_distill_suggest,
     });
     ai_chat.setDefaultWorkingDir(app.ai_agent_working_dir);
+    overlays.setSubagentProfileName(app.ai_subagent_profile);
+    ai_chat.setSubagentProfileResolver(overlays.resolveSubagentProfileOverride);
     @import("web_search.zig").setJinaApiKey(app.jina_api_key);
     @import("pty.zig").setConsoleHostPreference(app.console_host_preference);
     // Copy shell command from App
@@ -3489,21 +3491,6 @@ pub fn splitFocusedReturningSurface(direction: SplitTree.Split.Direction) ?*Surf
     return surface;
 }
 
-/// Close the active tab's preview pane if it has one (the focused preview, else
-/// the first in reading order), keeping the focused terminal focused. Returns
-/// false when there is no preview pane — or the preview is the tab's only pane —
-/// so the caller falls through to the standard split/tab close path. This is the
-/// pane-world successor of the right-dock close that Ctrl+Shift+W used to do
-/// first: opening a preview deliberately keeps the terminal focused, so a plain
-/// focused-split close would silently kill the terminal instead.
-pub fn closeActivePreviewPane() bool {
-    const allocator = g_allocator orelse return false;
-    if (!tab.closePreviewPane(allocator)) return false;
-    handleActiveSurfaceChangeWithinTab();
-    requestImmediateLayoutResize();
-    return true;
-}
-
 pub fn closeFocusedSplit() void {
     const allocator = g_allocator orelse return;
     const closing_tab_idx = active_tab_state.g_active_tab;
@@ -3982,7 +3969,7 @@ fn pollSkillUpdate(app: *App) void {
 /// Open a SKILL.md preview in a reused-or-new preview leaf. UI thread.
 fn openSkillMdInPreviewLeaf(allocator: std.mem.Allocator, title: []const u8, content: []const u8) void {
     const at = tab.activeTab() orelse return;
-    const pane = if (tab.firstPreviewForReuse(allocator, at)) |h|
+    const pane = if (tab.previewForReuse(allocator, at, .markdown)) |h|
         switch (at.tree.nodes[h.idx()]) {
             .leaf => |pn| switch (pn) {
                 .preview => |p| p,
@@ -3991,7 +3978,7 @@ fn openSkillMdInPreviewLeaf(allocator: std.mem.Allocator, title: []const u8, con
             .split => return,
         }
     else
-        (tab.splitIntoPreview(allocator) orelse return);
+        (tab.splitIntoPreviewStacked(allocator) orelse return);
     pane.open(.markdown, title, "SKILL.md", content);
 }
 
@@ -4087,6 +4074,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
         .distill_suggest_enabled = cfg.@"ai-distill-suggest",
     });
     ai_chat.setDefaultWorkingDir(cfg.@"ai-agent-working-dir");
+    overlays.setSubagentProfileName(cfg.@"ai-subagent-profile");
     @import("web_search.zig").setJinaApiKey(cfg.@"jina-api-key");
     @import("pty.zig").setConsoleHostPreference(cfg.@"windows-conpty");
 
@@ -4726,6 +4714,7 @@ const WeixinRequest = struct {
     out_surface_id: [16]u8 = [_]u8{0} ** 16,
     open_result: weixin_control.OpenResult = .failed,
     sent: bool = false,
+    busy: bool = false, // send_input: AI chat rejected the prompt (request inflight)
     transcript: []u8 = &.{},
     dir: []u8 = &.{}, // inbound_file_dir (heap, page_allocator)
 };
@@ -4811,7 +4800,7 @@ fn handleWeixinControlRequest(req: *WeixinRequest) void {
                 if (tab_state.kind != .ai_chat) return;
                 const session = tab_state.ai_chat_session orelse return;
                 if (req.reply_context) |ctx| {
-                    session.applyWeixinInput(req.bytes, ctx);
+                    req.busy = !session.applyWeixinInput(req.bytes, ctx);
                 } else {
                     session.applyRemoteInput(req.bytes);
                 }
@@ -4901,10 +4890,10 @@ fn wxOpenAiAgent(_: *anyopaque, _: u32) weixin_control.OpenResult {
     return req.open_result;
 }
 
-fn wxSendInput(_: *anyopaque, surface_id: [16]u8, bytes: []const u8, reply_context: ?weixin_types.ReplyContext) bool {
+fn wxSendInput(_: *anyopaque, surface_id: [16]u8, bytes: []const u8, reply_context: ?weixin_types.ReplyContext) weixin_control.SendResult {
     var req = WeixinRequest{ .op = .send_input, .surface_id = surface_id, .bytes = bytes, .reply_context = reply_context };
-    if (!weixinDispatch(&req)) return false;
-    return req.sent;
+    if (!weixinDispatch(&req) or !req.sent) return .offline;
+    return if (req.busy) .busy else .ok;
 }
 
 fn wxTranscript(_: *anyopaque) []const u8 {
