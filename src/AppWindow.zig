@@ -2023,8 +2023,9 @@ pub fn splitFocusedReturningSurface(direction: SplitTree.Split.Direction) ?*Surf
         if (t.tmux_window_id != null) {
             if (t.focusedSurface()) |focused| {
                 const horizontal = direction == .left or direction == .right;
-                if (tmux_controller.requestSplit(focused, horizontal)) return null;
+                _ = tmux_controller.requestSplit(focused, horizontal);
             }
+            return null; // a tmux tab's splits are owned by tmux; never spawn a local/ssh surface
         }
     }
 
