@@ -60,6 +60,7 @@ const PreviewJob = struct {
 
 refcount: usize = 1,
 kind: markdown_preview.Kind = .markdown,
+source_kind: PreviewSourceKind = .local,
 load_status: LoadStatus = .idle,
 title_buf: [256]u8 = undefined,
 title_len: usize = 0,
@@ -120,6 +121,7 @@ pub fn title(self: *const PreviewPane) []const u8 { return self.title_buf[0..sel
 pub fn path(self: *const PreviewPane) []const u8 { return self.path_buf[0..self.path_len]; }
 pub fn sourceText(self: *const PreviewPane) []const u8 { return self.source orelse ""; }
 pub fn contentGeneration(self: *const PreviewPane) u64 { return self.content_generation; }
+pub fn currentSourceKind(self: *const PreviewPane) PreviewSourceKind { return self.source_kind; }
 pub fn imageZoom(self: *const PreviewPane) f32 { return self.image_zoom; }
 pub fn imagePanX(self: *const PreviewPane) f32 { return self.image_pan_x; }
 pub fn imagePanY(self: *const PreviewPane) f32 { return self.image_pan_y; }
@@ -133,6 +135,7 @@ fn setTitlePath(self: *PreviewPane, t: []const u8, p: []const u8) void {
 
 pub fn open(self: *PreviewPane, kind: markdown_preview.Kind, t: []const u8, p: []const u8, source_text: []const u8) void {
     self.request_id +%= 1;
+    self.source_kind = .local;
     self.applyOwned(kind, t, p, std.heap.page_allocator.dupe(u8, source_text) catch null, .ready);
 }
 
@@ -213,6 +216,7 @@ pub fn beginAsyncLoad(self: *PreviewPane, kind: markdown_preview.Kind, t: []cons
 
 fn beginAsyncLoadWith(self: *PreviewPane, kind: markdown_preview.Kind, t: []const u8, p: []const u8, source_kind: PreviewSourceKind, read_fn: PreviewReadFn) bool {
     self.request_id +%= 1;
+    self.source_kind = source_kind;
     if (p.len > 512) { self.applyOwned(kind, t, p, std.heap.page_allocator.dupe(u8, FAILED_SOURCE) catch null, .failed); return false; }
     self.applyOwned(kind, t, p, std.heap.page_allocator.dupe(u8, LOADING_SOURCE) catch null, .loading);
     const alloc = std.heap.page_allocator;
@@ -437,6 +441,35 @@ test "PreviewPane: open sets content and bumps generation" {
     try std.testing.expectEqual(LoadStatus.ready, p.load_status);
     try std.testing.expectEqualStrings("# Title\n", p.sourceText());
     try std.testing.expect(p.contentGeneration() != g0);
+}
+
+test "PreviewPane: async load stores current source kind" {
+    const gpa = std.testing.allocator;
+    var p = try create(gpa);
+    defer p.unref(gpa);
+
+    try std.testing.expect(switch (p.currentSourceKind()) {
+        .local => true,
+        else => false,
+    });
+    try std.testing.expect(p.beginAsyncLoadWith(.image, "a.png", "/tmp/a.png", .wsl, previewReadOkForTest));
+    try std.testing.expect(switch (p.currentSourceKind()) {
+        .wsl => true,
+        else => false,
+    });
+    drainJobs(p);
+    try std.testing.expectEqual(@as(usize, 0), p.jobs.items.len);
+    try std.testing.expectEqual(LoadStatus.ready, p.load_status);
+    try std.testing.expect(switch (p.currentSourceKind()) {
+        .wsl => true,
+        else => false,
+    });
+
+    p.open(.markdown, "b.md", "b.md", "# Reset\n");
+    try std.testing.expect(switch (p.currentSourceKind()) {
+        .local => true,
+        else => false,
+    });
 }
 
 test "PreviewPane: image zoom/pan are image-only and clamped" {

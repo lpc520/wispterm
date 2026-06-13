@@ -71,6 +71,7 @@ test {
     _ = @import("ctl/client.zig");
     _ = @import("png_dimensions.zig");
     _ = @import("pdf_preview.zig");
+    _ = @import("preview_gallery.zig");
     _ = @import("file_backend.zig");
     _ = @import("file_explorer.zig");
     _ = @import("i18n.zig");
