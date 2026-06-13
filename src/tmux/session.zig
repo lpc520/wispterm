@@ -65,12 +65,14 @@ pub const Session = struct {
         onWindowClose: *const fn (ctx: *anyopaque, window_id: usize) void = noClose,
         onActiveWindowChanged: *const fn (ctx: *anyopaque, window_id: usize) void = noActiveWindow,
         onActivePaneChanged: *const fn (ctx: *anyopaque, pane_id: usize) void = noActive,
+        onPaneMeta: *const fn (ctx: *anyopaque, pane_id: usize, path: []const u8, cmd: []const u8) void = noPaneMeta,
 
         fn noLayout(_: *anyopaque, _: usize, _: *const layout.Node) void {}
         fn noRename(_: *anyopaque, _: usize, _: []const u8) void {}
         fn noClose(_: *anyopaque, _: usize) void {}
         fn noActiveWindow(_: *anyopaque, _: usize) void {}
         fn noActive(_: *anyopaque, _: usize) void {}
+        fn noPaneMeta(_: *anyopaque, _: usize, _: []const u8, _: []const u8) void {}
     };
 
     pub fn init(alloc: Allocator, sink: PaneSink, cols: u16, rows: u16) Session {
@@ -140,22 +142,24 @@ pub const Session = struct {
             // benign empty/other reply and is ignored.
             .block_end => |body| {
                 if (!try self.applyWindowList(body)) {
-                    if (self.capture_queue.items.len > 0) {
-                        const pane_id = self.capture_queue.orderedRemove(0);
-                        // Repaint from the top-left, translating LF→CRLF: the
-                        // capture's rows are joined by '\n' only, and the
-                        // terminal's line feed moves down without returning to
-                        // column 0 — without the '\r' each row staircases right.
-                        self.scratch.clearRetainingCapacity();
-                        try self.scratch.appendSlice(self.alloc, "\x1b[2J\x1b[H");
-                        for (body) |c| {
-                            if (c == '\n') {
-                                try self.scratch.appendSlice(self.alloc, "\r\n");
-                            } else {
-                                try self.scratch.append(self.alloc, c);
+                    if (!self.applyPaneList(body)) {
+                        if (self.capture_queue.items.len > 0) {
+                            const pane_id = self.capture_queue.orderedRemove(0);
+                            // Repaint from the top-left, translating LF→CRLF: the
+                            // capture's rows are joined by '\n' only, and the
+                            // terminal's line feed moves down without returning to
+                            // column 0 — without the '\r' each row staircases right.
+                            self.scratch.clearRetainingCapacity();
+                            try self.scratch.appendSlice(self.alloc, "\x1b[2J\x1b[H");
+                            for (body) |c| {
+                                if (c == '\n') {
+                                    try self.scratch.appendSlice(self.alloc, "\r\n");
+                                } else {
+                                    try self.scratch.append(self.alloc, c);
+                                }
                             }
+                            self.sink.write(pane_id, self.scratch.items);
                         }
-                        self.sink.write(pane_id, self.scratch.items);
                     }
                 }
             },
@@ -257,6 +261,27 @@ pub const Session = struct {
         self.active_window = active_window;
         if (active_window) |id| {
             self.events.onActiveWindowChanged(self.events.ctx, id);
+        }
+        return applied;
+    }
+
+    /// Parse a `list-panes -s -F "#{pane_id}\t#{pane_current_path}\t#{pane_current_command}"`
+    /// reply body. Each line: `%<id>\t<path>\t<cmd>`. Emits onPaneMeta per line.
+    /// Returns true if at least one line applied (lets block_end tell it apart).
+    fn applyPaneList(self: *Session, body: []const u8) bool {
+        var applied = false;
+        var lines = std.mem.splitScalar(u8, body, '\n');
+        while (lines.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \r");
+            if (line.len < 2 or line[0] != '%') continue;
+            const t1 = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+            const id = std.fmt.parseInt(usize, line[1..t1], 10) catch continue;
+            const rest = line[t1 + 1 ..];
+            const t2 = std.mem.indexOfScalar(u8, rest, '\t') orelse continue;
+            const path = rest[0..t2];
+            const cmd = rest[t2 + 1 ..];
+            self.events.onPaneMeta(self.events.ctx, id, path, cmd);
+            applied = true;
         }
         return applied;
     }
@@ -575,6 +600,10 @@ const EventLog = struct {
     closed_window: ?usize = null,
     active_window: ?usize = null,
     active_pane: ?usize = null,
+    pane_meta_count: usize = 0,
+    last_pane_meta_id: ?usize = null,
+    last_pane_meta_path: std.ArrayListUnmanaged(u8) = .empty,
+    last_pane_meta_cmd: std.ArrayListUnmanaged(u8) = .empty,
 
     fn eventSink(self: *EventLog) Session.EventSink {
         return .{
@@ -584,6 +613,7 @@ const EventLog = struct {
             .onWindowClose = onClose,
             .onActiveWindowChanged = onActiveWindow,
             .onActivePaneChanged = onActive,
+            .onPaneMeta = onPaneMeta,
         };
     }
 
@@ -618,8 +648,20 @@ const EventLog = struct {
             .split => |s| for (s.children) |*c| countLeaves(c, out),
         }
     }
+    fn onPaneMeta(ctx: *anyopaque, pane_id: usize, path: []const u8, cmd: []const u8) void {
+        const self: *EventLog = @ptrCast(@alignCast(ctx));
+        self.pane_meta_count += 1;
+        self.last_pane_meta_id = pane_id;
+        self.last_pane_meta_path.clearRetainingCapacity();
+        self.last_pane_meta_path.appendSlice(self.alloc, path) catch {};
+        self.last_pane_meta_cmd.clearRetainingCapacity();
+        self.last_pane_meta_cmd.appendSlice(self.alloc, cmd) catch {};
+    }
+
     fn deinit(self: *EventLog) void {
         self.renamed_name.deinit(self.alloc);
+        self.last_pane_meta_path.deinit(self.alloc);
+        self.last_pane_meta_cmd.deinit(self.alloc);
     }
 };
 
@@ -776,4 +818,27 @@ test "EventSink default is a silent no-op" {
     // No events sink set; these must not crash.
     try s.feed("%window-renamed @1 x\n");
     try s.feed("%window-pane-changed @1 %2\n");
+}
+
+test "list-panes reply drives onPaneMeta per pane" {
+    var col = Collector{ .alloc = std.testing.allocator };
+    defer col.deinit();
+    var log = EventLog{ .alloc = std.testing.allocator };
+    defer log.deinit();
+    var s = Session.init(std.testing.allocator, col.sink(), 80, 24);
+    defer s.deinit();
+    s.events = log.eventSink();
+
+    // Reply to: list-panes -s -F "#{pane_id}\t#{pane_current_path}\t#{pane_current_command}"
+    try s.feed(
+        "%begin 9 9 0\n" ++
+            "%1\t/home/u/proj\tnvim\n" ++
+            "%2\t/var/log\ttail\n" ++
+            "%end 9 9 0\n",
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), log.pane_meta_count);
+    try std.testing.expectEqual(@as(?usize, 2), log.last_pane_meta_id);
+    try std.testing.expectEqualStrings("/var/log", log.last_pane_meta_path.items);
+    try std.testing.expectEqualStrings("tail", log.last_pane_meta_cmd.items);
 }
