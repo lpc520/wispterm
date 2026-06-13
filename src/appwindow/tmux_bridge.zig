@@ -82,6 +82,7 @@ pub const TmuxBridge = struct {
             .onWindowClose = onWindowClose,
             .onActiveWindowChanged = onActiveWindowChanged,
             .onActivePaneChanged = onActivePaneChanged,
+            .onPaneMeta = onPaneMeta,
         };
     }
 
@@ -368,6 +369,15 @@ pub const TmuxBridge = struct {
                 }
             }
         }
+    }
+
+    fn onPaneMeta(ctx: *anyopaque, pane_id: usize, path: []const u8, cmd: []const u8) void {
+        const self: *TmuxBridge = @ptrCast(@alignCast(ctx));
+        const p = self.panes.find(pane_id) orelse return;
+        const op = p.surface orelse return;
+        const s: *Surface = @ptrCast(@alignCast(op));
+        if (path.len > 0) s.setCwdPath(path);
+        _ = cmd; // agent_kind is set from cmd in a later task (Phase B)
     }
 
     // ----- tab lookup / creation -----

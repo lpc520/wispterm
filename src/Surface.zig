@@ -807,6 +807,15 @@ fn refreshAgentDetection(self: *Surface) void {
     );
 }
 
+/// Set the working directory used for path resolution. Used by the tmux
+/// bridge, which sources cwd from `#{pane_current_path}` rather than OSC 7
+/// (tmux consumes OSC 7). Truncates to the cwd_path buffer.
+pub fn setCwdPath(self: *Surface, path: []const u8) void {
+    const n = @min(self.cwd_path.len, path.len);
+    @memcpy(self.cwd_path[0..n], path[0..n]);
+    self.cwd_path_len = n;
+}
+
 /// Get the current working directory path (from OSC 7), or null if not set.
 /// Returns a Unix-style path (e.g., "/home/user/dir" or "/mnt/c/Users/...").
 pub fn getCwd(self: *const Surface) ?[]const u8 {

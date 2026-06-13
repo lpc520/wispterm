@@ -334,6 +334,7 @@ pub const TmuxController = struct {
     closed: bool = false,
     next_retry_ms: i64 = 0,
     backoff_ms: i64 = INITIAL_BACKOFF_MS,
+    last_pane_meta_ms: i64 = 0,
 
     fn tick(self: *TmuxController, client_cols: u16, client_rows: u16) void {
         if (self.closed) return;
@@ -393,6 +394,12 @@ pub const TmuxController = struct {
         if (cmds.len > 0) {
             self.transport.writeInput(cmds);
             self.bridge.session.clearCommands();
+        }
+
+        const now = std.time.milliTimestamp();
+        if (now - self.last_pane_meta_ms >= 2000) {
+            self.last_pane_meta_ms = now;
+            self.bridge.session.refreshPaneMeta() catch {};
         }
     }
 
