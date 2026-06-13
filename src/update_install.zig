@@ -77,6 +77,38 @@ pub fn downloadAsset(allocator: std.mem.Allocator, url: []const u8, dest_path: [
     try std.fs.renameAbsolute(temp_path, dest_path);
 }
 
+/// HTTP GET `url` into an owned byte slice (caller frees). Errors on non-200 or
+/// a body larger than `max_bytes`. Network I/O — not unit-tested, validated
+/// manually like `downloadAsset`. Mirrors the body-collection idiom of
+/// `skill_update.fetchTreeJson`.
+pub fn httpGetAlloc(allocator: std.mem.Allocator, url: []const u8, max_bytes: usize) ![]u8 {
+    var client: std.http.Client = .{
+        .allocator = allocator,
+        .write_buffer_size = 16 * 1024,
+    };
+    defer client.deinit();
+
+    var body: std.Io.Writer.Allocating = .init(allocator);
+    defer body.deinit();
+
+    const response = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = .GET,
+        .keep_alive = false,
+        .headers = .{ .user_agent = .{ .override = "wispterm" } },
+        .response_writer = &body.writer,
+    });
+    if (response.status != .ok) return error.HttpStatus;
+
+    var list = body.toArrayList();
+    errdefer list.deinit(allocator);
+    if (list.items.len > max_bytes) {
+        list.deinit(allocator);
+        return error.ResponseTooLarge;
+    }
+    return list.toOwnedSlice(allocator);
+}
+
 test "update_install: download destination is the asset name inside Downloads" {
     const allocator = std.testing.allocator;
     const dest = downloadDestPath(allocator, "wispterm-windows-portable-v0.28.0.zip") catch |err| {
