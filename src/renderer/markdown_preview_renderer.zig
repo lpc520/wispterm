@@ -20,7 +20,11 @@ pub const HEADER_HEIGHT: f32 = 42;
 const PAD_X: f32 = 16;
 const PAD_Y: f32 = 18;
 const LINE_GAP: f32 = 6;
-const MAX_RENDER_LINES: usize = 512;
+// Upper bound on lines/rows laid out per pass. Off-screen lines are measured
+// (to size the scrollbar) but not drawn, so this also bounds how far a large
+// text/log head can be scrolled. Generous enough to page through a sizable head
+// while keeping the per-pass walk cheap.
+const MAX_RENDER_LINES: usize = 2000;
 const MAX_TABLE_SCAN_ROWS: usize = 128;
 const TABLE_CELL_PAD_X: f32 = 8;
 const TABLE_MIN_COL_W: f32 = 64;
@@ -67,7 +71,7 @@ pub fn renderInto(
     // Side background: fillQuad(x, gl_y, w, h) — gl_y = pane_gl_bottom
     ui_pipeline.fillQuad(panel_x, pane_gl_bottom, panel_w, panel_h, panel_bg);
 
-    renderHeader(panel_x, panel_w, window_height, panel_top, card_bg, border);
+    renderHeader(pane, panel_x, panel_w, window_height, panel_top, card_bg, border, accent);
     renderFooter(pane, panel_x, panel_w, pane_gl_bottom, card_bg, border, muted, normal, accent);
 
     renderDocument(pane, panel_x, panel_w, window_height, panel_top, panel_h, pane_gl_bottom, normal, muted, strong, accent, code_bg, border);
@@ -78,12 +82,14 @@ pub fn deinit() void {
 }
 
 fn renderHeader(
+    pane: *const PreviewPane,
     panel_x: f32,
     panel_w: f32,
     window_height: f32,
     panel_top: f32,
     card_bg: [3]f32,
     border: [3]f32,
+    accent: [3]f32,
 ) void {
     // A preview pane closes via the standard close-split keybind (like a terminal
     // pane), so the header is just a top separator bar — no close button.
@@ -91,6 +97,29 @@ fn renderHeader(
     const header_y = window_height - panel_top - HEADER_HEIGHT;
     ui_pipeline.fillQuad(panel_x, header_y, panel_w, HEADER_HEIGHT, card_bg);
     ui_pipeline.fillQuad(panel_x, header_y, panel_w, 1, border);
+
+    // Large text/log files are shown as a scrollable head; tell the user the rest
+    // is clipped so they don't mistake the end of the window for the end of file.
+    if (pane.content_truncated and panel_w > PAD_X * 2) {
+        var buf: [96]u8 = undefined;
+        const label = truncatedBannerText(&buf, pane.sourceText().len);
+        const text_y = header_y + (HEADER_HEIGHT - font.g_titlebar_cell_height) / 2;
+        _ = titlebar.renderTextLimited(label, panel_x + PAD_X, text_y, accent, panel_w - PAD_X * 2);
+    }
+}
+
+/// Header banner for a truncated (head-only) preview, e.g.
+/// "Large file: showing first 1.0 MB (scroll to read more)".
+fn truncatedBannerText(buf: []u8, head_bytes: usize) []const u8 {
+    const kib: usize = 1024;
+    const mib: usize = 1024 * 1024;
+    if (head_bytes >= mib) {
+        return std.fmt.bufPrint(buf, "Large file: showing first {d}.{d} MB (scroll to read more)", .{ head_bytes / mib, (head_bytes % mib) * 10 / mib }) catch buf[0..0];
+    }
+    if (head_bytes >= kib) {
+        return std.fmt.bufPrint(buf, "Large file: showing first {d} KB (scroll to read more)", .{head_bytes / kib}) catch buf[0..0];
+    }
+    return std.fmt.bufPrint(buf, "Large file: showing first {d} bytes (scroll to read more)", .{head_bytes}) catch buf[0..0];
 }
 
 fn renderFooter(
@@ -172,7 +201,8 @@ fn renderDocument(
     }
 
     const row_h = @max(22, font.g_titlebar_cell_height + LINE_GAP);
-    var y_from_top: f32 = body_top - pane.scroll_offset;
+    const body_origin = body_top - pane.scroll_offset;
+    var y_from_top: f32 = body_origin;
     const max_w = panel_w - PAD_X * 2;
 
     var in_code = false;
@@ -181,6 +211,9 @@ fn renderDocument(
     while (lines.next()) |raw_line| {
         if (rendered >= MAX_RENDER_LINES) break;
         const line = std.mem.trimRight(u8, raw_line, "\r");
+        // renderMarkdownLine measures every line but only draws the on-screen
+        // slice, so we keep walking past the viewport bottom to accumulate the
+        // full content height (needed to clamp scroll) without extra draw cost.
         const consumed = renderMarkdownLine(
             pane,
             panel_x + PAD_X,
@@ -201,9 +234,22 @@ fn renderDocument(
         );
         y_from_top += consumed;
         rendered += 1;
-        if (y_from_top > body_top + body_h + row_h * 4) break;
     }
+    // Clamp scroll to the laid-out height so the pane can't scroll past its last
+    // rendered line into blank space (large heads now stop cleanly at the end).
+    pane.max_scroll = @max(0, (y_from_top - body_origin) - body_h);
     _ = panel_h;
+}
+
+/// Number of non-blank lines — the count of rows the delimited renderer actually
+/// draws (it skips blank/whitespace-only lines), used to size the scroll height.
+fn countNonBlankLines(source: []const u8) usize {
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, source, '\n');
+    while (it.next()) |line| {
+        if (std.mem.trim(u8, line, " \t\r").len > 0) n += 1;
+    }
+    return n;
 }
 
 const TableLayout = struct {
@@ -270,6 +316,12 @@ fn renderDelimitedDocument(
 
     const row_h = @max(26, font.g_titlebar_cell_height + 10);
     if (body_h <= row_h) return;
+
+    // Rows are fixed-height, so clamp scroll to (visible rows × row_h) - body_h,
+    // stopping exactly at the last row. Count NON-BLANK lines (the render loop
+    // skips blank/empty lines), capped at the render budget (header + data rows).
+    const shown_rows = @min(countNonBlankLines(source), MAX_RENDER_LINES + 1);
+    pane.max_scroll = @max(0, @as(f32, @floatFromInt(shown_rows)) * row_h - body_h);
 
     var saw_header = false;
     var data_row_idx: usize = 0;
@@ -1014,4 +1066,18 @@ fn appendSlice(buf: *[1024]u8, pos: usize, text: []const u8) usize {
     const len = @min(text.len, buf.len - pos);
     @memcpy(buf[pos..][0..len], text[0..len]);
     return pos + len;
+}
+
+test "countNonBlankLines ignores blank and whitespace-only lines" {
+    try std.testing.expectEqual(@as(usize, 3), countNonBlankLines("a,b\n\nc,d\n   \ne,f\n"));
+    try std.testing.expectEqual(@as(usize, 1), countNonBlankLines("only"));
+    try std.testing.expectEqual(@as(usize, 0), countNonBlankLines("\n  \n\t\n"));
+}
+
+test "truncatedBannerText scales the head size" {
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("Large file: showing first 1.0 MB (scroll to read more)", truncatedBannerText(&buf, 1024 * 1024));
+    try std.testing.expectEqualStrings("Large file: showing first 1.5 MB (scroll to read more)", truncatedBannerText(&buf, 1024 * 1024 * 3 / 2));
+    try std.testing.expectEqualStrings("Large file: showing first 4 KB (scroll to read more)", truncatedBannerText(&buf, 4096));
+    try std.testing.expectEqualStrings("Large file: showing first 200 bytes (scroll to read more)", truncatedBannerText(&buf, 200));
 }
