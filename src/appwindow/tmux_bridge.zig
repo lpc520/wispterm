@@ -377,7 +377,7 @@ pub const TmuxBridge = struct {
         const op = p.surface orelse return;
         const s: *Surface = @ptrCast(@alignCast(op));
         if (path.len > 0) s.setCwdPath(path);
-        _ = cmd; // agent_kind is set from cmd in a later task (Phase B)
+        s.noteAgentCommand(@import("../agent_detector.zig").appFromCommand(cmd));
     }
 
     // ----- tab lookup / creation -----

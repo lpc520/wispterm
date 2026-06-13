@@ -77,8 +77,6 @@ const WISPTERM_IMAGE_OSC_MAX = 16 * 1024;
 
 /// OSC number prefix shared by image (7747) and agent (7748): the bytes "774".
 const WISPTERM_PRIVATE_OSC_SHARED = "774";
-/// Full OSC prefix for the agent-state marker (OSC 7748).
-const WISPTERM_AGENT_OSC_PREFIX = "7748;";
 /// Maximum agent marker payload size (bytes after "7748;"); sequences longer
 /// than this are silently discarded via the overflow states.
 const WISPTERM_AGENT_OSC_MAX = 256;
@@ -846,6 +844,24 @@ pub fn setCwdPath(self: *Surface, path: []const u8) void {
     const n = @min(self.cwd_path.len, path.len);
     @memcpy(self.cwd_path[0..n], path[0..n]);
     self.cwd_path_len = n;
+}
+
+/// Note the pane's current foreground command (from tmux `#{pane_current_command}`),
+/// classified to an agent App. Two effects:
+///  - If the command is no longer an agent (`.none`) and an OSC marker had been
+///    driving this surface, release the authoritative latch so the heuristic
+///    detector resumes (the agent process has exited back to a shell).
+///  - Otherwise, if no app is known yet and the OSC marker isn't driving the
+///    surface, seed `agent_detection.app` from the (reliable) process name so the
+///    badge identifies the agent even before output heuristics fire.
+pub fn noteAgentCommand(self: *Surface, app: agent_detector.App) void {
+    if (app == .none) {
+        if (self.agent_osc_active) self.agent_osc_active = false;
+        return;
+    }
+    if (!self.agent_osc_active and self.agent_detection.app == .none) {
+        self.agent_detection.app = app;
+    }
 }
 
 /// Get the current working directory path (from OSC 7), or null if not set.
