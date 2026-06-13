@@ -36,10 +36,19 @@ pub fn findNeighbor(
     const result = file_backend.list(allocator, backend, parent, entries);
     if (result.status != .ok) return null;
 
-    return neighborFromEntriesForTest(allocator, current_path, entries[0..result.count], forward);
+    return neighborFromEntries(allocator, current_path, entries[0..result.count], forward);
 }
 
 pub fn neighborFromEntriesForTest(
+    allocator: std.mem.Allocator,
+    current_path: []const u8,
+    entries: []const file_backend.Entry,
+    forward: bool,
+) !?Target {
+    return neighborFromEntries(allocator, current_path, entries, forward);
+}
+
+fn neighborFromEntries(
     allocator: std.mem.Allocator,
     current_path: []const u8,
     entries: []const file_backend.Entry,
@@ -89,6 +98,7 @@ fn rasterKind(entry: *const file_backend.Entry) ?markdown_preview.Kind {
 fn parentPath(path: []const u8) ?[]const u8 {
     const index = lastSeparatorIndex(path) orelse return null;
     if (index == 0) return path[0..1];
+    if (isWindowsDriveRootSeparator(path, index)) return path[0 .. index + 1];
     return path[0..index];
 }
 
@@ -153,6 +163,10 @@ fn makeTargetPath(
 
 fn isSeparator(byte: u8) bool {
     return byte == '/' or byte == '\\';
+}
+
+fn isWindowsDriveRootSeparator(path: []const u8, index: usize) bool {
+    return index == 2 and path.len >= 3 and path[1] == ':' and std.ascii.isAlphabetic(path[0]);
 }
 
 fn testEntry(name: []const u8, is_dir: bool) file_backend.Entry {
@@ -231,4 +245,46 @@ test "preview_gallery: supports windows-style backslash paths" {
     defer prev.deinit(allocator);
     try std.testing.expectEqualStrings("a.bmp", prev.title());
     try std.testing.expectEqualStrings("C:\\Users\\me\\Pictures\\a.bmp", prev.path);
+}
+
+test "preview_gallery: preserves windows drive-root parent separator" {
+    try std.testing.expectEqualStrings("C:\\", parentPath("C:\\file.pdf").?);
+    try std.testing.expectEqualStrings("C:/", parentPath("C:/file.pdf").?);
+}
+
+test "preview_gallery: returns null when current path has no parent" {
+    const allocator = std.testing.allocator;
+    var entries = [_]file_backend.Entry{
+        testEntry("current.pdf", false),
+        testEntry("next.png", false),
+    };
+
+    try std.testing.expect((try neighborFromEntriesForTest(allocator, "current.pdf", entries[0..], true)) == null);
+}
+
+test "preview_gallery: returns null when current file is absent" {
+    const allocator = std.testing.allocator;
+    var entries = [_]file_backend.Entry{
+        testEntry("a.png", false),
+        testEntry("b.pdf", false),
+    };
+
+    try std.testing.expect((try neighborFromEntriesForTest(allocator, "/tmp/missing.pdf", entries[0..], true)) == null);
+}
+
+test "preview_gallery: returns null when target path exceeds byte cap" {
+    const allocator = std.testing.allocator;
+    var entries = [_]file_backend.Entry{
+        testEntry("current.pdf", false),
+        testEntry("next.png", false),
+    };
+
+    const parent_len = MAX_TARGET_PATH_BYTES - "next.png".len + 1;
+    var current_buf: [MAX_TARGET_PATH_BYTES + 32]u8 = undefined;
+    @memset(current_buf[0..parent_len], 'a');
+    current_buf[parent_len] = '/';
+    @memcpy(current_buf[parent_len + 1 ..][0.."current.pdf".len], "current.pdf");
+    const current_path = current_buf[0 .. parent_len + 1 + "current.pdf".len];
+
+    try std.testing.expect((try neighborFromEntriesForTest(allocator, current_path, entries[0..], true)) == null);
 }
