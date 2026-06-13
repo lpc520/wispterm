@@ -142,7 +142,9 @@ pub const Session = struct {
             // benign empty/other reply and is ignored.
             .block_end => |body| {
                 if (!try self.applyWindowList(body)) {
-                    if (!self.applyPaneList(body)) {
+                    if (self.capture_queue.items.len == 0 and self.applyPaneList(body)) {
+                        // list-panes metadata handled
+                    } else {
                         if (self.capture_queue.items.len > 0) {
                             const pane_id = self.capture_queue.orderedRemove(0);
                             // Repaint from the top-left, translating LF→CRLF: the
@@ -268,10 +270,13 @@ pub const Session = struct {
     /// Parse a `list-panes -s -F "#{pane_id}\t#{pane_current_path}\t#{pane_current_command}"`
     /// reply body. Each line: `%<id>\t<path>\t<cmd>`. Emits onPaneMeta per line.
     /// Returns true if at least one line applied (lets block_end tell it apart).
+    /// NOTE: The `list-panes` enqueuer that feeds capture_queue is wired in a later task;
+    /// this function is only reached when capture_queue is empty (see block_end guard).
     fn applyPaneList(self: *Session, body: []const u8) bool {
         var applied = false;
         var lines = std.mem.splitScalar(u8, body, '\n');
         while (lines.next()) |raw| {
+            // Trim spaces and \r but NOT \t — tabs are the field separator.
             const line = std.mem.trim(u8, raw, " \r");
             if (line.len < 2 or line[0] != '%') continue;
             const t1 = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
@@ -841,4 +846,54 @@ test "list-panes reply drives onPaneMeta per pane" {
     try std.testing.expectEqual(@as(?usize, 2), log.last_pane_meta_id);
     try std.testing.expectEqualStrings("/var/log", log.last_pane_meta_path.items);
     try std.testing.expectEqualStrings("tail", log.last_pane_meta_cmd.items);
+}
+
+test "a queued capture-pane reply is not stolen by applyPaneList" {
+    var col = Collector{ .alloc = std.testing.allocator };
+    defer col.deinit();
+    var log = EventLog{ .alloc = std.testing.allocator };
+    defer log.deinit();
+    var s = Session.init(std.testing.allocator, col.sink(), 80, 24);
+    defer s.deinit();
+    s.events = log.eventSink();
+
+    // A capture for pane 5 is pending; the reply body looks like a pane-list
+    // line. It MUST seed pane 5's sink (capture), NOT emit onPaneMeta.
+    try s.capturePane(5);
+    try s.feed("%begin 1 1 0\n%5\tx\ty\n%end 1 1 0\n");
+
+    try std.testing.expectEqual(@as(usize, 0), log.pane_meta_count);
+    // Assert pane 5's sink received the captured body (mirrors the existing
+    // "capture-pane reply is routed to the pane sink" test assertions).
+    try std.testing.expectEqual(@as(usize, 5), col.last_pane);
+    try std.testing.expectEqualSlices(u8, "\x1b[2J\x1b[H%5\tx\ty", col.buf.items);
+}
+
+test "applyPaneList skips malformed lines and counts only valid pane-list entries" {
+    var col = Collector{ .alloc = std.testing.allocator };
+    defer col.deinit();
+    var log = EventLog{ .alloc = std.testing.allocator };
+    defer log.deinit();
+    var s = Session.init(std.testing.allocator, col.sink(), 80, 24);
+    defer s.deinit();
+    s.events = log.eventSink();
+
+    // No capture pending so applyPaneList is exercised. Mix of:
+    //   blank line            — skipped (len < 2)
+    //   %abc\t/p\tcmd         — skipped (non-numeric id)
+    //   %3\t/only-one-tab     — skipped (missing second tab / no cmd field)
+    //   %7\t/home\tbash       — valid → pane_meta_count == 1
+    try s.feed(
+        "%begin 5 5 0\n" ++
+            "\n" ++
+            "%abc\t/p\tcmd\n" ++
+            "%3\t/only-one-tab\n" ++
+            "%7\t/home\tbash\n" ++
+            "%end 5 5 0\n",
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), log.pane_meta_count);
+    try std.testing.expectEqual(@as(?usize, 7), log.last_pane_meta_id);
+    try std.testing.expectEqualStrings("/home", log.last_pane_meta_path.items);
+    try std.testing.expectEqualStrings("bash", log.last_pane_meta_cmd.items);
 }
