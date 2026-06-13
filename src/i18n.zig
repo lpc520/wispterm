@@ -565,6 +565,8 @@ pub fn commandTitle(action: CommandAction) ?[]const u8 {
         .download_update => "下载更新",
         .open_latest_release => "打开最新发布",
         .update_skills => "更新技能",
+        .install_claude_code_integration => "安装 Claude Code 集成",
+        .remove_claude_code_integration => "移除 Claude Code 集成",
     };
 }
 
@@ -609,6 +611,8 @@ pub fn commandDetail(action: CommandAction) ?[]const u8 {
         .download_update => "把最新更新下载到「下载」文件夹",
         .open_latest_release => "打开最新的 WispTerm GitHub Release",
         .update_skills => "从 GitHub 下载最新技能",
+        .install_claude_code_integration => "将 WispTerm 智能体钩子添加到 ~/.claude/settings.json",
+        .remove_claude_code_integration => "从 ~/.claude/settings.json 中移除 WispTerm 智能体钩子",
     };
 }
 

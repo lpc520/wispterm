@@ -34,6 +34,8 @@ const close_confirm = @import("../close_confirm.zig");
 const weixin_qr_panel = @import("../weixin/qr_panel.zig");
 const weixin_types = @import("../weixin/types.zig");
 const i18n = @import("../i18n.zig");
+const claude_integration = @import("../claude_integration.zig");
+const platform_atomic_file = @import("../platform/atomic_file.zig");
 
 const ui_pipeline = @import("ui_pipeline.zig");
 
@@ -571,6 +573,8 @@ fn executeCommand(action: CommandAction) void {
                 showStatusToast(i18n.s().toast_update_skills_unavailable);
             }
         },
+        .install_claude_code_integration => installClaudeCodeIntegration(),
+        .remove_claude_code_integration => removeClaudeCodeIntegration(),
     }
 }
 
@@ -5229,6 +5233,77 @@ pub fn openLatestRelease() void {
     var url_buf: [256]u8 = undefined;
     const url = latestReleaseUrl(&url_buf);
     _ = platform_open_url.open(allocator, .{ .url = url });
+}
+
+/// Read the Claude Code hook settings file (empty string if absent), call
+/// claude_integration.install, write atomically, show a toast.
+fn installClaudeCodeIntegration() void {
+    const allocator = AppWindow.g_allocator orelse return;
+    applyClaudeIntegration(allocator, true);
+}
+
+/// Read the Claude Code hook settings file (empty string if absent), call
+/// claude_integration.uninstall, write atomically, show a toast.
+fn removeClaudeCodeIntegration() void {
+    const allocator = AppWindow.g_allocator orelse return;
+    applyClaudeIntegration(allocator, false);
+}
+
+fn applyClaudeIntegration(allocator: std.mem.Allocator, comptime do_install: bool) void {
+    // Resolve the Claude Code settings file path via platform_dirs.
+    const settings_path = platform_dirs.agentHookSettingsPath(allocator) catch |err| {
+        std.log.warn("claude integration: cannot resolve settings path: {}", .{err});
+        showStatusToast("Claude Code integration: cannot resolve home directory");
+        return;
+    };
+    defer allocator.free(settings_path);
+
+    // Read existing content; treat missing file as "".
+    const existing = std.fs.cwd().readFileAlloc(allocator, settings_path, 16 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => allocator.dupe(u8, "") catch {
+            showStatusToast("Claude Code integration: out of memory");
+            return;
+        },
+        else => {
+            std.log.warn("claude integration: read {s}: {}", .{ settings_path, err });
+            showStatusToast("Claude Code integration: failed to read settings.json");
+            return;
+        },
+    };
+    defer allocator.free(existing);
+
+    // Apply install or uninstall (pure, no IO).
+    const new_content = if (do_install)
+        claude_integration.install(allocator, existing)
+    else
+        claude_integration.uninstall(allocator, existing);
+    const result = new_content catch |err| {
+        std.log.warn("claude integration: transform failed: {}", .{err});
+        showStatusToast("Claude Code integration: settings.json parse error");
+        return;
+    };
+    defer allocator.free(result);
+
+    // Ensure the settings directory exists.
+    const settings_dir = std.fs.path.dirname(settings_path) orelse settings_path;
+    std.fs.cwd().makePath(settings_dir) catch |err| {
+        std.log.warn("claude integration: makePath {s}: {}", .{ settings_dir, err });
+        showStatusToast("Claude Code integration: cannot create settings directory");
+        return;
+    };
+
+    // Write atomically (temp file + rename via platform helper).
+    platform_atomic_file.writeFileReplaceSafe(settings_path, result) catch |err| {
+        std.log.warn("claude integration: write {s}: {}", .{ settings_path, err });
+        showStatusToast("Claude Code integration: failed to write settings.json");
+        return;
+    };
+
+    if (do_install) {
+        showStatusToast("Claude Code agent integration installed");
+    } else {
+        showStatusToast("Claude Code agent integration removed");
+    }
 }
 
 fn openStoredPromptUrl() void {
