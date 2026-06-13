@@ -2594,8 +2594,14 @@ fn connectSshProfileTmux(idx: usize) void {
         .remote_command = remote,
     }) orelse return;
 
+    const conn = ssh_connection.SshConnection.fromParts(.{
+        .user = user,
+        .host = ip,
+        .port = port,
+        .proxy_jump = proxy_jump,
+    });
     sessionLauncherClose();
-    _ = AppWindow.startTmuxSession(cmd, password, name);
+    _ = AppWindow.startTmuxSession(cmd, password, name, conn);
 }
 
 /// Connect a profile by name in tmux mode (dev/automation hook).

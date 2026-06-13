@@ -1692,7 +1692,7 @@ pub fn spawnTabWithCommandUtf8(command: []const u8) bool {
 /// for key auth). The controller (pumped from the main loop) builds tabs/splits
 /// from the remote tmux windows/panes. Returns false if the transport could not
 /// be launched.
-pub fn startTmuxSession(ssh_cmd: []const u8, password: []const u8, profile_name: []const u8) bool {
+pub fn startTmuxSession(ssh_cmd: []const u8, password: []const u8, profile_name: []const u8, ssh_conn: ?@import("ssh_connection.zig").SshConnection) bool {
     const allocator = g_allocator orelse return false;
     return tmux_controller.start(
         allocator,
@@ -1704,6 +1704,7 @@ pub fn startTmuxSession(ssh_cmd: []const u8, password: []const u8, profile_name:
         tab.g_scrollback_limit,
         g_cursor_style,
         g_cursor_blink,
+        ssh_conn,
     );
 }
 

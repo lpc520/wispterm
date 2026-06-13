@@ -20,6 +20,7 @@ const pane_mod = @import("../tmux/pane.zig");
 const layout = @import("../tmux/layout.zig");
 const tab = @import("tab.zig");
 const active_tab_state = @import("active_tab.zig");
+const SshConnection = @import("../ssh_connection.zig").SshConnection;
 
 const Session = session_mod.Session;
 const PaneMap = pane_mod.PaneMap;
@@ -33,6 +34,10 @@ pub const TmuxBridge = struct {
     scrollback_limit: u32,
     cursor_style: Config.CursorStyle,
     cursor_blink: bool,
+    /// SSH endpoint this bridge's session was opened against. Null when the
+    /// session was started without a profile (preview-over-tmux disabled).
+    /// Threaded here so a later task can attach it to each pane Surface.
+    ssh_conn: ?SshConnection = null,
 
     /// Heap-allocate + wire the bridge. The bridge is self-referential (its
     /// `PaneSink`/`EventSink` close over `&self.panes` / `self`), so it must be
@@ -44,6 +49,7 @@ pub const TmuxBridge = struct {
         scrollback_limit: u32,
         cursor_style: Config.CursorStyle,
         cursor_blink: bool,
+        ssh_conn: ?SshConnection,
     ) Allocator.Error!*TmuxBridge {
         const self = try alloc.create(TmuxBridge);
         errdefer alloc.destroy(self);
@@ -52,6 +58,7 @@ pub const TmuxBridge = struct {
         self.scrollback_limit = scrollback_limit;
         self.cursor_style = cursor_style;
         self.cursor_blink = cursor_blink;
+        self.ssh_conn = ssh_conn;
         self.session = Session.init(alloc, self.panes.sink(), cols, rows);
         self.session.events = self.eventSink();
         return self;
@@ -465,7 +472,7 @@ test "pruneDetachedPanes drops mappings not referenced by live owned tabs" {
         active_tab_state.g_active_tab = saved_active;
     }
 
-    const bridge = try TmuxBridge.create(std.testing.allocator, 80, 24, 100, .bar, false);
+    const bridge = try TmuxBridge.create(std.testing.allocator, 80, 24, 100, .bar, false, null);
     defer bridge.destroy();
 
     var live_surface: Surface = undefined;
