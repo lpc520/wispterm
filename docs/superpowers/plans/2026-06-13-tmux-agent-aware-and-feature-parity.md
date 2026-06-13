@@ -489,6 +489,16 @@ Run: `zig build test-full 2>&1 | tail -15` → PASS (note any pre-existing failu
 
 # PHASE B — Agent-state awareness (Claude Code first)
 
+> **⚠️ REVISED 2026-06-13 (mid-execution, user-approved):** WispTerm already ships a heuristic agent-awareness feature — `agent_detector.zig` (`detect()` → per-Surface `agent_detection`: App + rich State + confidence) feeding a focused-surface titlebar badge + remote API + AI-chat context, already covering tmux panes. So Phase B REUSES it instead of building a parallel system:
+> - **B1 (done, `117daa3`):** OSC 7748 parsing folded INTO `agent_detector.zig` (`parseMarker`→authoritative `Detection` conf 100 using the existing App/State vocab; `appFromCommand`; `aggregate`). Parallel `agent_state.zig` DELETED. Wire labels = `State`/`App` `.label()` strings (e.g. `state=running|waiting_approval|done; app=claude_code`).
+> - **B2:** Surface recognizes OSC 7748 → sets `agent_detection` authoritatively + `agent_osc_active=true`; `refreshAgentDetection` skips the heuristic while `agent_osc_active` (OSC wins; heuristic stays for un-instrumented panes).
+> - **B3:** bridge `onPaneMeta` → `appFromCommand(cmd)` seeds `agent_detection.app` for tmux panes (don't clobber an OSC-active pane).
+> - **B4:** folded into B2 (heuristic is the default fallback; B2 just gates it off once OSC drives a pane).
+> - **B5/B6:** unchanged — Claude Code hooks emit the OSC using `agent_detector` labels.
+> - **B7:** NEW per-pane + per-tab dot reusing `titlebar.agentBadgeColor(state)` + `agent_detector.aggregate` (the existing badge is only for the focused surface).
+>
+> The literal task text below predates the revision; follow the revision where they conflict.
+
 ### Task B1: `src/agent_state.zig` — pure model + parsing
 
 **Files:**
