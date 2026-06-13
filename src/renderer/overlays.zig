@@ -2599,6 +2599,7 @@ fn connectSshProfileTmux(idx: usize) void {
         .host = ip,
         .port = port,
         .proxy_jump = proxy_jump,
+        .password = password,
     });
     sessionLauncherClose();
     _ = AppWindow.startTmuxSession(cmd, password, name, conn);
