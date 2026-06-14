@@ -180,8 +180,6 @@ pub const Strings = struct {
     cmd_palette_footer_history: []const u8,
 
     // —— 状态 Toast ——
-    toast_updating_skills: []const u8,
-    toast_update_skills_unavailable: []const u8,
     toast_enable_weixin_first: []const u8,
     toast_wechat_login_failed: []const u8,
     toast_wechat_poller_already_running: []const u8,
@@ -377,8 +375,6 @@ const en = Strings{
     .cmd_palette_footer = "Up/Down + Enter applies",
     .cmd_palette_footer_history = "Up/Down selects, Enter reopens, Delete removes, Esc returns",
 
-    .toast_updating_skills = "Updating skills...",
-    .toast_update_skills_unavailable = "Update Skills unavailable",
     .toast_enable_weixin_first = "Enable weixin-direct-enabled first, then restart WispTerm",
     .toast_wechat_login_failed = "WeChat login failed to start",
     .toast_wechat_poller_already_running = "WeChat poller already running",
@@ -572,8 +568,6 @@ const zh_CN = Strings{
     .cmd_palette_footer = "上下选择，回车执行",
     .cmd_palette_footer_history = "上下选择，回车重开，Delete 删除，Esc 返回",
 
-    .toast_updating_skills = "正在更新技能…",
-    .toast_update_skills_unavailable = "更新技能不可用",
     .toast_enable_weixin_first = "请先启用 weixin-direct-enabled，然后重启 WispTerm",
     .toast_wechat_login_failed = "微信登录启动失败",
     .toast_wechat_poller_already_running = "微信轮询已在运行",
@@ -746,7 +740,6 @@ pub fn commandTitle(action: CommandAction) ?[]const u8 {
         .download_update => "下载更新",
         .open_latest_release => "打开最新发布",
         .show_whats_new => "更新内容",
-        .update_skills => "更新技能",
         .install_claude_code_integration => "安装 Claude Code 集成",
         .remove_claude_code_integration => "移除 Claude Code 集成",
         .open_skill_center => "技能中心",
@@ -798,7 +791,6 @@ pub fn commandDetail(action: CommandAction) ?[]const u8 {
         .download_update => "把最新更新下载到「下载」文件夹",
         .open_latest_release => "打开最新的 WispTerm GitHub Release",
         .show_whats_new => "查看本版本的更新内容",
-        .update_skills => "从 GitHub 下载最新技能",
         .install_claude_code_integration => "将 WispTerm 智能体钩子添加到 ~/.claude/settings.json",
         .remove_claude_code_integration => "从 ~/.claude/settings.json 中移除 WispTerm 智能体钩子",
         .open_skill_center => "盘点各服务器上的 Claude Code / Codex 技能",

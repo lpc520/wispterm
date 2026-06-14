@@ -7,7 +7,6 @@ pub const SlashCommand = enum {
     skills,
     commands,
     reload_skills,
-    update_skills,
     reload_commands,
     clear,
     rewind_picker,
@@ -76,10 +75,6 @@ pub const slash_command_entries = [_]SlashCommandEntry{
     .{
         .suggestion = .{ .command = "/reload-skills", .description = "rescan skills for future calls" },
         .action = .reload_skills,
-    },
-    .{
-        .suggestion = .{ .command = "/update-skills", .description = "download latest skills from GitHub" },
-        .action = .update_skills,
     },
     .{
         .suggestion = .{ .command = "/clear", .description = "clear the conversation context" },
@@ -436,7 +431,7 @@ test "slash command suggestions filter by prefix" {
     try std.testing.expectEqual(@as(usize, 1), slashCommandSuggestionCountForInput("/sk", 3, &.{}));
     const s = slashCommandSuggestionAtForInput("/sk", 3, 0, &.{}).?;
     try std.testing.expectEqualStrings("/skills", s.command);
-    try std.testing.expectEqual(@as(usize, 17), slashCommandSuggestionCountForInput("/", 1, &.{}));
+    try std.testing.expectEqual(@as(usize, 16), slashCommandSuggestionCountForInput("/", 1, &.{}));
     try std.testing.expectEqual(@as(usize, 1), slashCommandSuggestionCountForInput("/di", 3, &.{}));
     try std.testing.expectEqualStrings("/distill", slashCommandSuggestionAtForInput("/di", 3, 0, &.{}).?.command);
 }

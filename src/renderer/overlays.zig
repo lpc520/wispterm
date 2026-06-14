@@ -573,14 +573,6 @@ fn executeCommand(action: CommandAction) void {
         },
         .open_latest_release => openLatestRelease(),
         .show_whats_new => showWhatsNew(),
-        .update_skills => {
-            if (AppWindow.g_app) |app| {
-                showStatusToast(i18n.s().toast_updating_skills);
-                app.requestSkillUpdate();
-            } else {
-                showStatusToast(i18n.s().toast_update_skills_unavailable);
-            }
-        },
         .install_claude_code_integration => installClaudeCodeIntegration(),
         .remove_claude_code_integration => removeClaudeCodeIntegration(),
         .open_skill_center => {

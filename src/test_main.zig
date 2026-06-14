@@ -800,7 +800,6 @@ comptime {
     _ = @import("ui_perf.zig");
     _ = @import("update_check.zig");
     _ = @import("update_install.zig");
-    _ = @import("skill_update.zig");
 }
 
 test "app version metadata is exposed for CLI and command center" {

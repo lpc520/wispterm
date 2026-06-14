@@ -132,7 +132,6 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
 
     // Store app pointer globally for requestNewWindow
     g_app = app;
-    ai_chat.setSkillUpdateTrigger(triggerSkillUpdate);
     // `/resume` opens the existing command-center agent history picker (the same
     // entry point the Command Palette uses for the "Select Agent History" action).
     ai_chat.setSessionResumeTrigger(struct {
@@ -4766,31 +4765,9 @@ fn resizeWindowToGrid() void {
     if (g_window) |w| window_backend.resizeClientArea(w, win_w, win_h);
 }
 
-fn triggerSkillUpdate() void {
-    if (g_app) |app| app.requestSkillUpdate();
-}
-
 fn pollUpdateCheck(app: *App) void {
     const result = app.consumeUpdateResult();
     if (result.state != .idle) overlays.showUpdateCheckResult(result);
-}
-
-fn pollSkillUpdate(app: *App) void {
-    const result = app.consumeSkillUpdateResult();
-    switch (result.state) {
-        .idle, .downloading => {},
-        .done => {
-            if (result.count == 0) {
-                overlays.showStatusToast("Skills already up to date");
-            } else {
-                var buf: [64]u8 = undefined;
-                const msg: []const u8 = std.fmt.bufPrint(&buf, "Skills updated ({d})", .{result.count}) catch "Skills updated";
-                overlays.showStatusToast(msg);
-            }
-            if (activeAiChat()) |session| session.reloadSkillSuggestions();
-        },
-        .failed => overlays.showStatusToast("Skill update failed"),
-    }
 }
 
 /// UI thread: consume a finished skill-center op result and apply it (open the
@@ -7768,7 +7745,6 @@ fn runMainLoop(self: *AppWindow) !void {
         maybePrintMemoryDebug(std.time.milliTimestamp());
         flushAgentHistoryStoreIfDirty(false);
         pollUpdateCheck(self.app);
-        pollSkillUpdate(self.app);
         if (activeSkillCenter()) |sc_session| pollSkillCenterOp(sc_session);
         if (self.app.port_forward_manager.tick() and activePortForwarding() != null) {
             g_force_rebuild = true;

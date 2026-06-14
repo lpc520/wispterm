@@ -84,7 +84,7 @@ automatically the first time you launch a new version) to see what changed.
 
 ## How Do I Update the Built-in AI Skills?
 
-Run **Update Skills** from the command center to download the latest bundled
-skills from GitHub into your platform config directory. Existing conversations
-keep the skill version they originally loaded, so updating does not change past
-chats.
+Open **Skill Center** from the command center to inventory, install, and sync
+your Claude Code / Codex skills across servers — including installing the latest
+skills from a GitHub repository. Existing conversations keep the skill version
+they originally loaded, so updating does not change past chats.

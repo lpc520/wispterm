@@ -2,8 +2,7 @@
 //! tree/blob/repo URL into owner/repo/ref/subpath, build the Git Trees + raw
 //! download URLs, and enumerate the SKILL.md-rooted skill directories found in
 //! a Trees API response. No network or disk I/O lives here — the AppWindow
-//! jobs do the HTTP + file writes. Mirrors the pure-helper style of
-//! `skill_update.zig`.
+//! jobs do the HTTP + file writes.
 const std = @import("std");
 
 pub const ParseError = error{ NotGithubUrl, MissingRepo };

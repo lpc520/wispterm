@@ -97,8 +97,7 @@ pub fn downloadAssetAccept(allocator: std.mem.Allocator, url: []const u8, dest_p
 
 /// HTTP GET `url` into an owned byte slice (caller frees). Errors on non-200 or
 /// a body larger than `max_bytes`. Network I/O — not unit-tested, validated
-/// manually like `downloadAsset`. Mirrors the body-collection idiom of
-/// `skill_update.fetchTreeJson`.
+/// manually like `downloadAsset`.
 pub fn httpGetAlloc(allocator: std.mem.Allocator, url: []const u8, max_bytes: usize) ![]u8 {
     var client: std.http.Client = .{
         .allocator = allocator,
