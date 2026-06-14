@@ -4564,14 +4564,15 @@ pub fn renderPaneAgentDots(active_tab: *const TabState, content_x: i32, content_
         const px: f32 = @as(f32, @floatCast(slot.x)) * @as(f32, @floatFromInt(content_w)) + @as(f32, @floatFromInt(content_x));
         const py: f32 = @as(f32, @floatCast(slot.y)) * @as(f32, @floatFromInt(content_h)) + @as(f32, @floatFromInt(content_y));
         const pw: f32 = @as(f32, @floatCast(slot.width)) * @as(f32, @floatFromInt(content_w));
-        const ph: f32 = @as(f32, @floatCast(slot.height)) * @as(f32, @floatFromInt(content_h));
 
-        // Top-right corner in GL coords (Y=0 at bottom):
-        //   pane GL top = window_height - py - ph  (py is top-down from content_y)
-        //   pane GL right = px + pw
-        const gl_top = window_height - py - ph;
+        // Top-right corner in GL coords (Y=0 at bottom). py is top-down from the
+        // framebuffer top, so the pane spans GL-Y [window_height - py - ph,
+        // window_height - py]; its visual top edge is the higher value
+        // (window_height - py). fillQuad's y is the quad's bottom edge (it extends
+        // upward by dot_size), so inset the dot below the top edge by the margin.
+        const gl_pane_top = window_height - py;
         const dot_x = px + pw - dot_size - dot_margin;
-        const dot_y = gl_top + dot_margin;
+        const dot_y = gl_pane_top - dot_size - dot_margin;
 
         const color = titlebar.agentBadgeColor(det.state);
         ui_pipeline.fillQuad(dot_x, dot_y, dot_size, dot_size, color);
