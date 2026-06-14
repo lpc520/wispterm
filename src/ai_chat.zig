@@ -327,15 +327,8 @@ var g_access_rules: ?*const ai_agent_access.AccessRules = null;
 var g_default_working_dir_buf: [WORKING_DIR_MAX_BYTES]u8 = undefined;
 var g_default_working_dir_len: usize = 0;
 var g_session_id_counter = std.atomic.Value(u64).init(1);
-var g_skill_update_trigger: ?*const fn () void = null;
 var g_session_resume_trigger: ?*const fn () void = null;
 var g_markdown_export_trigger: ?*const fn (MarkdownExportMode) void = null;
-
-/// Wire the callback that the `/update-skills` slash command fires. Set once at
-/// startup by the app layer (mirrors `configureAgent` / `setToolHost`).
-pub fn setSkillUpdateTrigger(cb: *const fn () void) void {
-    g_skill_update_trigger = cb;
-}
 
 /// Resolved credentials for the `ai-subagent-profile` config key. Owned
 /// strings; freed by ChatRequest.deinit.
@@ -361,7 +354,7 @@ var g_subagent_profile_resolver: ?SubagentProfileResolver = null;
 
 /// Wire the UI-thread resolver that maps the `ai-subagent-profile` config key
 /// to concrete profile credentials. Registered at startup by the app layer
-/// (mirrors setSkillUpdateTrigger). Resolution happens in buildRequestLocked
+/// (mirrors the other startup trigger setters). Resolution happens in buildRequestLocked
 /// on the UI thread; the worker only reads the owned copy on its ChatRequest.
 pub fn setSubagentProfileResolver(cb: ?SubagentProfileResolver) void {
     g_subagent_profile_resolver = cb;
@@ -517,7 +510,6 @@ fn slashCommandOutput(allocator: std.mem.Allocator, command: SlashCommand) ![]u8
         .commands => ai_chat_skills.slashCommandListOutput(allocator),
         .reload_skills => allocator.dupe(u8, "Skills will be re-read from disk on the next skill call."),
         .reload_commands => allocator.dupe(u8, "Custom commands will be re-read from the commands directory."),
-        .update_skills => allocator.dupe(u8, "Downloading the latest skills from GitHub in the background..."),
         .clear => allocator.dupe(u8, "Cleared the conversation context."),
         .rewind_picker => allocator.dupe(u8, "No previous user messages to rewind."),
         .resume_session => allocator.dupe(u8, "Opening saved conversation history..."),
@@ -2120,8 +2112,6 @@ pub const Session = struct {
             .clear => result.history_change = self.clearMessagesLocked(),
             .reload_commands => self.reloadCustomCommands(),
             .reload_skills => self.freeSkillSuggestions(),
-            // update_skills only spawns a background thread, so it is safe inline.
-            .update_skills => if (g_skill_update_trigger) |trigger| trigger(),
             .rewind_picker => {
                 const count = self.rewindPointCountLocked();
                 self.clearSubmittedInputLocked();
@@ -4398,7 +4388,6 @@ test "ai chat recognizes local slash commands" {
     try std.testing.expect(parseSlashCommand("/skills").? == .skills);
     try std.testing.expect(parseSlashCommand("/commands").? == .commands);
     try std.testing.expect(parseSlashCommand("/reload-skills").? == .reload_skills);
-    try std.testing.expect(parseSlashCommand("/update-skills").? == .update_skills);
     try std.testing.expect(parseSlashCommand("/unknown").? == .unknown);
     try std.testing.expect(parseSlashCommand("hello") == null);
 }

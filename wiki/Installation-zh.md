@@ -72,7 +72,7 @@ wispterm --show-config-path   # 打印解析出的配置文件路径
 - **Open Latest Release** —— 在浏览器中打开发布页。
 
 升级后，**What's New**（命令中心里，也会在首次启动新版本时自动弹出）会汇总改动。
-**Update Skills** 会从 GitHub 下载最新的内置 AI 技能。
+**Skill Center（技能中心）** 可以盘点、安装并跨服务器同步技能，也能从 GitHub 仓库安装最新技能。
 
 下一步：**[[快速上手|Getting-Started-zh]]**。
 
