@@ -7,12 +7,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const platform_pty_command = @import("../platform/pty_command.zig");
 const preview_path = @import("preview_path.zig");
+const html_server_model = @import("../html_server_model.zig");
 
 const looksLikePreviewPath = preview_path.looksLikePreviewPath;
 
 pub const LayoutResizeUrgency = enum { coalesced, immediate };
 pub const TerminalPathClickAction = enum { pass_through, open_url_or_preview, download_ssh_file };
-pub const InteractiveUnderlineTokenKind = enum { none, url, preview_path };
+pub const InteractiveUnderlineTokenKind = enum { none, url, html_path, preview_path };
 
 pub fn panelToggleResizeUrgency() LayoutResizeUrgency {
     return .coalesced;
@@ -31,12 +32,22 @@ pub fn terminalPathClickAction(launch_kind: platform_pty_command.LaunchKind, has
     return .pass_through;
 }
 
+/// Ctrl+right-click (Cmd on macOS) opens the file under the cursor in the OS
+/// default app, but only for local terminals — a local app cannot open an SSH
+/// or WSL path. `mod` is the primaryOpenMod result. Plain right-click and
+/// remote terminals fall through to the configured right-click action.
+pub fn rightClickOpensInEditor(launch_kind: platform_pty_command.LaunchKind, mod: bool, shift: bool, alt: bool) bool {
+    return launch_kind == .local and mod and !shift and !alt;
+}
+
 pub fn interactiveUnderlineTokenKind(action: TerminalPathClickAction, text: []const u8) InteractiveUnderlineTokenKind {
     return switch (action) {
         .pass_through => .none,
         .download_ssh_file => if (looksLikeDownloadPath(text)) .preview_path else .none,
         .open_url_or_preview => if (looksLikeUrl(text))
             .url
+        else if (html_server_model.isHtmlPath(text))
+            .html_path
         else if (looksLikePreviewPath(text))
             .preview_path
         else
@@ -47,9 +58,16 @@ pub fn interactiveUnderlineTokenKind(action: TerminalPathClickAction, text: []co
 pub fn looksLikeDownloadPath(text: []const u8) bool {
     if (text.len == 0 or looksLikeUrl(text)) return false;
     if (looksLikePreviewPath(text)) return true;
+    if (text[0] == '-') return false;
 
-    const dot_idx = std.mem.lastIndexOfScalar(u8, text, '.') orelse return false;
-    return dot_idx > 0 and dot_idx + 1 < text.len;
+    if (std.mem.lastIndexOfScalar(u8, text, '.')) |dot_idx| {
+        if (dot_idx > 0 and dot_idx + 1 < text.len) return true;
+    }
+
+    // In SSH download mode the exact remote type is only known after the click,
+    // when input.zig runs `test -d/-e` over SSH. Keep hover permissive enough
+    // for extensionless directory names such as `results` or `build`.
+    return true;
 }
 
 pub fn looksLikeUrl(text: []const u8) bool {
@@ -106,9 +124,40 @@ test "interactive underline includes preview paths for ctrl hover" {
     );
 }
 
+test "interactive underline classifies html before generic preview" {
+    try std.testing.expectEqual(
+        InteractiveUnderlineTokenKind.html_path,
+        interactiveUnderlineTokenKind(.open_url_or_preview, "index.html"),
+    );
+    try std.testing.expectEqual(
+        InteractiveUnderlineTokenKind.html_path,
+        interactiveUnderlineTokenKind(.open_url_or_preview, "dist/report.htm"),
+    );
+}
+
 test "interactive underline includes plain filenames for ssh download hover" {
     try std.testing.expectEqual(
         InteractiveUnderlineTokenKind.preview_path,
         interactiveUnderlineTokenKind(.download_ssh_file, "xx.h5ad"),
     );
+}
+
+test "interactive underline includes bare directory names for ssh download hover" {
+    try std.testing.expectEqual(
+        InteractiveUnderlineTokenKind.preview_path,
+        interactiveUnderlineTokenKind(.download_ssh_file, "results"),
+    );
+}
+
+test "right-click opens local files in editor only with primary modifier" {
+    // Local terminal + primary modifier (Ctrl/Cmd), no shift/alt → open.
+    try std.testing.expect(rightClickOpensInEditor(.local, true, false, false));
+    // Remote terminals never open a local editor.
+    try std.testing.expect(!rightClickOpensInEditor(.ssh, true, false, false));
+    try std.testing.expect(!rightClickOpensInEditor(.wsl, true, false, false));
+    // Plain right-click (no modifier) falls through to the configured action.
+    try std.testing.expect(!rightClickOpensInEditor(.local, false, false, false));
+    // Shift/Alt are reserved for other gestures.
+    try std.testing.expect(!rightClickOpensInEditor(.local, true, true, false));
+    try std.testing.expect(!rightClickOpensInEditor(.local, true, false, true));
 }

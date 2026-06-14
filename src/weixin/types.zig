@@ -3,12 +3,21 @@
 
 const std = @import("std");
 
+pub const InboundMedia = struct {
+    encrypt_query_param: []const u8 = "",
+    aes_key: []const u8 = "",
+};
+
 pub const MessageItem = struct {
     type: i64 = 0,
     /// text from a text_item (type 1)
     text: []const u8 = "",
     /// transcribed text from a voice_item (type 3)
     voice_text: []const u8 = "",
+    /// CDN media for an inbound image (type 2) or file (type 4)
+    media: ?InboundMedia = null,
+    /// original file name from a file_item (type 4)
+    file_name: []const u8 = "",
 };
 
 pub const Message = struct {
@@ -104,6 +113,11 @@ pub const ReplyContext = struct {
     sender: AttachmentSender,
     to_user_id: []const u8,
     context_token: []const u8,
+    /// Optional model-only context associated with the inbound message. The UI
+    /// shows the visible prompt text, while AI request construction may append
+    /// this context so tools can still access local resources such as saved
+    /// inbound files.
+    model_context: []const u8 = "",
 };
 
 pub const GetUpdatesResult = struct {

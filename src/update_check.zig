@@ -449,7 +449,7 @@ test "update_check: selects portable asset for runtime flavor" {
     var required_extra_name_buf: [asset_name_buffer_len]u8 = undefined;
     var no_embedded_browser_name_buf: [asset_name_buffer_len]u8 = undefined;
     const portable_package = platform_update_package.packageForScenario(.baseline);
-    const required_extra_package = platform_update_package.packageForScenario(.with_required_embedded_browser_payload);
+    const required_extra_package = platform_update_package.packageForScenario(.compat);
     const no_embedded_browser_package = platform_update_package.packageForScenario(.without_embedded_browser_payload);
     const portable_name = try platform_update_package.assetName(tag_name, portable_package, &portable_name_buf);
     const required_extra_name = try platform_update_package.assetName(tag_name, required_extra_package, &required_extra_name_buf);
@@ -517,7 +517,7 @@ test "update_check: selects macOS DMG asset for macOS package" {
 }
 
 test "update_check: update result includes selected asset fields" {
-    const package = platform_update_package.packageForScenario(.with_required_embedded_browser_payload);
+    const package = platform_update_package.packageForScenario(.compat);
     var asset_name_buf: [asset_name_buffer_len]u8 = undefined;
     const asset_name = try platform_update_package.assetName("v0.28.0", package, &asset_name_buf);
 
@@ -546,7 +546,7 @@ test "update_check: update result includes selected asset fields" {
 
 test "update_check: missing matching asset fails instead of changing flavor" {
     const available_package = platform_update_package.packageForScenario(.baseline);
-    const requested_package = platform_update_package.packageForScenario(.with_required_embedded_browser_payload);
+    const requested_package = platform_update_package.packageForScenario(.compat);
     var asset_name_buf: [asset_name_buffer_len]u8 = undefined;
     const asset_name = try platform_update_package.assetName("v0.28.0", available_package, &asset_name_buf);
 

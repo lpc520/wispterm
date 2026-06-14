@@ -13,9 +13,35 @@ pub const SlashCommand = enum {
     rewind_picker,
     resume_session,
     permission,
+    cwd,
     export_markdown,
+    distill,
+    loop,
+    watch,
+    remember,
+    memory,
+    forget,
     unknown,
 };
+
+pub const WebCommand = enum { websearch, webread, pubmed };
+
+/// Reserved `$`-prefixed commands shown in the same dropdown as skills.
+pub const ReservedWebCommand = struct { name: []const u8, description: []const u8 };
+pub const reserved_web_commands = [_]ReservedWebCommand{
+    .{ .name = "websearch", .description = "search the web (Jina)" },
+    .{ .name = "webread", .description = "read a web page or local file (Jina)" },
+    .{ .name = "pubmed", .description = "search PubMed (NCBI)" },
+};
+
+/// Match the first whitespace-delimited token against a reserved `$` command.
+/// `token` is e.g. "$websearch" (the value of `first_tok` in Session.submit).
+pub fn parseWebCommand(token: []const u8) ?WebCommand {
+    if (std.mem.eql(u8, token, "$websearch")) return .websearch;
+    if (std.mem.eql(u8, token, "$webread")) return .webread;
+    if (std.mem.eql(u8, token, "$pubmed")) return .pubmed;
+    return null;
+}
 
 pub const ComposerSuggestionKind = enum {
     slash_command,
@@ -72,12 +98,40 @@ pub const slash_command_entries = [_]SlashCommandEntry{
         .action = .permission,
     },
     .{
+        .suggestion = .{ .command = "/cwd", .description = "set the conversation working directory" },
+        .action = .cwd,
+    },
+    .{
         .suggestion = .{ .command = "/export", .description = "export conversation as Markdown" },
         .action = .export_markdown,
     },
     .{
+        .suggestion = .{ .command = "/distill", .description = "distill this conversation into a reusable skill" },
+        .action = .distill,
+    },
+    .{
         .suggestion = .{ .command = "/reload-commands", .description = "rescan the commands directory" },
         .action = .reload_commands,
+    },
+    .{
+        .suggestion = .{ .command = "/loop", .description = "repeat, list, or stop interval prompts" },
+        .action = .loop,
+    },
+    .{
+        .suggestion = .{ .command = "/watch", .description = "schedule, list, or stop timed prompts" },
+        .action = .watch,
+    },
+    .{
+        .suggestion = .{ .command = "/remember", .description = "remember a fact long-term" },
+        .action = .remember,
+    },
+    .{
+        .suggestion = .{ .command = "/memory", .description = "list remembered facts" },
+        .action = .memory,
+    },
+    .{
+        .suggestion = .{ .command = "/forget", .description = "delete a remembered fact by name" },
+        .action = .forget,
     },
 };
 
@@ -100,6 +154,8 @@ pub const ComposerCompletionTrigger = enum {
 pub fn parseSlashCommand(input: []const u8) ?SlashCommand {
     const trimmed = std.mem.trim(u8, input, " \t\r\n");
     if (!std.mem.startsWith(u8, trimmed, "/")) return null;
+    if (isDistillAlias(trimmed)) return .distill;
+    if (memoryCommandAlias(trimmed)) |c| return c;
     for (slash_command_entries) |entry| {
         if (std.mem.eql(u8, trimmed, entry.suggestion.command)) return entry.action;
     }
@@ -109,10 +165,38 @@ pub fn parseSlashCommand(input: []const u8) ?SlashCommand {
 }
 
 pub fn exactBuiltinCommand(token: []const u8) ?SlashCommand {
+    if (isDistillAlias(token)) return .distill;
+    if (memoryCommandAlias(token)) |c| return c;
     for (slash_command_entries) |entry| {
         if (std.mem.eql(u8, token, entry.suggestion.command)) return entry.action;
     }
     return null;
+}
+
+pub fn isDistillAlias(token: []const u8) bool {
+    return std.mem.eql(u8, token, "/distill") or std.mem.eql(u8, token, "/沉淀");
+}
+
+pub fn memoryCommandAlias(token: []const u8) ?SlashCommand {
+    if (std.mem.eql(u8, token, "/记住")) return .remember;
+    if (std.mem.eql(u8, token, "/记忆")) return .memory;
+    if (std.mem.eql(u8, token, "/忘记")) return .forget;
+    return null;
+}
+
+pub const CwdArg = union(enum) {
+    show,
+    reset,
+    set: []const u8,
+};
+
+/// Classify a `/cwd` argument: empty => show current, `reset`/`default`/`clear`
+/// => clear the override, anything else => set that path.
+pub fn parseCwdArg(arg: []const u8) CwdArg {
+    const t = std.mem.trim(u8, arg, " \t\r\n");
+    if (t.len == 0) return .show;
+    if (std.mem.eql(u8, t, "reset") or std.mem.eql(u8, t, "default") or std.mem.eql(u8, t, "clear")) return .reset;
+    return .{ .set = t };
 }
 
 pub fn matchCustomCommandIndex(input: []const u8, custom: []const SlashCommandSuggestion) ?usize {
@@ -217,6 +301,9 @@ pub fn skillSuggestionCountForPrefix(prefix: []const u8, skills: []const skill_r
     if (prefix.len == 0 or prefix[0] != '$') return 0;
     const skill_prefix = prefix[1..];
     var count: usize = 0;
+    for (reserved_web_commands) |rc| {
+        if (std.mem.startsWith(u8, rc.name, skill_prefix)) count += 1;
+    }
     for (skills) |meta| {
         if (std.mem.startsWith(u8, meta.name, skill_prefix)) count += 1;
     }
@@ -231,6 +318,15 @@ pub fn skillSuggestionAtForPrefix(
     if (prefix.len == 0 or prefix[0] != '$') return null;
     const skill_prefix = prefix[1..];
     var match_index: usize = 0;
+    for (reserved_web_commands) |rc| {
+        if (!std.mem.startsWith(u8, rc.name, skill_prefix)) continue;
+        if (match_index == suggestion_index) return .{
+            .kind = .skill,
+            .text = rc.name,
+            .description = rc.description,
+        };
+        match_index += 1;
+    }
     for (skills) |meta| {
         if (!std.mem.startsWith(u8, meta.name, skill_prefix)) continue;
         if (match_index == suggestion_index) return .{
@@ -304,12 +400,23 @@ const test_skills = [_]skill_registry.SkillMeta{
     .{ .name = &test_skill_review_name, .description = &test_skill_review_desc, .dir_name = &test_skill_review_dir, .rel_dir = &test_skill_review_rel },
 };
 
+test "parseSlashCommand recognizes loop and watch" {
+    try std.testing.expectEqual(SlashCommand.loop, parseSlashCommand("/loop").?);
+    try std.testing.expectEqual(SlashCommand.watch, parseSlashCommand("/watch").?);
+    try std.testing.expectEqual(SlashCommand.loop, exactBuiltinCommand("/loop").?);
+    try std.testing.expectEqual(SlashCommand.watch, exactBuiltinCommand("/watch").?);
+}
+
 test "parseSlashCommand recognizes new lifecycle commands" {
     try std.testing.expectEqual(SlashCommand.clear, parseSlashCommand("/clear").?);
     try std.testing.expectEqual(SlashCommand.resume_session, parseSlashCommand("/resume").?);
     try std.testing.expectEqual(SlashCommand.permission, parseSlashCommand("/permission").?);
     try std.testing.expectEqual(SlashCommand.export_markdown, parseSlashCommand("/export").?);
     try std.testing.expectEqual(SlashCommand.reload_commands, parseSlashCommand("/reload-commands").?);
+    try std.testing.expectEqual(SlashCommand.distill, parseSlashCommand("/distill").?);
+    try std.testing.expectEqual(SlashCommand.distill, parseSlashCommand("/沉淀").?);
+    try std.testing.expectEqual(SlashCommand.distill, exactBuiltinCommand("/沉淀").?);
+    try std.testing.expectEqual(@as(?SlashCommand, null), parseSlashCommand("/沉淀 主题"));
 }
 
 test "parseSlashCommand recognizes exact, unknown, and rejects non-slash" {
@@ -329,6 +436,9 @@ test "slash command suggestions filter by prefix" {
     try std.testing.expectEqual(@as(usize, 1), slashCommandSuggestionCountForInput("/sk", 3, &.{}));
     const s = slashCommandSuggestionAtForInput("/sk", 3, 0, &.{}).?;
     try std.testing.expectEqualStrings("/skills", s.command);
+    try std.testing.expectEqual(@as(usize, 17), slashCommandSuggestionCountForInput("/", 1, &.{}));
+    try std.testing.expectEqual(@as(usize, 1), slashCommandSuggestionCountForInput("/di", 3, &.{}));
+    try std.testing.expectEqualStrings("/distill", slashCommandSuggestionAtForInput("/di", 3, 0, &.{}).?.command);
 }
 
 test "slash suggestions include custom commands" {
@@ -358,4 +468,68 @@ test "suggestionReplacementText adds a space after a skill when needed" {
     try std.testing.expectEqualStrings("$build", suggestionReplacementText(&buf, sk, " x").?);
     const cmd = ComposerSuggestion{ .kind = .slash_command, .text = "/skills", .description = "" };
     try std.testing.expectEqualStrings("/skills", suggestionReplacementText(&buf, cmd, "").?);
+}
+
+test "parseWebCommand matches only the $websearch token" {
+    try std.testing.expectEqual(WebCommand.websearch, parseWebCommand("$websearch").?);
+    try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("$websearchx"));
+    try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("$web"));
+    try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("/websearch"));
+    try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("websearch"));
+}
+
+test "reserved $websearch appears in the $ suggestion dropdown" {
+    try std.testing.expectEqual(@as(usize, 2), skillSuggestionCountForPrefix("$web", &.{}));
+    const s = skillSuggestionAtForPrefix("$web", &.{}, 0).?;
+    try std.testing.expectEqual(ComposerSuggestionKind.skill, s.kind);
+    try std.testing.expectEqualStrings("websearch", s.text);
+}
+
+test "parseWebCommand matches $webread and still matches $websearch" {
+    try std.testing.expectEqual(WebCommand.webread, parseWebCommand("$webread").?);
+    try std.testing.expectEqual(WebCommand.websearch, parseWebCommand("$websearch").?);
+    try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("$webreadx"));
+    try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("/webread"));
+    try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("webread"));
+}
+
+test "parseWebCommand matches $pubmed" {
+    try std.testing.expectEqual(WebCommand.pubmed, parseWebCommand("$pubmed").?);
+    try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("$pubmedx"));
+    try std.testing.expectEqual(@as(?WebCommand, null), parseWebCommand("pubmed"));
+}
+
+test "reserved $pubmed appears in reserved web commands" {
+    var found = false;
+    for (reserved_web_commands) |rc| {
+        if (std.mem.eql(u8, rc.name, "pubmed")) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "parseSlashCommand recognizes memory commands and aliases" {
+    try std.testing.expectEqual(SlashCommand.remember, parseSlashCommand("/remember").?);
+    try std.testing.expectEqual(SlashCommand.remember, parseSlashCommand("/记住").?);
+    try std.testing.expectEqual(SlashCommand.memory, parseSlashCommand("/memory").?);
+    try std.testing.expectEqual(SlashCommand.memory, parseSlashCommand("/记忆").?);
+    try std.testing.expectEqual(SlashCommand.forget, parseSlashCommand("/forget").?);
+    try std.testing.expectEqual(SlashCommand.forget, parseSlashCommand("/忘记").?);
+}
+
+test "exactBuiltinCommand resolves memory aliases for arg-bearing commands" {
+    try std.testing.expectEqual(SlashCommand.remember, exactBuiltinCommand("/记住").?);
+    try std.testing.expectEqual(SlashCommand.forget, exactBuiltinCommand("/忘记").?);
+}
+
+test "parseCwdArg classifies show, reset, and set" {
+    try std.testing.expect(parseCwdArg("") == .show);
+    try std.testing.expect(parseCwdArg("   ") == .show);
+    try std.testing.expect(parseCwdArg("reset") == .reset);
+    try std.testing.expect(parseCwdArg("default") == .reset);
+    switch (parseCwdArg("  /home/u/proj  ")) {
+        .set => |p| try std.testing.expectEqualStrings("/home/u/proj", p),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(exactBuiltinCommand("/cwd") != null);
+    try std.testing.expect(exactBuiltinCommand("/cwd").? == .cwd);
 }

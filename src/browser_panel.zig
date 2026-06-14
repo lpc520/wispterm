@@ -4,6 +4,7 @@ const std = @import("std");
 const Surface = @import("Surface.zig");
 const platform_webview = @import("platform/webview.zig");
 const ssh_tunnel = @import("ssh_tunnel.zig");
+const html_server = @import("html_server.zig");
 const window_backend = @import("platform/window_backend.zig");
 const ui_perf = @import("ui_perf.zig");
 const tab = @import("appwindow/tab.zig");
@@ -53,6 +54,29 @@ pub fn contentBounds(bounds: Bounds) ?Bounds {
     };
 }
 
+pub const DisplayMode = enum { side, full };
+pub threadlocal var g_display_mode: DisplayMode = .side;
+
+pub fn setDisplayMode(mode: DisplayMode) void {
+    g_display_mode = mode;
+}
+
+pub fn displayMode() DisplayMode {
+    return g_display_mode;
+}
+
+/// Pure width math. In `full`, the panel covers the entire content area (the
+/// native webview occludes the terminal, which stays laid out behind it). In
+/// `side`, it reserves MIN_CONTENT_WIDTH for the terminal and clamps to stored_width.
+pub fn panelWidthForMode(mode: DisplayMode, stored_width: f32, window_width: i32, left_offset: f32, right_offset: f32) f32 {
+    const win_w: f32 = @floatFromInt(window_width);
+    if (mode == .full) {
+        return @max(MIN_WIDTH, win_w - left_offset - right_offset);
+    }
+    const max_width = @max(MIN_WIDTH, @min(MAX_WIDTH, win_w - left_offset - right_offset - MIN_CONTENT_WIDTH));
+    return @max(MIN_WIDTH, @min(stored_width, max_width));
+}
+
 pub threadlocal var g_visible: bool = false;
 pub threadlocal var g_owner_tab: ?usize = null;
 pub threadlocal var g_width: f32 = DEFAULT_WIDTH;
@@ -74,6 +98,13 @@ pub fn width() f32 {
 pub fn isVisibleForActiveTab() bool {
     const owner = g_owner_tab orelse return false;
     return g_visible and owner == active_tab_state.g_active_tab;
+}
+
+/// Whether the native webview should be shown this frame. Visible on its owning
+/// active tab, UNLESS a blocking GPU overlay is up (`suppressed`) — the webview
+/// composites above the GPU surface and would occlude the command center et al.
+pub fn shouldShowWebview(suppressed: bool) bool {
+    return isVisibleForActiveTab() and !suppressed;
 }
 
 pub fn onTabClosed(closed_idx: usize) void {
@@ -107,11 +138,21 @@ pub fn setWidth(w: f32, window_width: f32) bool {
     return true;
 }
 
+/// Width reserved from the TERMINAL layout. Always side-sized — even in full
+/// mode — so the terminal keeps a sane grid behind the (occluding) webview.
+/// Reserving the full width here collapses the terminal toward zero columns and
+/// panics ghostty's resize-reflow (PageList ViewportPinInsufficientRows). The
+/// webview's own draw rect uses `panelDrawWidthForWindow` instead.
 pub fn panelWidthForWindow(window_width: i32, left_offset: f32, right_offset: f32) f32 {
     if (!isVisibleForActiveTab()) return 0;
-    const win_w: f32 = @floatFromInt(window_width);
-    const max_width = @max(MIN_WIDTH, @min(MAX_WIDTH, win_w - left_offset - right_offset - MIN_CONTENT_WIDTH));
-    return @max(MIN_WIDTH, @min(g_width, max_width));
+    return panelWidthForMode(.side, g_width, window_width, left_offset, right_offset);
+}
+
+/// Width of the panel's DRAW rect (the webview + URL-bar chrome). Covers the
+/// whole content area in full mode; side-clamped otherwise.
+pub fn panelDrawWidthForWindow(window_width: i32, left_offset: f32, right_offset: f32) f32 {
+    if (!isVisibleForActiveTab()) return 0;
+    return panelWidthForMode(g_display_mode, g_width, window_width, left_offset, right_offset);
 }
 
 pub fn embeddedBrowserAvailable() bool {
@@ -179,18 +220,37 @@ pub fn toggleForSurface(allocator: std.mem.Allocator, parent: ?window_backend.Na
     return openForSurface(allocator, parent, DEFAULT_URL, surface);
 }
 
+pub fn openJupyterForSurface(allocator: std.mem.Allocator, parent: ?window_backend.NativeHandle, surface: ?*const Surface) bool {
+    if (isVisibleForActiveTab()) {
+        focusUrlBar();
+        return true;
+    }
+    // Open blank, then focus the URL bar so the user pastes their Jupyter URL.
+    if (!openForSurface(allocator, parent, "", surface)) return false;
+    focusUrlBar();
+    return true;
+}
+
 pub fn close() void {
+    g_display_mode = .side;
     g_visible = false;
     g_owner_tab = null;
     g_url_bar_focused = false;
     g_url_edit_select_all = false;
     destroyBrowser();
+    html_server.stopAll();
 }
 
 pub fn focus() void {
     if (g_browser) |browser| {
         platform_webview.focus(browser);
     }
+}
+
+pub fn refresh() void {
+    const browser = g_browser orelse return;
+    platform_webview.reload(browser);
+    g_last_error = platform_webview.lastError(browser);
 }
 
 pub fn isReady() bool {
@@ -205,13 +265,13 @@ pub fn lastError() platform_webview.ErrorCode {
     return g_last_error;
 }
 
-pub fn sync(parent: window_backend.NativeHandle, window_width: i32, window_height: i32, titlebar_height: f32, left_offset: f32, right_offset: f32) void {
+pub fn sync(parent: window_backend.NativeHandle, window_width: i32, window_height: i32, titlebar_height: f32, left_offset: f32, right_offset: f32, suppressed: bool) void {
     const perf = ui_perf.begin("browser_panel.sync");
     defer perf.end();
 
     if (window_width <= 0 or window_height <= 0) return;
 
-    if (!isVisibleForActiveTab()) {
+    if (!shouldShowWebview(suppressed)) {
         if (g_browser) |browser| platform_webview.setVisible(browser, false);
         return;
     }
@@ -251,6 +311,7 @@ pub fn sync(parent: window_backend.NativeHandle, window_width: i32, window_heigh
 
 pub fn deinit() void {
     destroyBrowser();
+    html_server.stopAll();
     ssh_tunnel.deinit();
     g_visible = false;
     g_owner_tab = null;
@@ -374,7 +435,7 @@ fn navigateCurrentUrl(browser: *platform_webview.Browser) void {
 pub fn boundsForWindow(window_width: i32, window_height: i32, titlebar_height: f32, left_offset: f32, right_offset: f32) Bounds {
     const win_w: f32 = @floatFromInt(window_width);
     const win_h: f32 = @floatFromInt(window_height);
-    const panel_w = panelWidthForWindow(window_width, left_offset, right_offset);
+    const panel_w = panelDrawWidthForWindow(window_width, left_offset, right_offset);
     const right = @max(0, win_w - right_offset);
     const left = @max(left_offset, right - panel_w);
     const top = @max(0, titlebar_height);
@@ -441,6 +502,70 @@ test "browser_panel: visible only on owning active tab" {
     try std.testing.expect(isVisibleForActiveTab());
 }
 
+test "panelWidthForMode: full covers the whole content area; side reserves min content" {
+    try std.testing.expectEqual(@as(f32, 1600), panelWidthForMode(.full, 720, 1600, 0, 0));
+    try std.testing.expectEqual(@as(f32, 720), panelWidthForMode(.side, 720, 1600, 0, 0));
+    try std.testing.expectEqual(@as(f32, 1500), panelWidthForMode(.full, 720, 1600, 60, 40));
+}
+
+test "full mode: terminal-layout width stays side; only the draw rect goes full" {
+    // Regression: in full mode the webview DRAWS over the whole content area, but
+    // the width reserved from the TERMINAL layout must stay side-sized. Reserving
+    // the full width collapsed the terminal to ~1 col and panicked ghostty's
+    // resize-reflow (PageList ViewportPinInsufficientRows) on Windows.
+    const saved_visible = g_visible;
+    const saved_owner = g_owner_tab;
+    const saved_active_tab = active_tab_state.g_active_tab;
+    const saved_width = g_width;
+    const saved_mode = g_display_mode;
+    defer {
+        g_visible = saved_visible;
+        g_owner_tab = saved_owner;
+        active_tab_state.g_active_tab = saved_active_tab;
+        g_width = saved_width;
+        g_display_mode = saved_mode;
+    }
+
+    active_tab_state.g_active_tab = 0;
+    g_visible = true;
+    g_owner_tab = 0;
+    g_width = 720;
+    g_display_mode = .full;
+
+    // Terminal-layout reservation: side-sized even in full mode.
+    try std.testing.expectEqual(@as(f32, 720), panelWidthForWindow(1600, 0, 0));
+    // Webview draw rect: full content width in full mode.
+    try std.testing.expectEqual(@as(f32, 1600), panelDrawWidthForWindow(1600, 0, 0));
+}
+
+test "browser_panel: a blocking overlay suppresses the webview even on the active tab" {
+    // The native webview composites ABOVE the GPU surface, so a full-mode panel
+    // would otherwise occlude GPU overlays like the command center. sync() must
+    // hide the webview whenever the caller reports a blocking overlay is up.
+    const saved_visible = g_visible;
+    const saved_owner = g_owner_tab;
+    const saved_active_tab = active_tab_state.g_active_tab;
+    defer {
+        g_visible = saved_visible;
+        g_owner_tab = saved_owner;
+        active_tab_state.g_active_tab = saved_active_tab;
+    }
+
+    active_tab_state.g_active_tab = 0;
+    g_visible = true;
+    g_owner_tab = 0;
+
+    // No overlay: shown on the owning active tab.
+    try std.testing.expect(shouldShowWebview(false));
+    // Overlay up: hidden, so the command center shows through.
+    try std.testing.expect(!shouldShowWebview(true));
+
+    // Inactive tab stays hidden regardless of the overlay flag.
+    active_tab_state.g_active_tab = 1;
+    try std.testing.expect(!shouldShowWebview(false));
+    try std.testing.expect(!shouldShowWebview(true));
+}
+
 test "browser_panel: public parent handle API uses window backend handle" {
     const open_info = @typeInfo(@TypeOf(open)).@"fn";
     try std.testing.expect(open_info.params[0].type.? == ?window_backend.NativeHandle);
@@ -456,4 +581,7 @@ test "browser_panel: public parent handle API uses window backend handle" {
 
     const submit_info = @typeInfo(@TypeOf(submitUrlBar)).@"fn";
     try std.testing.expect(submit_info.params[1].type.? == ?window_backend.NativeHandle);
+
+    const refresh_info = @typeInfo(@TypeOf(refresh)).@"fn";
+    try std.testing.expectEqual(@as(usize, 0), refresh_info.params.len);
 }

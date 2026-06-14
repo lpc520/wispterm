@@ -18,10 +18,15 @@ const markdown_text = @import("markdown_text.zig");
 const ai_chat_protocol = @import("ai_chat_protocol.zig");
 const ai_chat_composer = @import("ai_chat_composer.zig");
 const ai_chat_skills = @import("ai_chat_skills.zig");
+const ai_skill_distill = @import("ai_skill_distill.zig");
 const ai_chat_types = @import("ai_chat_types.zig");
 const ai_chat_tools = @import("ai_chat_tools.zig");
+const ai_agent_access = @import("ai_agent_access.zig");
+const platform_dirs = @import("platform/dirs.zig");
 const ai_chat_markdown = @import("ai_chat_markdown.zig");
 const weixin_types = @import("weixin/types.zig");
+const ai_loop_store = @import("ai_loop_store.zig");
+const ai_loop_schedule = @import("ai_loop_schedule.zig");
 
 pub const AgentSettings = ai_chat_types.AgentSettings;
 pub const AgentPermission = ai_chat_types.AgentPermission;
@@ -46,10 +51,23 @@ pub const DEFAULT_STREAM = ai_chat_protocol.DEFAULT_STREAM;
 pub const DEFAULT_AGENT = ai_chat_protocol.DEFAULT_AGENT;
 pub const DEFAULT_PROTOCOL = ai_chat_protocol.DEFAULT_PROTOCOL;
 pub const DEFAULT_MAX_TOKENS = ai_chat_protocol.DEFAULT_MAX_TOKENS;
+pub const DEFAULT_VISION = ai_chat_protocol.DEFAULT_VISION;
+
+/// Cap on a single pasted image (decoded PNG bytes) before base64. Larger images
+/// are dropped with a log rather than ballooning the request body.
+pub const MAX_PASTED_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Parse a profile "vision" field into the boolean session flag.
+pub fn parseVisionEnabled(value: []const u8) bool {
+    return std.mem.eql(u8, value, "on") or
+        std.mem.eql(u8, value, "true") or
+        std.mem.eql(u8, value, "enabled");
+}
 
 const REMOTE_SNAPSHOT_MAX_BYTES: usize = 24 * 1024;
 const INPUT_PROMPT_MAX_BYTES: usize = 64 * 1024;
 const SYSTEM_PROMPT_MAX_BYTES: usize = 16 * 1024;
+const WORKING_DIR_MAX_BYTES: usize = 1024;
 /// 两次 ESC 间隔不超过此毫秒数时判定为"双击"，用于打开回溯选择器。
 const DOUBLE_ESC_WINDOW_MS: i64 = 400;
 
@@ -61,10 +79,15 @@ pub const Role = ai_chat_protocol.Role;
 pub const Message = struct {
     role: Role,
     content: []u8,
+    /// Model-only context appended when building API requests. This is not
+    /// rendered, exported, or persisted in history.
+    model_context: ?[]u8 = null,
     reasoning: ?[]u8 = null,
     usage_footer: ?[]u8 = null,
     tool_call_id: ?[]u8 = null,
     tool_name: ?[]u8 = null,
+    // base64 images attached to a user message (vision). Owned by the message.
+    images: ?[]ai_chat_protocol.ImageBlock = null,
     replay_to_model: bool = false,
     persist_to_history: bool = true,
     content_collapsed: bool = false,
@@ -74,10 +97,15 @@ pub const Message = struct {
 
     fn deinit(self: Message, allocator: std.mem.Allocator) void {
         allocator.free(self.content);
+        if (self.model_context) |ctx| allocator.free(ctx);
         if (self.reasoning) |reasoning| allocator.free(reasoning);
         if (self.usage_footer) |footer| allocator.free(footer);
         if (self.tool_call_id) |id| allocator.free(id);
         if (self.tool_name) |name| allocator.free(name);
+        if (self.images) |images| {
+            for (images) |img| img.deinit(allocator);
+            allocator.free(images);
+        }
     }
 };
 
@@ -111,9 +139,13 @@ pub const TranscriptSelection = struct {
 };
 
 const RequestMessage = ai_chat_protocol.RequestMessage;
+const ImageBlock = ai_chat_protocol.ImageBlock;
 const ai_chat_title = @import("ai_chat_title.zig");
 const ToolCall = ai_chat_protocol.ToolCall;
 const ai_chat_request = @import("ai_chat_request.zig");
+const web_search = @import("web_search.zig");
+const pubmed = @import("pubmed.zig");
+const agent_memory = @import("agent_memory.zig");
 
 pub const ChatRequest = struct {
     allocator: std.mem.Allocator,
@@ -129,6 +161,7 @@ pub const ChatRequest = struct {
     stream: bool,
     max_tokens: u32 = 8192,
     agent_enabled: bool,
+    memory_enabled: bool = false,
     copilot: bool = false,
     tool_host: ?ToolHost,
     tool_snapshot: ?ToolSnapshot,
@@ -136,6 +169,12 @@ pub const ChatRequest = struct {
     started_ms: i64,
     write_context_surface_id: [64]u8 = undefined,
     write_context_surface_id_len: usize = 0,
+    toolset: ai_chat_protocol.Toolset = .full,
+    subagent_profile: ?SubagentProfileOverride = null,
+    /// Usage burned by nested subagent runs; merged into the agent loop's
+    /// total when the final answer returns.
+    subagent_usage: ai_chat_protocol.ApiUsage = .{},
+    subagent_usage_present: bool = false,
 
     pub fn deinit(self: *ChatRequest) void {
         self.allocator.free(self.base_url);
@@ -147,6 +186,7 @@ pub const ChatRequest = struct {
         self.allocator.free(self.messages);
         if (self.tool_snapshot) |snapshot| snapshot.deinit(self.allocator);
         if (self.weixin_reply_context) |*ctx| ctx.deinit(self.allocator);
+        if (self.subagent_profile) |profile| profile.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 
@@ -159,7 +199,74 @@ pub const ChatRequest = struct {
             .reasoning_effort = self.reasoning_effort,
             .stream = self.stream,
             .max_tokens = self.max_tokens,
+            .memory_enabled = self.memory_enabled,
+            .toolset = self.toolset,
         };
+    }
+};
+
+/// Lightweight background job for a `$websearch` user command. Owns its query.
+/// The spawning code stores the thread in `session.request_thread`, so
+/// `Session.deinit` joins it before freeing the session (no use-after-free).
+pub const WebSearchRequest = struct {
+    allocator: std.mem.Allocator,
+    session: *Session,
+    query: []u8,
+
+    pub fn create(allocator: std.mem.Allocator, session: *Session, query: []const u8) !*WebSearchRequest {
+        const self = try allocator.create(WebSearchRequest);
+        errdefer allocator.destroy(self);
+        self.* = .{ .allocator = allocator, .session = session, .query = try allocator.dupe(u8, query) };
+        return self;
+    }
+
+    pub fn deinit(self: *WebSearchRequest) void {
+        self.allocator.free(self.query);
+        self.allocator.destroy(self);
+    }
+};
+
+/// Lightweight background job for a `$webread` user command. Owns its target.
+/// Mirrors `WebSearchRequest`; joined by `Session.deinit` via `request_thread`.
+pub const WebReadRequest = struct {
+    allocator: std.mem.Allocator,
+    session: *Session,
+    target: []u8,
+    working_dir: []u8, // "" = none; used as the cache root
+
+    pub fn create(allocator: std.mem.Allocator, session: *Session, target: []const u8, working_dir: []const u8) !*WebReadRequest {
+        const self = try allocator.create(WebReadRequest);
+        errdefer allocator.destroy(self);
+        const target_dup = try allocator.dupe(u8, target);
+        errdefer allocator.free(target_dup);
+        self.* = .{ .allocator = allocator, .session = session, .target = target_dup, .working_dir = try allocator.dupe(u8, working_dir) };
+        return self;
+    }
+
+    pub fn deinit(self: *WebReadRequest) void {
+        self.allocator.free(self.target);
+        self.allocator.free(self.working_dir);
+        self.allocator.destroy(self);
+    }
+};
+
+/// Lightweight background job for a `$pubmed` user command. Owns its query.
+/// Mirrors `WebSearchRequest`; joined by `Session.deinit` via `request_thread`.
+pub const WebPubMedRequest = struct {
+    allocator: std.mem.Allocator,
+    session: *Session,
+    query: []u8,
+
+    pub fn create(allocator: std.mem.Allocator, session: *Session, query: []const u8) !*WebPubMedRequest {
+        const self = try allocator.create(WebPubMedRequest);
+        errdefer allocator.destroy(self);
+        self.* = .{ .allocator = allocator, .session = session, .query = try allocator.dupe(u8, query) };
+        return self;
+    }
+
+    pub fn deinit(self: *WebPubMedRequest) void {
+        self.allocator.free(self.query);
+        self.allocator.destroy(self);
     }
 };
 
@@ -215,6 +322,10 @@ fn fireDeferredAction(action: DeferredAction) void {
 
 var g_agent_mutex: std.Thread.Mutex = .{};
 var g_agent_settings: AgentSettings = .{};
+var g_access_rules_storage: ?ai_agent_access.AccessRules = null;
+var g_access_rules: ?*const ai_agent_access.AccessRules = null;
+var g_default_working_dir_buf: [WORKING_DIR_MAX_BYTES]u8 = undefined;
+var g_default_working_dir_len: usize = 0;
 var g_session_id_counter = std.atomic.Value(u64).init(1);
 var g_skill_update_trigger: ?*const fn () void = null;
 var g_session_resume_trigger: ?*const fn () void = null;
@@ -224,6 +335,42 @@ var g_markdown_export_trigger: ?*const fn (MarkdownExportMode) void = null;
 /// startup by the app layer (mirrors `configureAgent` / `setToolHost`).
 pub fn setSkillUpdateTrigger(cb: *const fn () void) void {
     g_skill_update_trigger = cb;
+}
+
+/// Resolved credentials for the `ai-subagent-profile` config key. Owned
+/// strings; freed by ChatRequest.deinit.
+pub const SubagentProfileOverride = struct {
+    base_url: []u8,
+    api_key: []u8,
+    model: []u8,
+    protocol: ApiProtocol,
+    thinking_enabled: bool,
+    reasoning_effort: []u8,
+    max_tokens: u32,
+
+    pub fn deinit(self: SubagentProfileOverride, allocator: std.mem.Allocator) void {
+        allocator.free(self.base_url);
+        allocator.free(self.api_key);
+        allocator.free(self.model);
+        allocator.free(self.reasoning_effort);
+    }
+};
+
+pub const SubagentProfileResolver = *const fn (allocator: std.mem.Allocator) ?SubagentProfileOverride;
+var g_subagent_profile_resolver: ?SubagentProfileResolver = null;
+
+/// Wire the UI-thread resolver that maps the `ai-subagent-profile` config key
+/// to concrete profile credentials. Registered at startup by the app layer
+/// (mirrors setSkillUpdateTrigger). Resolution happens in buildRequestLocked
+/// on the UI thread; the worker only reads the owned copy on its ChatRequest.
+pub fn setSubagentProfileResolver(cb: ?SubagentProfileResolver) void {
+    g_subagent_profile_resolver = cb;
+}
+
+fn resolveSubagentProfileForRequest(allocator: std.mem.Allocator, agent_enabled: bool) ?SubagentProfileOverride {
+    if (!agent_enabled) return null;
+    const resolve = g_subagent_profile_resolver orelse return null;
+    return resolve(allocator);
 }
 
 /// Wire the callback that `/resume` fires to open the agent history picker.
@@ -246,6 +393,80 @@ pub fn configureAgent(settings: AgentSettings) void {
     g_agent_settings = settings;
 }
 
+/// Load the private agent-access rules once at startup. Safe to call repeatedly
+/// (loads only the first time). Never fails the app: on any error the guard
+/// simply stays inactive.
+pub fn loadAccessRules(allocator: std.mem.Allocator) void {
+    g_agent_mutex.lock();
+    const already = g_access_rules_storage != null;
+    g_agent_mutex.unlock();
+    if (already) return;
+
+    const home = resolveHomeDir(allocator) orelse "";
+    defer if (home.len != 0) allocator.free(home);
+    const path = platform_dirs.pathInConfigDir(allocator, "agent-access.local") catch return;
+    defer allocator.free(path);
+    const rules = ai_agent_access.loadRules(allocator, path, home) catch return;
+
+    g_agent_mutex.lock();
+    defer g_agent_mutex.unlock();
+    if (g_access_rules_storage != null) {
+        var unused = rules;
+        unused.deinit();
+        return;
+    }
+    g_access_rules_storage = rules;
+    g_access_rules = &g_access_rules_storage.?;
+}
+
+pub fn deinitAccessRules() void {
+    g_agent_mutex.lock();
+    defer g_agent_mutex.unlock();
+    g_access_rules = null;
+    g_agent_settings.access_rules = null;
+    if (g_access_rules_storage) |*rules| {
+        rules.deinit();
+        g_access_rules_storage = null;
+    }
+}
+
+/// Set the persistent default working directory (from config). Empty clears it.
+/// Copies into a static buffer; oversized paths are truncated.
+pub fn setDefaultWorkingDir(path: []const u8) void {
+    g_agent_mutex.lock();
+    defer g_agent_mutex.unlock();
+    const n = @min(path.len, g_default_working_dir_buf.len);
+    @memcpy(g_default_working_dir_buf[0..n], path[0..n]);
+    g_default_working_dir_len = n;
+}
+
+pub fn defaultWorkingDir() ?[]const u8 {
+    g_agent_mutex.lock();
+    defer g_agent_mutex.unlock();
+    if (g_default_working_dir_len == 0) return null;
+    return g_default_working_dir_buf[0..g_default_working_dir_len];
+}
+
+fn resolveHomeDir(allocator: std.mem.Allocator) ?[]u8 {
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |v| {
+        return v;
+    } else |_| {}
+    if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |v| {
+        return v;
+    } else |_| {}
+    return null;
+}
+
+fn expandTilde(allocator: std.mem.Allocator, path: []const u8, home: ?[]const u8) ![]u8 {
+    if (path.len >= 1 and path[0] == '~') {
+        if (home) |h| {
+            if (path.len == 1) return allocator.dupe(u8, h);
+            if (path[1] == '/' or path[1] == '\\') return std.fmt.allocPrint(allocator, "{s}{s}", .{ h, path[1..] });
+        }
+    }
+    return allocator.dupe(u8, path);
+}
+
 pub fn setToolHost(host: ?ToolHost) void {
     g_tool_host = host;
 }
@@ -253,7 +474,10 @@ pub fn setToolHost(host: ?ToolHost) void {
 pub fn currentAgentSettings() AgentSettings {
     g_agent_mutex.lock();
     defer g_agent_mutex.unlock();
-    return g_agent_settings;
+    var s = g_agent_settings;
+    s.access_rules = g_access_rules;
+    if (g_default_working_dir_len > 0) s.working_dir = g_default_working_dir_buf[0..g_default_working_dir_len];
+    return s;
 }
 
 fn applyPermissionArg(arg: []const u8) void {
@@ -298,15 +522,47 @@ fn slashCommandOutput(allocator: std.mem.Allocator, command: SlashCommand) ![]u8
         .rewind_picker => allocator.dupe(u8, "No previous user messages to rewind."),
         .resume_session => allocator.dupe(u8, "Opening saved conversation history..."),
         .permission => permissionStatusOutput(allocator),
+        .cwd => allocator.dupe(u8, "Working directory updated."),
         .export_markdown => allocator.dupe(u8, "Exporting the conversation as Markdown..."),
+        .distill => allocator.dupe(u8, "Use /distill [topic] to preview a reusable skill candidate."),
         .unknown => allocator.dupe(u8, "Unknown command. Use /commands to list commands."),
         .skills => ai_chat_skills.listSkillsForDisplay(allocator),
+        // .loop and .watch suppress output and emit their own messages via
+        // runLoopCommandLocked; this path is never reached.
+        .loop, .watch => allocator.dupe(u8, ""),
+        // .remember, .memory, .forget suppress output and emit their own messages;
+        // this path is never reached, but the arm is required for exhaustiveness.
+        .remember, .memory, .forget => allocator.dupe(u8, ""),
+    };
+}
+
+fn previewPrompt(p: []const u8) []const u8 {
+    return if (p.len > 48) p[0..48] else p;
+}
+
+const LoopTaskListScope = enum { session, all };
+
+fn taskOwnerLabel(v: ai_loop_store.TaskView) []const u8 {
+    return if (v.title.len > 0) v.title else v.session_id;
+}
+
+fn loopErrorText(err: ai_loop_schedule.ParseError, kind: ai_loop_schedule.TaskKind) []const u8 {
+    return switch (err) {
+        error.MissingArgs => if (kind == .loop)
+            "Usage: /loop <interval> <count> <prompt>; /loop all; /loop stop <id>|all"
+        else
+            "Usage: /watch <HH:MM | YYYY-MM-DD HH:MM> <prompt>; /watch all; /watch stop <id>|all",
+        error.BadInterval => "Bad interval. Use a number + s/m/h/d, e.g. 30m, 5h.",
+        error.BadCount => "Count must be a positive integer.",
+        error.BadTime => "Bad time. Use HH:MM or YYYY-MM-DD HH:MM (24h).",
+        error.PastTime => "That time is already in the past.",
+        error.EmptyPrompt => "Add the prompt text after the schedule.",
     };
 }
 
 fn permissionStatusOutput(allocator: std.mem.Allocator) ![]u8 {
     const current = currentAgentSettings().permission;
-    return std.fmt.allocPrint(allocator, "Agent permission is '{s}'. Use /permission confirm or /permission full to change it.", .{current.name()});
+    return std.fmt.allocPrint(allocator, "Agent permission is '{s}'. Use /permission ask, /permission auto, or /permission full to change it.", .{current.name()});
 }
 
 pub fn agentPermission() AgentPermission {
@@ -360,6 +616,9 @@ pub const Session = struct {
     stream: bool = false,
     max_tokens: u32 = 8192,
     agent_enabled: bool = false,
+    vision_enabled: bool = false,
+    // base64 images pasted into the composer, awaiting the next user message.
+    pending_images: std.ArrayListUnmanaged(ai_chat_protocol.ImageBlock) = .empty,
     created_at_ms: i64 = 0,
     updated_at_ms: i64 = 0,
     history_on_change: ?HistoryChangeHook = null,
@@ -368,6 +627,10 @@ pub const Session = struct {
     request_thread: ?std.Thread = null,
     title_thread: ?std.Thread = null,
     pending_weixin_reply_context: ?WeixinReplyContext = null,
+    distill_candidate: ?ai_skill_distill.Candidate = null,
+    distill_suggestion_pending: bool = false,
+    distill_last_suggested_turn_count: usize = 0,
+    distill_inflight: bool = false,
     auto_title_attempted: bool = false,
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -389,6 +652,8 @@ pub const Session = struct {
     copilot: bool = false,
     bound_surface_id_buf: [16]u8 = undefined,
     bound_surface_id_len: usize = 0,
+    working_dir_buf: [WORKING_DIR_MAX_BYTES]u8 = undefined,
+    working_dir_len: usize = 0,
 
     pub const RequestState = struct {
         inflight: bool,
@@ -397,6 +662,17 @@ pub const Session = struct {
 
     pub fn reasoningEffort(self: *const Session) []const u8 {
         return self.reasoning_effort_buf[0..self.reasoning_effort_len];
+    }
+
+    /// Per-conversation working-dir override, or null when unset.
+    pub fn workingDirOverride(self: *const Session) ?[]const u8 {
+        if (self.working_dir_len == 0) return null;
+        return self.working_dir_buf[0..self.working_dir_len];
+    }
+
+    fn effectiveWorkingDirLocked(self: *Session) ?[]const u8 {
+        if (self.working_dir_len > 0) return self.working_dir_buf[0..self.working_dir_len];
+        return defaultWorkingDir();
     }
 
     pub fn apiProtocolName(self: *const Session) []const u8 {
@@ -421,6 +697,33 @@ pub const Session = struct {
 
     pub fn boundSurfaceId(self: *const Session) []const u8 {
         return self.bound_surface_id_buf[0..self.bound_surface_id_len];
+    }
+
+    pub fn pendingImageCount(self: *const Session) usize {
+        return self.pending_images.items.len;
+    }
+
+    /// Copy a base64 image + media type into the pending-attachment list. Both
+    /// inputs are duplicated; the session owns the stored copies.
+    pub fn addPendingImage(self: *Session, data_b64: []const u8, media_type: []const u8) !void {
+        const data = try self.allocator.dupe(u8, data_b64);
+        errdefer self.allocator.free(data);
+        const media = try self.allocator.dupe(u8, media_type);
+        errdefer self.allocator.free(media);
+        try self.pending_images.append(self.allocator, .{ .data_b64 = data, .media_type = media });
+    }
+
+    /// Free every pending image and release the backing storage.
+    pub fn clearPendingImages(self: *Session) void {
+        for (self.pending_images.items) |img| img.deinit(self.allocator);
+        self.pending_images.clearAndFree(self.allocator);
+    }
+
+    /// Hand the pending images to the caller as an owned slice, leaving the list
+    /// empty. Returns null when there are none.
+    pub fn takePendingImages(self: *Session) ?[]ai_chat_protocol.ImageBlock {
+        if (self.pending_images.items.len == 0) return null;
+        return self.pending_images.toOwnedSlice(self.allocator) catch null;
     }
 
     pub fn init(
@@ -463,6 +766,36 @@ pub const Session = struct {
         stream_val: []const u8,
         agent_val: []const u8,
     ) !*Session {
+        return initWithVision(
+            allocator,
+            name,
+            base_url,
+            api_key,
+            model_name,
+            protocol,
+            system_prompt,
+            thinking,
+            reasoning_effort,
+            stream_val,
+            agent_val,
+            DEFAULT_VISION,
+        );
+    }
+
+    pub fn initWithVision(
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        base_url: []const u8,
+        api_key: []const u8,
+        model_name: []const u8,
+        protocol: []const u8,
+        system_prompt: []const u8,
+        thinking: []const u8,
+        reasoning_effort: []const u8,
+        stream_val: []const u8,
+        agent_val: []const u8,
+        vision_val: []const u8,
+    ) !*Session {
         const session = try allocator.create(Session);
         session.* = .{
             .allocator = allocator,
@@ -482,6 +815,7 @@ pub const Session = struct {
         session.copyReasoningEffort(if (reasoning_effort.len > 0) reasoning_effort else DEFAULT_REASONING_EFFORT);
         session.stream = std.mem.eql(u8, stream_val, "true");
         session.agent_enabled = std.mem.eql(u8, agent_val, "true") or std.mem.eql(u8, agent_val, "enabled");
+        session.vision_enabled = parseVisionEnabled(vision_val);
         session.copyApiKey(api_key);
         if (session.api_key_len == 0 and isDeepSeekBaseUrl(session.baseUrl())) {
             if (std.process.getEnvVarOwned(allocator, "DEEPSEEK_API_KEY")) |env_key| {
@@ -516,6 +850,7 @@ pub const Session = struct {
         defer session.mutex.unlock();
         if (record.session_id.len > 0) session.copySessionId(record.session_id);
         session.max_tokens = record.max_tokens;
+        session.vision_enabled = record.vision_enabled;
         session.created_at_ms = record.created_at;
         session.updated_at_ms = record.updated_at;
         for (record.messages) |msg| {
@@ -565,10 +900,12 @@ pub const Session = struct {
             msg.deinit(self.allocator);
         }
         self.messages.deinit(self.allocator);
+        self.clearPendingImages();
         self.freeSkillSuggestions();
         self.freeCustomCommandSuggestions();
         command_registry.freeCommandList(self.allocator, self.custom_commands);
         if (self.pending_weixin_reply_context) |*ctx| ctx.deinit(self.allocator);
+        if (self.distill_candidate) |*candidate| candidate.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 
@@ -614,6 +951,10 @@ pub const Session = struct {
 
     pub fn agentConfigValue(self: *const Session) []const u8 {
         return if (self.agent_enabled) "true" else "false";
+    }
+
+    pub fn visionConfigValue(self: *const Session) []const u8 {
+        return if (self.vision_enabled) "on" else "off";
     }
 
     pub fn input(self: *const Session) []const u8 {
@@ -937,12 +1278,49 @@ pub const Session = struct {
         if (text_start < data.len) self.appendInputText(data[text_start..]);
     }
 
-    pub fn applyWeixinInput(self: *Session, data: []const u8, ctx: weixin_types.ReplyContext) void {
+    /// Inject a scheduled prompt as if the user typed + submitted it. Returns
+    /// false (skipped, nothing sent) if a request is already inflight. Clears any
+    /// half-typed composer text first so the scheduled prompt is sent verbatim.
+    /// Caller must run this on the UI thread (mirrors applyRemoteInput).
+    pub fn submitScheduledPrompt(self: *Session, text: []const u8) bool {
         self.mutex.lock();
+        if (self.request_inflight) {
+            self.mutex.unlock();
+            return false;
+        }
+        self.input_len = 0;
+        self.input_cursor = 0;
+        self.input_scroll_row = 0;
+        self.input_scroll_follow_cursor = true;
+        self.input_select_all = false;
+        self.mutex.unlock();
+        self.appendInputText(text);
+        self.submit();
+        return true;
+    }
+
+    /// WeChat delivers complete messages, not keystrokes: the whole payload is
+    /// one prompt (embedded newlines are content, unlike applyRemoteInput where
+    /// each one submits); only the trailing CR/LF byte-stream submit convention
+    /// is stripped. Returns false (busy) without touching the composer when a
+    /// request is already inflight, so the poller reports it to the sender
+    /// instead of silently swallowing the message.
+    pub fn applyWeixinInput(self: *Session, data: []const u8, ctx: weixin_types.ReplyContext) bool {
+        self.mutex.lock();
+        if (self.request_inflight) {
+            self.mutex.unlock();
+            return false;
+        }
         if (self.pending_weixin_reply_context) |*old| old.deinit(self.allocator);
         self.pending_weixin_reply_context = WeixinReplyContext.init(self.allocator, ctx) catch null;
         self.mutex.unlock();
-        self.applyRemoteInput(data);
+        if (self.submitScheduledPrompt(std.mem.trimRight(u8, data, "\r\n"))) return true;
+        // Lost the race with a concurrently started request: drop the stale
+        // context so a later local prompt cannot inherit this WeChat target.
+        self.mutex.lock();
+        self.clearPendingWeixinReplyContextLocked();
+        self.mutex.unlock();
+        return false;
     }
 
     fn clearPendingWeixinReplyContextLocked(self: *Session) void {
@@ -998,6 +1376,7 @@ pub const Session = struct {
             .end => self.moveInputCursorEnd(),
             .tab => _ = self.completeComposerSuggestion(.tab),
             .escape => {
+                if (self.dismissDistillSuggestion()) return;
                 const now = self.now_ms_override orelse std.time.milliTimestamp();
                 if (self.request_inflight) {
                     // 生成中：仅停止，不参与双击；停止后变空闲再双击才进选择器。
@@ -1023,6 +1402,7 @@ pub const Session = struct {
                 if (ev.shift) {
                     self.appendInputText("\n");
                 } else {
+                    if (self.acceptDistillSuggestion()) return;
                     if (!self.completeComposerSuggestion(.enter)) self.submit();
                 }
             },
@@ -1145,6 +1525,28 @@ pub const Session = struct {
     }
 
     pub fn allocRemoteSnapshot(self: *Session, allocator: std.mem.Allocator) ![]u8 {
+        // Capture any pending approval under approval_mutex BEFORE taking
+        // self.mutex (sequential locks, never nested — no reverse ordering
+        // exists, so this cannot deadlock). A resolution racing the gap between
+        // the two locks costs at most one extra Approval snapshot, which the
+        // remote consumer's once-per-episode announcer already de-dupes.
+        var cap_tool_buf: [64]u8 = undefined;
+        var cap_cmd_buf: [1024]u8 = undefined;
+        var cap_tool: []const u8 = "";
+        var cap_command: []const u8 = "";
+        {
+            self.approval_mutex.lock();
+            defer self.approval_mutex.unlock();
+            if (self.approval_pending and !self.approval_resolved) {
+                const tl = self.approval_tool_len;
+                @memcpy(cap_tool_buf[0..tl], self.approval_tool_buf[0..tl]);
+                cap_tool = cap_tool_buf[0..tl];
+                const cl = self.approval_command_len;
+                @memcpy(cap_cmd_buf[0..cl], self.approval_command_buf[0..cl]);
+                cap_command = cap_cmd_buf[0..cl];
+            }
+        }
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -1153,6 +1555,17 @@ pub const Session = struct {
 
         try appendLimitedSection(allocator, &out, "Model", self.model(), REMOTE_SNAPSHOT_MAX_BYTES);
         try appendLimitedSection(allocator, &out, "Status", self.status(), REMOTE_SNAPSHOT_MAX_BYTES);
+
+        if (cap_tool.len != 0) {
+            var approval_text: std.ArrayListUnmanaged(u8) = .empty;
+            defer approval_text.deinit(allocator);
+            try approval_text.appendSlice(allocator, cap_tool);
+            if (cap_command.len != 0) {
+                try approval_text.append(allocator, '\n');
+                try approval_text.appendSlice(allocator, cap_command);
+            }
+            try appendLimitedSection(allocator, &out, "Approval", approval_text.items, REMOTE_SNAPSHOT_MAX_BYTES);
+        }
 
         var sections: std.ArrayListUnmanaged(RemoteSnapshotSection) = .empty;
         defer sections.deinit(allocator);
@@ -1245,6 +1658,13 @@ pub const Session = struct {
         return true;
     }
 
+    /// Resolve a pending approval from a remote driver (e.g. the WeChat bridge),
+    /// mirroring the local handleApprovalKey path. Returns true if there was a
+    /// pending approval to resolve.
+    pub fn resolveApprovalExternal(self: *Session, approve: bool) bool {
+        return self.resolveApproval(approve);
+    }
+
     pub fn requestApproval(self: *Session, tool: []const u8, command: []const u8, reason: []const u8) bool {
         if (self.stop_requested.load(.acquire)) return false;
         self.approval_mutex.lock();
@@ -1268,6 +1688,37 @@ pub const Session = struct {
         return allowed;
     }
 
+    fn canUseDistillSuggestionLocked(self: *Session) bool {
+        return self.distill_suggestion_pending and
+            self.input_len == 0 and
+            !self.input_select_all and
+            !self.transcript_select_all and
+            self.transcript_selection == null;
+    }
+
+    fn acceptDistillSuggestion(self: *Session) bool {
+        self.mutex.lock();
+        const ok = self.canUseDistillSuggestionLocked();
+        self.mutex.unlock();
+        if (!ok) return false;
+        self.startDistillRequest("");
+        return true;
+    }
+
+    fn dismissDistillSuggestion(self: *Session) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (!self.canUseDistillSuggestionLocked()) return false;
+        self.distill_suggestion_pending = false;
+        self.last_esc_ms = 0;
+        self.appendLocalToolMessageLocked("Distill suggestion ignored.") catch {
+            self.setStatusLocked("Out of memory");
+            return true;
+        };
+        self.setStatusLocked("Ready");
+        return true;
+    }
+
     fn copyApprovalLocked(self: *Session, tool: []const u8, command: []const u8, reason: []const u8) void {
         self.approval_tool_len = @min(tool.len, self.approval_tool_buf.len);
         @memcpy(self.approval_tool_buf[0..self.approval_tool_len], tool[0..self.approval_tool_len]);
@@ -1275,6 +1726,42 @@ pub const Session = struct {
         @memcpy(self.approval_command_buf[0..self.approval_command_len], command[0..self.approval_command_len]);
         self.approval_reason_len = @min(reason.len, self.approval_reason_buf.len);
         @memcpy(self.approval_reason_buf[0..self.approval_reason_len], reason[0..self.approval_reason_len]);
+    }
+
+    fn appendLocalToolMessageLocked(self: *Session, text: []const u8) !void {
+        const content = try self.allocator.dupe(u8, text);
+        errdefer self.allocator.free(content);
+        try self.messages.append(self.allocator, .{
+            .role = .tool,
+            .content = content,
+            .replay_to_model = false,
+            .persist_to_history = false,
+            .content_collapsed = false,
+            .content_auto_expand = false,
+        });
+        self.scroll_px = 1_000_000;
+    }
+
+    /// Thread-safe wrapper used by the tool layer (worker thread) to post a
+    /// transcript note such as a diff. Swallows OOM (best-effort UI message).
+    pub fn appendLocalToolMessage(self: *Session, text: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.appendLocalToolMessageLocked(text) catch {};
+    }
+
+    fn clearDistillCandidateLocked(self: *Session) void {
+        if (self.distill_candidate) |*candidate| candidate.deinit(self.allocator);
+        self.distill_candidate = null;
+    }
+
+    fn submitDistillCommand(self: *Session, arg: []const u8) void {
+        const parsed = ai_skill_distill.parseCommandArgs(arg);
+        switch (parsed.action) {
+            .start => self.startDistillRequest(parsed.topic),
+            .confirm => self.confirmDistillCandidate(),
+            .cancel => self.cancelDistillCandidate(),
+        }
     }
 
     pub fn submit(self: *Session) void {
@@ -1305,6 +1792,12 @@ pub const Session = struct {
 
         // 1) Built-in command (with optional argument), exact first-token match.
         if (ai_chat_composer.exactBuiltinCommand(first_tok)) |command| {
+            if (command == .distill) {
+                self.clearPendingWeixinReplyContextLocked();
+                self.mutex.unlock();
+                self.submitDistillCommand(arg);
+                return;
+            }
             const r = self.runBuiltinCommandLocked(command, arg);
             self.clearPendingWeixinReplyContextLocked();
             self.mutex.unlock();
@@ -1341,8 +1834,19 @@ pub const Session = struct {
         }
         // otherwise (e.g. "/help me", "/usr/bin path", or a rebound template body): fall through.
 
+        if (ai_chat_composer.parseWebCommand(first_tok)) |web_cmd| {
+            self.clearPendingWeixinReplyContextLocked();
+            self.mutex.unlock();
+            switch (web_cmd) {
+                .websearch => self.startWebSearchRequest(arg),
+                .webread => self.startWebReadRequest(arg),
+                .pubmed => self.startPubMedRequest(arg),
+            }
+            return;
+        }
+
         if (self.api_key_len == 0) {
-            self.setStatusLocked("Missing API key. Edit the AI Chat profile or set DEEPSEEK_API_KEY.");
+            self.setStatusLocked("Missing API key. Edit the Copilot profile or set DEEPSEEK_API_KEY.");
             self.clearPendingWeixinReplyContextLocked();
             self.mutex.unlock();
             return;
@@ -1371,14 +1875,36 @@ pub const Session = struct {
             self.mutex.unlock();
             return;
         };
-        self.messages.append(self.allocator, .{ .role = .user, .content = prompt }) catch {
+        var prompt_model_context: ?[]u8 = null;
+        if (self.pending_weixin_reply_context) |ctx| {
+            if (ctx.model_context.len != 0) {
+                prompt_model_context = self.allocator.dupe(u8, ctx.model_context) catch {
+                    if (skill_preload_content) |content| self.allocator.free(content);
+                    self.allocator.free(prompt);
+                    self.setStatusLocked("Out of memory");
+                    self.clearPendingWeixinReplyContextLocked();
+                    self.mutex.unlock();
+                    return;
+                };
+            }
+        }
+        // Hand any pasted images to this user turn. They are re-sent on every
+        // subsequent request for the life of the session (multi-turn vision).
+        const user_images = self.takePendingImages();
+        self.messages.append(self.allocator, .{ .role = .user, .content = prompt, .model_context = prompt_model_context, .images = user_images }) catch {
             if (skill_preload_content) |content| self.allocator.free(content);
             self.allocator.free(prompt);
+            if (prompt_model_context) |ctx| self.allocator.free(ctx);
+            if (user_images) |imgs| {
+                for (imgs) |img| img.deinit(self.allocator);
+                self.allocator.free(imgs);
+            }
             self.setStatusLocked("Out of memory");
             self.clearPendingWeixinReplyContextLocked();
             self.mutex.unlock();
             return;
         };
+        prompt_model_context = null;
 
         var skill_preload_appended = false;
         if (invocation) |parsed| if (skill_preload_content) |skill_content| {
@@ -1475,6 +2001,115 @@ pub const Session = struct {
         if (skill_preload_appended) self.notifyHistoryChange(history_change);
     }
 
+    /// Handle `/cwd`. Assumes self.mutex is held. Appends its own tool message
+    /// (the caller suppresses the generic slash output).
+    fn applyCwdArgLocked(self: *Session, arg: []const u8) void {
+        switch (ai_chat_composer.parseCwdArg(arg)) {
+            .show => {
+                if (self.effectiveWorkingDirLocked()) |w| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Working directory: {s}", .{w}) catch return;
+                    defer self.allocator.free(msg);
+                    self.appendLocalToolMessageLocked(msg) catch {};
+                } else {
+                    self.appendLocalToolMessageLocked("Working directory: (unset). Use /cwd <path> to set one.") catch {};
+                }
+            },
+            .reset => {
+                self.working_dir_len = 0;
+                self.appendLocalToolMessageLocked("Working directory override cleared; using the default.") catch {};
+            },
+            .set => |path| {
+                const home = resolveHomeDir(self.allocator);
+                defer if (home) |h| self.allocator.free(h);
+                const expanded = expandTilde(self.allocator, path, home) catch return;
+                defer self.allocator.free(expanded);
+                const abs = std.fs.cwd().realpathAlloc(self.allocator, expanded) catch {
+                    const m = std.fmt.allocPrint(self.allocator, "No such directory: {s}", .{path}) catch return;
+                    defer self.allocator.free(m);
+                    self.appendLocalToolMessageLocked(m) catch {};
+                    return;
+                };
+                defer self.allocator.free(abs);
+                var dir = std.fs.openDirAbsolute(abs, .{}) catch {
+                    const m = std.fmt.allocPrint(self.allocator, "Not a directory: {s}", .{path}) catch return;
+                    defer self.allocator.free(m);
+                    self.appendLocalToolMessageLocked(m) catch {};
+                    return;
+                };
+                dir.close();
+                if (abs.len > self.working_dir_buf.len) {
+                    self.appendLocalToolMessageLocked("Path too long for the working directory.") catch {};
+                    return;
+                }
+                @memcpy(self.working_dir_buf[0..abs.len], abs);
+                self.working_dir_len = abs.len;
+                const m = std.fmt.allocPrint(self.allocator, "Working directory set to {s} for this conversation.", .{abs}) catch return;
+                defer self.allocator.free(m);
+                self.appendLocalToolMessageLocked(m) catch {};
+            },
+        }
+        self.clearSubmittedInputLocked();
+        self.setStatusLocked("Ready");
+    }
+
+    /// Append a memory-command result line and return the composer to Ready.
+    fn emitMemoryResultLocked(self: *Session, msg: []const u8) void {
+        self.appendLocalToolMessageLocked(msg) catch {};
+        self.clearSubmittedInputLocked();
+        self.setStatusLocked("Ready");
+    }
+
+    /// When the memory system is disabled, emit a notice and report true so the
+    /// command stops. Honors the `ai-memory-enabled` config switch.
+    fn memoryDisabledLocked(self: *Session) bool {
+        if (currentAgentSettings().memory_enabled) return false;
+        self.emitMemoryResultLocked("Memory is disabled. Set ai-memory-enabled = true in the config to use it.");
+        return true;
+    }
+
+    fn applyRememberLocked(self: *Session, arg: []const u8) void {
+        if (self.memoryDisabledLocked()) return;
+        const text = std.mem.trim(u8, arg, " \t\r\n");
+        if (text.len == 0) return self.emitMemoryResultLocked("Usage: /remember <fact>");
+        const wd = self.effectiveWorkingDirLocked();
+        const tier: agent_memory.Tier = if (wd != null and wd.?.len > 0) .project else .global;
+        var date_buf: [10]u8 = undefined;
+        const today = agent_memory.todayDate(&date_buf);
+        const base_slug = agent_memory.slugify(self.allocator, text, today) catch return self.emitMemoryResultLocked("Could not save memory.");
+        defer self.allocator.free(base_slug);
+        // Resolve a non-colliding slug in the target tier so /remember never
+        // silently overwrites a different fact that slugified to the same base.
+        const dir = (switch (tier) {
+            .global => agent_memory.globalDir(self.allocator),
+            .project => agent_memory.projectDir(self.allocator, wd.?),
+        }) catch return self.emitMemoryResultLocked("Could not save memory.");
+        defer self.allocator.free(dir);
+        const slug = agent_memory.uniqueSlugInDir(self.allocator, dir, base_slug) catch return self.emitMemoryResultLocked("Could not save memory.");
+        defer self.allocator.free(slug);
+        const desc = agent_memory.truncateUtf8(text, 80);
+        const msg = agent_memory.saveMemory(self.allocator, tier, wd, slug, desc, .user, text) catch return self.emitMemoryResultLocked("Could not save memory.");
+        defer self.allocator.free(msg);
+        self.emitMemoryResultLocked(msg);
+    }
+
+    fn applyMemoryListLocked(self: *Session) void {
+        if (self.memoryDisabledLocked()) return;
+        const wd = self.effectiveWorkingDirLocked() orelse "";
+        const msg = agent_memory.listForDisplay(self.allocator, wd) catch return self.emitMemoryResultLocked("Could not list memories.");
+        defer self.allocator.free(msg);
+        self.emitMemoryResultLocked(msg);
+    }
+
+    fn applyForgetLocked(self: *Session, arg: []const u8) void {
+        if (self.memoryDisabledLocked()) return;
+        const name = std.mem.trim(u8, arg, " \t\r\n");
+        if (name.len == 0) return self.emitMemoryResultLocked("Usage: /forget <name>");
+        const wd = self.effectiveWorkingDirLocked() orelse "";
+        const msg = agent_memory.deleteMemory(self.allocator, wd, name, null) catch return self.emitMemoryResultLocked("Could not delete memory.");
+        defer self.allocator.free(msg);
+        self.emitMemoryResultLocked(msg);
+    }
+
     /// Runs a built-in slash command's side-effects and appends its output as a
     /// tool message. Assumes self.mutex is held. Returns the captured history
     /// change (non-null only for /clear) plus any action the caller must fire
@@ -1499,9 +2134,27 @@ pub const Session = struct {
                 }
             },
             .permission => applyPermissionArg(arg),
+            .cwd => {
+                self.applyCwdArgLocked(arg);
+                result.suppress_output = true;
+            },
             .resume_session => result.deferred = .resume_picker,
             .export_markdown => result.deferred = .{
                 .export_markdown = if (std.mem.eql(u8, std.mem.trim(u8, arg, " \t\r\n"), "full")) .full else .clean,
+            },
+            .loop => self.runLoopCommandLocked(.loop, arg, &result),
+            .watch => self.runLoopCommandLocked(.watch, arg, &result),
+            .remember => {
+                self.applyRememberLocked(arg);
+                result.suppress_output = true;
+            },
+            .memory => {
+                self.applyMemoryListLocked();
+                result.suppress_output = true;
+            },
+            .forget => {
+                self.applyForgetLocked(arg);
+                result.suppress_output = true;
             },
             else => {},
         }
@@ -1510,21 +2163,479 @@ pub const Session = struct {
             self.setStatusLocked("Could not run command");
             return result;
         };
-        self.messages.append(self.allocator, .{
-            .role = .tool,
-            .content = output,
-            .replay_to_model = false,
-            .persist_to_history = false,
-            .content_collapsed = false,
-            .content_auto_expand = false,
-        }) catch {
-            self.allocator.free(output);
+        defer self.allocator.free(output);
+        self.appendLocalToolMessageLocked(output) catch {
             self.setStatusLocked("Out of memory");
             return result;
         };
         self.clearSubmittedInputLocked();
         self.setStatusLocked("Ready");
         return result;
+    }
+
+    fn runLoopCommandLocked(self: *Session, kind: ai_loop_schedule.TaskKind, arg: []const u8, result: *BuiltinResult) void {
+        result.suppress_output = true;
+        const store = ai_loop_store.active() orelse {
+            self.emitLoopMessageLocked("Scheduler is not available.");
+            return;
+        };
+        const trimmed = std.mem.trim(u8, arg, " \t\r\n");
+        const now_ms = std.time.milliTimestamp();
+        const offset_s = @import("ai_history_time.zig").localOffsetSeconds();
+        const ctx = ai_loop_store.SessionCtx{
+            .session_id = self.sessionId(),
+            .model = self.model(),
+            .title = self.title(),
+        };
+
+        if (trimmed.len == 0) {
+            self.listLoopTasksLocked(store, kind, .session);
+            return;
+        }
+        if (std.mem.eql(u8, trimmed, "all")) {
+            if (!self.copilot) {
+                self.emitLoopMessageLocked("Global scheduled task listing is only available in Copilot.");
+                return;
+            }
+            self.listLoopTasksLocked(store, kind, .all);
+            return;
+        }
+        if (std.mem.startsWith(u8, trimmed, "stop")) {
+            const rest = std.mem.trim(u8, trimmed["stop".len..], " \t\r\n");
+            if (std.mem.eql(u8, rest, "all")) {
+                const n = store.stopAll(ctx.session_id, kind);
+                var buf: [64]u8 = undefined;
+                self.emitLoopMessageLocked(std.fmt.bufPrint(&buf, "Cancelled {d} task(s).", .{n}) catch "Cancelled tasks.");
+            } else {
+                const id = std.fmt.parseInt(u32, rest, 10) catch {
+                    self.emitLoopMessageLocked("Usage: stop <id> | stop all");
+                    return;
+                };
+                var ok = store.stop(ctx.session_id, id);
+                if (!ok and self.copilot) ok = store.stopById(id);
+                self.emitLoopMessageLocked(if (ok) "Task cancelled." else "No such task.");
+            }
+            return;
+        }
+
+        const info = switch (kind) {
+            .loop => store.registerLoop(trimmed, ctx, now_ms, offset_s),
+            .watch => store.registerWatch(trimmed, ctx, now_ms, offset_s),
+        } catch |err| switch (err) {
+            error.OutOfMemory => {
+                self.emitLoopMessageLocked("Out of memory.");
+                return;
+            },
+            else => |parse_err| {
+                self.emitLoopMessageLocked(loopErrorText(parse_err, kind));
+                return;
+            },
+        };
+        self.emitRegisterConfirmationLocked(info);
+    }
+
+    fn listLoopTasksLocked(self: *Session, store: *ai_loop_store.Store, kind: ai_loop_schedule.TaskKind, scope: LoopTaskListScope) void {
+        const views = switch (scope) {
+            .session => store.snapshotForSession(self.allocator, self.sessionId(), kind),
+            .all => store.snapshotAll(self.allocator, kind),
+        } catch {
+            self.emitLoopMessageLocked("Out of memory.");
+            return;
+        };
+        defer ai_loop_store.freeSnapshot(self.allocator, views);
+        if (views.len == 0) {
+            self.emitLoopMessageLocked(if (kind == .loop) "No active loop tasks." else "No active watch tasks.");
+            return;
+        }
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        const w = buf.writer(self.allocator);
+        for (views) |v| {
+            const owner = taskOwnerLabel(v);
+            if (kind == .loop) {
+                const iv = ai_loop_schedule.formatInterval(v.interval_ms);
+                if (scope == .all) {
+                    w.print("#{d}  [{s}]  every {d}{c}  remaining {d}  \u{2192} {s}\n", .{
+                        v.id, owner, iv.value, iv.unit, v.remaining, previewPrompt(v.prompt),
+                    }) catch return;
+                } else {
+                    w.print("#{d}  every {d}{c}  remaining {d}  \u{2192} {s}\n", .{
+                        v.id, iv.value, iv.unit, v.remaining, previewPrompt(v.prompt),
+                    }) catch return;
+                }
+            } else if (v.daily) {
+                if (scope == .all) {
+                    w.print("#{d}  [{s}]  daily {d:0>2}:{d:0>2}  \u{2192} {s}\n", .{
+                        v.id, owner, @divTrunc(v.tod_minutes, 60), @mod(v.tod_minutes, 60), previewPrompt(v.prompt),
+                    }) catch return;
+                } else {
+                    w.print("#{d}  daily {d:0>2}:{d:0>2}  \u{2192} {s}\n", .{
+                        v.id, @divTrunc(v.tod_minutes, 60), @mod(v.tod_minutes, 60), previewPrompt(v.prompt),
+                    }) catch return;
+                }
+            } else {
+                if (scope == .all) {
+                    w.print("#{d}  [{s}]  once  \u{2192} {s}\n", .{ v.id, owner, previewPrompt(v.prompt) }) catch return;
+                } else {
+                    w.print("#{d}  once  \u{2192} {s}\n", .{ v.id, previewPrompt(v.prompt) }) catch return;
+                }
+            }
+        }
+        self.emitLoopMessageLocked(buf.items);
+    }
+
+    fn emitRegisterConfirmationLocked(self: *Session, info: ai_loop_store.RegisterInfo) void {
+        var buf: [160]u8 = undefined;
+        const msg = switch (info.kind) {
+            .loop => blk: {
+                const iv = ai_loop_schedule.formatInterval(info.interval_ms);
+                break :blk std.fmt.bufPrint(&buf, "Created loop task #{d}: every {d}{c}, {d} times.", .{
+                    info.id, iv.value, iv.unit, info.remaining,
+                }) catch "Created loop task.";
+            },
+            .watch => if (info.daily)
+                std.fmt.bufPrint(&buf, "Created watch task #{d} (daily).", .{info.id}) catch "Created watch task."
+            else
+                std.fmt.bufPrint(&buf, "Created watch task #{d} (one-shot).", .{info.id}) catch "Created watch task.",
+        };
+        self.emitLoopMessageLocked(msg);
+    }
+
+    fn emitLoopMessageLocked(self: *Session, text: []const u8) void {
+        self.appendLocalToolMessageLocked(text) catch {
+            self.setStatusLocked("Out of memory");
+            return;
+        };
+        self.clearSubmittedInputLocked();
+        self.setStatusLocked("Ready");
+    }
+
+    fn cancelDistillCandidate(self: *Session) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.clearDistillCandidateLocked();
+        self.distill_suggestion_pending = false;
+        self.clearSubmittedInputLocked();
+        self.appendLocalToolMessageLocked("Distill candidate discarded.") catch {
+            self.setStatusLocked("Out of memory");
+            return;
+        };
+        self.setStatusLocked("Ready");
+    }
+
+    fn confirmDistillCandidate(self: *Session) void {
+        var candidate: ?ai_skill_distill.Candidate = null;
+        self.mutex.lock();
+        if (self.distill_candidate) |existing| {
+            candidate = existing;
+            self.distill_candidate = null;
+            self.distill_suggestion_pending = false;
+            self.clearSubmittedInputLocked();
+        } else {
+            self.distill_suggestion_pending = false;
+            self.clearSubmittedInputLocked();
+            self.appendLocalToolMessageLocked("No distill candidate is waiting for confirmation.") catch {
+                self.setStatusLocked("Out of memory");
+                self.mutex.unlock();
+                return;
+            };
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        }
+        self.mutex.unlock();
+
+        var moved = candidate.?;
+        defer moved.deinit(self.allocator);
+        var saved = ai_chat_skills.saveDistilledCandidate(self.allocator, moved) catch |err| {
+            const text = switch (err) {
+                error.SkillAlreadyExists => std.fmt.allocPrint(
+                    self.allocator,
+                    "A skill named ${s} already exists. Use /distill with a more specific topic or remove the old skill first.",
+                    .{moved.name},
+                ),
+                else => std.fmt.allocPrint(self.allocator, "Could not save distilled skill: {}.", .{err}),
+            } catch null;
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (text) |msg| {
+                defer self.allocator.free(msg);
+                self.appendLocalToolMessageLocked(msg) catch self.setStatusLocked("Out of memory");
+            } else {
+                self.setStatusLocked("Out of memory");
+            }
+            self.setStatusLocked("Ready");
+            return;
+        };
+        defer saved.deinit(self.allocator);
+
+        const text = std.fmt.allocPrint(
+            self.allocator,
+            "Distilled skill: ${s}\nSaved to: {s}",
+            .{ saved.skill_name, saved.skill_path },
+        ) catch null;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (text) |msg| {
+            defer self.allocator.free(msg);
+            self.appendLocalToolMessageLocked(msg) catch self.setStatusLocked("Out of memory");
+        } else {
+            self.setStatusLocked("Out of memory");
+            return;
+        }
+        self.freeSkillSuggestions();
+        self.setStatusLocked("Ready");
+    }
+
+    fn startDistillRequest(self: *Session, topic: []const u8) void {
+        self.mutex.lock();
+        if (self.request_thread) |thread| {
+            if (self.request_inflight) {
+                self.distill_suggestion_pending = false;
+                self.clearSubmittedInputLocked();
+                self.appendLocalToolMessageLocked("Wait for the current AI request to finish before distilling.") catch {
+                    self.setStatusLocked("Out of memory");
+                    self.mutex.unlock();
+                    return;
+                };
+                self.setStatusLocked("Ready");
+                self.mutex.unlock();
+                return;
+            }
+            self.request_thread = null;
+            self.mutex.unlock();
+            thread.join();
+            self.mutex.lock();
+        }
+        if (self.api_key_len == 0) {
+            self.distill_suggestion_pending = false;
+            self.clearSubmittedInputLocked();
+            self.setStatusLocked("Missing API key. Edit the AI Chat profile or set DEEPSEEK_API_KEY.");
+            self.mutex.unlock();
+            return;
+        }
+
+        self.clearDistillCandidateLocked();
+        self.distill_suggestion_pending = false;
+        const request = self.buildDistillRequestLocked(topic) catch |err| {
+            self.clearSubmittedInputLocked();
+            const text = switch (err) {
+                error.NotEnoughContext => "Not enough reusable context to distill yet.",
+                else => "Could not prepare distill request.",
+            };
+            self.appendLocalToolMessageLocked(text) catch self.setStatusLocked("Out of memory");
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        };
+
+        self.clearSubmittedInputLocked();
+        self.stop_requested.store(false, .release);
+        self.request_stopping = false;
+        self.request_inflight = true;
+        self.distill_inflight = true;
+        self.appendLocalToolMessageLocked("Distilling a reusable skill candidate.") catch {
+            request.deinit();
+            self.request_inflight = false;
+            self.distill_inflight = false;
+            self.setStatusLocked("Out of memory");
+            self.mutex.unlock();
+            return;
+        };
+        self.setStatusLocked("Distilling skill.");
+        self.mutex.unlock();
+
+        const thread = std.Thread.spawn(.{}, ai_chat_request.distillThreadMain, .{request}) catch {
+            request.deinit();
+            self.mutex.lock();
+            self.request_inflight = false;
+            self.distill_inflight = false;
+            self.appendLocalToolMessageLocked("Failed to start distill request thread.") catch self.setStatusLocked("Out of memory");
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        };
+
+        self.mutex.lock();
+        self.request_thread = thread;
+        self.mutex.unlock();
+    }
+
+    /// Run a `$websearch <query>` command on a background thread. Mirrors
+    /// `startDistillRequest`: reuses `request_thread`/`request_inflight` so the
+    /// existing submit-guard and `deinit` join cover lifetime. Called AFTER the
+    /// caller has unlocked `self.mutex`.
+    fn startWebSearchRequest(self: *Session, query_in: []const u8) void {
+        self.mutex.lock();
+        if (self.request_thread) |thread| {
+            if (self.request_inflight) {
+                self.clearSubmittedInputLocked();
+                self.appendLocalToolMessageLocked("Wait for the current request to finish.") catch {};
+                self.setStatusLocked("Ready");
+                self.mutex.unlock();
+                return;
+            }
+            self.request_thread = null;
+            self.mutex.unlock();
+            thread.join();
+            self.mutex.lock();
+        }
+
+        const query = std.mem.trim(u8, query_in, " \t\r\n");
+        if (query.len == 0) {
+            self.clearSubmittedInputLocked();
+            self.appendLocalToolMessageLocked("Usage: $websearch <query>") catch self.setStatusLocked("Out of memory");
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        }
+        if (!web_search.jinaApiKeySet()) {
+            self.clearSubmittedInputLocked();
+            self.appendLocalToolMessageLocked("Jina API key not set — add `jina-api-key = <key>` to your WispTerm config.") catch self.setStatusLocked("Out of memory");
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        }
+
+        const req = WebSearchRequest.create(self.allocator, self, query) catch {
+            self.clearSubmittedInputLocked();
+            self.appendLocalToolMessageLocked("Out of memory.") catch {};
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        };
+        self.clearSubmittedInputLocked();
+        self.stop_requested.store(false, .release);
+        self.request_stopping = false;
+        self.request_inflight = true;
+        self.setStatusLocked("Searching the web…");
+        self.mutex.unlock();
+
+        const thread = std.Thread.spawn(.{}, ai_chat_request.webSearchThreadMain, .{req}) catch {
+            req.deinit();
+            self.mutex.lock();
+            self.request_inflight = false;
+            self.appendLocalToolMessageLocked("Failed to start web search thread.") catch {};
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        };
+        self.mutex.lock();
+        self.request_thread = thread;
+        self.mutex.unlock();
+    }
+
+    /// Run a `$webread <target>` command on a background thread. Mirrors
+    /// `startWebSearchRequest` but does not require a Jina key (anonymous read is
+    /// allowed). Called AFTER the caller has unlocked `self.mutex`.
+    fn startWebReadRequest(self: *Session, target_in: []const u8) void {
+        self.mutex.lock();
+        if (self.request_thread) |thread| {
+            if (self.request_inflight) {
+                self.clearSubmittedInputLocked();
+                self.appendLocalToolMessageLocked("Wait for the current request to finish.") catch {};
+                self.setStatusLocked("Ready");
+                self.mutex.unlock();
+                return;
+            }
+            self.request_thread = null;
+            self.mutex.unlock();
+            thread.join();
+            self.mutex.lock();
+        }
+
+        const target = std.mem.trim(u8, target_in, " \t\r\n");
+        if (target.len == 0) {
+            self.clearSubmittedInputLocked();
+            self.appendLocalToolMessageLocked("Usage: $webread <url | file path>") catch self.setStatusLocked("Out of memory");
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        }
+
+        const wd = self.effectiveWorkingDirLocked() orelse "";
+        const req = WebReadRequest.create(self.allocator, self, target, wd) catch {
+            self.clearSubmittedInputLocked();
+            self.appendLocalToolMessageLocked("Out of memory.") catch {};
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        };
+        self.clearSubmittedInputLocked();
+        self.stop_requested.store(false, .release);
+        self.request_stopping = false;
+        self.request_inflight = true;
+        self.setStatusLocked("Reading…");
+        self.mutex.unlock();
+
+        const thread = std.Thread.spawn(.{}, ai_chat_request.webReadThreadMain, .{req}) catch {
+            req.deinit();
+            self.mutex.lock();
+            self.request_inflight = false;
+            self.appendLocalToolMessageLocked("Failed to start web read thread.") catch {};
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        };
+        self.mutex.lock();
+        self.request_thread = thread;
+        self.mutex.unlock();
+    }
+
+    /// Run a `$pubmed <query>` command on a background thread. Mirrors
+    /// `startWebSearchRequest` but needs no API key (NCBI is anonymous). Called
+    /// AFTER the caller has unlocked `self.mutex`.
+    fn startPubMedRequest(self: *Session, query_in: []const u8) void {
+        self.mutex.lock();
+        if (self.request_thread) |thread| {
+            if (self.request_inflight) {
+                self.clearSubmittedInputLocked();
+                self.appendLocalToolMessageLocked("Wait for the current request to finish.") catch {};
+                self.setStatusLocked("Ready");
+                self.mutex.unlock();
+                return;
+            }
+            self.request_thread = null;
+            self.mutex.unlock();
+            thread.join();
+            self.mutex.lock();
+        }
+
+        const query = std.mem.trim(u8, query_in, " \t\r\n");
+        if (query.len == 0) {
+            self.clearSubmittedInputLocked();
+            self.appendLocalToolMessageLocked("Usage: $pubmed <query>") catch self.setStatusLocked("Out of memory");
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        }
+
+        const req = WebPubMedRequest.create(self.allocator, self, query) catch {
+            self.clearSubmittedInputLocked();
+            self.appendLocalToolMessageLocked("Out of memory.") catch {};
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        };
+        self.clearSubmittedInputLocked();
+        self.stop_requested.store(false, .release);
+        self.request_stopping = false;
+        self.request_inflight = true;
+        self.setStatusLocked("Searching PubMed…");
+        self.mutex.unlock();
+
+        const thread = std.Thread.spawn(.{}, ai_chat_request.pubMedThreadMain, .{req}) catch {
+            req.deinit();
+            self.mutex.lock();
+            self.request_inflight = false;
+            self.appendLocalToolMessageLocked("Failed to start PubMed search thread.") catch {};
+            self.setStatusLocked("Ready");
+            self.mutex.unlock();
+            return;
+        };
+        self.mutex.lock();
+        self.request_thread = thread;
+        self.mutex.unlock();
     }
 
     /// Assumes self.mutex is held. Returns the captured history change for the
@@ -1972,7 +3083,7 @@ pub const Session = struct {
             .clean => try self.appendCleanMarkdownExportLocked(allocator, &out),
         }
 
-        if (out.items.len == 0) try out.appendSlice(allocator, "# WispTerm AI Chat\n\nNo messages yet.\n");
+        if (out.items.len == 0) try out.appendSlice(allocator, "# WispTerm Copilot\n\nNo messages yet.\n");
         return out.toOwnedSlice(allocator);
     }
 
@@ -2043,6 +3154,159 @@ pub const Session = struct {
         return allocator.dupe(u8, display[start..end]);
     }
 
+    /// Convert the session's visible message history into owned RequestMessages.
+    /// Tool replays expand into a durable assistant tool_use + tool result pair;
+    /// user image attachments are deep-cloned so the request owns its own copies.
+    /// `copilot_target_idx`/`copilot_ctx` append a terminal snapshot to the last
+    /// user message (copilot mode); pass null/null for a plain chat.
+    fn buildRequestMessagesLocked(self: *Session, copilot_target_idx: ?usize, copilot_ctx: ?[]const u8) ![]RequestMessage {
+        var visible_count: usize = 0;
+        for (self.messages.items) |msg| {
+            if (msg.role != .tool) {
+                visible_count += 1;
+            } else if (msg.replay_to_model) {
+                const id = msg.tool_call_id orelse continue;
+                const name = msg.tool_name orelse continue;
+                if (id.len == 0 or name.len == 0) continue;
+                visible_count += 2;
+            }
+        }
+
+        const messages = try self.allocator.alloc(RequestMessage, visible_count);
+        errdefer self.allocator.free(messages);
+
+        var written: usize = 0;
+        errdefer {
+            for (messages[0..written]) |msg| msg.deinit(self.allocator);
+        }
+
+        for (self.messages.items, 0..) |msg, idx| {
+            if (msg.role == .tool) {
+                if (!msg.replay_to_model) continue;
+                const id = msg.tool_call_id orelse continue;
+                const name = msg.tool_name orelse continue;
+                if (id.len == 0 or name.len == 0) continue;
+
+                messages[written] = try ai_chat_request.durableToolAssistantRequestMessage(self.allocator, id, name);
+                written += 1;
+                messages[written] = try ai_chat_request.requestMessageWithClonedFields(self.allocator, .tool, msg.content, null, id, null, null);
+                written += 1;
+                continue;
+            }
+
+            const append_copilot_ctx = copilot_target_idx != null and idx == copilot_target_idx.? and copilot_ctx != null;
+            const model_ctx = msg.model_context;
+            var request_content: []const u8 = msg.content;
+            var combined_owned: ?[]u8 = null;
+            defer if (combined_owned) |combined| self.allocator.free(combined);
+
+            if (model_ctx != null and append_copilot_ctx) {
+                combined_owned = try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}\n\n{s}", .{ msg.content, model_ctx.?, copilot_ctx.? });
+                request_content = combined_owned.?;
+            } else if (model_ctx != null) {
+                combined_owned = try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ msg.content, model_ctx.? });
+                request_content = combined_owned.?;
+            } else if (append_copilot_ctx) {
+                combined_owned = try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ msg.content, copilot_ctx.? });
+                request_content = combined_owned.?;
+            }
+
+            messages[written] = try ai_chat_request.requestMessageWithClonedFields(self.allocator, msg.role, request_content, msg.reasoning, null, null, msg.images);
+            written += 1;
+        }
+
+        return messages;
+    }
+
+    fn allocDistillTurnsLocked(self: *Session) ![]ai_skill_distill.DistillTurn {
+        const turns = try self.allocator.alloc(ai_skill_distill.DistillTurn, self.messages.items.len);
+        for (self.messages.items, 0..) |msg, idx| {
+            turns[idx] = .{
+                .role = switch (msg.role) {
+                    .user => .user,
+                    .assistant => .assistant,
+                    .tool => .tool,
+                },
+                .content = msg.content,
+                .replay_to_model = msg.replay_to_model,
+            };
+        }
+        return turns;
+    }
+
+    fn buildDistillRequestLocked(self: *Session, topic: []const u8) !*ChatRequest {
+        const turns = try self.allocDistillTurnsLocked();
+        defer self.allocator.free(turns);
+
+        const prompt = try ai_skill_distill.buildDistillUserPrompt(self.allocator, topic, turns);
+        defer self.allocator.free(prompt);
+
+        const messages = try self.allocator.alloc(RequestMessage, 1);
+        var message_initialized = false;
+        errdefer {
+            if (message_initialized) messages[0].deinit(self.allocator);
+            self.allocator.free(messages);
+        }
+        messages[0] = try ai_chat_request.requestMessageWithClonedFields(self.allocator, .user, prompt, null, null, null, null);
+        message_initialized = true;
+
+        const base_url = try self.allocator.dupe(u8, self.baseUrl());
+        errdefer self.allocator.free(base_url);
+        const api_key = try self.allocator.dupe(u8, self.apiKey());
+        errdefer self.allocator.free(api_key);
+        const model_name = try self.allocator.dupe(u8, self.model());
+        errdefer self.allocator.free(model_name);
+        const system_prompt = try self.allocator.dupe(u8, ai_skill_distill.distiller_system_prompt);
+        errdefer self.allocator.free(system_prompt);
+        const reasoning_effort = try self.allocator.dupe(u8, self.reasoningEffort());
+        errdefer self.allocator.free(reasoning_effort);
+
+        const req = try self.allocator.create(ChatRequest);
+        errdefer self.allocator.destroy(req);
+        req.* = .{
+            .allocator = self.allocator,
+            .session = self,
+            .base_url = base_url,
+            .api_key = api_key,
+            .model = model_name,
+            .protocol = self.protocol,
+            .system_prompt = system_prompt,
+            .messages = messages,
+            .thinking_enabled = self.thinking_enabled,
+            .reasoning_effort = reasoning_effort,
+            .stream = false,
+            .max_tokens = self.max_tokens,
+            .agent_enabled = false,
+            .copilot = false,
+            .tool_host = null,
+            .tool_snapshot = null,
+            .weixin_reply_context = null,
+            .started_ms = std.time.milliTimestamp(),
+        };
+        message_initialized = false;
+        return req;
+    }
+
+    fn maybeAppendDistillSuggestionLocked(self: *Session) void {
+        // Gated by config `ai-distill-suggest` (off by default): when disabled the
+        // Copilot never auto-appends the "distill this into a skill?" prompt.
+        if (!currentAgentSettings().distill_suggest_enabled) return;
+        const turns = self.allocDistillTurnsLocked() catch return;
+        defer self.allocator.free(turns);
+        const should = ai_skill_distill.shouldSuggest(.{
+            .turns = turns,
+            .pending_candidate = self.distill_candidate != null,
+            .suggestion_pending = self.distill_suggestion_pending,
+            .last_suggested_turn_count = self.distill_last_suggested_turn_count,
+        });
+        if (!should) return;
+        self.appendLocalToolMessageLocked(
+            "This task looks reusable. Distill it into a skill?\nPress Enter to preview /distill, or Esc to ignore.",
+        ) catch return;
+        self.distill_suggestion_pending = true;
+        self.distill_last_suggested_turn_count = turns.len;
+    }
+
     fn buildRequestLocked(self: *Session) !*ChatRequest {
         const req = try self.allocator.create(ChatRequest);
         errdefer self.allocator.destroy(req);
@@ -2092,48 +3356,10 @@ pub const Session = struct {
             }
         }
 
-        var visible_count: usize = 0;
-        for (self.messages.items) |msg| {
-            if (msg.role != .tool) {
-                visible_count += 1;
-            } else if (msg.replay_to_model) {
-                const id = msg.tool_call_id orelse continue;
-                const name = msg.tool_name orelse continue;
-                if (id.len == 0 or name.len == 0) continue;
-                visible_count += 2;
-            }
-        }
-
-        const messages = try self.allocator.alloc(RequestMessage, visible_count);
-        errdefer self.allocator.free(messages);
-
-        var written: usize = 0;
+        const messages = try self.buildRequestMessagesLocked(copilot_target_idx, copilot_ctx);
         errdefer {
-            for (messages[0..written]) |msg| msg.deinit(self.allocator);
-        }
-
-        for (self.messages.items, 0..) |msg, idx| {
-            if (msg.role == .tool) {
-                if (!msg.replay_to_model) continue;
-                const id = msg.tool_call_id orelse continue;
-                const name = msg.tool_name orelse continue;
-                if (id.len == 0 or name.len == 0) continue;
-
-                messages[written] = try ai_chat_request.durableToolAssistantRequestMessage(self.allocator, id, name);
-                written += 1;
-                messages[written] = try ai_chat_request.requestMessageWithClonedFields(self.allocator, .tool, msg.content, null, id, null);
-                written += 1;
-                continue;
-            }
-
-            if (copilot_target_idx != null and idx == copilot_target_idx.? and copilot_ctx != null) {
-                const combined = try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ msg.content, copilot_ctx.? });
-                defer self.allocator.free(combined);
-                messages[written] = try ai_chat_request.requestMessageWithClonedFields(self.allocator, msg.role, combined, msg.reasoning, null, null);
-            } else {
-                messages[written] = try ai_chat_request.requestMessageWithClonedFields(self.allocator, msg.role, msg.content, msg.reasoning, null, null);
-            }
-            written += 1;
+            for (messages) |msg| msg.deinit(self.allocator);
+            self.allocator.free(messages);
         }
 
         const base_url = try self.allocator.dupe(u8, self.baseUrl());
@@ -2145,12 +3371,16 @@ pub const Session = struct {
         const model_name = try self.allocator.dupe(u8, self.model());
         var model_owned = true;
         errdefer if (model_owned) self.allocator.free(model_name);
-        const system_prompt = try self.allocator.dupe(u8, self.systemPrompt());
+        const working_dir = self.effectiveWorkingDirLocked() orelse "";
+        const system_prompt = try composeSystemPromptWithMemory(self.allocator, self.systemPrompt(), settings.memory_enabled, working_dir);
         var system_prompt_owned = true;
         errdefer if (system_prompt_owned) self.allocator.free(system_prompt);
         const reasoning_effort = try self.allocator.dupe(u8, self.reasoningEffort());
         var reasoning_effort_owned = true;
         errdefer if (reasoning_effort_owned) self.allocator.free(reasoning_effort);
+
+        var subagent_profile = resolveSubagentProfileForRequest(self.allocator, agent_enabled);
+        errdefer if (subagent_profile) |profile| profile.deinit(self.allocator);
 
         req.* = .{
             .allocator = self.allocator,
@@ -2166,11 +3396,13 @@ pub const Session = struct {
             .stream = self.stream and !agent_enabled and self.protocol != .anthropic,
             .max_tokens = self.max_tokens,
             .agent_enabled = agent_enabled,
+            .memory_enabled = settings.memory_enabled,
             .copilot = self.copilot,
             .tool_host = tool_host,
             .tool_snapshot = tool_snapshot,
             .weixin_reply_context = weixin_ctx,
             .started_ms = std.time.milliTimestamp(),
+            .subagent_profile = subagent_profile,
         };
         base_url_owned = false;
         api_key_owned = false;
@@ -2178,6 +3410,7 @@ pub const Session = struct {
         system_prompt_owned = false;
         reasoning_effort_owned = false;
         weixin_ctx = null;
+        subagent_profile = null;
         if (self.copilot and self.bound_surface_id_len > 0) {
             // Inline the write-context seed directly on ChatRequest (the field
             // layout is identical to ToolContext; setWriteContext in
@@ -2259,6 +3492,7 @@ pub const Session = struct {
             .stream = self.stream,
             .max_tokens = self.max_tokens,
             .agent_enabled = self.agent_enabled,
+            .vision_enabled = self.vision_enabled,
             .created_at = self.created_at_ms,
             .updated_at = self.updated_at_ms,
             .messages = messages,
@@ -2354,6 +3588,21 @@ pub const Session = struct {
         @memcpy(self.status_buf[0..self.status_len], value[0..self.status_len]);
     }
 };
+
+/// Returns base prompt, or base + memory index block when memory is enabled.
+/// Best-effort: any memory error degrades to just the base prompt. Caller owns.
+fn composeSystemPromptWithMemory(
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    memory_enabled: bool,
+    working_dir: []const u8,
+) ![]u8 {
+    if (!memory_enabled) return allocator.dupe(u8, base);
+    const block = agent_memory.buildInjectionBlock(allocator, working_dir) catch return allocator.dupe(u8, base);
+    defer allocator.free(block);
+    if (block.len == 0) return allocator.dupe(u8, base);
+    return std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{ base, block });
+}
 
 fn allocUsageFooter(allocator: std.mem.Allocator, started_ms: i64, usage: ?ApiUsage) !?[]u8 {
     const u = usage orelse return null;
@@ -2523,6 +3772,7 @@ pub fn finishStoppedRequest(session: *Session) void {
     defer session.mutex.unlock();
     if (session.closing.load(.acquire)) return;
     session.request_inflight = false;
+    session.distill_inflight = false;
     session.request_stopping = false;
     session.stop_requested.store(false, .release);
     session.collapseAutoExpandedDetailsLocked();
@@ -2690,10 +3940,98 @@ pub fn appendAssistantResult(session: *Session, result: ApiResult, started_ms: i
     };
     usage_footer = null;
     session.request_inflight = false;
+    session.distill_inflight = false;
     session.collapseAutoExpandedDetailsLocked();
     session.scroll_px = 1_000_000;
     session.setCompletionStatusLocked(started_ms, result.usage);
+    session.maybeAppendDistillSuggestionLocked();
     history_change = session.captureHistoryChangeLocked();
+}
+
+/// Append a `$websearch` result (or error text) as a local tool message and
+/// finish the in-flight request. Called from the web-search worker thread with
+/// no lock held. Mirrors the closing-guarded shape of `appendAssistantResult`.
+pub fn appendWebSearchResult(session: *Session, text: []const u8) void {
+    if (session.closing.load(.acquire)) return;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    if (session.closing.load(.acquire)) return;
+    session.appendLocalToolMessageLocked(text) catch {
+        session.request_inflight = false;
+        session.setStatusLocked("Out of memory");
+        return;
+    };
+    session.request_inflight = false;
+    session.setStatusLocked("Ready");
+}
+
+pub fn applyDistillCandidate(session: *Session, candidate: *ai_skill_distill.Candidate) void {
+    const allocator = session.allocator;
+    const root = ai_chat_skills.defaultWritableSkillRootPath(allocator) catch |err| {
+        candidate.deinit(allocator);
+        failDistillRequest(session, err);
+        return;
+    };
+    defer allocator.free(root);
+    const save_path = std.fs.path.join(allocator, &.{ root, candidate.name, "SKILL.md" }) catch |err| {
+        candidate.deinit(allocator);
+        failDistillRequest(session, err);
+        return;
+    };
+    defer allocator.free(save_path);
+    const preview = ai_skill_distill.renderPreviewMarkdown(allocator, candidate.*, save_path) catch |err| {
+        candidate.deinit(allocator);
+        failDistillRequest(session, err);
+        return;
+    };
+    defer allocator.free(preview);
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    if (session.closing.load(.acquire) or session.stop_requested.load(.acquire)) {
+        candidate.deinit(allocator);
+        session.request_inflight = false;
+        session.request_stopping = false;
+        session.distill_inflight = false;
+        session.stop_requested.store(false, .release);
+        session.setStatusLocked("Stopped");
+        return;
+    }
+
+    session.clearDistillCandidateLocked();
+    session.distill_candidate = candidate.*;
+    candidate.* = undefined;
+    session.distill_suggestion_pending = false;
+    session.request_inflight = false;
+    session.request_stopping = false;
+    session.distill_inflight = false;
+    session.appendLocalToolMessageLocked(preview) catch {
+        session.clearDistillCandidateLocked();
+        session.setStatusLocked("Out of memory");
+        return;
+    };
+    session.setStatusLocked("Distill preview ready");
+}
+
+pub fn failDistillRequest(session: *Session, err: anyerror) void {
+    const allocator = session.allocator;
+    const text = std.fmt.allocPrint(allocator, "Could not distill this conversation: {}.", .{err}) catch null;
+    defer if (text) |msg| allocator.free(msg);
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    session.request_inflight = false;
+    session.request_stopping = false;
+    session.distill_inflight = false;
+    session.stop_requested.store(false, .release);
+    session.clearDistillCandidateLocked();
+    if (text) |msg| {
+        session.appendLocalToolMessageLocked(msg) catch {
+            session.setStatusLocked("Out of memory");
+            return;
+        };
+    }
+    session.setStatusLocked("Ready");
 }
 
 pub fn appendProgressMessage(session: *Session, text: []const u8) !void {
@@ -2840,6 +4178,7 @@ pub fn finishAssistantStream(session: *Session, message_idx: usize, started_ms: 
     if (session.closing.load(.acquire)) return;
     if (session.stop_requested.load(.acquire)) {
         session.request_inflight = false;
+        session.distill_inflight = false;
         session.request_stopping = false;
         session.stop_requested.store(false, .release);
         session.setStatusLocked("Stopped");
@@ -2858,9 +4197,11 @@ pub fn finishAssistantStream(session: *Session, message_idx: usize, started_ms: 
         history_change = session.captureHistoryChangeLocked();
     }
     session.request_inflight = false;
+    session.distill_inflight = false;
     session.collapseAutoExpandedDetailsLocked();
     session.scroll_px = 1_000_000;
     session.setCompletionStatusLocked(started_ms, usage);
+    session.maybeAppendDistillSuggestionLocked();
 }
 
 pub fn failAssistantStream(session: *Session, message_idx: ?usize, text: []const u8) void {
@@ -3073,11 +4414,14 @@ test "ai chat slash command suggestions show and filter from input" {
     var session = Session{ .allocator = allocator };
     session.appendInputText("/");
 
-    try std.testing.expectEqual(@as(usize, 10), session.slashCommandSuggestionCount());
+    // A bare "/" shows every built-in command. Tie the count to the registry so
+    // it can't go stale when commands are added (it did: /cwd, /loop, /watch).
+    try std.testing.expectEqual(slash_command_entries.len, session.slashCommandSuggestionCount());
     try std.testing.expectEqualStrings("/skills", session.slashCommandSuggestionAt(0).?.command);
 
+    // "/c" filters to /commands, /clear, /cwd.
     session.appendInputText("c");
-    try std.testing.expectEqual(@as(usize, 2), session.slashCommandSuggestionCount());
+    try std.testing.expectEqual(@as(usize, 3), session.slashCommandSuggestionCount());
     try std.testing.expectEqualStrings("/commands", session.slashCommandSuggestionAt(0).?.command);
 }
 
@@ -3260,20 +4604,21 @@ test "ai chat dollar skill suggestions filter and enter completes with trailing 
     try session.loadSkillSuggestionsFromRoots(&.{root ++ "/skills"});
     session.appendInputText("$p");
 
-    try std.testing.expectEqual(@as(usize, 1), session.composerSuggestionCount());
-    const suggestion = session.composerSuggestionAt(0).?;
+    // "$p" matches both the reserved "$pubmed" command and the installed "pdf" skill.
+    try std.testing.expectEqual(@as(usize, 2), session.composerSuggestionCount());
+    // Reserved commands come first; index 0 = pubmed, index 1 = pdf skill.
+    const suggestion = session.composerSuggestionAt(1).?;
     try std.testing.expectEqual(ComposerSuggestionKind.skill, suggestion.kind);
     try std.testing.expectEqualStrings("pdf", suggestion.text);
 
+    // Navigate down once to select the "pdf" skill (index 1) and then confirm.
+    session.handleKey(.{ .key = input_key.Key.arrow_down });
     session.handleKey(.{ .key = input_key.Key.enter });
 
     try std.testing.expectEqualStrings("$pdf ", session.input());
     try std.testing.expectEqual(@as(usize, "$pdf ".len), session.inputCursor());
     try std.testing.expectEqual(@as(usize, 0), session.messages.items.len);
 }
-
-
-
 
 const WeixinAttachmentCapture = struct {
     called: bool = false,
@@ -3419,7 +4764,6 @@ test "weixin_send_attachment calls the active Weixin sender" {
     try std.testing.expectEqualStrings("ctx-1", capture.context_token);
     try std.testing.expectEqualStrings("Sent file to Weixin: report.pdf", result);
 }
-
 
 test "ai_chat: session serializes to history record" {
     const allocator = std.testing.allocator;
@@ -3894,13 +5238,17 @@ test "ai chat responses endpoint normalization" {
 }
 
 test "ai chat default system prompt comes from platform agent prompt" {
-    try std.testing.expect(DEFAULT_SYSTEM_PROMPT.len < 2200);
+    // Length budget: the system prompt ships on every AI API call, so this guards
+    // against silent bloat. The Windows variant is the longest (it adds the WSL
+    // tool guidance); keep headroom above it for future additions.
+    try std.testing.expect(DEFAULT_SYSTEM_PROMPT.len < 4000);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "wispterm_docs") != null);
     try std.testing.expectEqualStrings(platform_agent_prompt.defaultSystemPrompt, DEFAULT_SYSTEM_PROMPT);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "uv") != null);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "Python") != null);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, platform_process.localCommandToolName()) != null);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "terminal_list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "terminal_context") != null);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "terminal_select") != null);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "ssh_session_exec") != null);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "ssh_profile_save") != null);
@@ -3919,7 +5267,20 @@ test "ai chat default system prompt comes from platform agent prompt" {
 test "copilot prompt keeps tool guidance and adds the binding clause" {
     try std.testing.expect(std.mem.indexOf(u8, COPILOT_SYSTEM_PROMPT, "CURRENTLY FOCUSED") != null);
     try std.testing.expect(std.mem.indexOf(u8, COPILOT_SYSTEM_PROMPT, "ssh_session_exec") != null);
+    try std.testing.expect(std.mem.indexOf(u8, COPILOT_SYSTEM_PROMPT, "terminal_context") != null);
     try std.testing.expect(std.mem.indexOf(u8, COPILOT_SYSTEM_PROMPT, "terminal_select") != null);
+}
+
+test "default system prompt mentions subagent delegation" {
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "`subagent`") != null);
+}
+
+test "subagent system prompt is self-contained researcher guidance" {
+    const prompt = platform_agent_prompt.subagentSystemPrompt;
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "research subagent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "final report") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "websearch") != null);
+    try std.testing.expect(prompt.len < 1200);
 }
 
 test "ai chat empty profile system prompt uses full embedded default" {
@@ -4078,10 +5439,10 @@ const CopilotTestHost = struct {
         };
         return .{ .surfaces = surfaces, .active_tab = 0 };
     }
-    fn unsupportedSurfaceSnapshot(_: *anyopaque, _: std.mem.Allocator, _: *anyopaque) anyerror![]u8 {
+    fn unsupportedSurfaceSnapshot(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: *anyopaque) anyerror![]u8 {
         return error.Unsupported;
     }
-    fn unsupportedWrite(_: *anyopaque, _: *anyopaque, _: []const u8) bool {
+    fn unsupportedWrite(_: *anyopaque, _: []const u8, _: *anyopaque, _: []const u8) bool {
         return false;
     }
     fn unsupportedSpawn(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: ?[]const u8) anyerror!ToolSurface {
@@ -4165,12 +5526,6 @@ test "wsl_session_exec refuses to paste shell wrapper into Claude Code" {
     try std.testing.expect(std.mem.indexOf(u8, result, "repl=claude_code") != null);
 }
 
-
-
-
-
-
-
 test "ai chat ctrl a selects input and replacement clears selection" {
     const allocator = std.testing.allocator;
     var session = Session{ .allocator = allocator };
@@ -4185,6 +5540,100 @@ test "ai chat ctrl a selects input and replacement clears selection" {
     session.handleChar('x');
     try std.testing.expect(!session.input_select_all);
     try std.testing.expectEqualStrings("x", session.input());
+}
+
+test "ai chat pending image add, count, and clear" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(allocator, "test", "", "", "", "", "", "", "", "");
+    defer session.deinit();
+    try std.testing.expectEqual(@as(usize, 0), session.pendingImageCount());
+    try session.addPendingImage("QUJD", "image/png");
+    try session.addPendingImage("RUZH", "image/png");
+    try std.testing.expectEqual(@as(usize, 2), session.pendingImageCount());
+    session.clearPendingImages();
+    try std.testing.expectEqual(@as(usize, 0), session.pendingImageCount());
+}
+
+test "ai chat takePendingImages transfers ownership and clears the pending list" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(allocator, "test", "", "", "", "", "", "", "", "");
+    defer session.deinit();
+    try session.addPendingImage("QUJD", "image/png");
+    const taken = session.takePendingImages().?;
+    defer {
+        for (taken) |img| img.deinit(allocator);
+        allocator.free(taken);
+    }
+    try std.testing.expectEqual(@as(usize, 0), session.pendingImageCount());
+    try std.testing.expectEqual(@as(usize, 1), taken.len);
+    try std.testing.expectEqualStrings("QUJD", taken[0].data_b64);
+    try std.testing.expect(session.takePendingImages() == null);
+}
+
+test "ai chat vision flag parses from the profile vision string" {
+    const allocator = std.testing.allocator;
+    const off = try Session.init(allocator, "t", "", "", "", "", "", "", "", "");
+    defer off.deinit();
+    try std.testing.expect(!off.vision_enabled);
+    const on = try Session.initWithVision(allocator, "t", "", "", "", "", "", "", "", "", "", "on");
+    defer on.deinit();
+    try std.testing.expect(on.vision_enabled);
+}
+
+test "ai chat buildRequestMessages clones user image blocks into the request" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(allocator, "test", "", "", "", "", "", "", "", "");
+    defer session.deinit();
+
+    const images = try allocator.alloc(ImageBlock, 1);
+    images[0] = .{
+        .data_b64 = try allocator.dupe(u8, "QUJD"),
+        .media_type = try allocator.dupe(u8, "image/png"),
+    };
+    try session.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "look"),
+        .images = images,
+    });
+
+    const reqs = try session.buildRequestMessagesLocked(null, null);
+    defer {
+        for (reqs) |m| m.deinit(allocator);
+        allocator.free(reqs);
+    }
+    try std.testing.expectEqual(@as(usize, 1), reqs.len);
+    try std.testing.expect(reqs[0].images != null);
+    try std.testing.expectEqual(@as(usize, 1), reqs[0].images.?.len);
+    try std.testing.expectEqualStrings("QUJD", reqs[0].images.?[0].data_b64);
+    // Deep clone: the request owns separate buffers from the session message.
+    try std.testing.expect(reqs[0].images.?[0].data_b64.ptr != images[0].data_b64.ptr);
+}
+
+test "ai chat model context is request-only and hidden from visible history" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(allocator, "test", "", "", "", "", "", "", "", "");
+    defer session.deinit();
+
+    try session.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "用户通过微信发送了文件：a.pdf"),
+        .model_context = try allocator.dupe(u8, "本地文件路径：/work/weixin_inbound/a.pdf"),
+    });
+
+    const reqs = try session.buildRequestMessagesLocked(null, null);
+    defer {
+        for (reqs) |m| m.deinit(allocator);
+        allocator.free(reqs);
+    }
+    try std.testing.expectEqual(@as(usize, 1), reqs.len);
+    try std.testing.expect(std.mem.indexOf(u8, session.messages.items[0].content, "/work/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, reqs[0].content, "用户通过微信发送了文件：a.pdf") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reqs[0].content, "/work/weixin_inbound/a.pdf") != null);
+
+    var record = try session.toHistoryRecord(allocator);
+    defer agent_history.freeOwnedRecord(allocator, &record);
+    try std.testing.expectEqual(@as(usize, 1), record.messages.len);
+    try std.testing.expectEqualStrings("用户通过微信发送了文件：a.pdf", record.messages[0].content);
 }
 
 test "ai chat input cursor supports insertion and deletion in the middle" {
@@ -4468,6 +5917,62 @@ test "ai chat remote snapshot still includes reasoning when it fits" {
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "checked the state first") != null);
 }
 
+test "ai chat remote snapshot includes a pending approval section" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    defer {
+        for (session.messages.items) |msg| msg.deinit(allocator);
+        session.messages.deinit(allocator);
+    }
+    try session.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "clean up"),
+    });
+
+    const tool = "terminal_repl_exec";
+    const command = "rm -rf /tmp/x";
+    @memcpy(session.approval_tool_buf[0..tool.len], tool);
+    session.approval_tool_len = tool.len;
+    @memcpy(session.approval_command_buf[0..command.len], command);
+    session.approval_command_len = command.len;
+    session.approval_pending = true;
+    session.approval_resolved = false;
+
+    const with = try session.allocRemoteSnapshot(allocator);
+    defer allocator.free(with);
+    try std.testing.expect(std.mem.indexOf(u8, with, "Approval:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, with, "terminal_repl_exec") != null);
+    try std.testing.expect(std.mem.indexOf(u8, with, "rm -rf /tmp/x") != null);
+
+    // Once resolved, the section disappears.
+    try std.testing.expect(session.resolveApprovalExternal(true));
+    const without = try session.allocRemoteSnapshot(allocator);
+    defer allocator.free(without);
+    try std.testing.expect(std.mem.indexOf(u8, without, "Approval:") == null);
+}
+
+test "ai chat remote snapshot approval section omits the command line when empty" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    defer {
+        for (session.messages.items) |msg| msg.deinit(allocator);
+        session.messages.deinit(allocator);
+    }
+
+    const tool = "weather_lookup";
+    @memcpy(session.approval_tool_buf[0..tool.len], tool);
+    session.approval_tool_len = tool.len;
+    session.approval_command_len = 0; // no command argument
+    session.approval_pending = true;
+    session.approval_resolved = false;
+
+    const snapshot = try session.allocRemoteSnapshot(allocator);
+    defer allocator.free(snapshot);
+    // The tool-only approval still emits a section naming the tool, with no
+    // trailing command line (the `\n<command>` branch is skipped).
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "Approval:\r\nweather_lookup") != null);
+}
+
 test "ai chat clipboard text exports transcript when input is empty" {
     const allocator = std.testing.allocator;
     var session = Session{ .allocator = allocator };
@@ -4725,6 +6230,138 @@ test "ai chat escape stops in-flight request" {
     try std.testing.expectEqualStrings("Stopping...", session.status());
 }
 
+fn testDistillCandidate(allocator: std.mem.Allocator) !ai_skill_distill.Candidate {
+    return .{
+        .name = try allocator.dupe(u8, "ssh-transfer"),
+        .description = try allocator.dupe(u8, "Diagnose SSH transfer failures."),
+        .body = try allocator.dupe(u8, "# Steps\n\nRun checks."),
+        .source_summary = try allocator.dupe(u8, "Derived from test conversation."),
+    };
+}
+
+test "ai chat distill cancel clears pending candidate" {
+    const a = std.testing.allocator;
+    var session = Session{ .allocator = a };
+    defer {
+        if (session.distill_candidate) |*candidate| candidate.deinit(a);
+        for (session.messages.items) |msg| msg.deinit(a);
+        session.messages.deinit(a);
+    }
+    session.distill_candidate = try testDistillCandidate(a);
+    session.appendInputText("/distill cancel");
+
+    session.submit();
+
+    try std.testing.expect(session.distill_candidate == null);
+    try std.testing.expectEqualStrings("", session.input());
+    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
+    try std.testing.expect(std.mem.containsAtLeast(u8, session.messages.items[0].content, 1, "discarded"));
+}
+
+test "ai chat distill confirm without candidate is local only" {
+    const a = std.testing.allocator;
+    var session = Session{ .allocator = a };
+    defer {
+        if (session.distill_candidate) |*candidate| candidate.deinit(a);
+        for (session.messages.items) |msg| msg.deinit(a);
+        session.messages.deinit(a);
+    }
+    session.appendInputText("/沉淀 确认");
+
+    session.submit();
+
+    try std.testing.expect(!session.request_inflight);
+    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
+    try std.testing.expect(std.mem.containsAtLeast(u8, session.messages.items[0].content, 1, "No distill candidate"));
+}
+
+test "ai chat appends automatic distill suggestion after tool-heavy result" {
+    const a = std.testing.allocator;
+    configureAgent(.{ .distill_suggest_enabled = true });
+    defer configureAgent(.{});
+    var session = Session{ .allocator = a };
+    defer {
+        if (session.distill_candidate) |*candidate| candidate.deinit(a);
+        for (session.messages.items) |msg| msg.deinit(a);
+        session.messages.deinit(a);
+    }
+    try session.messages.append(a, .{ .role = .user, .content = try a.dupe(u8, "fix this") });
+    try session.messages.append(a, .{ .role = .tool, .content = try a.dupe(u8, "running exec one"), .persist_to_history = false });
+    try session.messages.append(a, .{ .role = .tool, .content = try a.dupe(u8, "running exec two"), .persist_to_history = false });
+    session.request_inflight = true;
+
+    appendAssistantResult(&session, .{ .content = @constCast("done") }, 0);
+
+    try std.testing.expect(session.distill_suggestion_pending);
+    try std.testing.expectEqual(@as(usize, 5), session.messages.items.len);
+    try std.testing.expectEqual(Role.tool, session.messages.items[4].role);
+    try std.testing.expect(!session.messages.items[4].persist_to_history);
+    try std.testing.expect(std.mem.containsAtLeast(u8, session.messages.items[4].content, 1, "Distill it into a skill"));
+}
+
+test "ai chat skips automatic distill suggestion when disabled" {
+    const a = std.testing.allocator;
+    // Default: ai-distill-suggest is off, so the prompt must not auto-appear
+    // even after a tool-heavy turn that the heuristic would otherwise flag.
+    configureAgent(.{});
+    defer configureAgent(.{});
+    var session = Session{ .allocator = a };
+    defer {
+        if (session.distill_candidate) |*candidate| candidate.deinit(a);
+        for (session.messages.items) |msg| msg.deinit(a);
+        session.messages.deinit(a);
+    }
+    try session.messages.append(a, .{ .role = .user, .content = try a.dupe(u8, "fix this") });
+    try session.messages.append(a, .{ .role = .tool, .content = try a.dupe(u8, "running exec one"), .persist_to_history = false });
+    try session.messages.append(a, .{ .role = .tool, .content = try a.dupe(u8, "running exec two"), .persist_to_history = false });
+    session.request_inflight = true;
+
+    appendAssistantResult(&session, .{ .content = @constCast("done") }, 0);
+
+    try std.testing.expect(!session.distill_suggestion_pending);
+    // Only the appended assistant message — no extra distill-suggestion tool row.
+    try std.testing.expectEqual(@as(usize, 4), session.messages.items.len);
+    try std.testing.expectEqual(Role.assistant, session.messages.items[3].role);
+}
+
+test "ai chat escape dismisses pending distill suggestion before rewind" {
+    const a = std.testing.allocator;
+    var session = Session{ .allocator = a };
+    defer {
+        if (session.distill_candidate) |*candidate| candidate.deinit(a);
+        for (session.messages.items) |msg| msg.deinit(a);
+        session.messages.deinit(a);
+    }
+    try session.messages.append(a, .{ .role = .user, .content = try a.dupe(u8, "hi") });
+    session.distill_suggestion_pending = true;
+    session.now_ms_override = 1000;
+
+    session.handleKey(.{ .key = input_key.Key.escape });
+
+    try std.testing.expect(!session.distill_suggestion_pending);
+    try std.testing.expect(!session.rewind_open);
+    try std.testing.expectEqual(@as(i64, 0), session.last_esc_ms);
+}
+
+test "ai chat enter on pending distill suggestion requires api key and does not send chat" {
+    const a = std.testing.allocator;
+    var session = Session{ .allocator = a };
+    defer {
+        if (session.distill_candidate) |*candidate| candidate.deinit(a);
+        for (session.messages.items) |msg| msg.deinit(a);
+        session.messages.deinit(a);
+    }
+    try session.messages.append(a, .{ .role = .user, .content = try a.dupe(u8, "fix this") });
+    try session.messages.append(a, .{ .role = .assistant, .content = try a.dupe(u8, "done") });
+    session.distill_suggestion_pending = true;
+
+    session.handleKey(.{ .key = input_key.Key.enter });
+
+    try std.testing.expect(!session.request_inflight);
+    try std.testing.expect(!session.distill_suggestion_pending);
+    try std.testing.expectEqualStrings("Missing API key. Edit the AI Chat profile or set DEEPSEEK_API_KEY.", session.status());
+}
+
 test "ai chat rewind point count and index map user messages" {
     const a = std.testing.allocator;
     var session = Session{ .allocator = a };
@@ -4828,7 +6465,6 @@ test "ai chat request state exposes in-flight stop status for remote layout" {
     try std.testing.expect(state.stopping);
 }
 
-
 test "ai chat collapse helper only closes auto-expanded details" {
     const allocator = std.testing.allocator;
     var session = Session{ .allocator = allocator };
@@ -4902,13 +6538,15 @@ test "clearMessages empties transcript but keeps settings" {
     try std.testing.expectEqualStrings("m1", session.model());
 }
 
-test "/permission full flips the global agent permission" {
+test "/permission accepts ask auto and full modes" {
     const saved = currentAgentSettings();
     defer configureAgent(saved); // restore global state for other tests
     configureAgent(.{ .permission = .confirm });
+    applyPermissionArg("auto");
+    try std.testing.expectEqual(AgentPermission.auto, currentAgentSettings().permission);
     applyPermissionArg("full");
     try std.testing.expectEqual(AgentPermission.full, currentAgentSettings().permission);
-    applyPermissionArg("confirm");
+    applyPermissionArg("ask");
     try std.testing.expectEqual(AgentPermission.confirm, currentAgentSettings().permission);
     applyPermissionArg("bogus"); // invalid → no change
     try std.testing.expectEqual(AgentPermission.confirm, currentAgentSettings().permission);
@@ -5107,10 +6745,10 @@ const CopilotBoundSnapshotTestHost = struct {
         };
         return .{ .surfaces = surfaces, .active_tab = 0 };
     }
-    fn unsupportedSurfaceSnapshot(_: *anyopaque, _: std.mem.Allocator, _: *anyopaque) anyerror![]u8 {
+    fn unsupportedSurfaceSnapshot(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: *anyopaque) anyerror![]u8 {
         return error.Unsupported;
     }
-    fn unsupportedWrite(_: *anyopaque, _: *anyopaque, _: []const u8) bool {
+    fn unsupportedWrite(_: *anyopaque, _: []const u8, _: *anyopaque, _: []const u8) bool {
         return false;
     }
     fn unsupportedSpawn(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: ?[]const u8) anyerror!ai_chat_types.ToolSurface {
@@ -5305,7 +6943,15 @@ test "ai chat request setup cleans scalar fields on allocation failure" {
 test "copilot session pre-targets the bound surface in its request" {
     const session = try Session.init(
         std.testing.allocator,
-        "copilot", "", "", "", "", "", "", "", "",
+        "copilot",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
     );
     defer session.deinit();
     session.copilot = true;
@@ -5315,4 +6961,242 @@ test "copilot session pre-targets the bound surface in its request" {
     defer req.deinit();
 
     try std.testing.expectEqualStrings("abc123", req.write_context_surface_id[0..req.write_context_surface_id_len]);
+}
+
+test "setDefaultWorkingDir is reflected in currentAgentSettings" {
+    setDefaultWorkingDir("/tmp/proj");
+    defer setDefaultWorkingDir(""); // reset global state for other tests
+    try std.testing.expectEqualStrings("/tmp/proj", currentAgentSettings().working_dir.?);
+    setDefaultWorkingDir("");
+    try std.testing.expect(currentAgentSettings().working_dir == null);
+}
+
+test "submitScheduledPrompt sets composer and reports busy state" {
+    const a = std.testing.allocator;
+    const session = try Session.init(a, "test", "", "", "", "", "", "", "", "");
+    defer session.deinit();
+
+    // Not inflight: returns true and submit is invoked (no agent configured, no-ops).
+    const ok = session.submitScheduledPrompt("hello world");
+    try std.testing.expect(ok);
+
+    // Inflight: returns false (skip).
+    session.request_inflight = true;
+    const skipped = session.submitScheduledPrompt("again");
+    try std.testing.expect(!skipped);
+    session.request_inflight = false;
+}
+
+test "applyWeixinInput submits the whole multi-line message as one prompt" {
+    const a = std.testing.allocator;
+    const session = try Session.init(a, "test", "", "", "", "", "", "", "", "");
+    defer session.deinit();
+
+    var capture = WeixinAttachmentCapture{};
+    const ctx = weixin_types.ReplyContext{
+        .sender = testWeixinSender(&capture),
+        .to_user_id = "wx-user",
+        .context_token = "ctx-1",
+    };
+
+    // A WeChat message is a complete message, not a keystroke stream: embedded
+    // newlines are content, only the trailing CR is the submit convention. With
+    // no API key submit() stops at the missing-key gate WITHOUT consuming the
+    // composer, so the composer shows exactly what the single submit sent.
+    try std.testing.expect(session.applyWeixinInput("第一段\n\n第二段\r", ctx));
+    try std.testing.expectEqualStrings("第一段\n\n第二段", session.input());
+}
+
+test "applyWeixinInput reports busy and leaves composer and reply context untouched" {
+    const a = std.testing.allocator;
+    const session = try Session.init(a, "test", "", "", "", "", "", "", "", "");
+    defer session.deinit();
+
+    var capture = WeixinAttachmentCapture{};
+    const ctx = weixin_types.ReplyContext{
+        .sender = testWeixinSender(&capture),
+        .to_user_id = "wx-user",
+        .context_token = "ctx-1",
+    };
+
+    session.appendInputText("draft");
+    session.request_inflight = true;
+    try std.testing.expect(!session.applyWeixinInput("新任务\r", ctx));
+    session.request_inflight = false;
+    try std.testing.expectEqualStrings("draft", session.input());
+    try std.testing.expect(session.pending_weixin_reply_context == null);
+}
+
+test "runLoopCommandLocked creates, lists, and stops a loop task" {
+    const a = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(dir_path);
+    const path = try std.fs.path.join(a, &.{ dir_path, "loop_tasks.json" });
+    defer a.free(path);
+
+    var store = ai_loop_store.Store.init(a, path);
+    defer store.deinit();
+    ai_loop_store.setActive(&store);
+    defer ai_loop_store.clearActive();
+
+    const session = try Session.init(a, "test", "", "", "", "", "", "", "", "");
+    defer session.deinit();
+    session.copySessionId("session-test");
+
+    session.mutex.lock();
+    _ = session.runBuiltinCommandLocked(.loop, "30m 3 hello");
+    session.mutex.unlock();
+
+    const snap = try store.snapshotForSession(a, "session-test", .loop);
+    defer ai_loop_store.freeSnapshot(a, snap);
+    try std.testing.expectEqual(@as(usize, 1), snap.len);
+    try std.testing.expectEqualStrings("hello", snap[0].prompt);
+
+    session.mutex.lock();
+    _ = session.runBuiltinCommandLocked(.loop, "stop 1");
+    session.mutex.unlock();
+    const snap2 = try store.snapshotForSession(a, "session-test", .loop);
+    defer ai_loop_store.freeSnapshot(a, snap2);
+    try std.testing.expectEqual(@as(usize, 0), snap2.len);
+}
+
+test "copilot loop command lists and stops tasks from other sessions" {
+    const a = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(dir_path);
+    const path = try std.fs.path.join(a, &.{ dir_path, "loop_tasks.json" });
+    defer a.free(path);
+
+    var store = ai_loop_store.Store.init(a, path);
+    defer store.deinit();
+    ai_loop_store.setActive(&store);
+    defer ai_loop_store.clearActive();
+
+    _ = try store.registerLoop(
+        "30m 3 legacy copilot task",
+        .{ .session_id = "old-copilot-session", .model = "model", .title = "Old Copilot" },
+        1000,
+        0,
+    );
+
+    const copilot = try Session.init(a, "Copilot", "", "", "", "", "", "", "", "");
+    defer copilot.deinit();
+    copilot.copilot = true;
+    copilot.copySessionId("new-copilot-session");
+
+    copilot.mutex.lock();
+    _ = copilot.runBuiltinCommandLocked(.loop, "all");
+    copilot.mutex.unlock();
+
+    try std.testing.expect(copilot.messages.items.len > 0);
+    const list_msg = copilot.messages.items[copilot.messages.items.len - 1].content;
+    try std.testing.expect(std.mem.indexOf(u8, list_msg, "legacy copilot task") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list_msg, "Old Copilot") != null);
+
+    copilot.mutex.lock();
+    _ = copilot.runBuiltinCommandLocked(.loop, "stop 1");
+    copilot.mutex.unlock();
+
+    const remaining = try store.snapshotForSession(a, "old-copilot-session", .loop);
+    defer ai_loop_store.freeSnapshot(a, remaining);
+    try std.testing.expectEqual(@as(usize, 0), remaining.len);
+}
+
+fn testSubagentResolver(allocator: std.mem.Allocator) ?SubagentProfileOverride {
+    const base_url = allocator.dupe(u8, "https://sub.example") catch return null;
+    const api_key = allocator.dupe(u8, "sub-key") catch {
+        allocator.free(base_url);
+        return null;
+    };
+    const model = allocator.dupe(u8, "sub-model") catch {
+        allocator.free(base_url);
+        allocator.free(api_key);
+        return null;
+    };
+    const reasoning_effort = allocator.dupe(u8, "low") catch {
+        allocator.free(base_url);
+        allocator.free(api_key);
+        allocator.free(model);
+        return null;
+    };
+    return .{
+        .base_url = base_url,
+        .api_key = api_key,
+        .model = model,
+        .protocol = .chat_completions,
+        .thinking_enabled = false,
+        .reasoning_effort = reasoning_effort,
+        .max_tokens = 4096,
+    };
+}
+
+test "resolveSubagentProfileForRequest gates on resolver and agent flag" {
+    const a = std.testing.allocator;
+    setSubagentProfileResolver(null);
+    try std.testing.expect(resolveSubagentProfileForRequest(a, true) == null);
+
+    setSubagentProfileResolver(testSubagentResolver);
+    defer setSubagentProfileResolver(null);
+    try std.testing.expect(resolveSubagentProfileForRequest(a, false) == null);
+
+    const override = resolveSubagentProfileForRequest(a, true) orelse return error.TestUnexpectedResult;
+    defer override.deinit(a);
+    try std.testing.expectEqualStrings("https://sub.example", override.base_url);
+    try std.testing.expectEqualStrings("sub-model", override.model);
+}
+
+test "ChatRequest deinit frees the subagent profile override" {
+    const a = std.testing.allocator;
+    var session = try Session.init(a, "test", "https://api.example", "key", "model", "prompt", "enabled", "medium", "false", "true");
+    defer session.deinit();
+
+    const request = try a.create(ChatRequest);
+    request.* = .{
+        .allocator = a,
+        .session = session,
+        .base_url = try a.dupe(u8, "https://api.example"),
+        .api_key = try a.dupe(u8, "key"),
+        .model = try a.dupe(u8, "model"),
+        .system_prompt = try a.dupe(u8, "prompt"),
+        .messages = &.{},
+        .thinking_enabled = false,
+        .reasoning_effort = try a.dupe(u8, "medium"),
+        .stream = false,
+        .agent_enabled = true,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .started_ms = 0,
+        .subagent_profile = testSubagentResolver(a),
+    };
+    request.deinit();
+    // std.testing.allocator fails the test on leak — nothing else to assert.
+}
+
+test "composeSystemPromptWithMemory appends the index block when enabled" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(root);
+    const dirs_mod = @import("platform/dirs.zig");
+    dirs_mod.setTestConfigDirForCurrentThread(root);
+    defer dirs_mod.clearTestConfigDirForCurrentThread();
+    const am = @import("agent_memory.zig");
+    const m = try am.saveMemory(a, .global, null, "k1", "v1", .user, "body");
+    a.free(m);
+
+    const with = try composeSystemPromptWithMemory(a, "BASE", true, "");
+    defer a.free(with);
+    try std.testing.expect(std.mem.startsWith(u8, with, "BASE"));
+    try std.testing.expect(std.mem.indexOf(u8, with, "k1: v1") != null);
+
+    const without = try composeSystemPromptWithMemory(a, "BASE", false, "");
+    defer a.free(without);
+    try std.testing.expectEqualStrings("BASE", without);
 }

@@ -1,7 +1,14 @@
 const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
+const jupyter_detect = @import("jupyter_detect.zig");
 
 pub const default_max_history_rows: usize = 10_000;
+
+/// Smaller history budget for the live agent/Copilot snapshot path. The full
+/// active screen is always included; only this many recent scrollback rows are
+/// prepended, so the live interactive screen at the bottom is never crowded out
+/// or truncated away. WeChat's remote path keeps the larger default.
+pub const agent_max_history_rows: usize = 400;
 
 const RowSpace = enum {
     active,
@@ -25,11 +32,14 @@ pub fn allocTerminalSnapshot(
     const history_start = history_total - history_rows;
 
     var wrote_row = false;
+    // True once the previously-emitted row was soft-wrapped into the next one;
+    // suppresses the \r\n separator so wrapped logical lines stay contiguous.
+    var prev_wrapped = false;
     for (history_start..history_total) |row| {
-        try appendSnapshotRow(allocator, &out, screen, .screen, row, cols, &wrote_row);
+        try appendSnapshotRow(allocator, &out, screen, .screen, row, cols, &wrote_row, &prev_wrapped);
     }
     for (0..rows) |row| {
-        try appendSnapshotRow(allocator, &out, screen, .active, row, cols, &wrote_row);
+        try appendSnapshotRow(allocator, &out, screen, .active, row, cols, &wrote_row, &prev_wrapped);
     }
 
     return out.toOwnedSlice(allocator);
@@ -43,9 +53,16 @@ fn appendSnapshotRow(
     row: usize,
     cols: usize,
     wrote_row: *bool,
+    prev_wrapped: *bool,
 ) !void {
-    if (wrote_row.*) try out.appendSlice(allocator, "\r\n");
+    // A soft-wrapped row continues the previous logical line, so don't separate
+    // them with \r\n — otherwise long URLs split across rows become undetectable.
+    if (wrote_row.* and !prev_wrapped.*) try out.appendSlice(allocator, "\r\n");
     wrote_row.* = true;
+
+    // The row's soft-wrap flag lives on its Row metadata; read it from any cell.
+    const row_wrapped = if (screen.pages.getCell(snapshotPoint(row_space, 0, row))) |c| c.row.wrap else false;
+    prev_wrapped.* = row_wrapped;
 
     var last_col: ?usize = null;
     for (0..cols) |col| {
@@ -54,8 +71,10 @@ fn appendSnapshotRow(
         if (cp != 0 and cp != ' ') last_col = col;
     }
 
-    const end_col = last_col orelse return;
-    for (0..end_col + 1) |col| {
+    // Soft-wrapped rows are full by construction; emit the whole width so the
+    // continuation joins seamlessly. Non-wrapped rows trim trailing blanks.
+    const end_col = if (row_wrapped) cols else (last_col orelse return) + 1;
+    for (0..end_col) |col| {
         const cell_data = screen.pages.getCell(snapshotPoint(row_space, col, row)) orelse {
             try out.append(allocator, ' ');
             continue;
@@ -129,4 +148,62 @@ test "remote terminal snapshot includes scrollback before active screen" {
 fn snapshotRowCount(snapshot: []const u8) usize {
     if (snapshot.len == 0) return 0;
     return std.mem.count(u8, snapshot, "\r\n") + 1;
+}
+
+test "agent snapshot caps history to the most recent rows but keeps the active screen" {
+    var terminal = try ghostty_vt.Terminal.init(std.testing.allocator, .{
+        .cols = 16,
+        .rows = 3,
+        .max_scrollback = 4096,
+    });
+    defer terminal.deinit(std.testing.allocator);
+
+    var stream = terminal.vtStream();
+    defer stream.deinit();
+    var i: usize = 1;
+    while (i <= 13) : (i += 1) {
+        var buf: [32]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "row{d}\r\n", .{i}) catch unreachable;
+        stream.nextSlice(line);
+    }
+
+    // Cap history to 2 rows: oldest scrollback dropped, active screen kept.
+    const snapshot = try allocTerminalSnapshot(std.testing.allocator, &terminal, 2);
+    defer std.testing.allocator.free(snapshot);
+
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "row1\r\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "row13") != null);
+}
+
+test "soft-wrapped line is joined into one logical line (no \\r\\n mid-wrap)" {
+    // Regression: a long Jupyter URL printed into a terminal narrower than the
+    // URL soft-wraps across rows. The snapshot must NOT insert \r\n at the wrap
+    // boundary, or `jupyter_detect` (which treats \r/\n as non-URL bytes) splits
+    // the URL and fails to match it — the macOS/narrow-window detection bug.
+    var terminal = try ghostty_vt.Terminal.init(std.testing.allocator, .{
+        .cols = 40,
+        .rows = 6,
+        .max_scrollback = 1024,
+    });
+    defer terminal.deinit(std.testing.allocator);
+
+    var stream = terminal.vtStream();
+    defer stream.deinit();
+    const url = "http://localhost:8888/lab?token=abcdef0123456789abcdef0123456789";
+    stream.nextSlice("To access the server, open this URL:\r\n    ");
+    stream.nextSlice(url);
+    stream.nextSlice("\r\n");
+
+    const snapshot = try allocTerminalSnapshot(std.testing.allocator, &terminal, 1024);
+    defer std.testing.allocator.free(snapshot);
+
+    // The full URL must survive intact across the soft-wrap boundary.
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, url) != null);
+
+    // End-to-end: the snapshot of a narrow terminal must still let the detector
+    // find the wrapped Jupyter URL (the user-visible macOS auto-detect bug).
+    const result = try jupyter_detect.findJupyterUrls(std.testing.allocator, snapshot);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.urls.len);
+    try std.testing.expectEqualStrings(url, result.urls[0]);
 }

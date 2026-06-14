@@ -6,6 +6,7 @@ const platform_window = @import("window.zig");
 pub const Backend = enum {
     windows,
     macos,
+    linux,
     unsupported,
 };
 
@@ -13,6 +14,7 @@ pub fn backendForOs(comptime os_tag: std.Target.Os.Tag) Backend {
     return switch (os_tag) {
         .windows => .windows,
         .macos => .macos,
+        .linux => .linux,
         else => .unsupported,
     };
 }
@@ -20,6 +22,7 @@ pub fn backendForOs(comptime os_tag: std.Target.Os.Tag) Backend {
 const impl = switch (backendForOs(builtin.os.tag)) {
     .windows => @import("window_backend_windows.zig"),
     .macos => @import("window_backend_macos.zig"),
+    .linux => @import("window_backend_linux.zig"),
     .unsupported => @import("window_backend_unsupported.zig"),
 };
 
@@ -80,6 +83,12 @@ pub const EventHandlers = struct {
 };
 
 pub const setGlobalWindow = impl.setGlobalWindow;
+
+/// Windows-only config gate for the DXGI flip-model present path
+/// (`wispterm-d3d-present`). No-op on backends without the seam.
+pub fn setFlipPresentEnabled(enabled: bool) void {
+    if (comptime @hasDecl(impl, "setFlipPresentEnabled")) impl.setFlipPresentEnabled(enabled);
+}
 /// Renderer surface seam (host → GPU backend). This is OpenGL-shaped: the host
 /// supplies a GL proc-address loader, which `gpu.Context.init` consumes. The
 /// seam is per-backend by design — a macOS/AppKit host pairs with the Metal
@@ -163,6 +172,25 @@ pub fn pollEvents(window: *Window) bool {
 
 pub fn swapBuffers(window: *Window) void {
     window.swapBuffers();
+}
+
+/// One-shot (Windows-only): true when the DXGI presenter latched a
+/// mid-session failure and the window reverted to GDI since the last call.
+/// The app loop rebuilds GPU-side caches (glyph atlas) in response, since a
+/// stalling/TDR-ing present path drops texture uploads made while broken.
+pub fn takePresentFallbackEvent(window: *Window) bool {
+    if (comptime @hasDecl(Window, "takePresentFallbackEvent")) return window.takePresentFallbackEvent();
+    return false;
+}
+
+/// One-shot (Windows-only): true when the DXGI presenter's watchdog flagged
+/// sustained slow presents. The session stays on the flip path (an HWND that
+/// has flip-presented cannot revert to GDI without going blank); the app
+/// loop persists the state-file marker that makes the next launch use GDI
+/// from frame 0.
+pub fn takePresentDegradedEvent(window: *Window) bool {
+    if (comptime @hasDecl(Window, "takePresentDegradedEvent")) return window.takePresentDegradedEvent();
+    return false;
 }
 
 pub fn framebufferSize(window: *Window) Size {
@@ -256,6 +284,11 @@ pub fn pumpAppEvents(timeout_seconds: f64) void {
     platform_window.pumpAppEvents(timeout_seconds);
 }
 
+/// 从任意线程唤醒阻塞中的主线程事件泵（app 级，无需 window 句柄）。
+pub fn postWakeup() void {
+    platform_window.postWakeup();
+}
+
 pub fn refreshClientSizeFromNative(window: *Window) bool {
     const rect = clientRect(window) orelse return false;
     setClientSize(window, rect.right - rect.left, rect.bottom - rect.top);
@@ -320,6 +353,10 @@ pub fn setNewTabButtonBounds(window: *Window, start_x: i32, end_x: i32) void {
 
 pub fn isFocused(window: *const Window) bool {
     return window.focused;
+}
+
+pub fn isVisible(window: *Window) bool {
+    return window.isVisible();
 }
 
 pub fn isMinimized(window: *const Window) bool {
@@ -803,7 +840,7 @@ test "platform window backend exposes native handle accessors" {
 
 test "platform window backend selects backend by target OS" {
     try std.testing.expectEqual(Backend.windows, backendForOs(.windows));
-    try std.testing.expectEqual(Backend.unsupported, backendForOs(.linux));
+    try std.testing.expectEqual(Backend.linux, backendForOs(.linux));
     try std.testing.expectEqual(Backend.macos, backendForOs(.macos));
 }
 

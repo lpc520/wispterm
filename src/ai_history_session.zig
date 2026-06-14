@@ -4,9 +4,11 @@ const source_mod = @import("ai_history_source.zig");
 const session_persist = @import("session_persist.zig");
 const codex_provider = @import("ai_history_provider_codex.zig");
 const claude_provider = @import("ai_history_provider_claude.zig");
+const reasonix_provider = @import("ai_history_provider_reasonix.zig");
 const remote_file = @import("platform/remote_file.zig");
 const ssh_connection = @import("ssh_connection.zig");
 const ai_history_cache = @import("ai_history_cache.zig");
+const i18n = @import("i18n.zig");
 
 pub const LoadState = enum { idle, scanning, ready, failed };
 pub const TranscriptState = enum { idle, loading, ready, failed };
@@ -159,6 +161,29 @@ pub const SshScannerHost = struct {
     }
 };
 
+/// Which of the three workbench panels keyboard ↑/↓ acts on. ←/→ moves focus
+/// between them (Filters ⟷ Sessions ⟷ Transcript).
+pub const Focus = enum(u8) {
+    filters = 0,
+    sessions = 1,
+    transcript = 2,
+};
+
+/// Max day buckets considered when walking the combined filter list by keyboard.
+const FILTER_BUCKET_CAP: usize = 256;
+/// Combined-filter cursor layout: category rows first, then "All dates", then
+/// individual days.
+pub const FILTER_CATEGORY_ROWS: usize = types.CATEGORY_ORDER.len;
+pub const FILTER_ALL_DATES_ROW: usize = FILTER_CATEGORY_ROWS;
+pub const FILTER_DAY_BASE: usize = FILTER_ALL_DATES_ROW + 1;
+
+fn categoryOrderIndex(category: types.CategoryFilter) usize {
+    for (types.CATEGORY_ORDER, 0..) |candidate, i| {
+        if (candidate == category) return i;
+    }
+    return 0;
+}
+
 pub const Session = struct {
     /// Allocator used for row storage. Do not change while rows are live.
     allocator: std.mem.Allocator,
@@ -189,6 +214,16 @@ pub const Session = struct {
     /// Scroll offset into the transcript preview, in wrapped visual lines. The
     /// renderer clamps this against the actual content height each frame.
     transcript_scroll: usize = 0,
+    /// Which panel keyboard ↑/↓ acts on; ←/→ switches it. Sessions by default so
+    /// the list is immediately navigable when the workbench opens.
+    focus: Focus = .sessions,
+    /// Keyboard cursor into the combined CATEGORY+DATE list while the Filters
+    /// panel is focused. Indices follow FILTER_* constants above.
+    filter_cursor: usize = 0,
+    /// Lazily-composed tab/window title ("History · <source>"); the source is
+    /// fixed for a session's lifetime, so it is computed once.
+    tab_title_buf: [96]u8 = undefined,
+    tab_title_len: usize = 0,
 
     // Async scan/transcript support. `mutex` guards state/status/rows/selected/
     // list_offset/filter/filter_len/transcript*/generation fields. Workers run host
@@ -591,7 +626,7 @@ pub const Session = struct {
 
     pub fn rowVisible(self: *const Session, row: types.SessionMeta, query: []const u8) bool {
         const key = types.dateKeyFromMs(row.last_active_at_ms, self.tz_offset_seconds);
-        return types.categoryMatches(self.category, row.provider) and
+        return types.categoryMatchesMeta(self.category, row) and
             types.dateMatches(self.date_filter, key) and
             types.metadataMatches(row, query);
     }
@@ -655,10 +690,10 @@ pub const Session = struct {
     }
 
     pub fn cycleCategory(self: *Session, delta: isize) void {
-        const count: isize = 3;
-        const cur: isize = @intFromEnum(self.category);
+        const count: isize = @intCast(FILTER_CATEGORY_ROWS);
+        const cur: isize = @intCast(categoryOrderIndex(self.category));
         const next: usize = @intCast(@mod(cur + delta, count));
-        self.setCategory(@enumFromInt(next));
+        self.setCategory(types.CATEGORY_ORDER[next]);
     }
 
     pub fn setDateFilter(self: *Session, filter: ?types.DateKey) void {
@@ -677,21 +712,22 @@ pub const Session = struct {
         }
     }
 
-    pub fn categoryCounts(self: *const Session, query: []const u8) struct { all: usize, codex: usize, claude: usize } {
-        var all: usize = 0;
-        var codex: usize = 0;
-        var claude: usize = 0;
+    pub fn categoryCounts(self: *const Session, query: []const u8) types.CategoryCounts {
+        var counts: types.CategoryCounts = .{};
         for (self.rows.items) |row| {
             if (!types.metadataMatches(row, query)) continue;
             const key = types.dateKeyFromMs(row.last_active_at_ms, self.tz_offset_seconds);
             if (!types.dateMatches(self.date_filter, key)) continue;
-            all += 1;
-            switch (row.provider) {
-                .codex => codex += 1,
-                .claude => claude += 1,
+            counts.all += 1;
+            if (types.isSubagentSession(row)) {
+                counts.subagent += 1;
+            } else switch (row.provider) {
+                .codex => counts.codex += 1,
+                .claude => counts.claude += 1,
+                .reasonix => counts.reasonix += 1,
             }
         }
-        return .{ .all = all, .codex = codex, .claude = claude };
+        return counts;
     }
 
     /// Fill `buf` with the distinct local days present under the current
@@ -704,7 +740,7 @@ pub const Session = struct {
         var n: usize = 0;
         var have_last = false;
         for (self.rows.items) |row| {
-            if (!types.categoryMatches(self.category, row.provider)) continue;
+            if (!types.categoryMatchesMeta(self.category, row)) continue;
             if (!types.metadataMatches(row, query)) continue;
             const key = types.dateKeyFromMs(row.last_active_at_ms, self.tz_offset_seconds);
             if (key == 0) continue; // no timestamp -> only under "All dates"
@@ -727,11 +763,90 @@ pub const Session = struct {
         const query = self.filter[0..self.filter_len];
         var count: usize = 0;
         for (self.rows.items) |row| {
-            if (!types.categoryMatches(self.category, row.provider)) continue;
+            if (!types.categoryMatchesMeta(self.category, row)) continue;
             if (!types.metadataMatches(row, query)) continue;
             count += 1;
         }
         return count;
+    }
+
+    /// Tab/window title for the workbench: "Sessions · <source>", or "Sessions"
+    /// when the source is unnamed. Conveys that this is the sessions workbench
+    /// rather than echoing the originating terminal's name. Cached after first use.
+    pub fn tabTitle(self: *Session) []const u8 {
+        if (self.tab_title_len == 0) {
+            const label = i18n.s().sl_sessions;
+            const composed = if (self.source.name.len == 0)
+                std.fmt.bufPrint(&self.tab_title_buf, "{s}", .{label}) catch label
+            else
+                std.fmt.bufPrint(&self.tab_title_buf, "{s} · {s}", .{ label, self.source.name }) catch self.source.name;
+            self.tab_title_len = composed.len;
+        }
+        return self.tab_title_buf[0..self.tab_title_len];
+    }
+
+    // --- panel focus + combined-filter keyboard navigation ----------------
+
+    /// Move keyboard focus between the three panels (←/→). Clamped at the ends.
+    pub fn focusMove(self: *Session, delta: isize) void {
+        const cur: isize = @intFromEnum(self.focus);
+        const next = std.math.clamp(cur + delta, 0, 2);
+        self.focus = @enumFromInt(@as(u8, @intCast(next)));
+    }
+
+    /// Number of rows in the combined CATEGORY+DATE list the Filters cursor walks
+    /// (categories + "All dates" + one row per distinct day). Callers must hold
+    /// `mutex` (reads `rows`).
+    pub fn filterRowCount(self: *const Session) usize {
+        var buf: [FILTER_BUCKET_CAP]types.DateBucket = undefined;
+        const buckets = self.buildDateBuckets(&buf);
+        return FILTER_DAY_BASE + buckets.len;
+    }
+
+    /// Move the Filters-panel cursor by `delta` rows and apply the filter the
+    /// cursor lands on (category rows first, then date rows). Live-applying mirrors
+    /// clicking the row. Callers must hold `mutex`.
+    pub fn moveFilterCursor(self: *Session, delta: isize) void {
+        var buf: [FILTER_BUCKET_CAP]types.DateBucket = undefined;
+        const buckets = self.buildDateBuckets(&buf);
+        const count = FILTER_DAY_BASE + buckets.len;
+        if (count == 0) return;
+        const old = @min(self.filter_cursor, count - 1);
+        const next = if (delta < 0)
+            old - @min(old, @as(usize, @intCast(-delta)))
+        else
+            @min(count - 1, old + @as(usize, @intCast(delta)));
+        self.filter_cursor = next;
+        self.applyFilterCursorLocked(buckets);
+    }
+
+    fn applyFilterCursorLocked(self: *Session, buckets: []const types.DateBucket) void {
+        const c = self.filter_cursor;
+        if (c < FILTER_CATEGORY_ROWS) {
+            self.setCategory(types.CATEGORY_ORDER[c]);
+        } else if (c == FILTER_ALL_DATES_ROW) {
+            self.setDateFilter(null);
+        } else {
+            const day = c - FILTER_DAY_BASE;
+            if (day < buckets.len) self.setDateFilter(buckets[day].key);
+        }
+    }
+
+    /// Keep the Filters cursor's day row inside the visible DATE window of
+    /// `day_slots` rows by adjusting `date_offset`. Category and "All dates" rows
+    /// pin the list to the top. Callers must hold `mutex`.
+    pub fn ensureFilterCursorVisible(self: *Session, day_slots: usize) void {
+        if (self.filter_cursor < FILTER_DAY_BASE) {
+            self.date_offset = 0;
+            return;
+        }
+        if (day_slots == 0) return;
+        const day = self.filter_cursor - FILTER_DAY_BASE;
+        if (day < self.date_offset) {
+            self.date_offset = day;
+        } else if (day >= self.date_offset + day_slots) {
+            self.date_offset = day + 1 - day_slots;
+        }
     }
 };
 
@@ -850,6 +965,18 @@ pub fn scanLocalFilesystemWithCacheSink(
             }
         }
     }
+    if (source.providers.reasonix) {
+        if (source.reasonix_root_override) |root| {
+            try scanner.scanProviderRoot(.reasonix, root);
+        } else {
+            var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (source_mod.defaultRoot(.reasonix, home, &root_buf)) |root| {
+                try scanner.scanProviderRoot(.reasonix, root);
+            } else {
+                scanner.warning_count += 1;
+            }
+        }
+    }
     for (source.extra_roots) |root| {
         if (!providerEnabled(source, root.provider)) continue;
         try scanner.scanProviderRoot(root.provider, root.path);
@@ -891,25 +1018,40 @@ pub fn loadLocalTranscript(allocator: std.mem.Allocator, meta: types.SessionMeta
     return switch (meta.provider) {
         .codex => try codex_provider.parseTranscript(allocator, bytes),
         .claude => try claude_provider.parseTranscript(allocator, bytes),
+        .reasonix => try reasonix_provider.parseTranscript(allocator, bytes),
     };
 }
 
 pub fn providerFindCommand(provider: types.ProviderId, root: []const u8, out: []u8) ![]const u8 {
-    _ = provider;
+    var reasonix_root_buf: [1024]u8 = undefined;
+    const find_root = providerFindRoot(provider, root, &reasonix_root_buf) catch return error.CommandTooLong;
     var quoted_buf: [1024]u8 = undefined;
-    const quoted = remote_file.shellQuote(&quoted_buf, root) orelse return error.CommandTooLong;
+    const quoted = remote_file.shellQuote(&quoted_buf, find_root) orelse return error.CommandTooLong;
+    const reasonix_filter = if (provider == .reasonix) " ! -name '*.events.jsonl'" else "";
     // GNU find: emit "mtime<TAB>size<TAB>path", newest first, capped. The \t and \n
     // are literal escapes for find -printf (single-quoted so the shell preserves them).
-    return std.fmt.bufPrint(out, "find {s} -type f -name '*.jsonl' -size -2048k -printf '%T@\\t%s\\t%p\\n' 2>/dev/null | sort -rn | head -500", .{quoted}) catch error.CommandTooLong;
+    return std.fmt.bufPrint(out, "find {s} -type f -name '*.jsonl'{s} -size -2048k -printf '%T@\\t%s\\t%p\\n' 2>/dev/null | sort -rn | head -500", .{ quoted, reasonix_filter }) catch error.CommandTooLong;
 }
 
 /// Fallback for environments without GNU `find -printf` (e.g. BSD): path-only,
 /// no stamps. Used when the primary command returns nothing.
 pub fn providerFindCommandPlain(provider: types.ProviderId, root: []const u8, out: []u8) ![]const u8 {
-    _ = provider;
+    var reasonix_root_buf: [1024]u8 = undefined;
+    const find_root = providerFindRoot(provider, root, &reasonix_root_buf) catch return error.CommandTooLong;
     var quoted_buf: [1024]u8 = undefined;
-    const quoted = remote_file.shellQuote(&quoted_buf, root) orelse return error.CommandTooLong;
-    return std.fmt.bufPrint(out, "find {s} -type f -name '*.jsonl' -size -2048k | head -500", .{quoted}) catch error.CommandTooLong;
+    const quoted = remote_file.shellQuote(&quoted_buf, find_root) orelse return error.CommandTooLong;
+    const reasonix_filter = if (provider == .reasonix) " ! -name '*.events.jsonl'" else "";
+    return std.fmt.bufPrint(out, "find {s} -type f -name '*.jsonl'{s} -size -2048k | head -500", .{ quoted, reasonix_filter }) catch error.CommandTooLong;
+}
+
+fn providerFindRoot(provider: types.ProviderId, root: []const u8, out: []u8) ![]const u8 {
+    return switch (provider) {
+        .codex, .claude => root,
+        .reasonix => if (std.mem.eql(u8, std.fs.path.basename(root), "sessions"))
+            root
+        else
+            std.fmt.bufPrint(out, "{s}/sessions", .{root}) catch error.CommandTooLong,
+    };
 }
 
 const RemoteCandidate = struct {
@@ -942,6 +1084,12 @@ pub fn remoteCatCommand(path: []const u8, out: []u8) ![]const u8 {
     var quoted_buf: [1024]u8 = undefined;
     const quoted = remote_file.shellQuote(&quoted_buf, path) orelse return error.CommandTooLong;
     return std.fmt.bufPrint(out, "cat {s}", .{quoted}) catch error.CommandTooLong;
+}
+
+pub fn remoteOptionalCatCommand(path: []const u8, out: []u8) ![]const u8 {
+    var quoted_buf: [1024]u8 = undefined;
+    const quoted = remote_file.shellQuote(&quoted_buf, path) orelse return error.CommandTooLong;
+    return std.fmt.bufPrint(out, "cat {s} 2>/dev/null || true", .{quoted}) catch error.CommandTooLong;
 }
 
 pub fn scanRemoteFilesystem(allocator: std.mem.Allocator, source: source_mod.Source, host: RemoteExecHost) !ScanResult {
@@ -990,6 +1138,18 @@ pub fn scanRemoteFilesystemSink(allocator: std.mem.Allocator, source: source_mod
             }
         }
     }
+    if (source.providers.reasonix) {
+        if (source.reasonix_root_override) |root| {
+            try scanner.scanProviderRoot(.reasonix, root);
+        } else {
+            var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (source_mod.defaultRoot(.reasonix, home, &root_buf)) |root| {
+                try scanner.scanProviderRoot(.reasonix, root);
+            } else {
+                scanner.warning_count += 1;
+            }
+        }
+    }
     for (source.extra_roots) |root| {
         if (!providerEnabled(source, root.provider)) continue;
         try scanner.scanProviderRoot(root.provider, root.path);
@@ -1027,6 +1187,7 @@ pub fn loadRemoteTranscript(allocator: std.mem.Allocator, host: RemoteExecHost, 
     return switch (meta.provider) {
         .codex => try codex_provider.parseTranscript(allocator, bytes),
         .claude => try claude_provider.parseTranscript(allocator, bytes),
+        .reasonix => try reasonix_provider.parseTranscript(allocator, bytes),
     };
 }
 
@@ -1040,6 +1201,7 @@ pub fn freeTranscript(allocator: std.mem.Allocator, provider: types.ProviderId, 
     switch (provider) {
         .codex => codex_provider.freeTranscript(allocator, messages),
         .claude => claude_provider.freeTranscript(allocator, messages),
+        .reasonix => reasonix_provider.freeTranscript(allocator, messages),
     }
 }
 
@@ -1197,7 +1359,7 @@ const LocalScan = struct {
                     try self.walkDir(provider, child_path, child);
                 },
                 .file => {
-                    if (!std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
+                    if (!providerAcceptsJsonl(provider, abs_path, entry.name)) continue;
                     try self.collectFile(provider, abs_path, dir, entry.name);
                 },
                 else => {},
@@ -1279,6 +1441,7 @@ const LocalScan = struct {
         const meta = (switch (candidate.provider) {
             .codex => codex_provider.parseMetadata(self.allocator, candidate.path, bytes),
             .claude => claude_provider.parseMetadata(self.allocator, candidate.path, bytes),
+            .reasonix => self.parseReasonixMetadata(candidate, bytes),
         }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
         };
@@ -1312,6 +1475,35 @@ const LocalScan = struct {
         try self.cache_records.append(self.allocator, cloned);
     }
 
+    fn parseReasonixMetadata(self: *LocalScan, candidate: Candidate, transcript_bytes: []const u8) !types.SessionMeta {
+        const meta_bytes = try self.readReasonixSidecar(candidate.path, ".meta.json");
+        defer self.allocator.free(meta_bytes);
+        const events_bytes = try self.readReasonixSidecar(candidate.path, ".events.jsonl");
+        defer self.allocator.free(events_bytes);
+        return try reasonix_provider.parseMetadata(self.allocator, candidate.path, transcript_bytes, meta_bytes, events_bytes);
+    }
+
+    fn readReasonixSidecar(self: *LocalScan, source_path: []const u8, suffix: []const u8) ![]u8 {
+        const sidecar_path = try reasonixSidecarPath(self.allocator, source_path, suffix);
+        defer self.allocator.free(sidecar_path);
+
+        const file = std.fs.openFileAbsolute(sidecar_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return try self.allocator.alloc(u8, 0),
+            else => {
+                self.warning_count += 1;
+                return try self.allocator.alloc(u8, 0);
+            },
+        };
+        defer file.close();
+        return file.readToEndAlloc(self.allocator, MAX_METADATA_FILE_BYTES) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => {
+                self.warning_count += 1;
+                return try self.allocator.alloc(u8, 0);
+            },
+        };
+    }
+
     fn candidateMoreRecent(_: void, lhs: Candidate, rhs: Candidate) bool {
         if (lhs.mtime == rhs.mtime) return std.mem.lessThan(u8, lhs.path, rhs.path);
         return lhs.mtime > rhs.mtime;
@@ -1322,6 +1514,7 @@ fn providerRootForPath(source: source_mod.Source, provider: types.ProviderId, so
     const explicit = switch (provider) {
         .codex => source.codex_root_override,
         .claude => source.claude_root_override,
+        .reasonix => source.reasonix_root_override,
     };
     if (explicit) |root| return root;
     for (source.extra_roots) |root| {
@@ -1421,6 +1614,7 @@ const RemoteScan = struct {
         const meta = (switch (provider) {
             .codex => codex_provider.parseMetadata(self.allocator, path, bytes),
             .claude => claude_provider.parseMetadata(self.allocator, path, bytes),
+            .reasonix => self.parseReasonixMetadata(path, bytes),
         }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
         };
@@ -1453,13 +1647,59 @@ const RemoteScan = struct {
         }
         try self.cache_records.append(self.allocator, cloned);
     }
+
+    fn parseReasonixMetadata(self: *RemoteScan, path: []const u8, transcript_bytes: []const u8) !types.SessionMeta {
+        const meta_bytes = try self.readReasonixSidecar(path, ".meta.json");
+        defer self.allocator.free(meta_bytes);
+        const events_bytes = try self.readReasonixSidecar(path, ".events.jsonl");
+        defer self.allocator.free(events_bytes);
+        return try reasonix_provider.parseMetadata(self.allocator, path, transcript_bytes, meta_bytes, events_bytes);
+    }
+
+    fn readReasonixSidecar(self: *RemoteScan, source_path: []const u8, suffix: []const u8) ![]u8 {
+        const sidecar_path = try reasonixSidecarPath(self.allocator, source_path, suffix);
+        defer self.allocator.free(sidecar_path);
+        var command_buf: [2048]u8 = undefined;
+        const command = remoteOptionalCatCommand(sidecar_path, &command_buf) catch {
+            self.warning_count += 1;
+            return try self.allocator.alloc(u8, 0);
+        };
+        return self.host.exec(self.host.ctx, self.allocator, command) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => {
+                self.warning_count += 1;
+                return try self.allocator.alloc(u8, 0);
+            },
+        };
+    }
 };
 
 fn providerEnabled(source: source_mod.Source, provider: types.ProviderId) bool {
     return switch (provider) {
         .codex => source.providers.codex,
         .claude => source.providers.claude,
+        .reasonix => source.providers.reasonix,
     };
+}
+
+fn providerAcceptsJsonl(provider: types.ProviderId, abs_dir: []const u8, name: []const u8) bool {
+    if (!std.mem.endsWith(u8, name, ".jsonl")) return false;
+    return switch (provider) {
+        .codex, .claude => true,
+        .reasonix => std.mem.eql(u8, std.fs.path.basename(abs_dir), "sessions") and
+            !std.mem.endsWith(u8, name, ".events.jsonl"),
+    };
+}
+
+fn reasonixSidecarPath(allocator: std.mem.Allocator, source_path: []const u8, suffix: []const u8) ![]u8 {
+    const stem = if (std.mem.endsWith(u8, source_path, ".jsonl"))
+        source_path[0 .. source_path.len - ".jsonl".len]
+    else
+        source_path;
+    const path = try allocator.alloc(u8, stem.len + suffix.len);
+    @memcpy(path[0..stem.len], stem);
+    @memcpy(path[stem.len..], suffix);
+    return path;
 }
 
 fn metadataHasUsableSignal(meta: types.SessionMeta) bool {
@@ -1511,6 +1751,7 @@ fn cloneSource(allocator: std.mem.Allocator, source: source_mod.Source) !source_
         .providers = source.providers,
         .codex_root_override = null,
         .claude_root_override = null,
+        .reasonix_root_override = null,
         .extra_roots = &.{},
     };
     errdefer freeOwnedSource(allocator, &cloned);
@@ -1524,6 +1765,7 @@ fn cloneSource(allocator: std.mem.Allocator, source: source_mod.Source) !source_
     };
     cloned.codex_root_override = try cloneOptionalSlice(allocator, source.codex_root_override);
     cloned.claude_root_override = try cloneOptionalSlice(allocator, source.claude_root_override);
+    cloned.reasonix_root_override = try cloneOptionalSlice(allocator, source.reasonix_root_override);
     cloned.extra_roots = try cloneProviderRoots(allocator, source.extra_roots);
 
     return cloned;
@@ -1572,6 +1814,7 @@ fn freeOwnedSource(allocator: std.mem.Allocator, source: *source_mod.Source) voi
     }
     if (source.codex_root_override) |value| freeSlice(allocator, value);
     if (source.claude_root_override) |value| freeSlice(allocator, value);
+    if (source.reasonix_root_override) |value| freeSlice(allocator, value);
     for (source.extra_roots) |root| {
         freeSlice(allocator, root.path);
     }
@@ -1609,6 +1852,9 @@ const TestTranscriptHost = struct {
 const FakeRemoteHost = struct {
     const codex_path = "/home/me/.codex/sessions/codex-abc.jsonl";
     const claude_path = "/home/me/.claude/projects/project/claude-abc.jsonl";
+    const reasonix_path = "/home/me/.reasonix/sessions/code-remote.jsonl";
+    const reasonix_meta_path = "/home/me/.reasonix/sessions/code-remote.meta.json";
+    const reasonix_events_path = "/home/me/.reasonix/sessions/code-remote.events.jsonl";
     const codex_jsonl =
         \\{"type":"session_meta","id":"codex-abc","cwd":"/home/me/project","timestamp":"2026-05-31T10:00:00Z"}
         \\{"type":"response_item","role":"user","content":[{"type":"input_text","text":"Fix remote renderer"}],"timestamp":"2026-05-31T10:01:00Z"}
@@ -1616,6 +1862,19 @@ const FakeRemoteHost = struct {
     ;
     const claude_jsonl =
         \\{"sessionId":"claude-abc","cwd":"/home/me/project","timestamp":"2026-05-31T10:00:00.000Z","type":"user","message":{"role":"user","content":"Fix remote tests"}}
+        \\
+    ;
+    const reasonix_jsonl =
+        \\{"role":"user","content":"remote reasonix"}
+        \\{"role":"assistant","content":"ok"}
+        \\
+    ;
+    const reasonix_meta_json =
+        \\{"workspace":"/home/me/reasonix-project","summary":"Remote Reasonix","turnCount":1}
+    ;
+    const reasonix_events_jsonl =
+        \\{"type":"session.opened","name":"code-remote","ts":"2026-05-31T10:00:00.000Z"}
+        \\{"type":"model.final","ts":"2026-05-31T10:01:00.000Z"}
         \\
     ;
 
@@ -1635,6 +1894,9 @@ const FakeRemoteHost = struct {
             if (std.mem.indexOf(u8, command, "/home/me/.claude") != null) {
                 return try allocator.dupe(u8, "1700000001\t100\t" ++ claude_path ++ "\n");
             }
+            if (std.mem.indexOf(u8, command, "/home/me/.reasonix") != null) {
+                return try allocator.dupe(u8, "1700000002\t100\t" ++ reasonix_path ++ "\n");
+            }
             return try allocator.dupe(u8, "");
         }
         if (std.mem.eql(u8, command, "cat '" ++ codex_path ++ "'")) {
@@ -1642,6 +1904,15 @@ const FakeRemoteHost = struct {
         }
         if (std.mem.eql(u8, command, "cat '" ++ claude_path ++ "'")) {
             return try allocator.dupe(u8, claude_jsonl);
+        }
+        if (std.mem.eql(u8, command, "cat '" ++ reasonix_path ++ "'")) {
+            return try allocator.dupe(u8, reasonix_jsonl);
+        }
+        if (std.mem.eql(u8, command, "cat '" ++ reasonix_meta_path ++ "' 2>/dev/null || true")) {
+            return try allocator.dupe(u8, reasonix_meta_json);
+        }
+        if (std.mem.eql(u8, command, "cat '" ++ reasonix_events_path ++ "' 2>/dev/null || true")) {
+            return try allocator.dupe(u8, reasonix_events_jsonl);
         }
         return error.UnexpectedCommand;
     }
@@ -1702,6 +1973,7 @@ test "ai_history_session: initOwned clones source identity and ssh roots" {
     var profile_buf = [_]u8{ 'b', 'u', 'i', 'l', 'd', 'b', 'o', 'x' };
     var codex_buf = [_]u8{ '/', 't', 'm', 'p', '/', 'c', 'o', 'd', 'e', 'x' };
     var claude_buf = [_]u8{ '/', 't', 'm', 'p', '/', 'c', 'l', 'a', 'u', 'd', 'e' };
+    var reasonix_buf = [_]u8{ '/', 't', 'm', 'p', '/', 'r', 'e', 'a', 's', 'o', 'n', 'i', 'x' };
     var extra_path_buf = [_]u8{ '/', 't', 'm', 'p', '/', 'e', 'x', 't', 'r', 'a' };
     const extra_roots = [_]source_mod.ProviderRoot{
         .{ .provider = .codex, .path = extra_path_buf[0..] },
@@ -1713,6 +1985,7 @@ test "ai_history_session: initOwned clones source identity and ssh roots" {
         .target = .{ .ssh = .{ .profile_name = profile_buf[0..] } },
         .codex_root_override = codex_buf[0..],
         .claude_root_override = claude_buf[0..],
+        .reasonix_root_override = reasonix_buf[0..],
         .extra_roots = extra_roots[0..],
     });
     defer session.deinit();
@@ -1722,6 +1995,7 @@ test "ai_history_session: initOwned clones source identity and ssh roots" {
     @memset(&profile_buf, 'x');
     @memset(&codex_buf, 'x');
     @memset(&claude_buf, 'x');
+    @memset(&reasonix_buf, 'x');
     @memset(&extra_path_buf, 'x');
 
     try std.testing.expectEqualStrings("ssh-history", session.source.id);
@@ -1729,11 +2003,13 @@ test "ai_history_session: initOwned clones source identity and ssh roots" {
     try std.testing.expectEqualStrings("buildbox", session.source.target.ssh.profile_name);
     try std.testing.expectEqualStrings("/tmp/codex", session.source.codex_root_override.?);
     try std.testing.expectEqualStrings("/tmp/claude", session.source.claude_root_override.?);
+    try std.testing.expectEqualStrings("/tmp/reasonix", session.source.reasonix_root_override.?);
     try std.testing.expectEqual(@as(usize, 1), session.source.extra_roots.len);
     try std.testing.expectEqualStrings("/tmp/extra", session.source.extra_roots[0].path);
     try std.testing.expect(session.source.id.ptr != id_buf[0..].ptr);
     try std.testing.expect(session.source.name.ptr != name_buf[0..].ptr);
     try std.testing.expect(session.source.target.ssh.profile_name.ptr != profile_buf[0..].ptr);
+    try std.testing.expect(session.source.reasonix_root_override.?.ptr != reasonix_buf[0..].ptr);
     try std.testing.expect(session.source.extra_roots.ptr != extra_roots[0..].ptr);
     try std.testing.expect(session.source.extra_roots[0].path.ptr != extra_path_buf[0..].ptr);
 }
@@ -1849,13 +2125,17 @@ test "ai_history_session: remote scan uses fake host JSONL bytes" {
     }, fake.remoteExecHost());
     defer freeScanResult(allocator, result);
 
-    try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+    try std.testing.expectEqual(@as(usize, 3), result.rows.len);
     try std.testing.expectEqual(@as(u32, 0), result.warning_count);
     try std.testing.expectEqual(types.ProviderId.codex, result.rows[0].provider);
     try std.testing.expectEqualStrings("codex-abc", result.rows[0].session_id);
     try std.testing.expectEqualStrings("/home/me/project", result.rows[0].project_dir);
     try std.testing.expectEqual(types.ProviderId.claude, result.rows[1].provider);
     try std.testing.expectEqualStrings("claude-abc", result.rows[1].session_id);
+    try std.testing.expectEqual(types.ProviderId.reasonix, result.rows[2].provider);
+    try std.testing.expectEqualStrings("code-remote", result.rows[2].session_id);
+    try std.testing.expectEqualStrings("/home/me/reasonix-project", result.rows[2].project_dir);
+    try std.testing.expectEqualStrings("Remote Reasonix", result.rows[2].summary);
 }
 
 test "ai_history_session: remote transcript loads from fake host" {
@@ -2175,10 +2455,69 @@ test "ai_history_session: scanLocalFilesystem reads codex and claude jsonl files
         switch (row.provider) {
             .codex => codex_count += 1,
             .claude => claude_count += 1,
+            .reasonix => {},
         }
     }
     try std.testing.expectEqual(@as(usize, 1), codex_count);
     try std.testing.expectEqual(@as(usize, 1), claude_count);
+}
+
+test "ai_history_session: scanLocalFilesystem reads reasonix sessions with sidecars" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".reasonix/sessions");
+    try tmp.dir.writeFile(.{
+        .sub_path = ".reasonix/sessions/code-demo.jsonl",
+        .data =
+        \\{"role":"user","content":"hello"}
+        \\{"role":"assistant","content":"Hi"}
+        \\
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = ".reasonix/sessions/code-demo.meta.json",
+        .data =
+        \\{"workspace":"/tmp/reasonix-project","summary":"Reasonix summary","turnCount":1}
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = ".reasonix/sessions/code-demo.events.jsonl",
+        .data =
+        \\{"type":"session.opened","name":"code-demo","ts":"2026-05-26T13:53:34.400Z"}
+        \\{"type":"model.final","ts":"2026-05-26T13:54:59.393Z"}
+        \\
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = ".reasonix/usage.jsonl",
+        .data =
+        \\{"not":"a session"}
+        ,
+    });
+
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &home_buf);
+    const result = try scanLocalFilesystem(allocator, .{
+        .id = "local",
+        .name = "Local",
+        .target = .local,
+        .providers = .{ .codex = false, .claude = false, .reasonix = true },
+    }, home);
+    defer freeScanResult(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqual(@as(u32, 0), result.warning_count);
+    const row = result.rows[0];
+    try std.testing.expectEqual(types.ProviderId.reasonix, row.provider);
+    try std.testing.expectEqualStrings("code-demo", row.session_id);
+    try std.testing.expectEqualStrings("Reasonix summary", row.title);
+    try std.testing.expectEqualStrings("Reasonix summary", row.summary);
+    try std.testing.expectEqualStrings("/tmp/reasonix-project", row.project_dir);
+    try std.testing.expectEqual(types.ResumeKind.reasonix_resume, row.resume_kind);
+    try std.testing.expectEqual(@as(u32, 2), row.message_count);
+    try std.testing.expect(row.last_active_at_ms > row.created_at_ms);
 }
 
 test "ai_history_session: scanNow failure marks failed and preserves existing rows" {
@@ -2239,7 +2578,7 @@ test "ai_history_session: scanLocalFilesystem skips unusable metadata with warni
         .id = "local",
         .name = "Local",
         .target = .local,
-        .providers = .{ .codex = true, .claude = false },
+        .providers = .{ .codex = true, .claude = false, .reasonix = false },
     }, home);
     defer freeScanResult(allocator, result);
 
@@ -2272,7 +2611,7 @@ test "ai_history_session: scanLocalFilesystem budget returns partial rows with w
         .id = "local",
         .name = "Local",
         .target = .local,
-        .providers = .{ .codex = true, .claude = false },
+        .providers = .{ .codex = true, .claude = false, .reasonix = false },
     }, home, .{ .max_files = 1, .max_bytes = 1024 * 1024 });
     defer freeScanResult(allocator, result);
 
@@ -2311,7 +2650,7 @@ test "ai_history_session: scanLocalFilesystem reuses unchanged cached metadata" 
         .id = "local",
         .name = "Local",
         .target = .local,
-        .providers = .{ .codex = true, .claude = false },
+        .providers = .{ .codex = true, .claude = false, .reasonix = false },
     }, home, .{}, null);
     defer freeScanResult(allocator, first);
     try std.testing.expectEqual(@as(usize, 1), first.cache_update.records.len);
@@ -2330,7 +2669,7 @@ test "ai_history_session: scanLocalFilesystem reuses unchanged cached metadata" 
         .id = "local",
         .name = "Local",
         .target = .local,
-        .providers = .{ .codex = true, .claude = false },
+        .providers = .{ .codex = true, .claude = false, .reasonix = false },
     }, home, .{}, .{ .records = @constCast(&records) });
     defer freeScanResult(allocator, result);
 
@@ -2371,18 +2710,21 @@ test "ai_history_session: categoryCounts splits by provider and respects query" 
         .{ .provider = .codex, .session_id = "a", .title = "Renderer fix", .source_path = "a.jsonl", .resume_kind = .codex_resume },
         .{ .provider = .codex, .session_id = "b", .title = "Docs", .source_path = "b.jsonl", .resume_kind = .codex_resume },
         .{ .provider = .claude, .session_id = "c", .title = "Renderer test", .source_path = "c.jsonl", .resume_kind = .claude_resume },
+        .{ .provider = .claude, .session_id = "d", .title = "You are implementing Task 3", .source_path = "d.jsonl", .resume_kind = .claude_resume },
     };
     try session.replaceRows(&rows);
 
     const counts = session.categoryCounts("");
-    try std.testing.expectEqual(@as(usize, 3), counts.all);
+    try std.testing.expectEqual(@as(usize, 4), counts.all);
     try std.testing.expectEqual(@as(usize, 2), counts.codex);
     try std.testing.expectEqual(@as(usize, 1), counts.claude);
+    try std.testing.expectEqual(@as(usize, 1), counts.subagent);
 
     const filtered = session.categoryCounts("renderer");
     try std.testing.expectEqual(@as(usize, 2), filtered.all);
     try std.testing.expectEqual(@as(usize, 1), filtered.codex);
     try std.testing.expectEqual(@as(usize, 1), filtered.claude);
+    try std.testing.expectEqual(@as(usize, 0), filtered.subagent);
 }
 
 test "ai_history_session: setCategory resets selection" {
@@ -2413,9 +2755,32 @@ test "ai_history_session: cycleCategory wraps forward and backward" {
     session.cycleCategory(1);
     try std.testing.expectEqual(types.CategoryFilter.claude, session.category);
     session.cycleCategory(1);
+    try std.testing.expectEqual(types.CategoryFilter.reasonix, session.category);
+    session.cycleCategory(1);
+    try std.testing.expectEqual(types.CategoryFilter.subagent, session.category);
+    session.cycleCategory(1);
     try std.testing.expectEqual(types.CategoryFilter.all, session.category);
     session.cycleCategory(-1);
-    try std.testing.expectEqual(types.CategoryFilter.claude, session.category);
+    try std.testing.expectEqual(types.CategoryFilter.subagent, session.category);
+}
+
+test "ai_history_session: subagent category separates You are sessions from provider category" {
+    var session = Session.init(std.testing.allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+
+    const rows = [_]types.SessionMeta{
+        .{ .provider = .claude, .session_id = "regular", .title = "Review panel behavior", .source_path = "a.jsonl", .resume_kind = .claude_resume },
+        .{ .provider = .claude, .session_id = "subagent", .title = "You are implementing Task 3", .source_path = "b.jsonl", .resume_kind = .claude_resume },
+    };
+    try session.replaceRows(&rows);
+
+    session.setCategory(.claude);
+    try std.testing.expectEqual(@as(usize, 1), session.visibleCount());
+    try std.testing.expectEqualStrings("regular", (session.selectedVisible() orelse return error.ExpectedSelection).session_id);
+
+    session.setCategory(.subagent);
+    try std.testing.expectEqual(@as(usize, 1), session.visibleCount());
+    try std.testing.expectEqualStrings("subagent", (session.selectedVisible() orelse return error.ExpectedSelection).session_id);
 }
 
 test "ai_history_session: finishScan applies rows when generation current" {
@@ -2686,6 +3051,81 @@ test "ai_history_session: setDateFilter resets selection and is a no-op when unc
     try std.testing.expectEqual(@as(usize, 1), session.selected);
 }
 
+test "ai_history_session: focusMove clamps across the three panels" {
+    var session = Session.init(std.testing.allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    try std.testing.expectEqual(Focus.sessions, session.focus); // default
+    session.focusMove(-1);
+    try std.testing.expectEqual(Focus.filters, session.focus);
+    session.focusMove(-1); // clamp at left edge
+    try std.testing.expectEqual(Focus.filters, session.focus);
+    session.focusMove(1);
+    try std.testing.expectEqual(Focus.sessions, session.focus);
+    session.focusMove(1);
+    try std.testing.expectEqual(Focus.transcript, session.focus);
+    session.focusMove(1); // clamp at right edge
+    try std.testing.expectEqual(Focus.transcript, session.focus);
+}
+
+test "ai_history_session: moveFilterCursor walks categories then dates, applying live" {
+    var session = Session.init(std.testing.allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    const day1: i64 = 1780315200000; // 2026-06-01
+    const day2: i64 = day1 + 86400000; // 2026-06-02
+    const rows = [_]types.SessionMeta{
+        .{ .provider = .codex, .session_id = "a", .title = "A", .source_path = "a.jsonl", .resume_kind = .codex_resume, .last_active_at_ms = day2 },
+        .{ .provider = .claude, .session_id = "b", .title = "B", .source_path = "b.jsonl", .resume_kind = .claude_resume, .last_active_at_ms = day1 },
+        .{ .provider = .reasonix, .session_id = "c", .title = "C", .source_path = "c.jsonl", .resume_kind = .reasonix_resume, .last_active_at_ms = day2 },
+    };
+    try session.replaceRows(&rows);
+
+    // Combined list: All, Codex, Claude, Reasonix, Subagent, All dates, 20260602, 20260601 => 8 rows.
+    try std.testing.expectEqual(@as(usize, 8), session.filterRowCount());
+    try std.testing.expectEqual(types.CategoryFilter.all, session.category);
+
+    session.moveFilterCursor(1); // -> Codex
+    try std.testing.expectEqual(types.CategoryFilter.codex, session.category);
+    session.moveFilterCursor(1); // -> Claude
+    try std.testing.expectEqual(types.CategoryFilter.claude, session.category);
+    session.moveFilterCursor(1); // -> Reasonix
+    try std.testing.expectEqual(types.CategoryFilter.reasonix, session.category);
+    session.moveFilterCursor(1); // -> Subagent
+    try std.testing.expectEqual(types.CategoryFilter.subagent, session.category);
+    session.moveFilterCursor(1); // -> All dates (date filter cleared, category kept)
+    try std.testing.expectEqual(types.CategoryFilter.subagent, session.category);
+    try std.testing.expectEqual(@as(?types.DateKey, null), session.date_filter);
+
+    // Reset category so both days are present, then step onto a specific day.
+    session.setCategory(.all);
+    session.filter_cursor = FILTER_ALL_DATES_ROW;
+    session.moveFilterCursor(1); // -> 20260602 (first/most-recent day)
+    try std.testing.expectEqual(@as(?types.DateKey, 20260602), session.date_filter);
+    session.moveFilterCursor(1); // -> 20260601
+    try std.testing.expectEqual(@as(?types.DateKey, 20260601), session.date_filter);
+    session.moveFilterCursor(1); // clamp at end, stays on last day
+    try std.testing.expectEqual(@as(?types.DateKey, 20260601), session.date_filter);
+}
+
+test "ai_history_session: ensureFilterCursorVisible scrolls the day window" {
+    var session = Session.init(std.testing.allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+    // Category/All-dates rows pin to the top.
+    session.date_offset = 5;
+    session.filter_cursor = 1; // Codex
+    session.ensureFilterCursorVisible(3);
+    try std.testing.expectEqual(@as(usize, 0), session.date_offset);
+
+    // Day index 6 (cursor 10) with a 3-row window scrolls so it is visible.
+    session.filter_cursor = FILTER_DAY_BASE + 6;
+    session.ensureFilterCursorVisible(3);
+    try std.testing.expectEqual(@as(usize, 4), session.date_offset); // 6 + 1 - 3
+
+    // Scrolling back up to an earlier day pulls the window up.
+    session.filter_cursor = FILTER_DAY_BASE + 1;
+    session.ensureFilterCursorVisible(3);
+    try std.testing.expectEqual(@as(usize, 1), session.date_offset);
+}
+
 test "ai_history_session: scrollDateBy saturates at zero" {
     var session = Session.init(std.testing.allocator, .{ .id = "local", .name = "Local", .target = .local });
     defer session.deinit();
@@ -2909,7 +3349,7 @@ test "ai_history_session: local scan with sink streams rows and returns empty no
         .id = "local",
         .name = "Local",
         .target = .local,
-        .providers = .{ .codex = true, .claude = false },
+        .providers = .{ .codex = true, .claude = false, .reasonix = false },
     }, home, .{}, null, collect.sink());
     defer freeScanResult(allocator, result);
 
@@ -2932,7 +3372,7 @@ test "ai_history_session: remote scan with sink streams rows and returns empty n
         .id = "wsl",
         .name = "WSL",
         .target = .{ .wsl = .{} },
-        .providers = .{ .codex = true, .claude = false },
+        .providers = .{ .codex = true, .claude = false, .reasonix = false },
     }, host, null, collect.sink());
     defer freeScanResult(allocator, result);
 
@@ -3034,7 +3474,7 @@ test "ai_history_session: local scan warm cache publishes provisional batch then
         .id = "local",
         .name = "Local",
         .target = .local,
-        .providers = .{ .codex = true, .claude = false },
+        .providers = .{ .codex = true, .claude = false, .reasonix = false },
     }, home, .{}, cache, collect.sink());
     defer freeScanResult(allocator, result);
 
@@ -3053,6 +3493,14 @@ test "ai_history_session: providerFindCommand emits sorted mtime/size/path" {
     try std.testing.expect(std.mem.indexOf(u8, cmd, "-printf '%T@\\t%s\\t%p\\n'") != null);
     try std.testing.expect(std.mem.indexOf(u8, cmd, "sort -rn") != null);
     try std.testing.expect(std.mem.indexOf(u8, cmd, "'/home/me/.codex'") != null);
+
+    const reasonix_cmd = try providerFindCommand(.reasonix, "/home/me/.reasonix", &buf);
+    try std.testing.expect(std.mem.indexOf(u8, reasonix_cmd, "'/home/me/.reasonix/sessions'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reasonix_cmd, "! -name '*.events.jsonl'") != null);
+
+    const reasonix_sessions_cmd = try providerFindCommand(.reasonix, "/home/me/.reasonix/sessions", &buf);
+    try std.testing.expect(std.mem.indexOf(u8, reasonix_sessions_cmd, "'/home/me/.reasonix/sessions/sessions'") == null);
+    try std.testing.expect(std.mem.indexOf(u8, reasonix_sessions_cmd, "'/home/me/.reasonix/sessions'") != null);
 }
 
 test "ai_history_session: parseRemoteStamp parses tab fields and tolerates plain paths" {
@@ -3096,7 +3544,7 @@ test "ai_history_session: remote scan skips cat on cache hit" {
         .id = "wsl",
         .name = "WSL",
         .target = .{ .wsl = .{} },
-        .providers = .{ .codex = true, .claude = false },
+        .providers = .{ .codex = true, .claude = false, .reasonix = false },
     }, host, cache, null);
     defer freeScanResult(allocator, result);
 

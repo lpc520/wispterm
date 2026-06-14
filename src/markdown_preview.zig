@@ -7,6 +7,7 @@ const std = @import("std");
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 pub const MAX_IMAGE_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_PDF_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 
 pub const Kind = enum {
     markdown,
@@ -14,6 +15,12 @@ pub const Kind = enum {
     csv,
     tsv,
     image,
+    pdf,
+
+    /// Kinds displayed as a rasterized texture (zoom/pan instead of scroll).
+    pub fn isRaster(self: Kind) bool {
+        return self == .image or self == .pdf;
+    }
 };
 
 pub const MAX_TABLE_COLS: usize = 32;
@@ -36,6 +43,7 @@ pub fn detectKind(path: []const u8) ?Kind {
     if (endsWithIgnoreCase(path, ".md") or endsWithIgnoreCase(path, ".markdown")) return .markdown;
     if (endsWithIgnoreCase(path, ".csv")) return .csv;
     if (endsWithIgnoreCase(path, ".tsv")) return .tsv;
+    if (endsWithIgnoreCase(path, ".pdf")) return .pdf;
     inline for (image_file_suffixes) |suffix| {
         if (endsWithIgnoreCase(path, suffix)) return .image;
     }
@@ -49,7 +57,16 @@ pub fn sourceLimit(kind: Kind) usize {
     return switch (kind) {
         .markdown, .text, .csv, .tsv => MAX_SOURCE_BYTES,
         .image => MAX_IMAGE_SOURCE_BYTES,
+        .pdf => MAX_PDF_SOURCE_BYTES,
     };
+}
+
+/// Whether an over-limit file of this kind should be shown as a truncated head
+/// window (the first `sourceLimit` bytes) rather than refused outright. Text-like
+/// kinds stream fine, so a huge log is previewable as a scrollable head; raster
+/// kinds (image/pdf) can't be partially decoded, so they still fail as too-large.
+pub fn allowsTruncatedHead(kind: Kind) bool {
+    return !kind.isRaster();
 }
 
 pub fn isImagePath(path: []const u8) bool {
@@ -75,6 +92,7 @@ const text_file_suffixes = &.{
     ".htm",
     ".xml",
     ".css",
+    ".r",
 };
 
 const image_file_suffixes = &.{
@@ -90,7 +108,7 @@ pub fn render(allocator: std.mem.Allocator, kind: Kind, title: []const u8, sourc
     return switch (kind) {
         .markdown => renderMarkdown(allocator, title, source),
         .text, .csv, .tsv => renderText(allocator, source),
-        .image => allocator.dupe(u8, source),
+        .image, .pdf => allocator.dupe(u8, source),
     };
 }
 
@@ -474,13 +492,38 @@ test "detect preview kind" {
     try std.testing.expectEqual(Kind.text, detectKind("page.HTM").?);
     try std.testing.expectEqual(Kind.text, detectKind("data.xml").?);
     try std.testing.expectEqual(Kind.text, detectKind("style.css").?);
+    try std.testing.expectEqual(Kind.text, detectKind("plot.r").?);
+    try std.testing.expectEqual(Kind.text, detectKind("model.R").?);
     try std.testing.expectEqual(Kind.image, detectKind("image.png").?);
     try std.testing.expectEqual(Kind.image, detectKind("photo.JPEG").?);
+    try std.testing.expectEqual(Kind.pdf, detectKind("paper.pdf").?);
+    try std.testing.expectEqual(Kind.pdf, detectKind("REPORT.PDF").?);
+    try std.testing.expectEqual(MAX_PDF_SOURCE_BYTES, sourceLimit(.pdf));
     try std.testing.expectEqual(MAX_SOURCE_BYTES, sourceLimit(.markdown));
     try std.testing.expectEqual(MAX_SOURCE_BYTES, sourceLimit(.text));
     try std.testing.expectEqual(MAX_SOURCE_BYTES, sourceLimit(.csv));
     try std.testing.expectEqual(MAX_SOURCE_BYTES, sourceLimit(.tsv));
     try std.testing.expectEqual(MAX_IMAGE_SOURCE_BYTES, sourceLimit(.image));
+}
+
+test "raster kinds are image and pdf" {
+    try std.testing.expect(Kind.image.isRaster());
+    try std.testing.expect(Kind.pdf.isRaster());
+    try std.testing.expect(!Kind.markdown.isRaster());
+    try std.testing.expect(!Kind.text.isRaster());
+    try std.testing.expect(!Kind.csv.isRaster());
+    try std.testing.expect(!Kind.tsv.isRaster());
+}
+
+test "text-like kinds allow a truncated head; raster kinds do not" {
+    // A huge log/markdown/csv shows its head and scrolls; image/pdf can't be
+    // partially decoded, so they still fail as too-large.
+    try std.testing.expect(allowsTruncatedHead(.text));
+    try std.testing.expect(allowsTruncatedHead(.markdown));
+    try std.testing.expect(allowsTruncatedHead(.csv));
+    try std.testing.expect(allowsTruncatedHead(.tsv));
+    try std.testing.expect(!allowsTruncatedHead(.image));
+    try std.testing.expect(!allowsTruncatedHead(.pdf));
 }
 
 test "delimited row parser handles csv quotes and tsv" {

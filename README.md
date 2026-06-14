@@ -17,10 +17,11 @@ English | [简体中文](README.zh-CN.md)
 - **Theme support** - Ghostty-compatible theme files, 450+ themes built in (default: Poimandres)
 - **Background image and shaders** - wallpaper blending plus Ghostty-compatible GLSL post-processing
 - **Splits and tabs** - vertical/horizontal splits, tab strip, focus-follows-mouse, equalize sizes
-- **File Explorer and previews** - browse local, WSL, and SSH files; preview Markdown/text/tables/images without leaving the terminal
+- **File Explorer and previews** - browse local, WSL, and SSH files; preview Markdown/text/tables/images/PDFs without leaving the terminal
 - **Embedded browser panel** - open web URLs in a side WebView2 panel or the default browser, with persistent SSH loopback port forwarding for profile sessions
-- **AI Agent sessions** - launch OpenAI-compatible Agent tabs, configure profiles, restore history, and export full or clean Markdown transcripts
-- **AI history browser** - browse local, WSL, and SSH Codex / Claude Code history and resume sessions from their original project directories
+- **SSH port forwarding manager** - silently manage local and reverse SSH forwarding rules from a dedicated tab
+- **AI Agent sessions** - launch OpenAI-compatible Agent tabs, configure profiles, restore history, export Markdown transcripts, and distill reusable local skills
+- **AI history browser** - browse local, WSL, and SSH Codex / Claude Code / Reasonix history and resume sessions from their original project directories
 - **Kitty Graphics protocol** - display inline images and PDFs from remote shells via `imgcat.py` / `pdfcat.py`
 - **Opt-in remote access** - share a session key over a Cloudflare-hosted relay (disabled by default)
 
@@ -30,6 +31,7 @@ English | [简体中文](README.zh-CN.md)
 - [File Explorer and previews](docs/file-explorer.md)
 - [AI Agent sessions](docs/ai-agent.md)
 - [Media, background images, and inline remote images](docs/media.md)
+- [SSH port forwarding](docs/port-forwarding.md)
 - [Development, architecture, packaging, and releases](docs/development.md)
 - [FAQ](docs/faq.md)
 
@@ -117,6 +119,8 @@ Use `keybind = clear` before custom bindings if you want to remove all defaults 
 | Toggle file explorer sidebar | **Ctrl+Shift+Alt+E** | **Cmd+Shift+Opt+E** |
 | Toggle AI Copilot sidebar (current terminal) | **Ctrl+Shift+A** | **Cmd+Shift+A** |
 | Preview files (Ctrl/Cmd-click in terminal, or double-click in File Explorer) | Ctrl-click | Cmd-click |
+| Previous / next image/PDF in gallery (preview focused) | Left / Right | Left / Right |
+| Previous / next PDF page (PDF preview focused) | PageUp / PageDown | PageUp / PageDown |
 | Download SSH remote file | Ctrl+Shift-click path in SSH output | Cmd+Shift-click path in SSH output |
 | Close focused panel, tab, or window | **Ctrl+Shift+W** | **Cmd+Shift+W** |
 | Maximize or restore window | **Alt+Enter** | **Opt+Enter** |
@@ -139,6 +143,7 @@ Use `keybind = clear` before custom bindings if you want to remove all defaults 
 | Paste text | **Ctrl+V** | **Cmd+V** |
 | Paste clipboard image | **Ctrl+Shift+V** | **Cmd+Shift+V** |
 | Move focus to adjacent panel | **Alt** + arrow keys | **Opt** + arrow keys |
+| Focus panel 1–9 by number | **Ctrl+1**–**9** | **Cmd+1**–**9** |
 | Focus previous panel (cycle) | **Ctrl+Shift+[** | **Cmd+Shift+[** |
 | Focus next panel (cycle) | **Ctrl+Shift+]** | **Cmd+Shift+]** |
 | Equalize split sizes | **Ctrl+Shift+Z** | **Cmd+Shift+Z** |
@@ -209,7 +214,7 @@ __wispterm_report_cwd
 - Original project: [arya-s/phantty](https://github.com/arya-s/phantty) - the
 Zig + libghostty-vt foundation and the Windows terminal core. WispTerm builds on
 that base and layers additional features on top: an embedded WebView2 browser
-panel, a file explorer with Markdown/text/table/image preview, AI Agent sessions
+panel, a file explorer with Markdown/text/table/image/PDF preview, AI Agent sessions
 with Markdown export, an opt-in remote-access client, Kitty Graphics image
 protocol support, and a configurable background image.
 - Terminal emulation: [ghostty-org/ghostty](https://github.com/ghostty-org/ghostty)
@@ -220,3 +225,14 @@ through the ghostty dependency).
 ## License
 
 MIT
+
+## Star History
+
+<a href="https://star-history.com/#xuzhougeng/wispterm&Date">
+  <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=xuzhougeng/wispterm&type=Date" />
+</a>
+
+## Citation
+
+Xu, Z.-G. (2026). *WispTerm* (Version 1.20.0) [Computer software]. Zenodo.
+https://doi.org/10.5281/zenodo.20660542

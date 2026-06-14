@@ -14,16 +14,21 @@ const font = AppWindow.font;
 const overlays = AppWindow.overlays;
 const split_layout = AppWindow.split_layout;
 const file_explorer = AppWindow.file_explorer;
+const file_backend = @import("file_backend.zig");
 const markdown_preview = @import("markdown_preview.zig");
 const markdown_preview_panel = AppWindow.markdown_preview_panel;
+const preview_gallery = @import("preview_gallery.zig");
 const preview_token = @import("preview_token.zig");
 const browser_panel = AppWindow.browser_panel;
+const html_server = @import("html_server.zig");
+const html_server_model = @import("html_server_model.zig");
 const ai_sidebar = @import("ai_sidebar.zig");
 const ui_perf = AppWindow.ui_perf;
 const render_diagnostics = @import("render_diagnostics.zig");
 const link_open = @import("link_open.zig");
 const platform_dirs = @import("platform/dirs.zig");
 const platform_local_path = @import("platform/local_path.zig");
+const platform_remote_file = @import("platform/remote_file.zig");
 const platform_open_url = @import("platform/open_url.zig");
 const platform_file_dialog = @import("platform/file_dialog.zig");
 const input_shortcuts = @import("input_shortcuts.zig");
@@ -38,6 +43,8 @@ const command_dispatch = @import("input/command_dispatch.zig");
 const Config = @import("config.zig");
 const Surface = @import("Surface.zig");
 const SplitTree = @import("split_tree.zig");
+const PreviewPane = @import("preview_pane.zig");
+const PreviewImageDrag = @import("input/preview_image_drag.zig");
 const selection_unit = @import("selection_unit.zig");
 const Selection = Surface.Selection;
 const CellPos = struct { col: usize, row: usize };
@@ -46,9 +53,15 @@ const clipboard = @import("input/clipboard.zig");
 const click_tracker = @import("input/click_tracker.zig");
 const hit_test = @import("input/hit_test.zig");
 const preview_source = @import("input/preview_source.zig");
+const ls_path_context = @import("input/ls_path_context.zig");
 const terminal_link_action = @import("input/terminal_link_action.zig");
+const underline_span = @import("input/underline_span.zig");
 const mouse_report = @import("input/mouse_report.zig");
+const mouse_wheel_scroll = @import("input/mouse_wheel_scroll.zig");
 const close_confirm = @import("close_confirm.zig");
+const jupyter_picker = @import("jupyter_picker.zig");
+const jupyter_detect = @import("jupyter_detect.zig");
+const scp = @import("scp.zig");
 const writeToPty = clipboard.writeToPty;
 pub const copyTextToClipboard = clipboard.copyTextToClipboard;
 const activeTerminalSelectionExists = clipboard.activeTerminalSelectionExists;
@@ -62,6 +75,7 @@ pub const pasteFromClipboard = clipboard.pasteFromClipboard;
 const pasteClipboardIntoBrowserUrlBar = clipboard.pasteClipboardIntoBrowserUrlBar;
 const pasteClipboardIntoSessionLauncher = clipboard.pasteClipboardIntoSessionLauncher;
 const pasteFromClipboardIntoAiChat = clipboard.pasteFromClipboardIntoAiChat;
+const pasteImageIntoAiChat = clipboard.pasteImageIntoAiChat;
 pub const pasteImageFromClipboard = clipboard.pasteImageFromClipboard;
 pub const writeTextToActivePty = clipboard.writeTextToActivePty;
 pub const writeTextToSurfacePty = clipboard.writeTextToSurfacePty;
@@ -133,6 +147,459 @@ test "input: command palette shortcut toggles command center" {
     try std.testing.expect(!overlays.commandPaletteVisible());
 }
 
+test "input: browser toolbar has a refresh action entrypoint" {
+    const info = @typeInfo(@TypeOf(refreshBrowserPanel)).@"fn";
+    try std.testing.expectEqual(@as(usize, 0), info.params.len);
+}
+
+test "input: preview gallery neighbor opens next raster sibling" {
+    const gpa = std.testing.allocator;
+    const prev_allocator = AppWindow.g_allocator;
+    defer AppWindow.g_allocator = prev_allocator;
+    AppWindow.g_allocator = gpa;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "a.png", .data = "a" });
+    try tmp.dir.writeFile(.{ .sub_path = "b.pdf", .data = "b" });
+    try tmp.dir.writeFile(.{ .sub_path = "c.jpg", .data = "c" });
+
+    const root = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(root);
+    const current_path = try std.fs.path.join(gpa, &.{ root, "b.pdf" });
+    defer gpa.free(current_path);
+    const next_path = try std.fs.path.join(gpa, &.{ root, "c.jpg" });
+    defer gpa.free(next_path);
+
+    var pane = try PreviewPane.create(gpa);
+    defer pane.unref(gpa);
+    pane.open(.pdf, "b.pdf", current_path, "current");
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    try std.testing.expect(openPreviewGalleryNeighbor(pane, true));
+    try std.testing.expectEqualStrings("c.jpg", pane.title());
+    try std.testing.expectEqualStrings(next_path, pane.path());
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+}
+
+test "input: focused preview ignores shift-modified navigation keys" {
+    const gpa = std.testing.allocator;
+    const prev_allocator = AppWindow.g_allocator;
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    const previous_force_rebuild = AppWindow.g_force_rebuild;
+    const previous_cells_valid = AppWindow.g_cells_valid;
+
+    var pane = try PreviewPane.create(gpa);
+    defer pane.unref(gpa);
+    pane.open(.image, "a.png", "a.png", "current");
+
+    var tab_state = tab.TabState{
+        .tree = try SplitTree.initPane(gpa, .{ .preview = pane }),
+    };
+    defer tab_state.tree.deinit();
+
+    AppWindow.g_allocator = gpa;
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tabs[0] = &tab_state;
+    tab.g_tab_count = 1;
+    active_tab_state.g_active_tab = 0;
+    defer {
+        AppWindow.g_allocator = prev_allocator;
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+        AppWindow.g_force_rebuild = previous_force_rebuild;
+        AppWindow.g_cells_valid = previous_cells_valid;
+    }
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(.{
+        .key_code = platform_input.key_right,
+        .ctrl = false,
+        .shift = true,
+        .alt = false,
+        .super = false,
+    });
+
+    try std.testing.expect(!AppWindow.g_force_rebuild);
+    try std.testing.expect(AppWindow.g_cells_valid);
+}
+
+// Regression: the event-driven render loop (PR #168) only paints a frame when
+// something marks the UI dirty. Command-center family overlays consume their own
+// key/char events and never reach the terminal, so each navigation/typing keystroke
+// MUST request a rebuild — otherwise the new selection only appears on the next
+// incidental wake (cursor blink ~530ms / mouse move), which felt like lag ("不跟手").
+const arrow_down_event = platform_input.KeyEvent{
+    .key_code = platform_input.key_down,
+    .ctrl = false,
+    .shift = false,
+    .alt = false,
+    .super = false,
+};
+
+const arrow_left_event = platform_input.KeyEvent{
+    .key_code = platform_input.key_left,
+    .ctrl = false,
+    .shift = false,
+    .alt = false,
+    .super = false,
+};
+
+const arrow_right_event = platform_input.KeyEvent{
+    .key_code = platform_input.key_right,
+    .ctrl = false,
+    .shift = false,
+    .alt = false,
+    .super = false,
+};
+
+const enter_event = platform_input.KeyEvent{
+    .key_code = platform_input.key_enter,
+    .ctrl = false,
+    .shift = false,
+    .alt = false,
+    .super = false,
+};
+
+const escape_event = platform_input.KeyEvent{
+    .key_code = platform_input.key_escape,
+    .ctrl = false,
+    .shift = false,
+    .alt = false,
+    .super = false,
+};
+
+test "input: command palette arrow navigation requests a repaint" {
+    const previous_keybinds = AppWindow.g_keybinds;
+    defer AppWindow.g_keybinds = previous_keybinds;
+    defer overlays.commandPaletteClose();
+
+    AppWindow.g_keybinds = keybind.Set.defaults();
+    overlays.commandPaletteOpen();
+    try std.testing.expect(overlays.commandPaletteVisible());
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(arrow_down_event);
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+}
+
+test "input: command palette text filtering requests a repaint" {
+    defer overlays.commandPaletteClose();
+    overlays.commandPaletteOpen();
+    try std.testing.expect(overlays.commandPaletteVisible());
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleChar(.{ .codepoint = 'a' });
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+}
+
+test "input: session launcher arrow navigation requests a repaint" {
+    const previous_keybinds = AppWindow.g_keybinds;
+    defer AppWindow.g_keybinds = previous_keybinds;
+    defer overlays.sessionLauncherClose();
+
+    AppWindow.g_keybinds = keybind.Set.defaults();
+    overlays.sessionLauncherOpen();
+    try std.testing.expect(overlays.sessionLauncherVisible());
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(arrow_down_event);
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+}
+
+test "input: command center child escape returns to command center" {
+    const previous_keybinds = AppWindow.g_keybinds;
+    defer AppWindow.g_keybinds = previous_keybinds;
+    defer overlays.commandPaletteClose();
+    defer overlays.sessionLauncherClose();
+
+    AppWindow.g_keybinds = keybind.Set.defaults();
+    overlays.commandPaletteClose();
+    overlays.sessionLauncherClose();
+
+    overlays.commandPaletteOpen();
+    try std.testing.expect(overlays.commandPaletteVisible());
+
+    handleKey(enter_event);
+    try std.testing.expect(!overlays.commandPaletteVisible());
+    try std.testing.expect(overlays.sessionLauncherVisible());
+
+    handleKey(escape_event);
+    try std.testing.expect(overlays.commandPaletteVisible());
+    try std.testing.expect(!overlays.sessionLauncherVisible());
+}
+
+test "input: settings page arrow navigation requests a repaint" {
+    const previous_keybinds = AppWindow.g_keybinds;
+    defer AppWindow.g_keybinds = previous_keybinds;
+    defer overlays.settingsPageClose();
+
+    AppWindow.g_keybinds = keybind.Set.defaults();
+    overlays.settingsPageOpen();
+    try std.testing.expect(overlays.settingsPageVisible());
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(arrow_down_event);
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+}
+
+test "input: port forwarding arrow navigation requests a repaint" {
+    const allocator = std.testing.allocator;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    if (!tab.spawnPortForwardingTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > previous_count) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+        active_tab_state.g_active_tab = previous_active;
+    }
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(arrow_down_event);
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+}
+
+test "input: terminal viewport mouse wheel scroll requests a repaint" {
+    const allocator = std.testing.allocator;
+    const ghostty_vt = @import("ghostty-vt");
+    const renderer = @import("renderer.zig");
+
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    const previous_sidebar = tab.g_sidebar_visible;
+    const previous_split_rect_count = split_layout.g_split_rect_count;
+    const previous_file_visible = file_explorer.g_visible;
+    const previous_file_owner = file_explorer.g_owner_tab;
+    const previous_browser_visible = browser_panel.g_visible;
+    const previous_browser_owner = browser_panel.g_owner_tab;
+    const previous_selecting = g_selecting;
+    const previous_whats_new_visible = overlays.whatsNewVisible();
+    defer {
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+        tab.g_sidebar_visible = previous_sidebar;
+        split_layout.g_split_rect_count = previous_split_rect_count;
+        file_explorer.g_visible = previous_file_visible;
+        file_explorer.g_owner_tab = previous_file_owner;
+        browser_panel.g_visible = previous_browser_visible;
+        browser_panel.g_owner_tab = previous_browser_owner;
+        g_selecting = previous_selecting;
+        if (previous_whats_new_visible) overlays.showWhatsNew() else overlays.hideWhatsNew();
+    }
+
+    var surface: Surface = undefined;
+    surface.terminal = try ghostty_vt.Terminal.init(allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback = 1024,
+        .default_modes = .{ .grapheme_cluster = true },
+    });
+    defer surface.terminal.deinit(allocator);
+    surface.render_state = renderer.State.init(&surface.terminal);
+    surface.selection = .{};
+    surface.ref_count = 1;
+    surface.scrollbar_opacity = 0;
+    surface.scrollbar_show_time = 0;
+
+    var tab_state = tab.TabState{
+        .kind = .terminal,
+        .tree = try SplitTree.init(allocator, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .port_forwarding_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer tab_state.tree.deinit();
+
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tabs[0] = &tab_state;
+    tab.g_tab_count = 1;
+    active_tab_state.g_active_tab = 0;
+    tab.g_sidebar_visible = false;
+    split_layout.g_split_rect_count = 0;
+    file_explorer.g_visible = false;
+    browser_panel.g_visible = false;
+    g_selecting = false;
+    overlays.hideWhatsNew();
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+
+    handleMouseWheel(.{ .delta = 120, .xpos = 20, .ypos = 40 });
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+}
+
+test "input: port forwarding form left/right arrows toggle Direction and request a repaint" {
+    const allocator = std.testing.allocator;
+    AppWindow.setSshHostsContentForTest("");
+    defer AppWindow.setSshHostsContentForTest(null);
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    if (!tab.spawnPortForwardingTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > previous_count) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+        active_tab_state.g_active_tab = previous_active;
+    }
+
+    try std.testing.expect(AppWindow.portForwardingOpenNew());
+    handleKey(arrow_down_event); // Name -> Profile
+    handleKey(arrow_down_event); // Profile -> Direction
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(arrow_right_event);
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+    {
+        const session = AppWindow.activePortForwarding() orelse return error.ExpectedPortForwardingTab;
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        const form = session.model.form() orelse return error.ExpectedPortForwardingForm;
+        try std.testing.expect(form.rule.direction == .local);
+    }
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(arrow_left_event);
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+    const session = AppWindow.activePortForwarding() orelse return error.ExpectedPortForwardingTab;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    const form = session.model.form() orelse return error.ExpectedPortForwardingForm;
+    try std.testing.expect(form.rule.direction == .reverse);
+}
+
+test "input: port forwarding form letter keys remain text input" {
+    const allocator = std.testing.allocator;
+    AppWindow.setSshHostsContentForTest("");
+    defer AppWindow.setSshHostsContentForTest(null);
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    if (!tab.spawnPortForwardingTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > previous_count) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+        active_tab_state.g_active_tab = previous_active;
+    }
+
+    try std.testing.expect(AppWindow.portForwardingOpenNew());
+    handleChar(.{ .codepoint = 'P' });
+    handleKey(.{ .key_code = 0x4E, .ctrl = false, .shift = false, .alt = false });
+    handleChar(.{ .codepoint = 'n' });
+
+    const session = AppWindow.activePortForwarding() orelse return error.ExpectedPortForwardingTab;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    const form = session.model.form() orelse return error.ExpectedPortForwardingForm;
+    try std.testing.expectEqualStrings("Local proxyPn", form.rule.name());
+}
+
+test "input: port forwarding new command suppresses its follow-up char event" {
+    const allocator = std.testing.allocator;
+    AppWindow.setSshHostsContentForTest("");
+    defer AppWindow.setSshHostsContentForTest(null);
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    if (!tab.spawnPortForwardingTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > previous_count) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+        active_tab_state.g_active_tab = previous_active;
+    }
+
+    handleKey(.{ .key_code = 0x4E, .ctrl = false, .shift = false, .alt = false });
+    handleChar(.{ .codepoint = 'n' });
+
+    const session = AppWindow.activePortForwarding() orelse return error.ExpectedPortForwardingTab;
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    const form = session.model.form() orelse return error.ExpectedPortForwardingForm;
+    try std.testing.expectEqualStrings("Local proxy", form.rule.name());
+}
+
+// Ties the fix end-to-end: a consumed overlay key must make the next render-gate
+// evaluation decide to render (the exact signal the main loop builds), instead of
+// blocking until an incidental wake — that decision IS the anti-lag invariant.
+test "input: overlay navigation drives the render gate to repaint" {
+    const render_gate = @import("appwindow/render_gate.zig");
+    defer overlays.commandPaletteClose();
+    overlays.commandPaletteOpen();
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(arrow_down_event);
+
+    const signals = render_gate.RenderSignals{
+        .force_rebuild = AppWindow.g_force_rebuild or !AppWindow.g_cells_valid,
+        .any_surface_dirty = false,
+        .cursor_blink_due = false,
+        .ai_streaming = false,
+        .overlay_active = false,
+        .atlas_sync_pending = false,
+    };
+    try std.testing.expect(render_gate.frameNeedsRender(signals));
+}
+
 test "macOS UI smoke: Cmd+Shift+B toggles the tab sidebar" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
 
@@ -184,7 +651,8 @@ const MAX_SELECTION_COLS: usize = 4096;
 
 const UrlUnderline = struct {
     surface: ?*Surface = null,
-    row_abs: usize = 0,
+    start_row_abs: usize = 0,
+    end_row_abs: usize = 0,
     start_col: usize = 0,
     end_col: usize = 0,
 
@@ -197,7 +665,8 @@ threadlocal var g_url_underline: UrlUnderline = .{};
 
 const TokenAtCell = struct {
     text: []u8,
-    row: usize,
+    start_row: usize,
+    end_row: usize,
     start_col: usize,
     end_col: usize,
 
@@ -209,9 +678,30 @@ const TokenAtCell = struct {
 pub const SPLIT_DIVIDER_HIT_WIDTH: f32 = 8; // Larger hit area for easier grabbing
 
 pub threadlocal var g_divider_hover: bool = false; // Mouse is over a divider
+// Handle of the preview pane whose close (×) button the mouse is currently
+// hovering, or null. The renderer brightens that pane's button; updated on
+// mouse-move. Just a hover hint — clicks are hit-tested independently.
+pub threadlocal var g_preview_close_hover: ?SplitTree.Node.Handle = null;
 pub threadlocal var g_divider_dragging: bool = false; // Currently dragging a divider
 pub threadlocal var g_divider_drag_handle: ?SplitTree.Node.Handle = null; // Handle of the split node being resized
 pub threadlocal var g_divider_drag_layout: ?SplitTree.Split.Layout = null; // horizontal or vertical
+
+// Alt + left-drag panel swap. `source` is the grabbed panel (recorded on press),
+// `target` is the panel under the cursor while dragging (drives the highlight),
+// `active` flips true once the drag passes PANEL_SWAP_DRAG_THRESHOLD_PX. The
+// renderer reads `g_panel_swap_active`/`source`/`target` to dim the source and
+// highlight the drop target.
+const PANEL_SWAP_DRAG_THRESHOLD_PX: f64 = 6.0;
+pub threadlocal var g_panel_swap_active: bool = false;
+pub threadlocal var g_panel_swap_source: ?SplitTree.Node.Handle = null;
+pub threadlocal var g_panel_swap_target: ?SplitTree.Node.Handle = null;
+threadlocal var g_panel_swap_start_x: f64 = 0;
+threadlocal var g_panel_swap_start_y: f64 = 0;
+
+// Left-drag pan of a ready image preview pane (the pane-world successor of the
+// old right-dock image drag). All state and the drag-lifetime pane ref live in
+// the tested state machine; input.zig only routes press/move/release into it.
+threadlocal var g_preview_image_drag: PreviewImageDrag = .{};
 threadlocal var g_scrollbar_drag_surface: ?*Surface = null;
 threadlocal var g_scrollbar_drag_view_y: f32 = 0;
 threadlocal var g_scrollbar_drag_view_h: f32 = 0;
@@ -226,16 +716,12 @@ threadlocal var g_ai_transcript_selecting: bool = false;
 threadlocal var g_ai_transcript_select_chat: ?*AppWindow.ai_chat.Session = null;
 threadlocal var g_ai_transcript_select_auto_copy: bool = false;
 threadlocal var g_ai_history_suppress_refresh_char: bool = false;
+threadlocal var g_port_forwarding_suppress_command_char: ?u21 = null;
+threadlocal var g_skill_center_suppress_command_char: ?u21 = null;
 pub threadlocal var g_sidebar_resize_hover: bool = false; // Mouse is over the sidebar resize edge
 pub threadlocal var g_sidebar_resize_dragging: bool = false; // Currently dragging the sidebar edge
 pub threadlocal var g_explorer_resize_hover: bool = false; // Mouse is over the file explorer resize edge
 pub threadlocal var g_explorer_resize_dragging: bool = false; // Currently dragging the file explorer edge
-pub threadlocal var g_markdown_preview_resize_hover: bool = false; // Mouse is over the preview resize edge
-pub threadlocal var g_markdown_preview_resize_dragging: bool = false; // Currently dragging the preview edge
-threadlocal var g_markdown_preview_image_dragging: bool = false;
-threadlocal var g_markdown_preview_image_hover: bool = false;
-threadlocal var g_markdown_preview_image_drag_last_x: f64 = 0;
-threadlocal var g_markdown_preview_image_drag_last_y: f64 = 0;
 pub threadlocal var g_browser_resize_hover: bool = false; // Mouse is over the embedded browser edge
 pub threadlocal var g_browser_resize_dragging: bool = false; // Currently dragging the browser edge
 pub threadlocal var g_ai_copilot_resize_hover: bool = false; // Mouse is over the AI copilot left edge
@@ -362,12 +848,6 @@ pub fn cancelTransientMouseState(win: anytype) void {
     g_sidebar_resize_dragging = false;
     g_explorer_resize_hover = false;
     g_explorer_resize_dragging = false;
-    g_markdown_preview_resize_hover = false;
-    g_markdown_preview_resize_dragging = false;
-    g_markdown_preview_image_dragging = false;
-    g_markdown_preview_image_hover = false;
-    g_markdown_preview_image_drag_last_x = 0;
-    g_markdown_preview_image_drag_last_y = 0;
     g_browser_resize_hover = false;
     g_browser_resize_dragging = false;
     g_ai_copilot_resize_hover = false;
@@ -375,6 +855,8 @@ pub fn cancelTransientMouseState(win: anytype) void {
     g_selecting = false;
     plus_btn_pressed = false;
     tab.g_tab_close_pressed = null;
+    releasePreviewImageDrag();
+    resetPanelSwapState();
     resetSidebarTabDragState();
     overlays.scrollbar.g_scrollbar_dragging = false;
     g_scrollbar_drag_surface = null;
@@ -409,7 +891,7 @@ pub fn toggleFileExplorer() void {
 
     file_explorer.toggle();
     if (file_explorer.isVisibleForActiveTab()) {
-        AppWindow.syncVisibleFileExplorerForActiveTab();
+        AppWindow.syncVisibleFileExplorerForActiveTab(true);
     }
     if (AppWindow.g_window) |win| {
         syncPanelGridFromWindow(win);
@@ -450,6 +932,49 @@ pub fn toggleBrowserPanel() void {
     AppWindow.g_cells_valid = false;
 }
 
+pub fn openJupyterPanel() void {
+    const perf = ui_perf.begin("input.open_jupyter_panel");
+    defer perf.end();
+
+    const allocator = AppWindow.g_allocator orelse return;
+    const parent = AppWindow.currentNativeHandle();
+    const surface = AppWindow.activeSurface();
+    if (!browser_panel.isVisibleForActiveTab()) AppWindow.hideAiCopilot();
+
+    // Open Jupyter takes over the full content area.
+    browser_panel.setDisplayMode(.full);
+
+    // Auto-detect a running Jupyter URL from the focused terminal.
+    if (AppWindow.activeSurfaceSnapshot(allocator)) |snap| {
+        defer allocator.free(snap);
+        if (jupyter_detect.findJupyterUrls(allocator, snap) catch null) |result| {
+            defer result.deinit(allocator);
+            if (result.urls.len == 1) {
+                if (!browser_panel.openForSurface(allocator, parent, result.urls[0], surface)) return;
+                finishOpenJupyter();
+                return;
+            } else if (result.urls.len >= 2) {
+                jupyter_picker.show(@ptrCast(result.urls));
+                AppWindow.g_force_rebuild = true;
+                AppWindow.g_cells_valid = false;
+                return;
+            }
+        }
+    }
+
+    // 0 matches → open full + focus empty URL bar for manual paste.
+    if (!browser_panel.openJupyterForSurface(allocator, parent, surface)) return;
+    finishOpenJupyter();
+}
+
+fn finishOpenJupyter() void {
+    if (AppWindow.g_window) |win| {
+        syncPanelGridFromWindow(win);
+    }
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+}
+
 fn closeBrowserPanel() void {
     g_close_shortcut_confirm_until_ms = 0;
     browser_panel.close();
@@ -460,12 +985,8 @@ fn closeBrowserPanel() void {
     AppWindow.g_cells_valid = false;
 }
 
-fn closeMarkdownPreviewPanel() void {
-    g_close_shortcut_confirm_until_ms = 0;
-    markdown_preview_panel.close();
-    if (AppWindow.g_window) |win| {
-        syncPanelGridFromWindow(win);
-    }
+pub fn refreshBrowserPanel() void {
+    browser_panel.refresh();
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
 }
@@ -480,10 +1001,10 @@ fn closeAiCopilotPanel() void {
 }
 
 pub fn closePanelOrTab() void {
-    if (markdown_preview_panel.isVisibleForActiveTab()) {
-        closeMarkdownPreviewPanel();
-        return;
-    }
+    // Close the FOCUSED pane, preview or terminal alike — click a preview (or
+    // Ctrl+1-9) to select it, then Ctrl+Shift+W closes it. The browser panel
+    // still closes first: it is an unfocusable side dock, so this shortcut is
+    // its only keyboard close.
     if (browser_panel.isVisibleForActiveTab()) {
         closeBrowserPanel();
         return;
@@ -510,6 +1031,30 @@ pub fn closePanelOrTab() void {
     }
     g_close_shortcut_confirm_until_ms = 0;
     AppWindow.closeFocusedSplit();
+}
+
+/// Close a specific preview pane by handle (the preview's × button). Focuses
+/// the pane, then reuses the standard close-split path, which removes it and
+/// refocuses the surviving terminal. Defensive: a no-op unless `handle` is still
+/// a live preview leaf (the tree may reshape between the cached rect and the
+/// click). Closing a preview never closes the window or hits a running program,
+/// so the close-shortcut/running-program confirmations are intentionally skipped.
+fn closePreviewPaneByHandle(handle: SplitTree.Node.Handle) void {
+    const tb = AppWindow.activeTab() orelse return;
+    if (tb.kind != .terminal) return;
+    if (handle.idx() >= tb.tree.nodes.len) return;
+    switch (tb.tree.nodes[handle.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .preview => {},
+            else => return,
+        },
+        .split => return,
+    }
+    g_preview_close_hover = null;
+    tb.focused = handle;
+    AppWindow.closeFocusedSplit();
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
 }
 
 /// Close a tab via a pointer gesture (middle-click or the × button), honoring
@@ -594,7 +1139,8 @@ fn splitRectForSurface(surface: *Surface) ?split_layout.SplitRect {
     for (0..split_layout.g_split_rect_count) |i| {
         const rect = split_layout.g_split_rects[i];
         if (!split_layout.cachedRectIsLive(rect)) continue;
-        if (rect.surface == surface) return rect;
+        const s = rect.surface() orelse continue;
+        if (s == surface) return rect;
     }
     return null;
 }
@@ -613,15 +1159,16 @@ fn scrollbarTargetAt(xpos: f64, ypos: f64, window_w: f32, window_h: f32, top_pad
         for (0..split_layout.g_split_rect_count) |i| {
             const rect = split_layout.g_split_rects[i];
             if (!split_layout.cachedRectIsLive(rect)) continue;
-            const pad = rect.surface.getPadding();
+            const s = rect.surface() orelse continue;
+            const pad = s.getPadding();
             const view_x: f32 = @floatFromInt(rect.x);
             const view_y: f32 = @floatFromInt(rect.y);
             const view_w: f32 = @floatFromInt(rect.width);
             const view_h: f32 = @floatFromInt(rect.height);
             const local_top_pad: f32 = @floatFromInt(pad.top);
-            if (overlays.scrollbarHitTestForSurface(rect.surface, xpos, ypos, view_x, view_y, view_w, view_h, local_top_pad)) {
+            if (overlays.scrollbarHitTestForSurface(s, xpos, ypos, view_x, view_y, view_w, view_h, local_top_pad)) {
                 return .{
-                    .surface = rect.surface,
+                    .surface = s,
                     .view_x = view_x,
                     .view_y = view_y,
                     .view_w = view_w,
@@ -725,6 +1272,106 @@ pub fn updateFocusFromMouse(mouse_x: i32, mouse_y: i32) void {
     }
 }
 
+/// Return the split-tree handle of the panel containing the given window point,
+/// or null if the point is not inside any (live) panel rect — e.g. it is over a
+/// divider gap or outside the content area.
+fn panelHandleAtPoint(x: i32, y: i32) ?SplitTree.Node.Handle {
+    for (0..split_layout.g_split_rect_count) |i| {
+        const rect = split_layout.g_split_rects[i];
+        if (!split_layout.cachedRectIsLive(rect)) continue;
+        if (x >= rect.x and x < rect.x + rect.width and
+            y >= rect.y and y < rect.y + rect.height)
+        {
+            return rect.handle;
+        }
+    }
+    return null;
+}
+
+fn resetPanelSwapState() void {
+    g_panel_swap_active = false;
+    g_panel_swap_source = null;
+    g_panel_swap_target = null;
+    g_panel_swap_start_x = 0;
+    g_panel_swap_start_y = 0;
+}
+
+/// End an image-preview pan drag, dropping the drag's pane reference.
+fn releasePreviewImageDrag() void {
+    const gpa = AppWindow.g_allocator orelse return; // drag only starts when set
+    g_preview_image_drag.release(gpa);
+}
+
+/// Begin a potential Alt-drag panel swap if the active terminal tab is split and
+/// the press landed inside a panel. Returns true if the gesture was engaged (the
+/// caller should consume the event). Single-panel tabs are left alone so default
+/// click/selection behavior is unchanged.
+fn beginPanelSwapIfSplit(x: i32, y: i32) bool {
+    const t = tab.activeTab() orelse return false;
+    if (t.kind != .terminal or !t.tree.isSplit()) return false;
+    const source = panelHandleAtPoint(x, y) orelse return false;
+    g_panel_swap_source = source;
+    g_panel_swap_target = null;
+    g_panel_swap_active = false;
+    g_panel_swap_start_x = @floatFromInt(x);
+    g_panel_swap_start_y = @floatFromInt(y);
+    platform_cursor.set(.size_all);
+    return true;
+}
+
+/// Drive an in-progress panel swap from a mouse-move. Returns true while the
+/// gesture owns the move (caller should return early). Engages `active` once the
+/// drag passes the threshold, then tracks the hovered drop target for highlight.
+fn updatePanelSwapDrag(x: i32, y: i32) bool {
+    const source = g_panel_swap_source orelse return false;
+
+    if (!g_panel_swap_active) {
+        const dx = @as(f64, @floatFromInt(x)) - g_panel_swap_start_x;
+        const dy = @as(f64, @floatFromInt(y)) - g_panel_swap_start_y;
+        if (@sqrt(dx * dx + dy * dy) < PANEL_SWAP_DRAG_THRESHOLD_PX) return true;
+        g_panel_swap_active = true;
+        g_selecting = false;
+    }
+
+    // The drop target is the hovered panel, but never the source itself.
+    const hovered = panelHandleAtPoint(x, y);
+    const target: ?SplitTree.Node.Handle = if (hovered) |h| (if (h == source) null else h) else null;
+    if (target != g_panel_swap_target) {
+        g_panel_swap_target = target;
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
+    }
+    platform_cursor.set(.size_all);
+    return true;
+}
+
+/// Finish a panel swap on mouse-up. Returns true if a swap gesture was in
+/// progress (caller should consume the event). Performs the swap only when the
+/// drag was active and dropped on a valid, different panel.
+fn finishPanelSwapDrag() bool {
+    const source = g_panel_swap_source orelse return false;
+    const did_swap = g_panel_swap_active;
+    const target = g_panel_swap_target;
+    resetPanelSwapState();
+    if (did_swap) {
+        if (target) |t| _ = AppWindow.swapPanels(source, t);
+    }
+    // The press set the size_all cursor; restore it whether or not a swap
+    // happened (a bare Alt-click never crossed the drag threshold).
+    platform_cursor.set(.arrow);
+    return true;
+}
+
+/// 时序 instrumentation：最近一次处理 key/char 输入的微秒时间戳，尚未与一帧 present 配对。
+/// 主循环 present 后读它算「输入 → 呈现」延迟（见 AppWindow.recordFrameLatencyIfInputDriven），
+/// 0 表示无待配对输入。仅在开启 render diagnostics 时被读取，平时只是个无害的时间戳写入。
+pub threadlocal var g_pending_input_us: i64 = 0;
+/// Main-loop iteration in which the above input was processed. Paired with
+/// AppWindow.g_loop_iter at present time: equal ⇒ the input painted in its own
+/// iteration (true latency); different ⇒ the loop idled in between and an
+/// unrelated wake (cursor blink, etc.) presented — a stall, not real latency.
+pub threadlocal var g_pending_input_iter: u64 = 0;
+
 /// Process all queued platform input events. Called once per frame from the main loop.
 pub fn processEvents(win: anytype) void {
     if (window_backend.isMinimized(win)) {
@@ -762,6 +1409,11 @@ fn processKeyAndCharEvents(win: anytype) void {
             g_ai_history_suppress_refresh_char = false;
         }
         if (!did_anything) break;
+        // Stamp the input→present latency clock on every handled key/char so the
+        // main loop can measure how long the resulting frame took to reach present,
+        // and tag the iteration so a later, unrelated paint isn't mis-attributed.
+        g_pending_input_us = std.time.microTimestamp();
+        g_pending_input_iter = AppWindow.g_loop_iter;
     }
 }
 
@@ -808,11 +1460,19 @@ fn processSizeChange(win: anytype) void {
 fn handleChar(ev: platform_input.CharEvent) void {
     overlays.startupShortcutsDismiss();
     if (overlays.sessionLauncherVisible()) {
-        if (!ev.ctrl and !ev.alt) overlays.sessionLauncherInsertChar(ev.codepoint);
+        if (!ev.ctrl and !ev.alt) {
+            overlays.sessionLauncherInsertChar(ev.codepoint);
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+        }
         return;
     }
     if (overlays.commandPaletteVisible()) {
-        if (!ev.ctrl and !ev.alt) overlays.commandPaletteInsertChar(ev.codepoint);
+        if (!ev.ctrl and !ev.alt) {
+            overlays.commandPaletteInsertChar(ev.codepoint);
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+        }
         return;
     }
     if (weixinQrPanelConsumesChar()) return;
@@ -855,6 +1515,28 @@ fn handleChar(ev: platform_input.CharEvent) void {
         }
         return;
     }
+    if (AppWindow.activeSkillCenter() != null) {
+        if (g_skill_center_suppress_command_char) |codepoint| {
+            const suppress = !ev.ctrl and !ev.alt and !ev.super and ev.codepoint == codepoint;
+            g_skill_center_suppress_command_char = null;
+            if (suppress) return;
+        }
+        if (!ev.ctrl and !ev.alt and !ev.super) {
+            _ = AppWindow.skillCenterUrlInsertChar(ev.codepoint); // no-op unless url_input active
+        }
+        return;
+    }
+    if (AppWindow.activePortForwarding() != null) {
+        if (g_port_forwarding_suppress_command_char) |codepoint| {
+            const suppress = !ev.ctrl and !ev.alt and !ev.super and ev.codepoint == codepoint;
+            g_port_forwarding_suppress_command_char = null;
+            if (suppress) return;
+        }
+        if (!ev.ctrl and !ev.alt and !ev.super) {
+            _ = AppWindow.portForwardingInsertChar(ev.codepoint);
+        }
+        return;
+    }
     // AI copilot sidebar (terminal tabs): when the copilot owns focus, route
     // text input to its composer. `activeCopilotSessionForInput` is non-null
     // only when the panel is visible on the active terminal tab.
@@ -867,6 +1549,27 @@ fn handleChar(ev: platform_input.CharEvent) void {
                 AppWindow.g_cells_valid = false;
             }
             return;
+        }
+    }
+    // A focused raster (image/PDF) preview consumes +/=/- as zoom in/out. Only
+    // raster previews claim these chars (markdown previews ignore them so they
+    // reach nothing), and only when such a preview holds focus — terminals are
+    // never affected.
+    if (AppWindow.focusedPreviewPane()) |p| {
+        if (p.kind.isRaster() and !ev.ctrl and !ev.alt) {
+            const zoomed = switch (ev.codepoint) {
+                '+', '=' => p.zoomImageBySteps(1, true),
+                '-', '_' => p.zoomImageBySteps(1, false),
+                else => false,
+            };
+            if (zoomed) {
+                AppWindow.g_force_rebuild = true;
+                AppWindow.g_cells_valid = false;
+            }
+            switch (ev.codepoint) {
+                '+', '=', '-', '_' => return,
+                else => {},
+            }
         }
     }
     if (!AppWindow.isActiveTabTerminal()) return;
@@ -973,7 +1676,7 @@ fn requestNewWindowFromActiveCwd() void {
     if (AppWindow.activeSurface()) |surface| {
         if (surface.getCwd()) |guest_path| {
             std.debug.print("CWD from OSC 7: {s}\n", .{guest_path});
-            if (platform_wsl.guestPathToNativeCwd(guest_path, &cwd_buf)) |native_cwd| {
+            if (platform_wsl.nativeCwdForLaunchKind(surface.launch_kind, guest_path, &cwd_buf)) |native_cwd| {
                 cwd = native_cwd;
                 var path_u8: [260]u8 = undefined;
                 var display_buf: platform_pty_command.CwdBuffer = undefined;
@@ -1033,7 +1736,19 @@ fn executeCommand(cmd: command_dispatch.Command) bool {
                 pasteFromClipboard();
             }
         },
-        .paste_image => pasteImageFromClipboard(),
+        .paste_image => {
+            if (AppWindow.activeAiChat()) |chat| {
+                pasteImageIntoAiChat(chat);
+            } else if (aiCopilotFocused()) {
+                if (AppWindow.activeCopilotSessionForInput()) |chat| {
+                    pasteImageIntoAiChat(chat);
+                } else {
+                    pasteImageFromClipboard();
+                }
+            } else {
+                pasteImageFromClipboard();
+            }
+        },
         // Panel-focus shortcuts are "performable": if there is no pane in
         // the requested direction, don't consume the key so it falls
         // through to the terminal (e.g. Alt+Up reaches a TUI like Claude
@@ -1046,6 +1761,10 @@ fn executeCommand(cmd: command_dispatch.Command) bool {
             .previous => AppWindow.gotoSplit(.previous_wrapped),
             .next => AppWindow.gotoSplit(.next_wrapped),
         },
+        // Numeric panel focus: like focus_split, "performable" — if there is no
+        // panel at that index (single-panel tab, or index past the panel count),
+        // don't consume the key so it falls through to the terminal.
+        .focus_panel => |n| return AppWindow.focusPanel(n),
         .equalize_splits => AppWindow.equalizeSplits(),
         .next_tab => AppWindow.switchTab((active_tab_state.g_active_tab + 1) % tab.g_tab_count),
         .previous_tab => {
@@ -1065,6 +1784,12 @@ fn executeCommand(cmd: command_dispatch.Command) bool {
 fn handleKey(ev: platform_input.KeyEvent) void {
     overlays.startupShortcutsDismiss();
     const key_event = logicalKeyEvent(ev);
+    if (overlays.whatsNewVisible()) {
+        overlays.whatsNewHandleKey(key_event);
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
+        return;
+    }
     if (overlays.windowCloseConfirmVisible()) {
         overlays.windowCloseConfirmHandleKey(key_event);
         AppWindow.g_force_rebuild = true;
@@ -1092,6 +1817,8 @@ fn handleKey(ev: platform_input.KeyEvent) void {
             return;
         }
         overlays.sessionLauncherHandleKey(key_event);
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
         return;
     }
     if (action) |app_action| {
@@ -1118,6 +1845,30 @@ fn handleKey(ev: platform_input.KeyEvent) void {
                 else => {},
             }
         }
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
+        return;
+    }
+    if (jupyter_picker.isVisible()) {
+        switch (ev.key_code) {
+            platform_input.key_escape => jupyter_picker.hide(),
+            platform_input.key_up => jupyter_picker.move(-1),
+            platform_input.key_down => jupyter_picker.move(1),
+            platform_input.key_enter => {
+                const url = jupyter_picker.selectedUrl();
+                if (AppWindow.g_allocator) |allocator| {
+                    const parent = AppWindow.currentNativeHandle();
+                    const surface = AppWindow.activeSurface();
+                    browser_panel.setDisplayMode(.full);
+                    _ = browser_panel.openForSurface(allocator, parent, url, surface);
+                    if (AppWindow.g_window) |win| syncPanelGridFromWindow(win);
+                }
+                jupyter_picker.hide();
+            },
+            else => {},
+        }
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
         return;
     }
     if (overlays.restoreDefaultsConfirmVisible()) {
@@ -1128,6 +1879,8 @@ fn handleKey(ev: platform_input.KeyEvent) void {
     }
     if (overlays.settingsPageVisible()) {
         overlays.settingsPageHandleKey(key_event);
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
         return;
     }
     if (AppWindow.weixin_qr_panel.visible()) {
@@ -1152,6 +1905,14 @@ fn handleKey(ev: platform_input.KeyEvent) void {
     if (browser_panel.urlBarFocused()) {
         handleBrowserUrlBarKey(ev);
         return;
+    }
+    if (browser_panel.isVisibleForActiveTab() and !browser_panel.urlBarFocused() and !jupyter_picker.isVisible()) {
+        if (ev.key_code == platform_input.key_escape) {
+            closeBrowserPanel();
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+            return;
+        }
     }
     if (AppWindow.activeAiChat()) |chat| {
         // Accept Cmd (super, macOS) or Ctrl (Windows) for chat editing keys.
@@ -1214,19 +1975,19 @@ fn handleKey(ev: platform_input.KeyEvent) void {
                 return;
             },
             platform_input.key_up => {
-                _ = AppWindow.aiHistoryMoveSelection(-1);
+                _ = AppWindow.aiHistoryNav(-1);
                 return;
             },
             platform_input.key_down => {
-                _ = AppWindow.aiHistoryMoveSelection(1);
+                _ = AppWindow.aiHistoryNav(1);
                 return;
             },
             platform_input.key_left => {
-                _ = AppWindow.aiHistoryCycleCategory(-1);
+                _ = AppWindow.aiHistoryFocusMove(-1);
                 return;
             },
             platform_input.key_right => {
-                _ = AppWindow.aiHistoryCycleCategory(1);
+                _ = AppWindow.aiHistoryFocusMove(1);
                 return;
             },
             platform_input.key_enter => {
@@ -1262,6 +2023,176 @@ fn handleKey(ev: platform_input.KeyEvent) void {
         return;
     }
 
+    if (AppWindow.activePortForwarding() != null) {
+        const plain = !ev.ctrl and !ev.alt and !ev.super;
+        const overlay_kind = AppWindow.portForwardingOverlayKind() orelse .none;
+        const form_active = overlay_kind == .form;
+        const overlay_active = overlay_kind != .none;
+        switch (ev.key_code) {
+            platform_input.key_up => {
+                if (form_active) {
+                    _ = AppWindow.portForwardingFormMove(-1);
+                } else if (!overlay_active) {
+                    _ = AppWindow.portForwardingMove(-1);
+                }
+                return;
+            },
+            platform_input.key_down => {
+                if (form_active) {
+                    _ = AppWindow.portForwardingFormMove(1);
+                } else if (!overlay_active) {
+                    _ = AppWindow.portForwardingMove(1);
+                }
+                return;
+            },
+            platform_input.key_left => {
+                if (form_active) _ = AppWindow.portForwardingFormAdjust(-1);
+                return;
+            },
+            platform_input.key_right => {
+                if (form_active) _ = AppWindow.portForwardingFormAdjust(1);
+                return;
+            },
+            platform_input.key_tab => {
+                if (form_active) _ = AppWindow.portForwardingFormMove(1);
+                return;
+            },
+            platform_input.key_enter => {
+                if (overlay_active) _ = AppWindow.portForwardingConfirmOrApply();
+                return;
+            },
+            platform_input.key_escape => {
+                _ = AppWindow.portForwardingCancelOrClose();
+                return;
+            },
+            platform_input.key_backspace => {
+                if (form_active) _ = AppWindow.portForwardingBackspace();
+                return;
+            },
+            platform_input.key_space => if (plain and !ev.shift) {
+                if (form_active) {
+                    _ = AppWindow.portForwardingFormAdjust(1);
+                } else if (!overlay_active) {
+                    _ = AppWindow.portForwardingToggleSelected();
+                }
+                return;
+            },
+            0x4E => if (plain and !ev.shift) {
+                if (!overlay_active and AppWindow.portForwardingOpenNew()) {
+                    g_port_forwarding_suppress_command_char = 'n';
+                }
+                return;
+            },
+            0x45 => if (plain and !ev.shift) {
+                if (!overlay_active and AppWindow.portForwardingOpenEdit()) {
+                    g_port_forwarding_suppress_command_char = 'e';
+                }
+                return;
+            },
+            0x44 => if (plain and !ev.shift) {
+                if (!overlay_active) _ = AppWindow.portForwardingOpenDeleteConfirm();
+                return;
+            },
+            0x52 => if (plain and !ev.shift) {
+                if (!overlay_active) _ = AppWindow.portForwardingRestartSelected();
+                return;
+            },
+            0x41 => if (plain and !ev.shift) {
+                if (!overlay_active) _ = AppWindow.portForwardingToggleAutoStart();
+                return;
+            },
+            else => {},
+        }
+        return;
+    }
+
+    // Skill Center: ↑/↓ move, space preview/toggle, ⏎ confirm, esc cancel,
+    // d deploy, i import, g get-from-GitHub, r rescan. The URL-input overlay
+    // captures text; the checklist captures space + 'a'.
+    if (AppWindow.activeSkillCenter() != null) {
+        // SKILL.md preview overlay captures all keys: esc/space/⏎ close,
+        // arrows/PgUp/PgDn/Home/End scroll.
+        if (AppWindow.skillCenterTextPreviewActive()) {
+            switch (ev.key_code) {
+                platform_input.key_escape, platform_input.key_space, platform_input.key_enter => _ = AppWindow.skillCenterPreviewClose(),
+                platform_input.key_up => _ = AppWindow.skillCenterPreviewScroll(-1),
+                platform_input.key_down => _ = AppWindow.skillCenterPreviewScroll(1),
+                platform_input.key_page_up => _ = AppWindow.skillCenterPreviewScroll(-12),
+                platform_input.key_page_down => _ = AppWindow.skillCenterPreviewScroll(12),
+                platform_input.key_home => _ = AppWindow.skillCenterPreviewScroll(-1_000_000),
+                platform_input.key_end => _ = AppWindow.skillCenterPreviewScroll(1_000_000),
+                else => {},
+            }
+            return;
+        }
+        const plain = !ev.ctrl and !ev.alt and !ev.super;
+        const text_capture = AppWindow.skillCenterUrlInputActive();
+        const picking = AppWindow.skillCenterPickActive();
+        // Ctrl/Cmd+V paste into the URL field.
+        if (text_capture and (ev.ctrl or ev.super) and ev.key_code == 0x56) { // 'V'
+            _ = AppWindow.skillCenterUrlPaste();
+            return;
+        }
+        switch (ev.key_code) {
+            platform_input.key_up => {
+                _ = AppWindow.skillCenterMove(-1);
+                return;
+            },
+            platform_input.key_down => {
+                _ = AppWindow.skillCenterMove(1);
+                return;
+            },
+            platform_input.key_enter => {
+                if (AppWindow.skillCenterOverlayActive()) {
+                    _ = AppWindow.skillCenterOverlaySelect();
+                } else {
+                    _ = AppWindow.skillCenterDeploy();
+                }
+                return;
+            },
+            platform_input.key_escape => {
+                _ = AppWindow.skillCenterOverlayCancel();
+                return;
+            },
+            platform_input.key_backspace => {
+                if (text_capture) {
+                    _ = AppWindow.skillCenterUrlBackspace();
+                    return;
+                }
+            },
+            0x52 => if (plain and !ev.shift and !text_capture) { // 'R'
+                _ = AppWindow.skillCenterRescan();
+                return;
+            },
+            0x44 => if (plain and !ev.shift and !text_capture and !picking) { // 'D'
+                _ = AppWindow.skillCenterDeploy();
+                return;
+            },
+            0x49 => if (plain and !ev.shift and !text_capture and !picking) { // 'I'
+                _ = AppWindow.skillCenterImport();
+                return;
+            },
+            0x47 => if (plain and !ev.shift and !text_capture and !picking) { // 'G'
+                _ = AppWindow.skillCenterOpenUrlInput();
+                // SDL text-input mode also fires a 'g' CHAR event after this
+                // key-down; suppress it so it doesn't land in the now-active
+                // URL field. (Only 'G' opens a text field, so only it suppresses.)
+                g_skill_center_suppress_command_char = 'g';
+                return;
+            },
+            0x41 => if (plain and !ev.shift and picking) { // 'A' select-all
+                _ = AppWindow.skillCenterPickSelectAll();
+                return;
+            },
+            platform_input.key_space => if (plain and !ev.shift and !text_capture) {
+                _ = AppWindow.skillCenterSpacePreview(); // toggles when picking
+                return;
+            },
+            else => {},
+        }
+        return;
+    }
+
     // AI copilot sidebar (terminal tabs): route editing/navigation keys to the
     // copilot composer. Esc is intercepted specially so it never reaches the
     // terminal — it stops an in-flight request, or hides the panel when idle.
@@ -1287,6 +2218,48 @@ fn handleKey(ev: platform_input.KeyEvent) void {
             if (isAiChatKey(ev)) {
                 AppWindow.resetCursorBlink();
                 chat.handleKeyWithWrapCols(key_event, aiCopilotInputWrapCols());
+                AppWindow.g_force_rebuild = true;
+                AppWindow.g_cells_valid = false;
+                return;
+            }
+        }
+    }
+
+    // A focused preview leaf consumes plain navigation keys for scroll/pan.
+    // Only engaged when a preview actually holds focus; otherwise this block is
+    // skipped entirely and terminal/copilot key handling is unchanged. Modified
+    // keys (ctrl/shift/alt/super) are left for keybinds and the terminal.
+    if (AppWindow.focusedPreviewPane()) |p| {
+        if (!ev.ctrl and !ev.shift and !ev.alt and !ev.super) {
+            var consumed = true;
+            switch (ev.key_code) {
+                platform_input.key_page_up => if (p.kind == .pdf) {
+                    _ = p.flipPdfPage(false);
+                } else p.scrollBy(-360),
+                platform_input.key_page_down => if (p.kind == .pdf) {
+                    _ = p.flipPdfPage(true);
+                } else p.scrollBy(360),
+                platform_input.key_up => if (p.kind.isRaster()) {
+                    _ = p.panImageBy(0, 40);
+                } else p.scrollBy(-60),
+                platform_input.key_down => if (p.kind.isRaster()) {
+                    _ = p.panImageBy(0, -40);
+                } else p.scrollBy(60),
+                platform_input.key_left => if (p.kind.isRaster()) {
+                    _ = openPreviewGalleryNeighbor(p, false);
+                } else {
+                    consumed = false;
+                },
+                platform_input.key_right => if (p.kind.isRaster()) {
+                    _ = openPreviewGalleryNeighbor(p, true);
+                } else {
+                    consumed = false;
+                },
+                platform_input.key_home => p.scrollBy(-1_000_000),
+                platform_input.key_end => p.scrollBy(1_000_000),
+                else => consumed = false,
+            }
+            if (consumed) {
                 AppWindow.g_force_rebuild = true;
                 AppWindow.g_cells_valid = false;
                 return;
@@ -1571,39 +2544,8 @@ fn hitTestFileExplorerCloseButton(xpos: f64, ypos: f64) bool {
     return hit_test.panelHeaderCloseButton(fileExplorerHeaderLayout() orelse return false, xpos, ypos);
 }
 
-fn hitTestMarkdownPreviewPanel(xpos: f64, ypos: f64) bool {
-    if (!markdown_preview_panel.isVisibleForActiveTab()) return false;
-    if (ypos < titlebarHeight()) return false;
-    const win = AppWindow.g_window orelse return false;
-    const size = clientSize(win);
-    const preview_w: f64 = @floatCast(markdown_preview_panel.width());
-    const panel_x: f64 = @as(f64, @floatFromInt(size.width)) - preview_w;
-    return xpos >= panel_x and xpos < panel_x + preview_w;
-}
-
-fn markdownPreviewHeaderLayout() ?hit_test.PanelHeaderLayout {
-    if (!markdown_preview_panel.isVisibleForActiveTab()) return null;
-    const win = AppWindow.g_window orelse return null;
-    const size = clientSize(win);
-    const preview_w: f64 = @floatCast(markdown_preview_panel.width());
-    const panel_x: f64 = @as(f64, @floatFromInt(size.width)) - preview_w;
-    return .{
-        .visible = true,
-        .left = panel_x,
-        .right = panel_x + preview_w,
-        .top = titlebarHeight(),
-        .height = @floatCast(AppWindow.markdown_preview_renderer.HEADER_HEIGHT),
-    };
-}
-
-fn hitTestMarkdownPreviewCloseButton(xpos: f64, ypos: f64) bool {
-    return hit_test.panelHeaderCloseButton(markdownPreviewHeaderLayout() orelse return false, xpos, ypos);
-}
-
-fn hitTestMarkdownPreviewHeader(xpos: f64, ypos: f64) bool {
-    const layout = markdownPreviewHeaderLayout() orelse return false;
-    return xpos >= layout.left and xpos < layout.right and
-        ypos >= layout.top and ypos < layout.top + layout.height;
+fn hitTestFileExplorerRefreshButton(xpos: f64, ypos: f64) bool {
+    return hit_test.panelHeaderSecondButton(fileExplorerHeaderLayout() orelse return false, xpos, ypos);
 }
 
 fn browserPanelBounds() ?browser_panel.Bounds {
@@ -1650,6 +2592,23 @@ fn browserHeaderLayout() ?hit_test.PanelHeaderLayout {
 
 fn hitTestBrowserCloseButton(xpos: f64, ypos: f64) bool {
     return hit_test.panelHeaderCloseButton(browserHeaderLayout() orelse return false, xpos, ypos);
+}
+
+fn hitTestBrowserToggleButton(xpos: f64, ypos: f64) bool {
+    return hit_test.panelHeaderSecondButton(browserHeaderLayout() orelse return false, xpos, ypos);
+}
+
+fn hitTestBrowserRefreshButton(xpos: f64, ypos: f64) bool {
+    return hit_test.panelHeaderButton(browserHeaderLayout() orelse return false, 2, xpos, ypos);
+}
+
+fn toggleBrowserDisplayMode() void {
+    browser_panel.setDisplayMode(if (browser_panel.displayMode() == .full) .side else .full);
+    if (AppWindow.g_window) |win| {
+        syncPanelGridFromWindow(win);
+    }
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
 }
 
 fn aiCopilotHeaderLayout() ?hit_test.PanelHeaderLayout {
@@ -1732,28 +2691,6 @@ fn applyAiCopilotWidthFromMouse(xpos: f64) void {
     AppWindow.g_cells_valid = false;
 }
 
-fn hitTestMarkdownPreviewResizeHandle(xpos: f64, ypos: f64) bool {
-    if (!markdown_preview_panel.isVisibleForActiveTab()) return false;
-    if (ypos < titlebarHeight()) return false;
-    const win = AppWindow.g_window orelse return false;
-    const size = clientSize(win);
-    const preview_w: f64 = @floatCast(markdown_preview_panel.width());
-    const panel_x: f64 = @as(f64, @floatFromInt(size.width)) - preview_w;
-    const half_hit: f64 = @as(f64, @floatCast(markdown_preview_panel.RESIZE_HIT_WIDTH)) / 2;
-    return xpos >= panel_x - half_hit and xpos <= panel_x + half_hit;
-}
-
-fn applyMarkdownPreviewWidthFromMouse(xpos: f64) void {
-    const win = AppWindow.g_window orelse return;
-    const size = clientSize(win);
-    const right_edge = @as(f64, @floatFromInt(size.width));
-    const new_width = right_edge - xpos;
-    if (!markdown_preview_panel.setWidth(@floatCast(new_width), @floatFromInt(size.width))) return;
-    syncGridFromWindow(win);
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
-}
-
 fn hitTestFileExplorerResizeHandle(xpos: f64, ypos: f64) bool {
     if (!file_explorer.isVisibleForActiveTab()) return false;
     if (ypos < titlebarHeight()) return false;
@@ -1827,9 +2764,13 @@ fn handleFileExplorerKey(ev: platform_input.KeyEvent) bool {
             }
             return true;
         },
-        0x52 => { // 'R' key = rename
+        0x52 => { // 'R': bare = rename, Ctrl/Cmd+R = refresh
             if (!ev.ctrl and !ev.alt and !ev.super) {
                 file_explorer.startRename();
+                return true;
+            }
+            if ((ev.ctrl or ev.super) and !ev.alt and !ev.shift) {
+                file_explorer.refresh();
                 return true;
             }
             return false;
@@ -1866,14 +2807,20 @@ fn handleFileExplorerKey(ev: platform_input.KeyEvent) bool {
             }
             return false;
         },
-        0x55 => { // 'U' key = upload local file to remote
-            if (!ev.ctrl and !ev.alt and !ev.shift and !ev.super) {
-                if (file_explorer.g_mode == .remote) {
+        0x55 => { // 'U' = upload file; Shift+U = upload folder
+            if (file_explorer.g_mode == .remote and !ev.ctrl and !ev.alt and !ev.super) {
+                if (ev.shift) {
+                    openFolderDialogAndUpload();
+                } else {
                     openFileDialogAndUpload();
-                    return true;
                 }
+                return true;
             }
             return false;
+        },
+        platform_input.key_f5 => {
+            file_explorer.refresh();
+            return true;
         },
         else => return false,
     }
@@ -1935,6 +2882,23 @@ fn openFileDialogAndUpload() void {
     defer allocator.free(path);
 
     file_explorer.uploadFile(path);
+}
+
+fn openFolderDialogAndUpload() void {
+    const allocator = AppWindow.g_allocator orelse return;
+    const filters = [_]platform_file_dialog.Filter{.{ .name = "All Files", .pattern = "*.*" }};
+    const owner: platform_file_dialog.Owner = if (AppWindow.currentNativeHandleBits()) |handle_bits|
+        platform_file_dialog.windowOwner(handle_bits)
+    else
+        .{};
+    const path = platform_file_dialog.pickFolder(allocator, .{
+        .owner = owner,
+        .title = "Upload folder to remote",
+        .filters = &filters,
+    }) orelse return;
+    defer allocator.free(path);
+
+    file_explorer.uploadFolder(path);
 }
 
 fn handleFileExplorerPress(xpos: f64, ypos: f64, ctrl: bool, shift: bool, alt: bool, super: bool) void {
@@ -2099,6 +3063,45 @@ fn viewportCellCodepoint(surface: *Surface, col: usize, row: usize) u21 {
     return @intCast(cell_data.cell.codepoint());
 }
 
+fn viewportRowFlags(surface: *Surface, row: usize) struct { wraps_next: bool, continues_from_prev: bool } {
+    const row_pin = surface.terminal.screens.active.pages.pin(.{ .viewport = .{
+        .x = 0,
+        .y = @intCast(row),
+    } }) orelse return .{ .wraps_next = false, .continues_from_prev = false };
+    const rac = row_pin.rowAndCell();
+    return .{
+        .wraps_next = rac.row.wrap,
+        .continues_from_prev = rac.row.wrap_continuation,
+    };
+}
+
+const TerminalTokenGrid = struct {
+    surface: *Surface,
+    rows: usize,
+    cols: usize,
+
+    pub fn rowCount(self: TerminalTokenGrid) usize {
+        return self.rows;
+    }
+
+    pub fn colCount(self: TerminalTokenGrid, row: usize) usize {
+        _ = row;
+        return self.cols;
+    }
+
+    pub fn codepoint(self: TerminalTokenGrid, row: usize, col: usize) u21 {
+        return viewportCellCodepoint(self.surface, col, row);
+    }
+
+    pub fn wrapsNext(self: TerminalTokenGrid, row: usize) bool {
+        return viewportRowFlags(self.surface, row).wraps_next;
+    }
+
+    pub fn continuesFromPrev(self: TerminalTokenGrid, row: usize) bool {
+        return viewportRowFlags(self.surface, row).continues_from_prev;
+    }
+};
+
 fn markSelectionChanged() void {
     g_selection_changed_for_copy = true;
     AppWindow.g_force_rebuild = true;
@@ -2230,14 +3233,6 @@ fn selectParagraphAtCell(surface: *Surface, cell_pos: CellPos) bool {
     return true;
 }
 
-fn utf8CodepointCount(text: []const u8) usize {
-    const view = std.unicode.Utf8View.init(text) catch return text.len;
-    var it = view.iterator();
-    var count: usize = 0;
-    while (it.nextCodepoint() != null) count += 1;
-    return count;
-}
-
 fn extractTokenRangeAtCell(allocator: std.mem.Allocator, surface: *Surface, cell_pos: CellPos) ?TokenAtCell {
     const cols = @as(usize, @intCast(surface.size.grid.cols));
     const rows = @as(usize, @intCast(surface.size.grid.rows));
@@ -2247,47 +3242,22 @@ fn extractTokenRangeAtCell(allocator: std.mem.Allocator, surface: *Surface, cell
     surface.render_state.mutex.lock();
     defer surface.render_state.mutex.unlock();
 
-    if (preview_token.isDelimiter(viewportCellCodepoint(surface, click_col, cell_pos.row))) return null;
-
-    var start = click_col;
-    while (start > 0) {
-        const cp = viewportCellCodepoint(surface, start - 1, cell_pos.row);
-        if (preview_token.isDelimiter(cp)) break;
-        start -= 1;
-    }
-
-    var end = click_col + 1;
-    while (end < cols) : (end += 1) {
-        const cp = viewportCellCodepoint(surface, end, cell_pos.row);
-        if (preview_token.isDelimiter(cp)) break;
-    }
-
-    var token: std.ArrayListUnmanaged(u8) = .empty;
-    defer token.deinit(allocator);
-    var col = start;
-    while (col < end) : (col += 1) {
-        const cp = viewportCellCodepoint(surface, col, cell_pos.row);
-        if (preview_token.isDelimiter(cp)) break;
-        var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(cp, &buf) catch continue;
-        token.appendSlice(allocator, buf[0..len]) catch return null;
-    }
-
-    const span = preview_token.trimSpan(token.items);
-    if (span.start >= span.end) return null;
-
-    const leading_cols = utf8CodepointCount(token.items[0..span.start]);
-    const trailing_cols = utf8CodepointCount(token.items[span.end..]);
-    const start_col = @min(start + leading_cols, cols - 1);
-    const end_exclusive = if (end > trailing_cols) end - trailing_cols else start_col + 1;
-    const end_col = @max(start_col, @min(end_exclusive - 1, cols - 1));
-    const text = allocator.dupe(u8, token.items[span.start..span.end]) catch return null;
+    const grid = TerminalTokenGrid{
+        .surface = surface,
+        .rows = rows,
+        .cols = cols,
+    };
+    const token = preview_token.extractGridTokenAtCell(allocator, grid, .{
+        .row = cell_pos.row,
+        .col = click_col,
+    }) orelse return null;
 
     return .{
-        .text = text,
-        .row = cell_pos.row,
-        .start_col = start_col,
-        .end_col = end_col,
+        .text = token.text,
+        .start_row = token.start.row,
+        .end_row = token.end.row,
+        .start_col = token.start.col,
+        .end_col = token.end.col,
     };
 }
 
@@ -2318,10 +3288,11 @@ fn markUrlUnderlineDirty(surface: ?*Surface) void {
     AppWindow.g_force_rebuild = true;
 }
 
-fn setUrlUnderline(surface: *Surface, row_abs: usize, start_col: usize, end_col: usize) void {
+fn setUrlUnderline(surface: *Surface, start_row_abs: usize, end_row_abs: usize, start_col: usize, end_col: usize) void {
     const old_surface = g_url_underline.surface;
     if (g_url_underline.surface == surface and
-        g_url_underline.row_abs == row_abs and
+        g_url_underline.start_row_abs == start_row_abs and
+        g_url_underline.end_row_abs == end_row_abs and
         g_url_underline.start_col == start_col and
         g_url_underline.end_col == end_col)
     {
@@ -2330,7 +3301,8 @@ fn setUrlUnderline(surface: *Surface, row_abs: usize, start_col: usize, end_col:
 
     g_url_underline = .{
         .surface = surface,
-        .row_abs = row_abs,
+        .start_row_abs = start_row_abs,
+        .end_row_abs = end_row_abs,
         .start_col = start_col,
         .end_col = end_col,
     };
@@ -2345,12 +3317,18 @@ fn clearUrlUnderline() void {
     markUrlUnderlineDirty(old_surface);
 }
 
-pub fn isUrlUnderlineCell(surface: *Surface, col: usize, row: usize) bool {
-    if (g_url_underline.surface != surface) return false;
-    const abs_row = viewportOffsetForSurface(surface) + row;
-    return abs_row == g_url_underline.row_abs and
-        col >= g_url_underline.start_col and
-        col <= g_url_underline.end_col;
+/// The hover-underline range for `surface`, or null when no underline targets
+/// it. One call per frame — the renderer computes per-row spans itself (pure
+/// underline_span.colSpanForRow) using its snapshot-cached viewport offset,
+/// instead of a per-cell predicate that locked the surface each call.
+pub fn urlUnderlineRangeForSurface(surface: *Surface) ?underline_span.Range {
+    if (g_url_underline.surface != surface) return null;
+    return .{
+        .start_row_abs = g_url_underline.start_row_abs,
+        .end_row_abs = g_url_underline.end_row_abs,
+        .start_col = g_url_underline.start_col,
+        .end_col = g_url_underline.end_col,
+    };
 }
 
 fn extractPreviewPathAtCell(allocator: std.mem.Allocator, surface: *Surface, cell_pos: CellPos) ?[]u8 {
@@ -2365,7 +3343,7 @@ fn extractDownloadPathAtCell(allocator: std.mem.Allocator, surface: *Surface, ce
 
 fn extractPreviewPathRangeAtCell(allocator: std.mem.Allocator, surface: *Surface, cell_pos: CellPos) ?TokenAtCell {
     const token = extractTokenRangeAtCell(allocator, surface, cell_pos) orelse return null;
-    if (!looksLikePreviewPath(token.text)) {
+    if (!looksLikePreviewPath(token.text) and !html_server_model.isHtmlPath(token.text)) {
         token.deinit(allocator);
         return null;
     }
@@ -2426,10 +3404,43 @@ fn openUrlAtCell(surface: *Surface, cell_pos: CellPos) bool {
     const allocator = AppWindow.g_allocator orelse return false;
     const token = extractUrlRangeAtCell(allocator, surface, cell_pos) orelse return false;
     defer token.deinit(allocator);
-    setUrlUnderline(surface, viewportOffsetForSurface(surface) + token.row, token.start_col, token.end_col);
+    const vp_off = viewportOffsetForSurface(surface);
+    setUrlUnderline(surface, vp_off + token.start_row, vp_off + token.end_row, token.start_col, token.end_col);
     const opened = openUrl(surface, token.text);
     if (opened) clearUrlUnderline();
     return opened;
+}
+
+fn openHtmlPanelForCell(surface: *Surface, cell_pos: CellPos) bool {
+    const allocator = AppWindow.g_allocator orelse return false;
+    const path = extractPreviewPathAtCell(allocator, surface, cell_pos) orelse return false;
+    defer allocator.free(path);
+    if (!html_server_model.isHtmlPath(path)) return false;
+
+    var ls_prefix_buf: [256]u8 = undefined;
+    const ls_prefix = lsPrefixForCell(surface, cell_pos, &ls_prefix_buf);
+
+    switch (html_server.openForSurface(allocator, surface, path, ls_prefix)) {
+        .url => |url| {
+            defer allocator.free(url);
+            const parent = AppWindow.currentNativeHandle();
+            browser_panel.open(parent, url);
+            if (AppWindow.g_window) |win| syncPanelGridFromWindow(win);
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+            return true;
+        },
+        .err => |err| {
+            file_explorer.setTransferStatus(.failed, switch (err) {
+                error.CwdUnavailable => "HTML cwd unknown",
+                error.ServerUnavailable => "Install Python 3 in this environment",
+                error.ServerNotReady => "HTML server not reachable",
+                error.TunnelFailed => "HTML SSH tunnel failed",
+                else => "HTML preview failed",
+            });
+            return true;
+        },
+    }
 }
 
 fn updateInteractiveUnderlineAtMouse(xpos: f64, ypos: f64, ctrl: bool, shift: bool, alt: bool, super: bool) void {
@@ -2437,7 +3448,7 @@ fn updateInteractiveUnderlineAtMouse(xpos: f64, ypos: f64, ctrl: bool, shift: bo
         clearUrlUnderline();
         return;
     }
-    if (ypos < titlebarHeight() or hitTestFileExplorer(xpos, ypos) or hitTestMarkdownPreviewPanel(xpos, ypos) or hitTestBrowserPanel(xpos, ypos)) {
+    if (ypos < titlebarHeight() or hitTestFileExplorer(xpos, ypos) or hitTestBrowserPanel(xpos, ypos)) {
         clearUrlUnderline();
         return;
     }
@@ -2460,19 +3471,73 @@ fn updateInteractiveUnderlineAtMouse(xpos: f64, ypos: f64, ctrl: bool, shift: bo
     };
     defer token.deinit(allocator);
 
-    setUrlUnderline(surface, viewportOffsetForSurface(surface) + token.row, token.start_col, token.end_col);
+    const vp_off = viewportOffsetForSurface(surface);
+    setUrlUnderline(surface, vp_off + token.start_row, vp_off + token.end_row, token.start_col, token.end_col);
 }
 
 fn openPreviewAsync(kind: markdown_preview.Kind, title: []const u8, path: []const u8, source_kind: markdown_preview_panel.PreviewSourceKind) bool {
     const perf = ui_perf.begin("input.open_preview_async");
     defer perf.end();
 
-    AppWindow.hideAiCopilot();
-    if (!markdown_preview_panel.beginAsyncLoad(kind, title, path, source_kind)) {
+    const t = tab.activeTab() orelse return false;
+    const gpa = AppWindow.g_allocator orelse return false;
+    const pane: *PreviewPane = if (tab.previewForReuse(gpa, t, kind)) |h|
+        switch (t.tree.nodes[h.idx()]) {
+            .leaf => |pn| switch (pn) {
+                .preview => |p| p,
+                else => return false,
+            },
+            .split => return false,
+        }
+    else
+        (tab.splitIntoPreviewStacked(gpa) orelse return false);
+    // Select the just-opened/reused preview so Ctrl+Shift+W closes it (not the
+    // terminal) and PgUp/PgDn/arrows scroll it.
+    _ = tab.focusPreviewPane(pane);
+    if (!pane.beginAsyncLoad(kind, title, path, source_kind)) {
         file_explorer.setTransferStatus(.failed, "Preview failed");
         return true;
     }
-    if (AppWindow.g_window) |win| syncPanelGridFromWindow(win);
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+    return true;
+}
+
+fn openPreviewGalleryNeighbor(p: *PreviewPane, forward: bool) bool {
+    const gpa = AppWindow.g_allocator orelse return false;
+    var target = findPreviewGalleryNeighbor(gpa, p, forward) orelse return false;
+    defer target.deinit(gpa);
+
+    if (!p.beginAsyncLoad(target.kind, target.title(), target.path, p.currentSourceKind())) {
+        file_explorer.setTransferStatus(.failed, "Preview failed");
+        return false;
+    }
+
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+    return true;
+}
+
+fn findPreviewGalleryNeighbor(allocator: std.mem.Allocator, p: *const PreviewPane, forward: bool) ?preview_gallery.Target {
+    return switch (p.currentSourceKind()) {
+        .local => preview_gallery.findNeighbor(allocator, @as(file_backend.Backend, .local), p.path(), forward) catch null,
+        .wsl => preview_gallery.findNeighbor(allocator, @as(file_backend.Backend, .wsl), p.path(), forward) catch null,
+        .remote => |conn| preview_gallery.findNeighbor(allocator, .{ .ssh = &conn }, p.path(), forward) catch null,
+    };
+}
+
+fn openPreviewNew(kind: markdown_preview.Kind, title: []const u8, path: []const u8, source_kind: markdown_preview_panel.PreviewSourceKind) bool {
+    const perf = ui_perf.begin("input.open_preview_new");
+    defer perf.end();
+
+    const gpa = AppWindow.g_allocator orelse return false;
+    const pane = tab.splitIntoPreviewStacked(gpa) orelse return false;
+    // Select the new preview so Ctrl+Shift+W closes it (not the terminal).
+    _ = tab.focusPreviewPane(pane);
+    if (!pane.beginAsyncLoad(kind, title, path, source_kind)) {
+        file_explorer.setTransferStatus(.failed, "Preview failed");
+        return true;
+    }
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
     return true;
@@ -2513,13 +3578,32 @@ fn openFileExplorerPreview(row_idx: usize) bool {
     return openPreviewAsync(kind, title, path, source_kind);
 }
 
-fn openPreviewPanelForCell(surface: *Surface, cell_pos: CellPos) bool {
+/// Infer the `ls <dir>/` directory prefix for the clicked cell, copied into
+/// `out_buf`. The returned slice points into `out_buf`, so the caller's buffer
+/// must outlive every use of the result. Returns null when no nearby `ls`
+/// command applies. Holds `render_state.mutex` only for the grid scan.
+fn lsPrefixForCell(surface: *Surface, cell_pos: CellPos, out_buf: []u8) ?[]const u8 {
+    const cols = @as(usize, @intCast(surface.size.grid.cols));
+    const rows = @as(usize, @intCast(surface.size.grid.rows));
+    if (cols == 0 or rows == 0 or cell_pos.row >= rows) return null;
+
+    surface.render_state.mutex.lock();
+    defer surface.render_state.mutex.unlock();
+
+    const grid = TerminalTokenGrid{ .surface = surface, .rows = rows, .cols = cols };
+    return ls_path_context.inferPrefixForClick(grid, cell_pos.row, out_buf);
+}
+
+fn openPreviewPanelForCell(surface: *Surface, cell_pos: CellPos, shift: bool) bool {
     const allocator = AppWindow.g_allocator orelse return false;
     const path = extractPreviewPathAtCell(allocator, surface, cell_pos) orelse return false;
     defer allocator.free(path);
 
+    var ls_prefix_buf: [256]u8 = undefined;
+    const ls_prefix = lsPrefixForCell(surface, cell_pos, &ls_prefix_buf);
+
     if (markdown_preview.detectKind(path)) |kind| {
-        const resolved_path = resolveTerminalPreviewPath(allocator, surface, path) catch {
+        const resolved_path = resolveTerminalPreviewPath(allocator, surface, path, ls_prefix) catch {
             file_explorer.setTransferStatus(.failed, "Preview failed");
             return true;
         };
@@ -2530,7 +3614,11 @@ fn openPreviewPanelForCell(surface: *Surface, cell_pos: CellPos) bool {
             return true;
         };
 
-        return openPreviewAsync(kind, basenameForPreview(path), resolved_path, source_kind);
+        if (shift) {
+            return openPreviewNew(kind, basenameForPreview(path), resolved_path, source_kind);
+        } else {
+            return openPreviewAsync(kind, basenameForPreview(path), resolved_path, source_kind);
+        }
     }
 
     const command = buildPreviewCommand(allocator, path) orelse return false;
@@ -2541,6 +3629,37 @@ fn openPreviewPanelForCell(surface: *Surface, cell_pos: CellPos) bool {
     return true;
 }
 
+fn buildRemotePathKindCommand(buf: []u8, remote_path: []const u8) ?[]const u8 {
+    var path_expr_buf: [1024]u8 = undefined;
+    const path_expr = platform_remote_file.shellPathExpr(&path_expr_buf, remote_path) orelse return null;
+    return std.fmt.bufPrint(
+        buf,
+        "if test -d {s}; then printf d; elif test -e {s}; then printf f; else exit 1; fi",
+        .{ path_expr, path_expr },
+    ) catch null;
+}
+
+fn remotePathIsDirectoryForDownload(allocator: std.mem.Allocator, conn: *const @import("ssh_connection.zig").SshConnection, remote_path: []const u8) ?bool {
+    var cmd_buf: [2300]u8 = undefined;
+    const cmd = buildRemotePathKindCommand(cmd_buf[0..], remote_path) orelse return null;
+    const output = scp.sshExecCapped(allocator, conn, cmd, 8) orelse return null;
+    defer allocator.free(output);
+
+    const trimmed = std.mem.trim(u8, output, " \t\r\n");
+    if (std.mem.eql(u8, trimmed, "d")) return true;
+    if (std.mem.eql(u8, trimmed, "f")) return false;
+    return null;
+}
+
+test "input: remote download path kind command shell-quotes paths" {
+    var buf: [2300]u8 = undefined;
+    const cmd = buildRemotePathKindCommand(buf[0..], "/tmp/it's here") orelse return error.CommandTooLong;
+    try std.testing.expectEqualStrings(
+        "if test -d '/tmp/it'\\''s here'; then printf d; elif test -e '/tmp/it'\\''s here'; then printf f; else exit 1; fi",
+        cmd,
+    );
+}
+
 fn downloadTerminalFileAtCell(surface: *Surface, cell_pos: CellPos) bool {
     if (surface.launch_kind != .ssh) return false;
     const conn = surface.ssh_connection orelse return false;
@@ -2549,7 +3668,10 @@ fn downloadTerminalFileAtCell(surface: *Surface, cell_pos: CellPos) bool {
     const path = extractDownloadPathAtCell(allocator, surface, cell_pos) orelse return false;
     defer allocator.free(path);
 
-    const resolved_path = resolveTerminalPreviewPath(allocator, surface, path) catch |err| {
+    var ls_prefix_buf: [256]u8 = undefined;
+    const ls_prefix = lsPrefixForCell(surface, cell_pos, &ls_prefix_buf);
+
+    const resolved_path = resolveTerminalPreviewPath(allocator, surface, path, ls_prefix) catch |err| {
         if (err == error.CwdUnavailable) {
             file_explorer.setTransferStatusForKind(.download, .failed, "SSH cwd unknown");
             overlays.showSshCwdFallbackPrompt();
@@ -2562,6 +3684,7 @@ fn downloadTerminalFileAtCell(surface: *Surface, cell_pos: CellPos) bool {
 
     const name = basenameForPreview(resolved_path);
     if (name.len == 0) return false;
+    const is_dir = remotePathIsDirectoryForDownload(allocator, &conn, resolved_path) orelse false;
 
     var dl_buf: [260]u8 = undefined;
     const dl_path = getDownloadsFolder(&dl_buf);
@@ -2576,12 +3699,53 @@ fn downloadTerminalFileAtCell(surface: *Surface, cell_pos: CellPos) bool {
         return true;
     };
 
-    _ = file_explorer.downloadRemoteFileToPath(resolved_path, dst, name, &conn);
+    _ = file_explorer.downloadRemotePathToPath(resolved_path, dst, name, &conn, is_dir);
     return true;
+}
+
+/// Ctrl+right-click (Cmd on macOS) over a local terminal opens the file path
+/// under the cursor in the OS default app. Returns true only when it launched
+/// an open; false otherwise so the caller falls through to the configured
+/// right-click action (copy/paste) for plain right-clicks, remote terminals,
+/// empty space, and non-path text.
+fn openInEditorAtRightClick(ev: platform_input.MouseButtonEvent) bool {
+    const surface = split_layout.surfaceAtPoint(ev.x, ev.y) orelse return false;
+    if (!terminal_link_action.rightClickOpensInEditor(
+        surface.launch_kind,
+        primaryOpenMod(ev.ctrl, ev.super),
+        ev.shift,
+        ev.alt,
+    )) return false;
+
+    const allocator = AppWindow.g_allocator orelse return false;
+    const cell_pos = mouseToSurfaceCell(surface, @floatFromInt(ev.x), @floatFromInt(ev.y));
+
+    const path = extractPreviewPathAtCell(allocator, surface, cell_pos) orelse return false;
+    defer allocator.free(path);
+
+    var ls_prefix_buf: [256]u8 = undefined;
+    const ls_prefix = lsPrefixForCell(surface, cell_pos, &ls_prefix_buf);
+
+    const resolved = resolveTerminalPreviewPath(allocator, surface, path, ls_prefix) catch return false;
+    defer allocator.free(resolved);
+
+    return platform_open_url.open(allocator, .{ .url = resolved });
 }
 
 fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
     if (ev.action == .press) g_close_shortcut_confirm_until_ms = 0;
+    if (overlays.whatsNewVisible()) {
+        if (ev.button == .left and ev.action == .press) {
+            const win = AppWindow.g_window orelse return;
+            const fb = window_backend.framebufferSize(win);
+            const xpos: f64 = @floatFromInt(ev.x);
+            const ypos: f64 = @floatFromInt(ev.y);
+            _ = overlays.whatsNewExecuteAt(xpos, ypos, @floatFromInt(fb.width), @floatFromInt(fb.height));
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+        }
+        return;
+    }
     if (overlays.windowCloseConfirmVisible()) {
         if (ev.button == .left and ev.action == .press) {
             const win = AppWindow.g_window orelse return;
@@ -2705,6 +3869,18 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
         }
     }
 
+    // Alt + left-press begins a panel swap when the active terminal tab is
+    // split. Intercept here — before terminal mouse-reporting — so the gesture
+    // works even when the panel runs a full-screen mouse-tracking program. Only
+    // engages when the press lands inside a panel of a split tab; otherwise it
+    // falls through to the normal handling below.
+    if (ev.button == .left and ev.action == .press and ev.alt) {
+        if (beginPanelSwapIfSplit(ev.x, ev.y)) {
+            updateFocusFromMouse(ev.x, ev.y);
+            return;
+        }
+    }
+
     // Terminal mouse reporting (xterm 1000/1002/1003). When the focused
     // program has enabled mouse tracking, deliver button events to the PTY
     // instead of driving local selection / paste / context-menu. A release
@@ -2771,8 +3947,10 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
         return;
     }
 
-    // Right-click follows Ghostty-compatible right-click-action config.
+    // Ctrl+right-click (Cmd on macOS) over a local terminal opens the file under
+    // the cursor in the OS default app; otherwise follow the configured action.
     if (ev.button == .right and ev.action == .release) {
+        if (openInEditorAtRightClick(ev)) return;
         handleConfiguredRightClick();
         return;
     }
@@ -2798,12 +3976,22 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 closeFileExplorerPanel();
                 return;
             }
-            if (hitTestBrowserCloseButton(xpos, ypos)) {
-                closeBrowserPanel();
+            if (file_explorer.g_panel_mode == .files and hitTestFileExplorerRefreshButton(xpos, ypos)) {
+                file_explorer.refresh();
+                AppWindow.g_force_rebuild = true;
+                AppWindow.g_cells_valid = false;
                 return;
             }
-            if (hitTestMarkdownPreviewCloseButton(xpos, ypos)) {
-                closeMarkdownPreviewPanel();
+            if (hitTestBrowserRefreshButton(xpos, ypos)) {
+                refreshBrowserPanel();
+                return;
+            }
+            if (hitTestBrowserToggleButton(xpos, ypos)) {
+                toggleBrowserDisplayMode();
+                return;
+            }
+            if (hitTestBrowserCloseButton(xpos, ypos)) {
+                closeBrowserPanel();
                 return;
             }
             if (hitTestAiCopilotCloseButton(xpos, ypos)) {
@@ -2821,12 +4009,6 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             if (hitTestFileExplorerResizeHandle(xpos, ypos)) {
                 g_explorer_resize_dragging = true;
                 g_explorer_resize_hover = true;
-                platform_cursor.set(.size_we);
-                return;
-            }
-            if (hitTestMarkdownPreviewResizeHandle(xpos, ypos)) {
-                g_markdown_preview_resize_dragging = true;
-                g_markdown_preview_resize_hover = true;
                 platform_cursor.set(.size_we);
                 return;
             }
@@ -2868,20 +4050,6 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             // File explorer left sidebar click
             if (hitTestFileExplorer(xpos, ypos)) {
                 handleFileExplorerPress(xpos, ypos, ev.ctrl, ev.shift, ev.alt, ev.super);
-                return;
-            }
-
-            if (hitTestMarkdownPreviewPanel(xpos, ypos)) {
-                file_explorer.g_focused = false;
-                if (file_explorer.g_op_mode != .none) file_explorer.cancelOp();
-                if (hitTestMarkdownPreviewHeader(xpos, ypos)) return;
-                if (markdown_preview_panel.g_kind == .image and markdown_preview_panel.g_load_status == .ready) {
-                    g_markdown_preview_image_dragging = true;
-                    g_markdown_preview_image_hover = true;
-                    g_markdown_preview_image_drag_last_x = xpos;
-                    g_markdown_preview_image_drag_last_y = ypos;
-                    platform_cursor.set(.size_all);
-                }
                 return;
             }
 
@@ -3168,7 +4336,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 // Initialize per-surface resize tracking with current sizes
                 // so we only show overlays on surfaces that actually change
                 if (AppWindow.activeTab()) |tb| {
-                    var it = tb.tree.iterator();
+                    var it = tb.tree.surfaces();
                     while (it.next()) |entry| {
                         entry.surface.resize_overlay_active = false;
                         entry.surface.resize_overlay_last_cols = entry.surface.size.grid.cols;
@@ -3176,6 +4344,39 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                     }
                 }
                 return;
+            }
+
+            // A click on a preview's top-right × button closes that preview, so
+            // users who don't know the close-split keybind can dismiss it with
+            // the mouse. Checked before the focus/drag path below (the button
+            // sits inside the pane rect).
+            if (split_layout.previewCloseButtonAtPoint(ev.x, ev.y)) |close_handle| {
+                closePreviewPaneByHandle(close_handle);
+                return;
+            }
+
+            // A click on a preview leaf focuses it (so keyboard/wheel scroll-zoom
+            // route there) and consumes the event — previews have no terminal
+            // grid to select into. Terminal leaves fall through to the surface
+            // focus + selection path below, so non-preview clicks are unchanged.
+            // A ready image preview additionally starts a drag-to-pan.
+            if (split_layout.paneAtPoint(ev.x, ev.y)) |hit| {
+                switch (hit.pane) {
+                    .preview => |p| {
+                        const tb = AppWindow.activeTab() orelse return;
+                        if (tb.focused != hit.handle) {
+                            tb.focused = hit.handle;
+                            AppWindow.g_force_rebuild = true;
+                            AppWindow.g_cells_valid = false;
+                        }
+                        if (AppWindow.g_allocator) |gpa| {
+                            if (g_preview_image_drag.begin(gpa, p, xpos, ypos))
+                                platform_cursor.set(.size_all);
+                        }
+                        return;
+                    },
+                    .terminal => {},
+                }
             }
 
             // Find which surface was clicked and focus it
@@ -3187,9 +4388,11 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 for (0..split_layout.g_split_rect_count) |i| {
                     const rect = split_layout.g_split_rects[i];
                     if (!split_layout.cachedRectIsLive(rect)) continue;
-                    if (rect.surface == clicked_surface) {
-                        tb.focused = rect.handle;
-                        break;
+                    if (rect.surface()) |s| {
+                        if (s == clicked_surface) {
+                            tb.focused = rect.handle;
+                            break;
+                        }
                     }
                 }
                 if (tb.focused != previous_focus) {
@@ -3204,7 +4407,8 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 },
                 .open_url_or_preview => {
                     if (openUrlAtCell(clicked_surface, cell_pos)) return;
-                    if (openPreviewPanelForCell(clicked_surface, cell_pos)) return;
+                    if (openHtmlPanelForCell(clicked_surface, cell_pos)) return;
+                    if (openPreviewPanelForCell(clicked_surface, cell_pos, ev.shift)) return;
                 },
                 .pass_through => {},
             }
@@ -3239,6 +4443,11 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             }
         } else {
             // Mouse up
+            if (g_preview_image_drag.active()) {
+                releasePreviewImageDrag();
+                platform_cursor.set(.arrow);
+                return;
+            }
             overlays.scrollbar.g_scrollbar_dragging = false;
             g_scrollbar_drag_surface = null;
             g_ai_input_scroll_dragging = false;
@@ -3258,16 +4467,6 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 platform_cursor.set(.arrow);
                 return;
             }
-            if (g_markdown_preview_image_dragging) {
-                g_markdown_preview_image_dragging = false;
-                const cursor_shape: platform_cursor.Shape = if (hitTestMarkdownPreviewPanel(xpos, ypos) and markdown_preview_panel.g_kind == .image and markdown_preview_panel.g_load_status == .ready)
-                    .size_all
-                else
-                    .arrow;
-                g_markdown_preview_image_hover = cursor_shape == .size_all;
-                platform_cursor.set(cursor_shape);
-                return;
-            }
             if (g_sidebar_resize_dragging) {
                 g_sidebar_resize_dragging = false;
                 g_sidebar_resize_hover = hitTestSidebarResizeHandle(xpos, ypos);
@@ -3278,12 +4477,6 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 g_explorer_resize_dragging = false;
                 g_explorer_resize_hover = hitTestFileExplorerResizeHandle(xpos, ypos);
                 platform_cursor.set(if (g_explorer_resize_hover) .size_we else .arrow);
-                return;
-            }
-            if (g_markdown_preview_resize_dragging) {
-                g_markdown_preview_resize_dragging = false;
-                g_markdown_preview_resize_hover = hitTestMarkdownPreviewResizeHandle(xpos, ypos);
-                platform_cursor.set(if (g_markdown_preview_resize_hover) .size_we else .arrow);
                 return;
             }
             if (g_browser_resize_dragging) {
@@ -3299,6 +4492,9 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 return;
             }
 
+            // Handle Alt-drag panel swap release (performs the swap if valid).
+            if (finishPanelSwapDrag()) return;
+
             // Handle divider drag release
             if (g_divider_dragging) {
                 g_divider_dragging = false;
@@ -3306,7 +4502,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 g_divider_drag_layout = null;
                 // Reset per-surface resize overlay state
                 if (AppWindow.activeTab()) |tb| {
-                    var it = tb.tree.iterator();
+                    var it = tb.tree.surfaces();
                     while (it.next()) |entry| {
                         entry.surface.resize_overlay_active = false;
                     }
@@ -3519,11 +4715,6 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         platform_cursor.set(.size_we);
         return;
     }
-    if (g_markdown_preview_resize_dragging) {
-        applyMarkdownPreviewWidthFromMouse(xpos);
-        platform_cursor.set(.size_we);
-        return;
-    }
     if (g_browser_resize_dragging) {
         applyBrowserWidthFromMouse(xpos);
         platform_cursor.set(.size_we);
@@ -3547,17 +4738,17 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         platform_cursor.set(.ibeam);
         return;
     }
-    if (g_markdown_preview_image_dragging) {
-        const delta_x: f32 = @floatCast(xpos - g_markdown_preview_image_drag_last_x);
-        const delta_y: f32 = @floatCast(ypos - g_markdown_preview_image_drag_last_y);
-        g_markdown_preview_image_drag_last_x = xpos;
-        g_markdown_preview_image_drag_last_y = ypos;
-        if (markdown_preview_panel.panImageBy(delta_x, delta_y)) {
-            AppWindow.g_force_rebuild = true;
-        }
+    // Left-drag pans a ready image preview (the renderer clamps the pan to the
+    // image's overflow each frame).
+    if (g_preview_image_drag.active()) {
+        if (g_preview_image_drag.move(xpos, ypos)) AppWindow.g_force_rebuild = true;
         platform_cursor.set(.size_all);
         return;
     }
+    // Alt-drag panel swap: track the drop target / dim the source. Owns the move
+    // while a swap source is recorded, so it must precede PTY mouse-report and
+    // selection handling below.
+    if (updatePanelSwapDrag(ev.x, ev.y)) return;
 
     // Reported mouse drag: stream motion to the PTY (button/any tracking
     // modes) and suppress local hover/selection while the button is held.
@@ -3640,10 +4831,7 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         return;
     }
     if (!g_selecting and !overlays.scrollbar.g_scrollbar_dragging) {
-        if (hitTestMarkdownPreviewHeader(xpos, ypos) or hitTestAiCopilotCloseButton(xpos, ypos)) {
-            if (g_markdown_preview_image_hover) {
-                g_markdown_preview_image_hover = false;
-            }
+        if (hitTestAiCopilotCloseButton(xpos, ypos)) {
             platform_cursor.set(.arrow);
             return;
         }
@@ -3664,24 +4852,6 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         } else if (g_explorer_resize_hover) {
             platform_cursor.set(.arrow);
             g_explorer_resize_hover = false;
-        }
-        const over_preview_resize = hitTestMarkdownPreviewResizeHandle(xpos, ypos);
-        if (over_preview_resize) {
-            platform_cursor.set(.size_we);
-            g_markdown_preview_resize_hover = true;
-            return;
-        } else if (g_markdown_preview_resize_hover) {
-            platform_cursor.set(.arrow);
-            g_markdown_preview_resize_hover = false;
-        }
-        const over_preview_image = hitTestMarkdownPreviewPanel(xpos, ypos) and markdown_preview_panel.g_kind == .image and markdown_preview_panel.g_load_status == .ready;
-        if (over_preview_image) {
-            platform_cursor.set(.size_all);
-            g_markdown_preview_image_hover = true;
-            return;
-        } else if (g_markdown_preview_image_hover) {
-            platform_cursor.set(.arrow);
-            g_markdown_preview_image_hover = false;
         }
         const over_browser_resize = hitTestBrowserResizeHandle(xpos, ypos);
         if (over_browser_resize) {
@@ -3754,6 +4924,15 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
             platform_cursor.set(.arrow);
             g_divider_hover = false;
         }
+    }
+
+    // Track which preview's × button (if any) the mouse is over, so the renderer
+    // can brighten it. Re-render only when the hovered button changes.
+    const new_close_hover = if (!g_selecting) split_layout.previewCloseButtonAtPoint(ev.x, ev.y) else null;
+    if (new_close_hover != g_preview_close_hover) {
+        g_preview_close_hover = new_close_hover;
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
     }
 
     // Normal selection handling
@@ -3929,7 +5108,6 @@ fn terminalMouseReportTarget(x_i: i32, y_i: i32) ?*Surface {
     if (hitTestFileExplorer(xf, yf)) return null;
     if (hitTestBrowserUrlBar(xf, yf)) return null;
     if (hitTestBrowserPanel(xf, yf)) return null;
-    if (hitTestMarkdownPreviewPanel(xf, yf)) return null;
     if (aiCopilotRegionContains(xf, yf)) return null;
     const surface = split_layout.surfaceAtPoint(x_i, y_i) orelse return null;
     surface.render_state.mutex.lock();
@@ -3997,18 +5175,13 @@ fn reportMouseMotion(surface: *Surface, button: mouse_report.Button, ev: platfor
 
 fn handleMouseWheel(ev: platform_input.MouseWheelEvent) void {
     overlays.startupShortcutsDismiss();
-    if (tab.g_sidebar_visible and ev.xpos >= 0 and ev.xpos < @as(i32, @intFromFloat(titlebar.sidebarWidth()))) return;
-    if (hitTestBrowserPanel(@floatFromInt(ev.xpos), @floatFromInt(ev.ypos))) return;
-    if (hitTestMarkdownPreviewPanel(@floatFromInt(ev.xpos), @floatFromInt(ev.ypos))) {
-        if (markdown_preview_panel.g_kind == .image) {
-            _ = markdown_preview_panel.zoomImageBySteps(mouseWheelUnits(ev.delta), ev.delta > 0);
-        } else {
-            const delta: f32 = -@as(f32, @floatFromInt(ev.delta)) * 72.0 / 120.0;
-            markdown_preview_panel.scrollBy(delta);
-        }
+    if (overlays.whatsNewVisible()) {
+        overlays.whatsNewHandleScroll(@floatFromInt(ev.delta));
         AppWindow.g_force_rebuild = true;
         return;
     }
+    if (tab.g_sidebar_visible and ev.xpos >= 0 and ev.xpos < @as(i32, @intFromFloat(titlebar.sidebarWidth()))) return;
+    if (hitTestBrowserPanel(@floatFromInt(ev.xpos), @floatFromInt(ev.ypos))) return;
     // Scroll in file explorer
     if (file_explorer.isVisibleForActiveTab()) {
         const panel_x = @as(i32, @intFromFloat(titlebar.sidebarWidth()));
@@ -4111,6 +5284,26 @@ fn handleMouseWheel(ev: platform_input.MouseWheelEvent) void {
             }
         }
     }
+    // Wheel over a preview leaf scrolls/zooms that pane (mirroring the dock
+    // preview wheel logic above) and consumes the event. Terminal leaves fall
+    // through to the surface-scroll path below, so the default behavior is
+    // unchanged when the cursor is not over a preview.
+    if (split_layout.paneAtPoint(ev.xpos, ev.ypos)) |hit| {
+        if (hit.pane == .preview) {
+            const p = hit.pane.preview;
+            if (p.kind.isRaster()) {
+                // Continuous, per-event-bounded zoom: mouseWheelUnits is tuned
+                // for line-scrolling and turns macOS precise/trackpad deltas
+                // into a runaway 1.2^N zoom (see zoomImageByWheel).
+                _ = p.zoomImageByWheel(ev.delta);
+            } else {
+                const delta: f32 = -@as(f32, @floatFromInt(ev.delta)) * 72.0 / 120.0;
+                p.scrollBy(delta);
+            }
+            AppWindow.g_force_rebuild = true;
+            return;
+        }
+    }
     // Scroll the surface under the mouse cursor (like Ghostty), not the focused surface.
     // Fall back to focused surface if mouse is not over any split.
     const surface = split_layout.surfaceAtPoint(ev.xpos, ev.ypos) orelse AppWindow.activeSurface() orelse return;
@@ -4132,6 +5325,10 @@ fn handleMouseWheel(ev: platform_input.MouseWheelEvent) void {
         const notches = @as(f64, @floatFromInt(ev.delta)) / 120.0;
         const delta: isize = @intFromFloat(-notches * 3);
         surface.terminal.scrollViewport(.{ .delta = delta });
+        if (mouse_wheel_scroll.repaintFlagsForViewportScroll(delta)) |flags| {
+            AppWindow.g_force_rebuild = flags.force_rebuild;
+            AppWindow.g_cells_valid = flags.cells_valid;
+        }
 
         // Show scrollbar for the scrolled surface
         surface.scrollbar_opacity = 1.0;
@@ -4185,8 +5382,9 @@ fn toggleAiAgentPermission() void {
     defer cfg.deinit(allocator);
 
     const next = switch (cfg.@"ai-agent-permission") {
-        .confirm => "full",
-        .full => "confirm",
+        .confirm => "auto",
+        .auto => "full",
+        .full => "ask",
     };
     Config.setConfigValue(allocator, "ai-agent-permission", next) catch return;
     AppWindow.reloadConfigImmediate(allocator);

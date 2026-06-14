@@ -118,6 +118,8 @@ extern fn wispterm_macos_window_create(
 extern fn wispterm_macos_window_destroy(handle: NativeHandle) void;
 extern fn wispterm_macos_window_poll(handle: NativeHandle) void;
 extern fn wispterm_macos_window_close_requested(handle: NativeHandle) bool;
+extern fn wispterm_macos_window_visible(handle: NativeHandle) bool;
+extern fn wispterm_macos_window_is_key(handle: NativeHandle) bool;
 extern fn wispterm_macos_window_get_framebuffer_size(handle: NativeHandle, width: *i32, height: *i32, dpi: *u32) void;
 extern fn wispterm_macos_window_set_content_size(handle: NativeHandle, width: i32, height: i32) void;
 extern fn wispterm_macos_window_metal_layer(handle: NativeHandle) ?*anyopaque;
@@ -218,8 +220,13 @@ pub const Window = struct {
         self.drainFileDropEvents();
         self.drainInputEvents();
         self.refreshGeometry();
+        self.focused = wispterm_macos_window_is_key(self.hwnd);
         self.close_requested = self.close_requested or wispterm_macos_window_close_requested(self.hwnd);
         return !self.close_requested;
+    }
+
+    pub fn isVisible(self: *Window) bool {
+        return wispterm_macos_window_visible(self.hwnd);
     }
 
     pub fn swapBuffers(self: *Window) void {
@@ -427,6 +434,20 @@ test "macOS backend normalizes control-modified shortcut key codes" {
     try std.testing.expectEqual(@as(usize, 0xBC), wispterm_macos_window_test_map_key_code(43, ","));
     try std.testing.expectEqual(@as(usize, 0xDB), wispterm_macos_window_test_map_key_code(33, "["));
     try std.testing.expectEqual(@as(usize, 0xDD), wispterm_macos_window_test_map_key_code(30, "]"));
+
+    // Period (47), quote (39), semicolon (41), backslash (42) and slash (44) were
+    // missing from the ANSI map, so they fell through to their raw ASCII value —
+    // which collided with the hard-coded navigation/edit codes at the top of the
+    // switch: '.' -> 0x2E == key_delete rang the shell bell on every period (and
+    // '。', the same physical key), and '\'' -> 0x27 == key_right silently moved
+    // the cursor. They must map to their Windows VK_OEM codes instead.
+    try std.testing.expectEqual(@as(usize, 0xBE), wispterm_macos_window_test_map_key_code(47, "."));
+    try std.testing.expect(wispterm_macos_window_test_map_key_code(47, ".") != platform_input.key_delete);
+    try std.testing.expectEqual(@as(usize, 0xDE), wispterm_macos_window_test_map_key_code(39, "'"));
+    try std.testing.expect(wispterm_macos_window_test_map_key_code(39, "'") != platform_input.key_right);
+    try std.testing.expectEqual(@as(usize, 0xBA), wispterm_macos_window_test_map_key_code(41, ";"));
+    try std.testing.expectEqual(@as(usize, 0xDC), wispterm_macos_window_test_map_key_code(42, "\\"));
+    try std.testing.expectEqual(@as(usize, 0xBF), wispterm_macos_window_test_map_key_code(44, "/"));
 }
 
 test "macOS backend drains text, mouse, wheel, and IME preedit events" {
@@ -734,4 +755,62 @@ test "macOS backend drains file drop events" {
     try std.testing.expect(test_drop_seen);
     try std.testing.expectEqual(@as(i32, 11), test_drop_x);
     try std.testing.expectEqual(@as(i32, 22), test_drop_y);
+}
+
+// Worker-thread idle wait: every window past the first runs its loop on a
+// worker thread (Dock reopen / new-window), and the event-driven render gate
+// blocks in pumpAppEvents between frames. -[NSApp nextEventMatchingMask:] is
+// main-thread-only (AppKit throws NSInternalInconsistencyException off-main),
+// so off-main the pump must block on the wakeup condition instead.
+const WorkerPumpProbe = struct {
+    ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    elapsed_ms: std.atomic.Value(i64) = std.atomic.Value(i64).init(-1),
+
+    fn run(self: *@This()) void {
+        // Consume any wakeup signalled before this test (earlier tests push
+        // events) so the timed pump below measures only the test's wakeup.
+        platform_window.pumpAppEvents(0.001);
+        self.ready.store(true, .release);
+        var timer = std.time.Timer.start() catch unreachable;
+        platform_window.pumpAppEvents(5.0);
+        self.elapsed_ms.store(@intCast(timer.read() / std.time.ns_per_ms), .release);
+    }
+
+    fn awaitReady(self: *@This()) void {
+        while (!self.ready.load(.acquire)) std.Thread.yield() catch {};
+    }
+};
+
+test "macOS pumpAppEvents on a worker thread blocks and wakes on postWakeup" {
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("WispTerm Worker Pump");
+    var window = try Window.init(320, 180, title, null, null, false);
+    defer window.deinit();
+
+    var probe = WorkerPumpProbe{};
+    const worker = try std.Thread.spawn(.{}, WorkerPumpProbe.run, .{&probe});
+    probe.awaitReady();
+    // Even if this lands before the worker re-enters the pump, the wakeup must
+    // not be lost: the next pump call has to return immediately.
+    platform_window.postWakeup();
+    worker.join();
+
+    const elapsed = probe.elapsed_ms.load(.acquire);
+    try std.testing.expect(elapsed >= 0);
+    try std.testing.expect(elapsed < 3000);
+}
+
+test "macOS pumpAppEvents on a worker thread wakes when input is pushed" {
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("WispTerm Worker Pump Input");
+    var window = try Window.init(320, 180, title, null, null, false);
+    defer window.deinit();
+
+    var probe = WorkerPumpProbe{};
+    const worker = try std.Thread.spawn(.{}, WorkerPumpProbe.run, .{&probe});
+    probe.awaitReady();
+    wispterm_macos_window_test_push_key(window.hwnd, 0x41, false, false, false);
+    worker.join();
+
+    const elapsed = probe.elapsed_ms.load(.acquire);
+    try std.testing.expect(elapsed >= 0);
+    try std.testing.expect(elapsed < 3000);
 }

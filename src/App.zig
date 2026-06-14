@@ -11,6 +11,7 @@ const AppWindow = @import("AppWindow.zig");
 const ai_chat = @import("ai_chat.zig");
 const app_metadata = @import("app_metadata.zig");
 const keybind = @import("keybind.zig");
+const console_host_policy = @import("platform/console_host_policy.zig");
 const platform_com = @import("platform/com.zig");
 const platform_display = @import("platform/display.zig");
 const font_backend = @import("platform/font_backend.zig");
@@ -20,11 +21,16 @@ const window_backend = @import("platform/window_backend.zig");
 const remote = @import("remote_client.zig");
 const weixin = @import("weixin/controller.zig");
 const weixin_types = @import("weixin/types.zig");
+const ctl_server = @import("ctl/server.zig");
+const ctl_discovery = @import("ctl/discovery.zig");
+const port_forward_manager_mod = @import("port_forward_manager.zig");
 const platform_dirs = @import("platform/dirs.zig");
 const platform_open_url = @import("platform/open_url.zig");
 const update_check = @import("update_check.zig");
 const update_install = @import("update_install.zig");
 const skill_update = @import("skill_update.zig");
+const whats_new_gate = @import("whats_new_gate.zig");
+const platform_window_state = @import("platform/window_state.zig");
 
 const App = @This();
 
@@ -95,17 +101,29 @@ remote_client: ?*remote.Client,
 // WeChat direct (embedded ilink). Independent from the remote relay client.
 weixin_controller: ?*weixin.Controller,
 
+// Local agent terminal control API (wisptermctl). Created by startAgentControl().
+agent_control_server: ?*ctl_server.Server = null,
+
+port_forward_manager: port_forward_manager_mod.Manager,
+
 // AI agent config
 ai_agent_enabled: bool,
 ai_agent_permission: ai_chat.AgentPermission,
 ai_agent_command_timeout_ms: u32,
 ai_agent_output_limit: u32,
+ai_agent_working_dir: []const u8,
+ai_subagent_profile: []const u8,
+jina_api_key: []const u8,
+ai_memory_enabled: bool,
+ai_distill_suggest: bool,
+console_host_preference: console_host_policy.Preference,
 
 // Session persistence
 restore_tabs_on_startup: bool,
 
 // Update check state
 auto_update_check: bool,
+whats_new_on_update: bool,
 update_mutex: std.Thread.Mutex,
 update_result: update_check.CheckResult,
 update_latest_version_buf: [32]u8,
@@ -160,7 +178,18 @@ fn freeOptStr(allocator: std.mem.Allocator, s: ?[]const u8) void {
 }
 
 pub fn resolveShellCommandLine(out_buf: *platform_pty_command.CommandLineBuffer, cmd: []const u8) usize {
-    return platform_pty_command.resolveShellCommandLine(out_buf, cmd);
+    const len = platform_pty_command.resolveShellCommandLine(out_buf, cmd);
+    // shell=wsl (or any custom command that resolves to wsl.exe) is only honored
+    // when a WSL distro is actually installed. Otherwise fall back to a
+    // guaranteed local shell so the default tab does not spawn a broken wsl.exe
+    // pane that splits would then propagate.
+    if (platform_pty_command.shellFallBackDecision(
+        platform_pty_command.launchKindForCommand(out_buf[0..len :0]),
+        platform_pty_command.wslAvailable(),
+    )) {
+        return platform_pty_command.resolveShellCommandLine(out_buf, platform_pty_command.guaranteedLocalShellCommand());
+    }
+    return len;
 }
 
 /// Initialize the App with configuration.
@@ -187,6 +216,12 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
     errdefer if (remote_client_ptr) |client| client.destroy();
     const background_image = try dupeOptStr(allocator, cfg.@"background-image");
     errdefer freeOptStr(allocator, background_image);
+    const ai_agent_working_dir = try dupeStr(allocator, cfg.@"ai-agent-working-dir");
+    errdefer allocator.free(ai_agent_working_dir);
+    const ai_subagent_profile = try dupeStr(allocator, cfg.@"ai-subagent-profile");
+    errdefer allocator.free(ai_subagent_profile);
+    const jina_api_key = try dupeStr(allocator, cfg.@"jina-api-key");
+    errdefer allocator.free(jina_api_key);
 
     var app = App{
         .allocator = allocator,
@@ -232,12 +267,22 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
         .remote_client = remote_client_ptr,
         // Created later by startWeixin(), once App lives at a stable address.
         .weixin_controller = null,
+        // Created later by startAgentControl().
+        .agent_control_server = null,
+        .port_forward_manager = port_forward_manager_mod.Manager.init(allocator),
         .ai_agent_enabled = cfg.@"ai-agent-enabled",
         .ai_agent_permission = cfg.@"ai-agent-permission",
         .ai_agent_command_timeout_ms = cfg.@"ai-agent-command-timeout-ms",
         .ai_agent_output_limit = cfg.@"ai-agent-output-limit",
+        .ai_agent_working_dir = ai_agent_working_dir,
+        .ai_subagent_profile = ai_subagent_profile,
+        .jina_api_key = jina_api_key,
+        .ai_memory_enabled = cfg.@"ai-memory-enabled",
+        .ai_distill_suggest = cfg.@"ai-distill-suggest",
+        .console_host_preference = cfg.@"windows-conpty",
         .restore_tabs_on_startup = cfg.@"restore-tabs-on-startup",
         .auto_update_check = cfg.@"auto-update-check",
+        .whats_new_on_update = cfg.@"whats-new-on-update",
         .update_mutex = .{},
         .update_result = .{ .state = .idle },
         .update_latest_version_buf = undefined,
@@ -297,6 +342,30 @@ fn startRemoteClient(
     };
 }
 
+/// Load app-owned SSH forwarding rules and start enabled auto-start entries.
+/// Call after `App.init` returns and the App value is at its final address; the
+/// manager contains a mutex and child handles, so it should not be used before
+/// the App has settled.
+pub fn startPortForwarding(self: *App, cfg: *const Config) void {
+    if (platform_dirs.pathInConfigDir(self.allocator, "port_forwards")) |path| {
+        defer self.allocator.free(path);
+        self.port_forward_manager.setStoragePath(path) catch |err| {
+            std.debug.print("Port forwarding storage disabled: {}\n", .{err});
+            return;
+        };
+        if (self.port_forward_manager.load()) |loaded| {
+            if (loaded) {
+                std.debug.print("Port forwarding rules loaded from {s}\n", .{path});
+            }
+        } else |err| {
+            std.debug.print("Port forwarding rules load failed: {}\n", .{err});
+        }
+        self.port_forward_manager.startAuto(cfg.@"ssh-legacy-algorithms");
+    } else |err| {
+        std.debug.print("Port forwarding storage unavailable: {}\n", .{err});
+    }
+}
+
 // WeChat direct (embedded ilink). App owns the controller's lifecycle; the
 // Control vtable lives in AppWindow (it needs UI-thread tab/overlay state,
 // marshalled from the poller thread). See AppWindow.weixinControl.
@@ -323,6 +392,37 @@ pub fn startWeixin(self: *App, cfg: *const Config) void {
     };
     controller.start() catch {};
     self.weixin_controller = controller;
+}
+
+/// Starts the local agent terminal control API (wisptermctl) when enabled.
+/// Binds 127.0.0.1, generates a random token, and writes the discovery file
+/// (port + token, 0600) so the client can auto-connect. Call once, after App is
+/// at its final address (see main.zig). No-op unless agent-control-enabled.
+pub fn startAgentControl(self: *App, cfg: *const Config) void {
+    if (!cfg.@"agent-control-enabled") return;
+
+    var token_bytes: [16]u8 = undefined;
+    std.crypto.random.bytes(&token_bytes);
+    const token_hex = std.fmt.bytesToHex(token_bytes, .lower); // [32]u8
+
+    const server = ctl_server.Server.create(self.allocator, AppWindow.agentControl(), &token_hex, cfg.@"agent-control-port") catch |err| {
+        std.debug.print("agent-control disabled: {}\n", .{err});
+        return;
+    };
+    ctl_discovery.write(self.allocator, .{ .port = server.port, .token = server.token }) catch |err| {
+        std.debug.print("agent-control discovery file write failed: {}\n", .{err});
+        server.destroy();
+        return;
+    };
+    server.start() catch |err| {
+        std.debug.print("agent-control listener failed to start: {}\n", .{err});
+        ctl_discovery.remove(self.allocator);
+        server.destroy();
+        return;
+    };
+    self.agent_control_server = server;
+    AppWindow.enableAgentControl();
+    std.debug.print("agent-control listening on 127.0.0.1:{d}\n", .{server.port});
 }
 
 /// Get the shell command as a native null-terminated command line.
@@ -403,14 +503,36 @@ pub fn updateConfig(self: *App, cfg: *const Config) void {
     self.ai_agent_permission = cfg.@"ai-agent-permission";
     self.ai_agent_command_timeout_ms = cfg.@"ai-agent-command-timeout-ms";
     self.ai_agent_output_limit = cfg.@"ai-agent-output-limit";
+    self.replaceStr(&self.ai_agent_working_dir, cfg.@"ai-agent-working-dir");
+    self.replaceStr(&self.ai_subagent_profile, cfg.@"ai-subagent-profile");
+    self.replaceStr(&self.jina_api_key, cfg.@"jina-api-key");
+    self.ai_memory_enabled = cfg.@"ai-memory-enabled";
+    self.ai_distill_suggest = cfg.@"ai-distill-suggest";
+    self.console_host_preference = cfg.@"windows-conpty";
     self.restore_tabs_on_startup = cfg.@"restore-tabs-on-startup";
     self.auto_update_check = cfg.@"auto-update-check";
+    self.whats_new_on_update = cfg.@"whats-new-on-update";
     self.shell_cmd_len = resolveShellCommandLine(&self.shell_cmd_buf, cfg.shell);
 }
 
 // ============================================================================
 // Update checks
 // ============================================================================
+
+/// Decide whether to auto-show the "What's New" modal on launch, and record the
+/// current build as last-seen unconditionally (so the popup shows at most once
+/// per upgrade, and toggling the option off never resurfaces a stale popup).
+/// Returns true when the caller should open the modal.
+pub fn shouldShowWhatsNewOnStartup(self: *App, allocator: std.mem.Allocator) bool {
+    const current = app_metadata.version;
+    var seen_buf: [32]u8 = undefined;
+    const last_seen = platform_window_state.lastSeenVersion(allocator, &seen_buf);
+    const notes_present = app_metadata.release_notes.len > 0;
+    const show = self.whats_new_on_update and
+        whats_new_gate.whatsNewDecision(last_seen, current, notes_present) == .show;
+    platform_window_state.recordSeenVersion(allocator, current);
+    return show;
+}
 
 pub fn maybeStartStartupUpdateCheck(self: *App) void {
     var should_start = false;
@@ -1009,6 +1131,12 @@ pub fn deinit(self: *App) void {
         self.remote_client = null;
     }
 
+    if (self.agent_control_server) |server| {
+        server.destroy(); // stops + joins the accept thread, frees the listener
+        self.agent_control_server = null;
+        ctl_discovery.remove(self.allocator);
+    }
+
     if (self.weixin_controller) |controller| {
         if (!controller.destroyForProcessExit(.{
             .request_synchronous_io_cancel = platform_thread_control.requestSynchronousIoCancel,
@@ -1020,10 +1148,15 @@ pub fn deinit(self: *App) void {
         self.weixin_controller = null;
     }
 
+    self.port_forward_manager.deinit();
+
     // Free owned string copies
     self.allocator.free(self.font_family);
     freeOptStr(self.allocator, self.font_family_cjk);
     freeOptStr(self.allocator, self.font_family_fallback);
+    self.allocator.free(self.ai_agent_working_dir);
+    self.allocator.free(self.ai_subagent_profile);
+    self.allocator.free(self.jina_api_key);
     freeOptStr(self.allocator, self.shader_path);
     freeOptStr(self.allocator, self.title);
     freeOptStr(self.allocator, self.remote_server_url);

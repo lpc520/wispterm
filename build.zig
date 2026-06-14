@@ -12,8 +12,11 @@ comptime {
     }
 }
 
+const linux_system_libraries = [_][]const u8{ "SDL3", "fontconfig" };
+
 const windows_system_libraries = [_][]const u8{
     "user32",
+    "advapi32", // registry access for WSL availability detection
     "gdi32",
     "gdiplus",
     "dwmapi",
@@ -29,6 +32,7 @@ const windows_system_libraries = [_][]const u8{
 };
 
 const macos_app_frameworks = [_][]const u8{
+    "WebKit",
     "Metal",
     "QuartzCore",
     "AppKit",
@@ -38,6 +42,7 @@ const macos_app_frameworks = [_][]const u8{
     "UserNotifications",
     "CoreFoundation",
     "Carbon",
+    "ImageIO", // PDF preview page rasters are PNG-encoded with ImageIO
 };
 
 const macos_objective_c_sources = [_][]const u8{
@@ -47,6 +52,8 @@ const macos_objective_c_sources = [_][]const u8{
     "src/platform/services_macos_bridge.m",
     "src/platform/text_macos_bridge.m",
     "src/platform/menu_macos_bridge.m",
+    "src/platform/http_client_macos_bridge.m",
+    "src/platform/pdf_render_macos_bridge.m",
 };
 
 const MacosBundleMetadata = struct {
@@ -60,6 +67,7 @@ const MacosBundleMetadata = struct {
 const EmbeddedBrowserBackend = enum {
     none,
     webview2,
+    webkit,
 
     fn isSupported(self: EmbeddedBrowserBackend) bool {
         return self != .none;
@@ -81,9 +89,15 @@ const PlatformFeatures = struct {
     fn forOs(os_tag: std.Target.Os.Tag) PlatformFeatures {
         const uses_windows_backend = os_tag == .windows;
         const uses_macos_backend = os_tag == .macos;
-        const has_desktop_backend = uses_windows_backend or uses_macos_backend;
+        const uses_linux_backend = os_tag == .linux;
+        const has_desktop_backend = uses_windows_backend or uses_macos_backend or uses_linux_backend;
         const has_app_bundle = os_tag == .macos;
-        const embedded_browser_backend: EmbeddedBrowserBackend = if (uses_windows_backend) .webview2 else .none;
+        const embedded_browser_backend: EmbeddedBrowserBackend = if (uses_windows_backend)
+            .webview2
+        else if (uses_macos_backend)
+            .webkit
+        else
+            .none; // linux: webview disabled (SP5)
         return .{
             .supports_desktop_exe = has_desktop_backend,
             .supports_embedded_browser = embedded_browser_backend.isSupported(),
@@ -92,7 +106,7 @@ const PlatformFeatures = struct {
             .supports_gui_subsystem = uses_windows_backend,
             .supports_remote_transport = uses_windows_backend,
             .supports_app_bundle = has_app_bundle,
-            .system_libraries = if (uses_windows_backend) &windows_system_libraries else &.{},
+            .system_libraries = if (uses_windows_backend) &windows_system_libraries else if (uses_linux_backend) &linux_system_libraries else &.{},
             .app_frameworks = if (has_app_bundle) &macos_app_frameworks else &.{},
             .opengl_system_library = if (uses_windows_backend) "opengl32" else null,
         };
@@ -113,6 +127,19 @@ fn systemLibrariesFor(features: PlatformFeatures) []const []const u8 {
 
 fn appFrameworksFor(features: PlatformFeatures) []const []const u8 {
     return features.app_frameworks;
+}
+
+/// Resolve a pkg-config variable (e.g. "libdir", "includedir") for a system
+/// library at configure time, so build paths are not hardcoded per distro.
+/// Returns null when pkg-config or the variable is unavailable.
+fn pkgConfigVariable(b: *std.Build, lib: []const u8, variable: []const u8) ?[]const u8 {
+    const result = std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &.{ "pkg-config", b.fmt("--variable={s}", .{variable}), lib },
+    }) catch return null;
+    if (result.term != .Exited or result.term.Exited != 0) return null;
+    const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
+    return if (trimmed.len == 0) null else b.dupe(trimmed);
 }
 
 fn macosBundleMetadata() MacosBundleMetadata {
@@ -197,6 +224,11 @@ fn macosInfoPlist(allocator: std.mem.Allocator, app_version: []const u8) []const
         \\    <string>{s}</string>
         \\    <key>NSHighResolutionCapable</key>
         \\    <true/>
+        \\    <key>NSAppTransportSecurity</key>
+        \\    <dict>
+        \\        <key>NSAllowsLocalNetworking</key>
+        \\        <true/>
+        \\    </dict>
         \\</dict>
         \\</plist>
         \\
@@ -223,6 +255,7 @@ fn supportsMacosAppTarget(os_tag: std.Target.Os.Tag, cpu_arch: std.Target.Cpu.Ar
 fn webviewBridgeSourcePath(features: PlatformFeatures) ?[]const u8 {
     return switch (features.embedded_browser_backend) {
         .webview2 => "src/platform/webview2_bridge.c",
+        .webkit => "src/platform/webview_macos_bridge.m",
         .none => null,
     };
 }
@@ -264,7 +297,7 @@ test "platform feature gates enable implemented desktop artifacts" {
     try std.testing.expectEqualStrings("opengl32", windows.opengl_system_library.?);
 
     const linux = PlatformFeatures.forOs(.linux);
-    try std.testing.expect(!linux.supports_desktop_exe);
+    try std.testing.expect(linux.supports_desktop_exe);
     try std.testing.expect(!linux.supports_embedded_browser);
     try std.testing.expectEqual(EmbeddedBrowserBackend.none, linux.embedded_browser_backend);
     try std.testing.expect(!linux.supports_resource_manifest);
@@ -275,8 +308,8 @@ test "platform feature gates enable implemented desktop artifacts" {
 
     const macos = PlatformFeatures.forOs(.macos);
     try std.testing.expect(macos.supports_desktop_exe);
-    try std.testing.expect(!macos.supports_embedded_browser);
-    try std.testing.expectEqual(EmbeddedBrowserBackend.none, macos.embedded_browser_backend);
+    try std.testing.expect(macos.supports_embedded_browser);
+    try std.testing.expectEqual(EmbeddedBrowserBackend.webkit, macos.embedded_browser_backend);
     try std.testing.expect(!macos.supports_resource_manifest);
     try std.testing.expect(!macos.supports_gui_subsystem);
     try std.testing.expect(!macos.supports_remote_transport);
@@ -292,7 +325,9 @@ test "windows system libraries are gated by platform" {
     try std.testing.expectEqualStrings("shcore", systemLibrariesFor(windows)[12]);
 
     const linux = PlatformFeatures.forOs(.linux);
-    try std.testing.expectEqual(@as(usize, 0), systemLibrariesFor(linux).len);
+    try std.testing.expectEqual(@as(usize, 2), systemLibrariesFor(linux).len);
+    try std.testing.expectEqualStrings("SDL3", systemLibrariesFor(linux)[0]);
+    try std.testing.expectEqualStrings("fontconfig", systemLibrariesFor(linux)[1]);
 
     const macos = PlatformFeatures.forOs(.macos);
     try std.testing.expectEqual(@as(usize, 0), systemLibrariesFor(macos).len);
@@ -300,7 +335,8 @@ test "windows system libraries are gated by platform" {
 
 test "macOS platform advertises required app frameworks" {
     const frameworks = appFrameworksFor(PlatformFeatures.forOs(.macos));
-    try std.testing.expectEqual(@as(usize, 9), frameworks.len);
+    try std.testing.expectEqual(@as(usize, 11), frameworks.len);
+    try expectContainsString(frameworks, "WebKit");
     try expectContainsString(frameworks, "Metal");
     try expectContainsString(frameworks, "QuartzCore");
     try expectContainsString(frameworks, "AppKit");
@@ -310,6 +346,7 @@ test "macOS platform advertises required app frameworks" {
     try expectContainsString(frameworks, "CoreFoundation");
     try expectContainsString(frameworks, "Carbon");
     try expectContainsString(frameworks, "UserNotifications");
+    try expectContainsString(frameworks, "ImageIO");
 
     try std.testing.expectEqual(@as(usize, 0), appFrameworksFor(PlatformFeatures.forOs(.windows)).len);
     try std.testing.expectEqual(@as(usize, 0), appFrameworksFor(PlatformFeatures.forOs(.linux)).len);
@@ -321,7 +358,10 @@ test "webview bridge source is selected only for the webview platform backend" {
         webviewBridgeSourcePath(PlatformFeatures.forOs(.windows)).?,
     );
     try std.testing.expect(webviewBridgeSourcePath(PlatformFeatures.forOs(.linux)) == null);
-    try std.testing.expect(webviewBridgeSourcePath(PlatformFeatures.forOs(.macos)) == null);
+    try std.testing.expectEqualStrings(
+        "src/platform/webview_macos_bridge.m",
+        webviewBridgeSourcePath(PlatformFeatures.forOs(.macos)).?,
+    );
 }
 
 test "browser build option text does not expose concrete backend names" {
@@ -349,13 +389,13 @@ test "foreign target tests are compile-only by default" {
 
 test "desktop executable emission defaults to implemented platform backends" {
     try std.testing.expect(defaultEmitDesktopExe(PlatformFeatures.forOs(.windows)));
-    try std.testing.expect(!defaultEmitDesktopExe(PlatformFeatures.forOs(.linux)));
+    try std.testing.expect(defaultEmitDesktopExe(PlatformFeatures.forOs(.linux)));
     try std.testing.expect(defaultEmitDesktopExe(PlatformFeatures.forOs(.macos)));
 }
 
 test "shared compile checks default to platforms without desktop backends" {
     try std.testing.expect(!defaultEmitSharedCompileChecks(PlatformFeatures.forOs(.windows)));
-    try std.testing.expect(defaultEmitSharedCompileChecks(PlatformFeatures.forOs(.linux)));
+    try std.testing.expect(!defaultEmitSharedCompileChecks(PlatformFeatures.forOs(.linux)));
     try std.testing.expect(!defaultEmitSharedCompileChecks(PlatformFeatures.forOs(.macos)));
 }
 
@@ -450,6 +490,8 @@ test "macOS Info.plist renders app bundle metadata and package type" {
     try expectSourceContains(plist, "<string>1.2.3</string>");
     try expectSourceContains(plist, "<key>CFBundleIconFile</key>");
     try expectSourceContains(plist, "<string>WispTerm</string>");
+    try expectSourceContains(plist, "NSAppTransportSecurity");
+    try expectSourceContains(plist, "NSAllowsLocalNetworking");
 }
 
 test "macOS app bundle links required native frameworks" {
@@ -519,6 +561,16 @@ pub fn build(b: *std.Build) void {
             .name = "wispterm",
             .root_module = exe_mod,
         });
+        if (target.result.os.tag == .linux) {
+            // libSDL3.so / libfontconfig reference glibc symbols (pthread_*,
+            // dlsym, stat) at versions above Zig's default glibc stubs for
+            // x86_64-linux-gnu; they are resolved at runtime by the system
+            // glibc. Let the linker leave those system-shared-library undefined
+            // symbols unresolved — ReleaseFast enforces
+            // --no-allow-shlib-undefined (Debug does not), so a release build
+            // would otherwise fail to link.
+            exe.linker_allow_shlib_undefined = true;
+        }
         if (platform.supports_app_bundle) {
             apple_sdk.addPaths(b, exe) catch @panic("failed to locate native Apple SDK for macOS app executable");
         }
@@ -530,6 +582,42 @@ pub fn build(b: *std.Build) void {
         }
 
         b.installArtifact(exe);
+
+        if (target.result.os.tag == .windows) {
+            const askpass_mod = b.createModule(.{
+                .root_source_file = b.path("src/ssh_askpass.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            const askpass_exe = b.addExecutable(.{
+                .name = "wispterm-ssh-askpass",
+                .root_module = askpass_mod,
+            });
+            askpass_exe.subsystem = .Windows;
+            b.installArtifact(askpass_exe);
+        }
+
+        // Standalone CLI client for the agent terminal control API. Lean: it
+        // imports only ctl/* + platform/dirs.zig (std/builtin), so it links
+        // without any GUI/SDL dependencies on every desktop target.
+        //
+        // Deliberately NOT part of the default install / app packaging:
+        // wisptermctl ships as a separate artifact for third-party agents
+        // (Claude Code / Codex / scripts). The release workflows run a plain
+        // `zig build` and copy named files, so the client never lands in the
+        // app bundle. Build it on its own with `zig build wisptermctl`.
+        const ctl_mod = b.createModule(.{
+            .root_source_file = b.path("src/wisptermctl.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const ctl_exe = b.addExecutable(.{
+            .name = "wisptermctl",
+            .root_module = ctl_mod,
+        });
+        if (platform.supports_gui_subsystem) ctl_exe.subsystem = .Console; // it is a CLI
+        const wisptermctl_step = b.step("wisptermctl", "Build the standalone wisptermctl CLI client (separate artifact; not bundled with the app)");
+        wisptermctl_step.dependOn(&b.addInstallArtifact(ctl_exe, .{}).step);
     }
 
     b.installDirectory(.{
@@ -575,6 +663,7 @@ pub fn build(b: *std.Build) void {
     });
     const fast_test_options = b.addOptions();
     fast_test_options.addOption([]const u8, "app_version", app_version);
+    fast_test_options.addOption([]const u8, "release_notes", "");
     fast_test_mod.addOptions("build_options", fast_test_options);
     // Mirror the app's doc embeds: a fast-test module (ai_chat_protocol) pulls in
     // wispterm_docs, whose @embedFile names must resolve here too.
@@ -583,34 +672,44 @@ pub fn build(b: *std.Build) void {
     fast_test_mod.addAnonymousImport("wispterm_doc_ai_agent", .{ .root_source_file = b.path("docs/ai-agent.md") });
     fast_test_mod.addAnonymousImport("wispterm_doc_file_explorer", .{ .root_source_file = b.path("docs/file-explorer.md") });
     fast_test_mod.addAnonymousImport("wispterm_doc_media", .{ .root_source_file = b.path("docs/media.md") });
+    fast_test_mod.addAnonymousImport("wispterm_doc_tabs_panels", .{ .root_source_file = b.path("docs/tabs-panels.md") });
     const fast_tests = b.addTest(.{
         .name = "wispterm-fast-test",
         .root_module = fast_test_mod,
     });
-    // On a macOS host the fast suite's dependency graph reaches
-    // `platform/text.zig` → `text_macos.zig`, whose `caseInsensitiveCompare`
-    // bridge lives in `text_macos_bridge.m` (Foundation only). Link it so the
-    // native logic suite resolves the symbol. Non-macOS hosts select a
-    // different text backend (text_windows / text_unsupported) and need none.
-    if (b.graph.host.result.os.tag == .macos) {
-        fast_test_mod.link_libc = true;
-        fast_test_mod.addCSourceFile(.{
-            .file = b.path("src/platform/text_macos_bridge.m"),
-            .flags = &.{},
-            .language = .objective_c,
-        });
-        fast_test_mod.linkFramework("Foundation", .{});
-        fast_test_mod.linkFramework("CoreFoundation", .{});
-        apple_sdk.addPaths(b, fast_tests) catch @panic("failed to locate native Apple SDK for fast tests");
+    switch (b.graph.host.result.os.tag) {
+        .windows => fast_test_mod.linkSystemLibrary("winhttp", .{}),
+        .macos => {
+            fast_test_mod.link_libc = true;
+            fast_test_mod.addCSourceFile(.{
+                .file = b.path("src/platform/http_client_macos_bridge.m"),
+                .flags = &.{},
+                .language = .objective_c,
+            });
+            // The fast suite's graph also reaches platform/text.zig →
+            // text_macos.zig, whose caseInsensitiveCompare bridge lives in the
+            // Foundation-only text_macos_bridge.m. Link it so the symbol
+            // resolves on macOS hosts.
+            fast_test_mod.addCSourceFile(.{
+                .file = b.path("src/platform/text_macos_bridge.m"),
+                .flags = &.{},
+                .language = .objective_c,
+            });
+            fast_test_mod.linkFramework("Foundation", .{});
+            fast_test_mod.linkFramework("CoreFoundation", .{});
+            fast_test_mod.linkSystemLibrary("objc", .{});
+            apple_sdk.addPaths(b, fast_tests) catch @panic("failed to locate native Apple SDK for fast tests");
+        },
+        else => {},
     }
     test_step.dependOn(&b.addRunArtifact(fast_tests).step);
 
-    // Posix-only tests (socketpair virtual PTY + tmux pane I/O bridge) need libc
-    // and a real posix target. They can't run in the fast suite (no libc) or in
-    // the windows app test binary (where their `!= .windows` registration guards
-    // exclude them), so run them directly against the native host when it is
-    // posix. This is the only path under which `test-full` actually executes
-    // them; on a windows host they fall back to the guarded compile-only checks.
+    // Posix-native libc-linked tests: file I/O, libc (localtime), fork, plus the
+    // socketpair virtual-PTY and tmux pane I/O bridge tests. Runs on any
+    // non-Windows host. Added to test-full so the store tests (ai_loop_store)
+    // execute on the Linux CI host where test_main.zig is skipped (no desktop
+    // backend → supports_desktop_exe = false), and so the tmux posix tests run on
+    // a posix host (they are guarded out of the windows app test binary).
     if (b.graph.host.result.os.tag != .windows) {
         const posix_test_mod = b.createModule(.{
             .root_source_file = b.path("src/test_posix.zig"),
@@ -618,6 +717,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
         });
+        const posix_test_options = b.addOptions();
+        posix_test_options.addOption([]const u8, "app_version", app_version);
+        posix_test_options.addOption([]const u8, "release_notes", "");
+        posix_test_mod.addOptions("build_options", posix_test_options);
         const posix_tests = b.addTest(.{
             .name = "wispterm-posix-test",
             .root_module = posix_test_mod,
@@ -632,6 +735,7 @@ pub fn build(b: *std.Build) void {
     });
     const shared_test_options = b.addOptions();
     shared_test_options.addOption([]const u8, "app_version", app_version);
+    shared_test_options.addOption([]const u8, "release_notes", "");
     shared_test_mod.addOptions("build_options", shared_test_options);
 
     const shared_tests = b.addTest(.{
@@ -841,6 +945,7 @@ fn createAppModuleWithRoot(
     const app_options = b.addOptions();
     app_options.addOption(bool, "webview", webview);
     app_options.addOption([]const u8, "app_version", app_version);
+    app_options.addOption([]const u8, "release_notes", readReleaseNotes(b, app_version));
     app_mod.addOptions("build_options", app_options);
 
     // Embed user-facing docs so the wispterm_docs agent tool can read them at
@@ -851,6 +956,7 @@ fn createAppModuleWithRoot(
     app_mod.addAnonymousImport("wispterm_doc_ai_agent", .{ .root_source_file = b.path("docs/ai-agent.md") });
     app_mod.addAnonymousImport("wispterm_doc_file_explorer", .{ .root_source_file = b.path("docs/file-explorer.md") });
     app_mod.addAnonymousImport("wispterm_doc_media", .{ .root_source_file = b.path("docs/media.md") });
+    app_mod.addAnonymousImport("wispterm_doc_tabs_panels", .{ .root_source_file = b.path("docs/tabs-panels.md") });
 
     // Add ghostty-vt dependency with SIMD disabled for cross-compilation.
     if (b.lazyDependency("ghostty", .{
@@ -931,13 +1037,46 @@ fn createAppModuleWithRoot(
         }
     }
 
-    if (platform.opengl_system_library) |library| {
+    // System WinRT PDF rasterizer bridge (preview pane PDF support); loads its
+    // combase/shlwapi/shcore entry points dynamically, so no extra libraries.
+    if (target.result.os.tag == .windows) {
+        app_mod.addCSourceFile(.{
+            .file = b.path("src/platform/pdf_render_windows_bridge.c"),
+            .flags = &.{},
+        });
+    }
+
+    // OpenGL backend (Windows + Linux): the glad loader needs its include path
+    // and C source compiled in. macOS uses Metal and skips this.
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         app_mod.addIncludePath(b.path("vendor/glad/include"));
         app_mod.addCSourceFile(.{
             .file = b.path("vendor/glad/src/gl.c"),
             .flags = &.{},
         });
+    }
+
+    // Windows links the system OpenGL (opengl32); Linux gets its GL context and
+    // function loader from SDL3 (linked via systemLibrariesFor above), so it
+    // needs no separate GL system library.
+    if (platform.opengl_system_library) |library| {
         app_mod.linkSystemLibrary(library, .{});
+    }
+
+    if (target.result.os.tag == .linux) {
+        if (b.lazyDependency("sdl", .{ .target = target })) |dep| {
+            app_mod.addImport("sdl", dep.module("sdl"));
+        }
+        if (b.lazyDependency("fontconfig", .{ .target = target })) |dep| {
+            app_mod.addImport("fontconfig", dep.module("fontconfig"));
+        }
+        // libfontconfig lives in the system libdir; pkg-config does not emit it
+        // as a -L (it is a default search path for the system compiler, but Zig
+        // does not assume host paths). Discover it via pkg-config so we avoid a
+        // hardcoded, distro-specific multiarch path.
+        if (pkgConfigVariable(b, "fontconfig", "libdir")) |libdir| {
+            app_mod.addLibraryPath(.{ .cwd_relative = libdir });
+        }
     }
 
     if (platform.supports_app_bundle) {
@@ -951,9 +1090,11 @@ fn createAppModuleWithRoot(
     }
 
     if (webview) {
+        const bridge_source = webviewBridgeSourcePath(platform).?;
         app_mod.addCSourceFile(.{
-            .file = b.path(webviewBridgeSourcePath(platform).?),
+            .file = b.path(bridge_source),
             .flags = &.{},
+            .language = if (std.mem.endsWith(u8, bridge_source, ".m")) .objective_c else .c,
         });
     }
 
@@ -978,7 +1119,7 @@ fn addMacosAppBundle(
     platform: PlatformFeatures,
 ) *std.Build.Step.InstallDir {
     const metadata = macosBundleMetadata();
-    const macos_mod = createAppModule(b, target, optimize, app_version, platform, false);
+    const macos_mod = createAppModule(b, target, optimize, app_version, platform, platform.supports_embedded_browser);
 
     const exe = b.addExecutable(.{
         .name = metadata.executable_name,
@@ -1011,6 +1152,21 @@ fn addMacosAppBundle(
     });
     install_bundle.step.dependOn(&clean_existing_bundle.step);
     return install_bundle;
+}
+
+/// Read the release notes for `app_version` (`release-notes/vX.Y.Z.md`) at
+/// configure time so they can be embedded as a build option. Returns "" when the
+/// file is missing or unreadable — a missing notes file must never fail the build.
+fn readReleaseNotes(b: *std.Build, app_version: []const u8) []const u8 {
+    const path = std.fmt.allocPrint(b.allocator, "release-notes/v{s}.md", .{app_version}) catch return "";
+    return b.build_root.handle.readFileAllocOptions(
+        b.allocator,
+        path,
+        256 * 1024,
+        null,
+        .of(u8),
+        null,
+    ) catch "";
 }
 
 fn packageVersion(b: *std.Build) []const u8 {

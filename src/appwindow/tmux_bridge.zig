@@ -107,7 +107,7 @@ pub const TmuxBridge = struct {
         var old_ids: std.ArrayListUnmanaged(usize) = .empty;
         defer old_ids.deinit(self.alloc);
         {
-            var it = t.tree.iterator();
+            var it = t.tree.surfaces();
             while (it.next()) |entry| {
                 if (self.panes.findIdBySurface(entry.surface)) |id| {
                     try old_ids.append(self.alloc, id);
@@ -200,7 +200,7 @@ pub const TmuxBridge = struct {
         const p = self.panes.find(active) orelse return;
         const op = p.surface orelse return;
         const target: *Surface = @ptrCast(@alignCast(op));
-        var it = t.tree.iterator();
+        var it = t.tree.surfaces();
         while (it.next()) |entry| {
             if (entry.surface == target) {
                 t.focused = entry.handle;
@@ -219,7 +219,7 @@ pub const TmuxBridge = struct {
 
         var ids: std.ArrayListUnmanaged(usize) = .empty;
         defer ids.deinit(self.alloc);
-        var it = t.tree.iterator();
+        var it = t.tree.surfaces();
         while (it.next()) |entry| {
             if (self.panes.findIdBySurface(entry.surface)) |id| {
                 ids.append(self.alloc, id) catch continue;
@@ -295,7 +295,7 @@ pub const TmuxBridge = struct {
         while (ti < tab.g_tab_count) : (ti += 1) {
             const t = tab.g_tabs[ti] orelse continue;
             if (t.tmux_owner != ownerPtr(self)) continue;
-            var it = t.tree.iterator();
+            var it = t.tree.surfaces();
             while (it.next()) |entry| {
                 if (@as(*anyopaque, @ptrCast(entry.surface)) == surface) return true;
             }
@@ -332,7 +332,7 @@ pub const TmuxBridge = struct {
         // Drop this window's panes from the PaneMap (closes their controllers)
         // before
         // closeTab destroys the surfaces. removePane never touches the surface.
-        var it = t.tree.iterator();
+        var it = t.tree.surfaces();
         while (it.next()) |entry| {
             if (self.panes.findIdBySurface(entry.surface)) |id| self.panes.removePane(id);
         }
@@ -361,7 +361,7 @@ pub const TmuxBridge = struct {
         while (ti < tab.g_tab_count) : (ti += 1) {
             const t = tab.g_tabs[ti] orelse continue;
             if (t.kind != .terminal) continue;
-            var it = t.tree.iterator();
+            var it = t.tree.surfaces();
             while (it.next()) |entry| {
                 if (entry.surface == target) {
                     t.focused = entry.handle;
@@ -504,7 +504,7 @@ test "pruneDetachedPanes drops mappings not referenced by live owned tabs" {
         .surface = &detached_surface,
     });
 
-    var nodes = [_]SplitTree.Node{.{ .leaf = &live_surface }};
+    var nodes = [_]SplitTree.Node{.{ .leaf = .{ .terminal = &live_surface } }};
     var t: TabState = .{ .tree = .{
         .arena = undefined,
         .nodes = nodes[0..],

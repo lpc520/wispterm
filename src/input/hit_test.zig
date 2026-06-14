@@ -90,24 +90,45 @@ pub fn sidebarResizeHandle(l: SidebarLayout, x: f64, y: f64) bool {
     return x >= l.width - half_hit and x <= l.width + half_hit;
 }
 
+pub const PANEL_HEADER_BTN_GAP: f64 = 4;
+
+pub fn panelSecondButtonRect(l: PanelHeaderLayout) ?Rect {
+    return panelHeaderButtonRect(l, 1);
+}
+
+pub fn panelHeaderSecondButton(l: PanelHeaderLayout, x: f64, y: f64) bool {
+    return panelHeaderButton(l, 1, x, y);
+}
+
 pub fn panelHeaderCloseButton(l: PanelHeaderLayout, x: f64, y: f64) bool {
-    const rect = panelCloseButtonRect(l) orelse return false;
-    return x >= rect.left and x < rect.left + rect.width and
-        y >= rect.top and y < rect.top + rect.height;
+    return panelHeaderButton(l, 0, x, y);
 }
 
 pub fn panelCloseButtonRect(l: PanelHeaderLayout) ?Rect {
+    return panelHeaderButtonRect(l, 0);
+}
+
+pub fn panelHeaderButtonRect(l: PanelHeaderLayout, index_from_right: usize) ?Rect {
     if (!l.visible) return null;
     if (l.right <= l.left or l.height <= 0) return null;
     if (l.close_btn_w <= 0 or l.close_margin < 0) return null;
-    if ((l.right - l.left) <= l.close_btn_w + l.close_margin) return null;
+
+    const stride = l.close_btn_w + PANEL_HEADER_BTN_GAP;
+    const offset = @as(f64, @floatFromInt(index_from_right)) * stride;
+    const left = l.right - l.close_margin - l.close_btn_w - offset;
+    if (left <= l.left) return null;
 
     return .{
-        .left = l.right - l.close_margin - l.close_btn_w,
+        .left = left,
         .top = l.top,
         .width = l.close_btn_w,
         .height = l.height,
     };
+}
+
+pub fn panelHeaderButton(l: PanelHeaderLayout, index_from_right: usize, x: f64, y: f64) bool {
+    const r = panelHeaderButtonRect(l, index_from_right) orelse return false;
+    return x >= r.left and x < r.left + r.width and y >= r.top and y < r.top + r.height;
 }
 
 const sample: SidebarLayout = .{
@@ -213,4 +234,49 @@ test "panelCloseButtonRect: returns a reusable right-aligned rect" {
     var collapsed = sample_panel;
     collapsed.right = collapsed.left + collapsed.close_btn_w;
     try std.testing.expectEqual(@as(?Rect, null), panelCloseButtonRect(collapsed));
+}
+
+test "panelSecondButtonRect: sits just left of the close button" {
+    const close = panelCloseButtonRect(sample_panel).?;
+    const second = panelSecondButtonRect(sample_panel).?;
+    try std.testing.expectEqual(close.width, second.width);
+    try std.testing.expectEqual(close.top, second.top);
+    try std.testing.expect(second.left < close.left);
+    try std.testing.expect(second.left + second.width <= close.left);
+}
+
+test "panelHeaderButtonRect: indexes buttons from right to left" {
+    const close = panelHeaderButtonRect(sample_panel, 0).?;
+    const second = panelHeaderButtonRect(sample_panel, 1).?;
+    const third = panelHeaderButtonRect(sample_panel, 2).?;
+
+    try std.testing.expectEqual(@as(f64, 382), close.left);
+    try std.testing.expectEqual(@as(f64, 346), second.left);
+    try std.testing.expectEqual(@as(f64, 310), third.left);
+    try std.testing.expectEqual(close.width, second.width);
+    try std.testing.expectEqual(second.width, third.width);
+}
+
+test "panelHeaderButton: third button hit-test works" {
+    try std.testing.expect(panelHeaderButton(sample_panel, 2, 320, 50));
+    try std.testing.expect(!panelHeaderButton(sample_panel, 2, 346, 50));
+}
+
+test "panelHeaderSecondButton: sits left of the close button and is hit-distinct" {
+    const layout: PanelHeaderLayout = .{
+        .visible = true,
+        .left = 0,
+        .right = 400,
+        .top = 30,
+        .height = 40, // y spans [30, 70)
+    };
+    const close_rect = panelCloseButtonRect(layout).?;
+    const second_rect = panelSecondButtonRect(layout).?;
+    // Second button is strictly to the left of the close button.
+    try std.testing.expect(second_rect.left + second_rect.width <= close_rect.left);
+    // A point inside the second button hits second, not close.
+    const cx = second_rect.left + second_rect.width / 2;
+    const cy = 50;
+    try std.testing.expect(panelHeaderSecondButton(layout, cx, cy));
+    try std.testing.expect(!panelHeaderCloseButton(layout, cx, cy));
 }

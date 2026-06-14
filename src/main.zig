@@ -13,7 +13,9 @@ const app_metadata = @import("app_metadata.zig");
 const platform_console = @import("platform/console.zig");
 const font_backend = @import("platform/font_backend.zig");
 const render_diagnostics = @import("render_diagnostics.zig");
+const window_backend = @import("platform/window_backend.zig");
 const i18n = @import("i18n.zig");
+const ai_chat = @import("ai_chat.zig");
 
 // ============================================================================
 // Font Discovery Test Functions (use --list-fonts or --test-font-discovery)
@@ -167,13 +169,58 @@ pub fn main() !void {
     // exists, so the very first WM_SIZE/WM_DPICHANGED events are captured.
     render_diagnostics.enableFromConfig(cfg.@"wispterm-debug-render");
 
+    // Present-path selection must be decided before the first window is
+    // created (the presenter is built right after the GL context).
+    window_backend.setFlipPresentEnabled(cfg.@"wispterm-d3d-present");
+
+    // Bring-up crash fuse: presenter init runs driver code (wglDX*NV, D3D11)
+    // that broken ICDs crash in instead of failing — which previously meant
+    // the app never opened again on those machines. Leave a marker before
+    // the first attempt; AppWindow clears it after the first survived
+    // present. Finding our own marker at startup = last bring-up died →
+    // stop trying the D3D path for this app version (an upgrade retries).
+    if (comptime builtin.os.tag == .windows) {
+        if (cfg.@"wispterm-d3d-present") {
+            const window_state = @import("platform/window_state.zig");
+            const dxgi_core = @import("platform/dxgi_core.zig");
+            var stored_buf: [dxgi_core.bringup_marker_max_len]u8 = undefined;
+            const stored = window_state.d3dBringup(allocator, &stored_buf);
+            var marker_buf: [dxgi_core.bringup_marker_max_len]u8 = undefined;
+            switch (dxgi_core.bringupFuseDecision(stored, app_metadata.version)) {
+                .blocked => {
+                    window_backend.setFlipPresentEnabled(false);
+                    render_diagnostics.log("dx-present bring-up fuse tripped (\"{s}\") — GDI for this version", .{stored});
+                    std.debug.print("Win32: last DXGI present bring-up did not survive; using SwapBuffers for v{s}\n", .{app_metadata.version});
+                    if (dxgi_core.bringupMarkerIsProbing(stored)) {
+                        if (dxgi_core.bringupBlockedMarker(&marker_buf, app_metadata.version)) |m|
+                            window_state.recordD3dBringup(allocator, m)
+                        else |_| {}
+                    }
+                },
+                .attempt => {
+                    if (dxgi_core.bringupProbingMarker(&marker_buf, app_metadata.version)) |m|
+                        window_state.recordD3dBringup(allocator, m)
+                    else |_| {}
+                },
+            }
+        }
+    }
+
     // Create the App and run (first window on main thread, spawned windows on separate threads)
     var app = try App.init(allocator, cfg);
+    defer ai_chat.deinitAccessRules();
     defer app.deinit();
+    ai_chat.loadAccessRules(allocator);
 
-    // App now lives at a stable address; start the WeChat direct bridge (no-op
-    // unless weixin-direct-enabled is set).
+    // App now lives at a stable address; start app-owned background services
+    // before opening the first window.
+    app.startPortForwarding(&cfg);
+
+    // Start the WeChat direct bridge (no-op unless weixin-direct-enabled is set).
     app.startWeixin(&cfg);
+
+    // Start the local agent terminal control API (no-op unless agent-control-enabled).
+    app.startAgentControl(&cfg);
 
     try app.run();
 

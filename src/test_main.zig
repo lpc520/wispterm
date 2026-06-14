@@ -117,6 +117,20 @@ comptime {
         @compileError("App/AppWindow launch APIs must use native command line names, not UTF-16-specific names");
     }
 
+    const profile_codec_source = @embedFile("renderer/overlays/profile_codec.zig");
+    if (std.mem.indexOf(u8, profile_codec_source, "pub const SSH_FIELD_COUNT = 6") == null or
+        std.mem.indexOf(u8, profile_codec_source, "port_forward") != null)
+    {
+        @compileError("Port forwarding must not extend the existing ssh_hosts profile schema");
+    }
+
+    const ssh_tunnel_source = @embedFile("ssh_tunnel.zig");
+    if (std.mem.indexOf(u8, ssh_tunnel_source, "\"-L\"") == null or
+        std.mem.indexOf(u8, ssh_tunnel_source, "\"-R\"") != null)
+    {
+        @compileError("Existing URL SSH tunnel code must remain local-forwarding only");
+    }
+
     const shared_pty_sources = .{
         @embedFile("Surface.zig"),
         @embedFile("termio/Thread.zig"),
@@ -358,6 +372,20 @@ comptime {
     {
         @compileError("input/clipboard.zig must ask platform remote-file helpers to adapt local paths for terminal paste targets");
     }
+    // Image-preview drag-to-pan wiring guard: the behavior was silently lost
+    // once before (the #185 right-dock → pane migration) because it lived only
+    // in mouse glue. The state machine is unit-tested in
+    // input/preview_image_drag.zig; these checks pin the input.zig call sites
+    // that route mouse press/move/release into it.
+    if (std.mem.indexOf(u8, input_source, "g_preview_image_drag.begin(") == null) {
+        @compileError("input.zig mouse-down must start the image-preview pan drag via PreviewImageDrag.begin");
+    }
+    if (std.mem.indexOf(u8, input_source, "g_preview_image_drag.move(") == null) {
+        @compileError("input.zig mouse-move must pan the image preview via PreviewImageDrag.move");
+    }
+    if (std.mem.indexOf(u8, input_source, "g_preview_image_drag.release(") == null) {
+        @compileError("input.zig must drop the image-preview pan drag via PreviewImageDrag.release on mouse-up/cancel");
+    }
     const platform_wsl_source = @embedFile("platform/wsl.zig");
     if (std.mem.indexOf(u8, platform_wsl_source, "pub fn windowsPathToWslPathAlloc") != null or
         std.mem.indexOf(u8, platform_wsl_source, "pub fn unixPathToWindows") != null or
@@ -471,6 +499,7 @@ comptime {
     }
     if (std.mem.indexOf(u8, overlays_source, ".codex") != null or
         std.mem.indexOf(u8, overlays_source, ".claude") != null or
+        std.mem.indexOf(u8, overlays_source, ".reasonix") != null or
         std.mem.indexOf(u8, overlays_source, "parseMetadata") != null)
     {
         @compileError("renderer/overlays.zig must only launch AI History sources; provider scanning belongs in ai_history modules");
@@ -605,15 +634,19 @@ comptime {
     _ = @import("ai_chat_tools.zig");
     _ = @import("ai_chat_skills.zig");
     _ = @import("ai_chat_types.zig");
+    _ = @import("ai_agent_access.zig");
     _ = @import("ai_chat_protocol.zig");
     _ = @import("ai_chat_markdown.zig");
     _ = @import("agent_history.zig");
     _ = @import("ai_chat_composer_layout.zig");
     _ = @import("ai_chat_input_text.zig");
     _ = @import("ai_chat_composer.zig");
+    _ = @import("ai_loop_schedule.zig");
+    _ = @import("ai_loop_store.zig");
     _ = @import("ai_history_types.zig");
     _ = @import("ai_history_provider_codex.zig");
     _ = @import("ai_history_provider_claude.zig");
+    _ = @import("ai_history_provider_reasonix.zig");
     _ = @import("ai_history_source.zig");
     _ = @import("ai_history_cache.zig");
     _ = @import("ai_history_resume.zig");
@@ -621,9 +654,13 @@ comptime {
     _ = @import("renderer/ai_history_renderer.zig");
     _ = @import("agent_detector.zig");
     _ = @import("Surface.zig");
+    _ = @import("agent_prompt_answer.zig");
     _ = @import("App.zig");
     _ = @import("AppWindow.zig");
+    _ = @import("surface_registry.zig");
+    _ = @import("png_dimensions.zig");
     _ = @import("appwindow/flush_scheduler.zig");
+    _ = @import("appwindow/split_layout.zig");
     _ = @import("appwindow/tab.zig");
     _ = @import("appwindow/thread_message.zig");
     _ = @import("scp.zig");
@@ -632,6 +669,7 @@ comptime {
     _ = @import("build_guards.zig");
     _ = @import("command_center_state.zig");
     _ = @import("command_palette_model.zig");
+    _ = @import("openssh_config_import.zig");
     _ = @import("config.zig");
     _ = @import("i18n.zig");
     _ = @import("config_watcher.zig");
@@ -645,9 +683,16 @@ comptime {
     _ = @import("input/hit_test.zig");
     _ = @import("input/key.zig");
     _ = @import("input/preview_source.zig");
+    _ = @import("input/preview_image_drag.zig");
     _ = @import("input_shortcuts.zig");
+    _ = @import("html_server.zig");
     _ = @import("keybind.zig");
     _ = @import("kitty_graphics_unit.zig");
+    _ = @import("renderer/cell_update_unit.zig");
+    _ = @import("renderer/ui_batch.zig");
+    _ = @import("input/underline_span.zig");
+    _ = @import("agent_detect_throttle.zig");
+    _ = @import("surface_output_unit.zig");
     _ = @import("link_open.zig");
     _ = @import("markdown_preview.zig");
     _ = @import("markdown_text.zig");
@@ -674,6 +719,7 @@ comptime {
     _ = @import("platform/notifications.zig");
     _ = @import("platform/open_url.zig");
     _ = @import("platform/process.zig");
+    _ = @import("platform/console_host_policy.zig");
     _ = @import("platform/pty.zig");
     switch (@import("builtin").os.tag) {
         .windows, .linux, .macos => {
@@ -715,17 +761,32 @@ comptime {
     _ = @import("weixin/agent.zig");
     _ = @import("weixin/reply_progress.zig");
     _ = @import("weixin/ilink_codec.zig");
+    _ = @import("weixin/media_inbound.zig");
     _ = @import("weixin/ilink_client.zig");
     _ = @import("weixin/poller.zig");
     _ = @import("weixin/controller.zig");
     _ = @import("weixin/qr_code.zig");
     _ = @import("weixin/qr_panel.zig");
+    _ = @import("weixin/approval_reply.zig");
     _ = @import("renderer/overlay_keys.zig");
     _ = @import("close_confirm.zig");
     _ = @import("renderer/overlays.zig");
     _ = @import("selection_unit.zig");
     _ = @import("session_persist.zig");
+    _ = @import("agent_memory.zig");
     _ = @import("skill_registry.zig");
+    _ = @import("skill_scan.zig");
+    _ = @import("skill_install.zig");
+    _ = @import("skill_local_fs.zig");
+    _ = @import("skill_inventory.zig");
+    _ = @import("skill_inventory_cache.zig");
+    _ = @import("skill_center.zig");
+    _ = @import("renderer/skill_center_renderer.zig");
+    _ = @import("port_forward_rule.zig");
+    _ = @import("ssh_profile_store.zig");
+    _ = @import("port_forward_manager.zig");
+    _ = @import("port_forwarding.zig");
+    _ = @import("renderer/port_forwarding_renderer.zig");
     _ = @import("command_registry.zig");
     _ = @import("scrollbar_model.zig");
     _ = @import("ai_chat_scrollbar_model.zig");
@@ -734,6 +795,8 @@ comptime {
     _ = @import("startup_tabs.zig");
     _ = @import("system_browser.zig");
     _ = @import("split_tree.zig");
+    _ = @import("preview_pane.zig");
+    _ = @import("renderer/markdown_preview_renderer.zig");
     _ = @import("ui_perf.zig");
     _ = @import("update_check.zig");
     _ = @import("update_install.zig");

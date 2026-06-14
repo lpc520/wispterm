@@ -50,6 +50,7 @@ extern fn wispterm_macos_app_consume_reopen() bool;
 extern fn wispterm_macos_app_consume_quit() bool;
 extern fn wispterm_macos_app_request_quit() void;
 extern fn wispterm_macos_app_pump_events(timeout_seconds: f64) void;
+extern fn wispterm_macos_post_wakeup() void;
 
 pub fn appMessage(offset: u32) MessageId {
     return wm_app + offset;
@@ -253,9 +254,25 @@ pub fn requestQuit() void {
 
 /// Pump pending NSApp events; blocks up to `timeout_seconds` waiting for the
 /// first event so the main thread's run loop also drains the GCD main queue
-/// (needed for worker-thread dispatch_sync to the main thread).
+/// (needed for worker-thread dispatch_sync to the main thread). On worker
+/// threads (every window past the first) this must not touch NSApp — AppKit
+/// throws off-main — so the bridge instead blocks on a wakeup condition that
+/// input pushes, close requests, and postWakeup() signal.
 pub fn pumpAppEvents(timeout_seconds: f64) void {
     wispterm_macos_app_pump_events(timeout_seconds);
+}
+
+/// 从任意线程唤醒阻塞中的事件泵：主线程的 NSApp 泵和 worker 窗口的条件等待都会被唤醒。
+pub fn postWakeup() void {
+    wispterm_macos_post_wakeup();
+}
+
+pub fn registerEventWindow(hwnd: NativeHandle) void {
+    _ = hwnd;
+}
+
+pub fn unregisterEventWindow(hwnd: NativeHandle) void {
+    _ = hwnd;
 }
 
 test "macOS window constants defer caption controls to AppKit" {

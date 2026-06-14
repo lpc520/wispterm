@@ -3,6 +3,7 @@
 const std = @import("std");
 const Surface = @import("Surface.zig");
 const ssh_tunnel = @import("ssh_tunnel.zig");
+const html_server = @import("html_server.zig");
 const window_backend = @import("platform/window_backend.zig");
 const tab = @import("appwindow/tab.zig");
 const active_tab_state = @import("appwindow/active_tab.zig");
@@ -15,6 +16,7 @@ pub const RESIZE_HIT_WIDTH: f32 = 12;
 pub const URL_BAR_HEIGHT: f32 = 42;
 pub const URL_BAR_MARGIN: f32 = 8;
 pub const DEFAULT_URL = "http://localhost:3000";
+pub const DisplayMode = enum { side, full };
 
 pub const Bounds = struct {
     left: i32,
@@ -26,7 +28,16 @@ pub const Bounds = struct {
 pub threadlocal var g_visible: bool = false;
 pub threadlocal var g_owner_tab: ?usize = null;
 pub threadlocal var g_width: f32 = DEFAULT_WIDTH;
+pub threadlocal var g_display_mode: DisplayMode = .side;
 pub threadlocal var g_last_error: i32 = 0;
+
+pub fn setDisplayMode(mode: DisplayMode) void {
+    g_display_mode = mode;
+}
+
+pub fn displayMode() DisplayMode {
+    return g_display_mode;
+}
 
 pub fn urlBarBounds(bounds: Bounds) ?Bounds {
     const grip: i32 = @intFromFloat(@round(RESIZE_HIT_WIDTH));
@@ -140,12 +151,24 @@ pub fn toggleForSurface(allocator: std.mem.Allocator, parent: ?window_backend.Na
     return false;
 }
 
+pub fn openJupyterForSurface(allocator: std.mem.Allocator, parent: ?window_backend.NativeHandle, surface: ?*const Surface) bool {
+    _ = allocator;
+    _ = parent;
+    _ = surface;
+    g_visible = false;
+    g_owner_tab = null;
+    return false;
+}
+
 pub fn close() void {
     g_visible = false;
     g_owner_tab = null;
+    html_server.stopAll();
 }
 
 pub fn focus() void {}
+
+pub fn refresh() void {}
 
 pub fn isReady() bool {
     return false;
@@ -155,16 +178,18 @@ pub fn lastError() i32 {
     return g_last_error;
 }
 
-pub fn sync(parent: window_backend.NativeHandle, window_width: i32, window_height: i32, titlebar_height: f32, left_offset: f32, right_offset: f32) void {
+pub fn sync(parent: window_backend.NativeHandle, window_width: i32, window_height: i32, titlebar_height: f32, left_offset: f32, right_offset: f32, suppressed: bool) void {
     _ = parent;
     _ = window_width;
     _ = window_height;
     _ = titlebar_height;
     _ = left_offset;
     _ = right_offset;
+    _ = suppressed;
 }
 
 pub fn deinit() void {
+    html_server.stopAll();
     ssh_tunnel.deinit();
     g_visible = false;
     g_owner_tab = null;
@@ -259,4 +284,24 @@ test "browser_panel_stub: public parent handle API uses window backend handle" {
 
     const submit_info = @typeInfo(@TypeOf(submitUrlBar)).@"fn";
     try std.testing.expect(submit_info.params[1].type.? == ?window_backend.NativeHandle);
+
+    const open_jupyter_info = @typeInfo(@TypeOf(openJupyterForSurface)).@"fn";
+    try std.testing.expect(open_jupyter_info.params[1].type.? == ?window_backend.NativeHandle);
+    try std.testing.expect(open_jupyter_info.return_type.? == bool);
+
+    const set_mode_info = @typeInfo(@TypeOf(setDisplayMode)).@"fn";
+    try std.testing.expect(set_mode_info.params[0].type.? == DisplayMode);
+
+    const display_mode_info = @typeInfo(@TypeOf(displayMode)).@"fn";
+    try std.testing.expect(display_mode_info.return_type.? == DisplayMode);
+}
+
+test "browser_panel_stub: display mode API stores the requested mode" {
+    const saved_mode = g_display_mode;
+    defer g_display_mode = saved_mode;
+
+    setDisplayMode(.full);
+    try std.testing.expectEqual(DisplayMode.full, displayMode());
+    setDisplayMode(.side);
+    try std.testing.expectEqual(DisplayMode.side, displayMode());
 }

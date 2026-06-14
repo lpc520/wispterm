@@ -3,18 +3,21 @@ const builtin = @import("builtin");
 
 pub const Backend = enum {
     windows,
+    macos,
     unsupported,
 };
 
 pub fn backendForOs(os_tag: std.Target.Os.Tag) Backend {
     return switch (os_tag) {
         .windows => .windows,
+        .macos => .macos,
         else => .unsupported,
     };
 }
 
 const impl = switch (backendForOs(builtin.os.tag)) {
     .windows => @import("webview_windows.zig"),
+    .macos => @import("webview_macos.zig"),
     .unsupported => @import("webview_unsupported.zig"),
 };
 
@@ -60,6 +63,10 @@ pub fn navigate(browser: *Browser, url: Url) void {
     impl.navigate(browser, url);
 }
 
+pub fn reload(browser: *Browser) void {
+    impl.reload(browser);
+}
+
 pub fn isReady(browser: *Browser) bool {
     return impl.isReady(browser);
 }
@@ -100,6 +107,10 @@ test "platform webview exposes backend-neutral browser API" {
     try std.testing.expectEqual(@as(usize, 2), navigate_info.params.len);
     try std.testing.expect(navigate_info.params[1].type.? == @This().Url);
 
+    const reload_info = @typeInfo(@TypeOf(reload)).@"fn";
+    try std.testing.expectEqual(@as(usize, 1), reload_info.params.len);
+    try std.testing.expect(reload_info.params[0].type.? == *@This().Browser);
+
     var url_buf: UrlBuffer = undefined;
     const url = urlFromUtf8("https://example.test", &url_buf).?;
     try std.testing.expect(url.len > 0);
@@ -110,12 +121,12 @@ test "platform webview exposes backend-neutral browser API" {
 }
 
 test "platform webview reports unavailable when backend is unsupported" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows or builtin.os.tag == .macos) return error.SkipZigTest;
     try std.testing.expect(!loaderAvailable());
 }
 
 test "platform webview selects backend by target OS" {
     try std.testing.expectEqual(Backend.windows, backendForOs(.windows));
     try std.testing.expectEqual(Backend.unsupported, backendForOs(.linux));
-    try std.testing.expectEqual(Backend.unsupported, backendForOs(.macos));
+    try std.testing.expectEqual(Backend.macos, backendForOs(.macos));
 }

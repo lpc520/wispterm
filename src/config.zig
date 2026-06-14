@@ -22,6 +22,7 @@ const builtin = @import("builtin");
 const ai_agent_config = @import("ai_agent_config.zig");
 const keybind = @import("keybind.zig");
 const link_open = @import("link_open.zig");
+const console_host_policy = @import("platform/console_host_policy.zig");
 const platform_dirs = @import("platform/dirs.zig");
 const platform_editor = @import("platform/editor.zig");
 const platform_pty_command = @import("platform/pty_command.zig");
@@ -293,7 +294,17 @@ theme: ?[]const u8 = null,
 /// that is running a full-screen (non-shell) program.
 @"confirm-close-running-program": bool = true,
 
-/// Agent command permission mode: confirm (deny until approved UI exists) or full.
+/// Master on/off switch for the Copilot long-term memory system.
+/// When true, memory index is injected into the system prompt and the
+/// memory_save/memory_recall/memory_delete tools are advertised to the model.
+@"ai-memory-enabled": bool = true,
+
+/// When true, the Copilot appends a "This task looks reusable. Distill it into
+/// a skill?" prompt after tool-heavy turns. Off by default so the suggestion
+/// never appears unless the user opts in (see settings page / issue #184).
+@"ai-distill-suggest": bool = false,
+
+/// Agent command permission mode: ask, auto, or full.
 @"ai-agent-permission": ai_agent_config.AgentPermission = .confirm,
 
 /// Timeout budget for agent shell/SSH commands.
@@ -301,6 +312,20 @@ theme: ?[]const u8 = null,
 
 /// Maximum bytes returned from a single tool result.
 @"ai-agent-output-limit": u32 = 16 * 1024,
+
+/// Default working directory for the AI agent's local commands (empty = unset).
+@"ai-agent-working-dir": []const u8 = "",
+
+/// API key for Jina (https://jina.ai) — powers `$websearch` (s.jina.ai) and
+/// `$webread` (r.jina.ai). Optional for `$webread` (anonymous read works). Empty = unset.
+@"jina-api-key": []const u8 = "",
+
+/// Which Windows pseudo console host services terminal sessions: `auto`
+/// prefers a bundled modern ConPTY (conpty.dll + OpenConsole.exe next to
+/// wispterm.exe, shipped in the portable-compat package) with fallback to
+/// the OS inbox implementation; `system` always uses the inbox one.
+/// Ignored on non-Windows platforms.
+@"windows-conpty": console_host_policy.Preference = .auto,
 
 /// The shell to run in the terminal. Platform aliases are resolved by
 /// platform/pty_command.zig; any other value is treated as a raw command path.
@@ -310,6 +335,10 @@ shell: []const u8 = platform_pty_command.default_shell_name,
 /// remote auto-open, and the "New Agent" command. Empty falls back to the
 /// first saved profile.
 @"ai-default-profile": []const u8 = "",
+
+/// Name of the saved AI profile the Copilot `subagent` tool runs on. Empty =
+/// the subagent uses the main conversation's profile.
+@"ai-subagent-profile": []const u8 = "",
 
 /// UI language. auto follows the system locale. Restart required.
 language: i18n.LanguageSetting = .auto,
@@ -355,6 +384,15 @@ language: i18n.LanguageSetting = .auto,
 /// finish/confirm notifications to the bound WeChat owner. Opt-in; default off.
 @"weixin-notify-forward": bool = false,
 
+/// Enable the local agent terminal control API (wisptermctl). Lets external
+/// agents list panes / read text / send input over a loopback socket. Opt-in;
+/// default off. Binds 127.0.0.1 only; a random token + the chosen port are
+/// written to <config-dir>/agent-control.json (0600) for client auto-discovery.
+@"agent-control-enabled": bool = false,
+
+/// Fixed loopback port for the agent control API (0 = let the OS assign one).
+@"agent-control-port": u16 = 0,
+
 /// Show a debug FPS overlay in the bottom-right corner.
 @"wispterm-debug-fps": bool = false,
 @"wispterm-debug-draw-calls": bool = false,
@@ -364,6 +402,17 @@ language: i18n.LanguageSetting = .auto,
 /// the `WISPTERM_RENDER_DIAGNOSTICS=1` env var, but survives restarts and needs
 /// no shell setup — intended for users helping debug resize/DPI render glitches.
 @"wispterm-debug-render": bool = false,
+/// Present frames through a DXGI flip-model swapchain instead of GDI
+/// SwapBuffers (Windows only). The legacy BLT present goes through the DWM
+/// redirection surface, which on some iGPU drivers (Intel Arc, AMD) produces
+/// ghosting/black regions on cross-DPI drags and resizes (#46/#47/#88). Set to
+/// false to force the legacy path. Machines where the D3D path can't work
+/// revert to the legacy path automatically: at init (no interop / no DXGI
+/// adapter matching the GL context's GPU), at runtime (first-frames content
+/// probe + sustained-slow-present watchdog, both latch GDI for the session),
+/// and across launches (a bring-up that crashed the process trips a
+/// state-file fuse for that app version). Read at startup.
+@"wispterm-d3d-present": bool = true,
 
 // ============================================================================
 // Split pane configuration
@@ -386,6 +435,10 @@ language: i18n.LanguageSetting = .auto,
 
 /// Check GitHub Releases for a newer WispTerm version after startup.
 @"auto-update-check": bool = true,
+
+/// Show the "What's New" changelog once after upgrading to a newer build.
+/// Disables only the automatic popup; the command-center entry always works.
+@"whats-new-on-update": bool = true,
 
 /// Load an additional config file. Can be repeated. Relative paths are
 /// resolved relative to the file containing the directive. Prefix with
@@ -760,6 +813,22 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
         } else {
             log.warn("invalid confirm-close-running-program: {s}", .{value});
         }
+    } else if (std.mem.eql(u8, key, "ai-memory-enabled")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"ai-memory-enabled" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"ai-memory-enabled" = false;
+        } else {
+            log.warn("invalid ai-memory-enabled: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "ai-distill-suggest")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"ai-distill-suggest" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"ai-distill-suggest" = false;
+        } else {
+            log.warn("invalid ai-distill-suggest: {s}", .{value});
+        }
     } else if (std.mem.eql(u8, key, "right-click-action")) {
         if (RightClickAction.parse(value)) |action| {
             self.@"right-click-action" = action;
@@ -810,10 +879,22 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
             log.warn("invalid ai-agent-output-limit: {s}", .{value});
             return;
         };
+    } else if (std.mem.eql(u8, key, "ai-agent-working-dir")) {
+        self.@"ai-agent-working-dir" = self.dupeString(allocator, value) orelse return;
+    } else if (std.mem.eql(u8, key, "jina-api-key")) {
+        self.@"jina-api-key" = self.dupeString(allocator, value) orelse return;
+    } else if (std.mem.eql(u8, key, "windows-conpty")) {
+        if (console_host_policy.parsePreference(value)) |pref| {
+            self.@"windows-conpty" = pref;
+        } else {
+            log.warn("invalid windows-conpty: {s}", .{value});
+        }
     } else if (std.mem.eql(u8, key, "shell")) {
         self.shell = self.dupeString(allocator, value) orelse return;
     } else if (std.mem.eql(u8, key, "ai-default-profile")) {
         self.@"ai-default-profile" = self.dupeString(allocator, value) orelse return;
+    } else if (std.mem.eql(u8, key, "ai-subagent-profile")) {
+        self.@"ai-subagent-profile" = self.dupeString(allocator, value) orelse return;
     } else if (std.mem.eql(u8, key, "remote-enabled")) {
         if (std.mem.eql(u8, value, "true")) {
             self.@"remote-enabled" = true;
@@ -855,6 +936,19 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
         } else {
             log.warn("invalid weixin-notify-forward: {s}", .{value});
         }
+    } else if (std.mem.eql(u8, key, "agent-control-enabled")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"agent-control-enabled" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"agent-control-enabled" = false;
+        } else {
+            log.warn("invalid agent-control-enabled: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "agent-control-port")) {
+        self.@"agent-control-port" = std.fmt.parseInt(u16, std.mem.trim(u8, value, " \t"), 10) catch {
+            log.warn("invalid agent-control-port: {s}", .{value});
+            return;
+        };
     } else if (std.mem.eql(u8, key, "wispterm-debug-fps")) {
         if (std.mem.eql(u8, value, "true")) {
             self.@"wispterm-debug-fps" = true;
@@ -878,6 +972,22 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
             self.@"wispterm-debug-memory" = false;
         } else {
             log.warn("invalid wispterm-debug-memory: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "wispterm-debug-render")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"wispterm-debug-render" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"wispterm-debug-render" = false;
+        } else {
+            log.warn("invalid wispterm-debug-render: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "wispterm-d3d-present")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"wispterm-d3d-present" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"wispterm-d3d-present" = false;
+        } else {
+            log.warn("invalid wispterm-d3d-present: {s}", .{value});
         }
     } else if (std.mem.eql(u8, key, "unfocused-split-opacity")) {
         if (std.fmt.parseFloat(f32, value)) |opacity| {
@@ -914,6 +1024,14 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
             self.@"auto-update-check" = false;
         } else {
             log.warn("invalid auto-update-check: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "whats-new-on-update")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"whats-new-on-update" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"whats-new-on-update" = false;
+        } else {
+            log.warn("invalid whats-new-on-update: {s}", .{value});
         }
     } else if (std.mem.eql(u8, key, "config-file")) {
         self.loadConfigFileDirective(allocator, value, base_dir);
@@ -1257,9 +1375,12 @@ pub fn writeHelp(writer: anytype) !void {
         \\  --language <lang>            UI language: auto | en | zh-CN (default: auto)
         \\  --ssh-legacy-algorithms <bool> Enable legacy ssh-rsa/ssh-dss OpenSSH options
         \\  --ai-agent-enabled <bool>    Enable AI Chat agent tools by default
-        \\  --ai-agent-permission <mode> Agent tool permission: confirm | full
+        \\  --ai-agent-permission <mode> Agent tool permission: ask | auto | full
         \\  --ai-agent-command-timeout-ms <ms> Agent command timeout budget
         \\  --ai-agent-output-limit <bytes> Max bytes returned by each tool
+        \\  --ai-agent-working-dir <path> Default working directory for agent local commands
+        \\  --jina-api-key <key>         API key for Jina web search/read ($websearch, $webread)
+        \\  --windows-conpty <mode>      Windows pseudo console host: auto | system
         \\  --auto-update-check <bool>  Check GitHub Releases after startup
         \\  --config-file <path>         Include another config file (prefix ? for optional)
         \\  --keybind <binding>          Configure a shortcut, e.g. global:ctrl+backquote=toggle_quake
@@ -1273,6 +1394,8 @@ pub fn writeHelp(writer: anytype) !void {
         \\  --weixin-reply-timeout-ms <n> Deprecated (no-op); AI-reply window is ~30 min
         \\  --weixin-allowed-user <id>   Restrict control to one ilink user_id
         \\  --weixin-notify-forward <bool> Forward agent notifications to the bound WeChat owner
+        \\  --agent-control-enabled <bool> Enable the local wisptermctl terminal control API (loopback)
+        \\  --agent-control-port <n>     Fixed loopback port for the control API (0 = auto)
         \\  --quake-mode <bool>          Enable Quake-style drop-down mode (default: true)
         \\
         \\Color Options (override theme):
@@ -1510,9 +1633,11 @@ pub const settings_reset_keys = [_][]const u8{
     "focus-follows-mouse",
     "shell",
     "ai-default-profile",
+    "ai-subagent-profile",
     "weixin-direct-enabled",
     "language",
     "restore-tabs-on-startup",
+    "ai-distill-suggest",
 };
 
 /// Revert every settings-page option to its built-in default by removing its
@@ -1620,9 +1745,19 @@ const default_config_template =
     \\
     \\# AI Chat agent tools (disabled by default)
     \\# ai-agent-enabled = false
-    \\# ai-agent-permission = confirm   # confirm | full
+    \\# ai-agent-permission = ask       # ask | auto | full
     \\# ai-agent-command-timeout-ms = 60000
     \\# ai-agent-output-limit = 16384
+    \\# ai-agent-working-dir =          # default dir for downloads/clones (empty = unset)
+    \\# ai-distill-suggest = false      # auto-suggest distilling reusable tasks into a skill
+    \\
+    \\# Jina API key — used by $websearch / websearch and $webread / webread
+    \\# (optional for $webread: r.jina.ai reads anonymously)
+    \\# jina-api-key =
+    \\
+    \\# Windows pseudo console host: auto prefers a bundled conpty.dll +
+    \\# OpenConsole.exe next to wispterm.exe; system forces the OS inbox one
+    \\# windows-conpty = auto
     \\
     \\# Updates
     \\# auto-update-check = true
@@ -1936,6 +2071,10 @@ test "config: ai agent options parse" {
     try std.testing.expectEqual(ai_agent_config.AgentPermission.confirm, cfg.@"ai-agent-permission");
 
     cfg.applyKeyValue(allocator, "ai-agent-enabled", "true", ".");
+    cfg.applyKeyValue(allocator, "ai-agent-permission", "ask", ".");
+    try std.testing.expectEqual(ai_agent_config.AgentPermission.confirm, cfg.@"ai-agent-permission");
+    cfg.applyKeyValue(allocator, "ai-agent-permission", "auto", ".");
+    try std.testing.expectEqual(ai_agent_config.AgentPermission.auto, cfg.@"ai-agent-permission");
     cfg.applyKeyValue(allocator, "ai-agent-permission", "full", ".");
     cfg.applyKeyValue(allocator, "ai-agent-command-timeout-ms", "120000", ".");
     cfg.applyKeyValue(allocator, "ai-agent-output-limit", "4096", ".");
@@ -2003,6 +2142,15 @@ test "config: ai-default-profile parses" {
     try std.testing.expectEqualStrings("GPT-4o", cfg.@"ai-default-profile");
 }
 
+test "config: ai-subagent-profile parses" {
+    const allocator = std.testing.allocator;
+    var cfg: Config = .{};
+    defer cfg.deinit(allocator);
+    try std.testing.expectEqualStrings("", cfg.@"ai-subagent-profile");
+    cfg.applyKeyValue(allocator, "ai-subagent-profile", "cheap-fast", ".");
+    try std.testing.expectEqualStrings("cheap-fast", cfg.@"ai-subagent-profile");
+}
+
 test "config: language parses auto/en/zh-CN and rejects invalid" {
     const allocator = std.testing.allocator;
     var cfg = Config{};
@@ -2031,4 +2179,86 @@ test "config: confirm-close-running-program defaults true and parses false" {
     try std.testing.expect(cfg.@"confirm-close-running-program");
     cfg.applyKeyValue(allocator, "confirm-close-running-program", "false", ".");
     try std.testing.expect(!cfg.@"confirm-close-running-program");
+}
+
+test "config: ai-agent-working-dir parses from a config line" {
+    const allocator = std.testing.allocator;
+    var cfg: Config = .{};
+    defer cfg.deinit(allocator); // dupeString tracks the value in _owned_strings
+    cfg.applyKeyValue(allocator, "ai-agent-working-dir", "/home/u/proj", ".");
+    try std.testing.expectEqualStrings("/home/u/proj", cfg.@"ai-agent-working-dir");
+}
+
+test "config: jina-api-key parses from a config line" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    cfg.applyKeyValue(allocator, "jina-api-key", "jina_abc", ".");
+    try std.testing.expectEqualStrings("jina_abc", cfg.@"jina-api-key");
+}
+
+test "config: windows-conpty parses and rejects invalid values" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    try std.testing.expectEqual(console_host_policy.Preference.auto, cfg.@"windows-conpty");
+    cfg.applyKeyValue(allocator, "windows-conpty", "system", ".");
+    try std.testing.expectEqual(console_host_policy.Preference.system, cfg.@"windows-conpty");
+    cfg.applyKeyValue(allocator, "windows-conpty", "bundled-only", ".");
+    try std.testing.expectEqual(console_host_policy.Preference.system, cfg.@"windows-conpty");
+}
+
+test "ai-memory-enabled parses true/false" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    // default is true
+    try std.testing.expect(cfg.@"ai-memory-enabled");
+    cfg.applyKeyValue(allocator, "ai-memory-enabled", "false", ".");
+    try std.testing.expect(!cfg.@"ai-memory-enabled");
+    cfg.applyKeyValue(allocator, "ai-memory-enabled", "true", ".");
+    try std.testing.expect(cfg.@"ai-memory-enabled");
+}
+
+test "ai-distill-suggest parses true/false and defaults off" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    // default is off: the Copilot does not auto-suggest distilling skills
+    try std.testing.expect(!cfg.@"ai-distill-suggest");
+    cfg.applyKeyValue(allocator, "ai-distill-suggest", "true", ".");
+    try std.testing.expect(cfg.@"ai-distill-suggest");
+    cfg.applyKeyValue(allocator, "ai-distill-suggest", "false", ".");
+    try std.testing.expect(!cfg.@"ai-distill-suggest");
+    // unknown value leaves it unchanged (still false)
+    cfg.applyKeyValue(allocator, "ai-distill-suggest", "maybe", ".");
+    try std.testing.expect(!cfg.@"ai-distill-suggest");
+}
+
+test "config: wispterm-d3d-present defaults on and parses false" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    // default on: flip-model present is the primary path, GDI is the fallback
+    try std.testing.expect(cfg.@"wispterm-d3d-present");
+    cfg.applyKeyValue(allocator, "wispterm-d3d-present", "false", ".");
+    try std.testing.expect(!cfg.@"wispterm-d3d-present");
+    cfg.applyKeyValue(allocator, "wispterm-d3d-present", "true", ".");
+    try std.testing.expect(cfg.@"wispterm-d3d-present");
+    cfg.applyKeyValue(allocator, "wispterm-d3d-present", "maybe", ".");
+    try std.testing.expect(cfg.@"wispterm-d3d-present");
+}
+
+test "config: wispterm-debug-render parses from a config line" {
+    // Regression: the field existed (read by main.zig to gate the render
+    // diagnostics log) but applyKeyValue had no branch for it, so the key
+    // users were asked to set in #88 was silently ignored.
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    try std.testing.expect(!cfg.@"wispterm-debug-render");
+    cfg.applyKeyValue(allocator, "wispterm-debug-render", "true", ".");
+    try std.testing.expect(cfg.@"wispterm-debug-render");
+    cfg.applyKeyValue(allocator, "wispterm-debug-render", "false", ".");
+    try std.testing.expect(!cfg.@"wispterm-debug-render");
 }

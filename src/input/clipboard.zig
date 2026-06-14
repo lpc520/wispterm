@@ -10,6 +10,8 @@ const platform_clipboard = @import("../platform/clipboard.zig");
 const platform_remote_file = @import("../platform/remote_file.zig");
 const Surface = @import("../Surface.zig");
 const selection_unit = @import("../selection_unit.zig");
+const file_drop_path = @import("file_drop_path.zig");
+const ai_chat_composer_layout = @import("../ai_chat_composer_layout.zig");
 
 fn isPasteStripByte(byte: u8) bool {
     return switch (byte) {
@@ -237,9 +239,17 @@ fn createDeferredSshDropPaste(surface: *Surface, text: []const u8) ?*DeferredSsh
     return pending;
 }
 
-pub fn handleFileDrop(local_path: []const u8, x: i32, _: i32) bool {
+pub fn handleFileDrop(local_path: []const u8, x: i32, y: i32) bool {
     if (handleFileExplorerDrop(local_path, x)) return true;
+    if (handleAiChatFileDrop(local_path, x, y)) return true;
     return handleSshTerminalFileDrop(local_path);
+}
+
+fn handleAiChatFileDrop(local_path: []const u8, x: i32, y: i32) bool {
+    const allocator = std.heap.page_allocator;
+    const text = file_drop_path.formatDroppedPath(allocator, local_path) catch return false;
+    defer allocator.free(text);
+    return AppWindow.appendDroppedPathToChatAtPoint(text, x, y);
 }
 
 fn handleFileExplorerDrop(local_path: []const u8, x: i32) bool {
@@ -308,7 +318,7 @@ fn handleSshTerminalFileDrop(local_path: []const u8) bool {
 fn selectionSurfaceForClipboard() ?*Surface {
     if (AppWindow.activeTab()) |tb| {
         var selected_surface: ?*Surface = null;
-        var it = tb.tree.iterator();
+        var it = tb.tree.surfaces();
         while (it.next()) |entry| {
             if (!entry.surface.selection.active) continue;
             if (entry.handle == tb.focused) return entry.surface;
@@ -347,6 +357,11 @@ fn clipboardOwner() ?platform_clipboard.Owner {
 fn readClipboardText(allocator: std.mem.Allocator) ?[]u8 {
     const owner = clipboardOwner() orelse return null;
     return platform_clipboard.readText(allocator, owner);
+}
+
+/// Public: read the system clipboard as owned text (caller frees), or null.
+pub fn readClipboardTextOwned(allocator: std.mem.Allocator) ?[]u8 {
+    return readClipboardText(allocator);
 }
 
 pub fn copyTextToClipboard(text: []const u8) bool {
@@ -514,6 +529,85 @@ pub fn pasteFromClipboardIntoAiChat(chat: *AppWindow.ai_chat.Session) void {
     chat.appendInputText(text);
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
+}
+
+/// Outcome of routing a pasted clipboard image to an AI chat composer.
+pub const PastedImageOutcome = enum { attached, ignored_no_vision, too_large };
+
+/// Decide what to do with a pasted image given the model's vision flag and the
+/// decoded byte size. The size cap takes precedence so an oversized payload is
+/// always rejected, vision or not.
+pub fn classifyPastedImage(vision_enabled: bool, byte_len: usize, max_bytes: usize) PastedImageOutcome {
+    if (byte_len > max_bytes) return .too_large;
+    if (!vision_enabled) return .ignored_no_vision;
+    return .attached;
+}
+
+test "classifyPastedImage routes by vision flag and size cap" {
+    try std.testing.expectEqual(PastedImageOutcome.attached, classifyPastedImage(true, 100, 1000));
+    try std.testing.expectEqual(PastedImageOutcome.ignored_no_vision, classifyPastedImage(false, 100, 1000));
+    try std.testing.expectEqual(PastedImageOutcome.too_large, classifyPastedImage(true, 2000, 1000));
+    // The size cap is checked before the vision flag.
+    try std.testing.expectEqual(PastedImageOutcome.too_large, classifyPastedImage(false, 2000, 1000));
+}
+
+fn encodeImageBase64(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const encoder = std.base64.standard.Encoder;
+    const out = try allocator.alloc(u8, encoder.calcSize(bytes.len));
+    _ = encoder.encode(out, bytes);
+    return out;
+}
+
+test "encodeImageBase64 produces standard base64" {
+    const out = try encodeImageBase64(std.testing.allocator, "ABC");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("QUJD", out);
+}
+
+/// Ctrl+Shift+V target when an AI chat composer is focused: read a clipboard
+/// image, and either attach it to the composer (vision models) or drop it with a
+/// log + toast (non-vision models / oversized images).
+pub fn pasteImageIntoAiChat(chat: *AppWindow.ai_chat.Session) void {
+    const allocator = AppWindow.g_allocator orelse return;
+    const owner = clipboardOwner() orelse return;
+
+    const image_path = platform_clipboard.readImageAsPngTemp(allocator, owner) orelse return;
+    defer allocator.free(image_path);
+    // The temp PNG belongs to us once read; remove it either way.
+    defer std.fs.deleteFileAbsolute(image_path) catch {};
+
+    const max_bytes = AppWindow.ai_chat.MAX_PASTED_IMAGE_BYTES;
+    const bytes = std.fs.cwd().readFileAlloc(allocator, image_path, max_bytes + 1) catch |err| {
+        std.debug.print("Chat image paste: could not read {s}: {s}\n", .{ image_path, @errorName(err) });
+        return;
+    };
+    defer allocator.free(bytes);
+
+    switch (classifyPastedImage(chat.vision_enabled, bytes.len, max_bytes)) {
+        .too_large => {
+            std.debug.print("Chat image paste: image is {d} bytes, exceeds {d} cap — ignored\n", .{ bytes.len, max_bytes });
+            overlays.showStatusToast("Image too large \xe2\x80\x94 ignored");
+        },
+        .ignored_no_vision => {
+            std.debug.print("Chat image paste: vision disabled for this model \xe2\x80\x94 image ignored ({d} bytes)\n", .{bytes.len});
+            overlays.showStatusToast("Vision off for this model \xe2\x80\x94 image ignored");
+        },
+        .attached => {
+            const b64 = encodeImageBase64(allocator, bytes) catch return;
+            defer allocator.free(b64);
+            chat.addPendingImage(b64, "image/png") catch {
+                std.debug.print("Chat image paste: out of memory attaching image\n", .{});
+                return;
+            };
+            std.debug.print("Chat image paste: attached image ({d} bytes, {d} pending)\n", .{ bytes.len, chat.pendingImageCount() });
+            var placeholder_buf: [32]u8 = undefined;
+            if (ai_chat_composer_layout.pendingImagePlaceholder(chat.pendingImageCount(), &placeholder_buf)) |placeholder| {
+                chat.appendInputText(placeholder);
+            }
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+        },
+    }
 }
 
 pub fn pasteImageFromClipboard() void {

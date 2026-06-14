@@ -3,8 +3,10 @@
 const std = @import("std");
 const control = @import("control.zig");
 const types = @import("types.zig");
+const approval_reply = @import("approval_reply.zig");
 
 const AI_ACK = "信息已收到，开始处理。\n发送 /stop 可停止本次处理。";
+const AI_BUSY = "副驾正在处理上一条消息，请稍候再发，或发送 /stop 停止当前处理。";
 const ESC = "\x1b";
 const AI_OPEN_TIMEOUT_MS: u32 = 2000;
 
@@ -89,20 +91,48 @@ pub fn route(
 fn sendAi(ctrl: control.Control, text: []const u8, reply_context: ?types.ReplyContext, out: *Reply) !void {
     const ai = ctrl.findAiSurface() orelse blk: {
         switch (ctrl.openAiAgent(AI_OPEN_TIMEOUT_MS)) {
-            .no_profile => return out.set("WispTerm 尚未配置 AI Chat profile。"),
-            .failed => return out.set("WispTerm 无法打开 AI Agent。"),
-            .offline => return out.set("WispTerm 当前离线，无法打开 AI Agent。"),
-            .timeout => return out.set("已请求打开 AI Agent，但未等到 AI Chat tab。"),
+            .no_profile => return out.set("WispTerm 尚未配置副驾。"),
+            .failed => return out.set("WispTerm 无法打开副驾。"),
+            .offline => return out.set("WispTerm 当前离线，无法打开副驾。"),
+            .timeout => return out.set("已请求打开副驾，但未等到副驾标签页。"),
             .opened => {},
         }
-        break :blk ctrl.findAiSurface() orelse return out.set("已请求打开 AI Agent，但未等到 AI Chat tab。");
+        break :blk ctrl.findAiSurface() orelse return out.set("已请求打开副驾，但未等到副驾标签页。");
     };
+
+    // A pending approval turns this reply into the answer for it, not a new
+    // prompt. resolveAiApproval's bool is discarded: we just checked pending
+    // above, and a lost race (resolved locally in between) needs no different
+    // reply. Both approve and deny keep streaming — denying a tool does not
+    // abort the run, the copilot continues with the denial (use /stop to abort).
+    if (ctrl.aiApprovalPending()) {
+        switch (approval_reply.classify(text)) {
+            .approve => {
+                _ = ctrl.resolveAiApproval(true);
+                try out.set("已确认，继续执行。");
+                out.expect_ai_progress = true;
+            },
+            .deny => {
+                _ = ctrl.resolveAiApproval(false);
+                try out.set("已拒绝该操作。");
+                out.expect_ai_progress = true;
+            },
+            .unrecognized => try out.set("当前有待确认操作，请先回复 Y 同意 / N 拒绝。"),
+        }
+        return;
+    }
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(out.allocator);
     try buf.appendSlice(out.allocator, text);
     try buf.append(out.allocator, '\r');
-    if (!ctrl.sendInput(ai.id, buf.items, reply_context)) return out.set("WispTerm 当前离线，无法发送给 AI Agent。");
+    switch (ctrl.sendInput(ai.id, buf.items, reply_context)) {
+        .offline => return out.set("WispTerm 当前离线，无法发送给副驾。"),
+        // The copilot still has a request inflight: the message was rejected,
+        // not queued, so tell the user instead of acking "开始处理" for nothing.
+        .busy => return out.set(AI_BUSY),
+        .ok => {},
+    }
     try out.set(AI_ACK);
     out.expect_ai_progress = true;
 }
@@ -112,8 +142,8 @@ fn stopAi(ctrl: control.Control, out: *Reply) !void {
     // in-flight weixin reply streaming so no further progress/final reply is
     // sent after the stop (otherwise a trailing reply looks like /stop failed).
     out.stop_followup = true;
-    const ai = ctrl.findAiSurface() orelse return out.set("当前没有 AI Agent 可停止。");
-    if (!ctrl.sendInput(ai.id, ESC, null)) return out.set("WispTerm 当前离线，无法停止 AI Agent。");
+    const ai = ctrl.findAiSurface() orelse return out.set("当前没有副驾可停止。");
+    if (ctrl.sendInput(ai.id, ESC, null) != .ok) return out.set("WispTerm 当前离线，无法停止副驾。");
     return out.set("已发送停止指令。");
 }
 
@@ -123,15 +153,15 @@ fn sendTerminal(ctrl: control.Control, text: []const u8, enter: bool, out: *Repl
     defer buf.deinit(out.allocator);
     try buf.appendSlice(out.allocator, text);
     if (enter) try buf.append(out.allocator, '\r');
-    if (!ctrl.sendInput(term.id, buf.items, null)) return out.set("WispTerm 当前离线，无法发送到终端。");
+    if (ctrl.sendInput(term.id, buf.items, null) != .ok) return out.set("WispTerm 当前离线，无法发送到终端。");
     return out.set("已发送到终端。");
 }
 
 const helpTextConst =
     "WispTerm 微信直连命令：\n" ++
-    "/ping 验证连接\n/status 查看状态\n/ai <内容> 发送给 AI Agent\n" ++
+    "/ping 验证连接\n/status 查看状态\n/ai <内容> 发送给副驾\n" ++
     "/stop 停止当前 AI 处理\n/term <命令> 发送到终端并回车\n/keys <文本> 发送原始文本\n" ++
-    "普通文本默认发送给 AI Agent。";
+    "普通文本默认发送给副驾。";
 
 fn statusText(ctrl: control.Control) []const u8 {
     return if (ctrl.isConnected()) "微信直连：在线" else "微信直连：离线";
@@ -149,10 +179,14 @@ const t = std.testing;
 const FakeControl = struct {
     connected: bool = true,
     has_ai: bool = true,
+    busy: bool = false,
     buf: [256]u8 = undefined,
     len: usize = 0,
     last_surface: [16]u8 = [_]u8{0} ** 16,
     last_reply_context: ?types.ReplyContext = null,
+    approval_pending: bool = false,
+    resolved_calls: u8 = 0,
+    last_resolve_approve: bool = false,
 
     /// Bytes captured from the last send_input. send_input borrows its argument
     /// (production consumes it synchronously), so the fake copies for inspection.
@@ -164,7 +198,7 @@ const FakeControl = struct {
         return cast(ctx).connected;
     }
     fn find_ai_surface(ctx: *anyopaque) ?control.Surface {
-        return if (cast(ctx).has_ai) .{ .id = aiId(), .title = "AI Chat" } else null;
+        return if (cast(ctx).has_ai) .{ .id = aiId(), .title = "Copilot" } else null;
     }
     fn find_terminal_surface(_: *anyopaque) ?control.Surface {
         return .{ .id = termId(), .title = "zsh" };
@@ -172,17 +206,32 @@ const FakeControl = struct {
     fn open_ai_agent(_: *anyopaque, _: u32) control.OpenResult {
         return .opened;
     }
-    fn send_input(ctx: *anyopaque, surface_id: [16]u8, bytes: []const u8, reply_context: ?types.ReplyContext) bool {
+    fn send_input(ctx: *anyopaque, surface_id: [16]u8, bytes: []const u8, reply_context: ?types.ReplyContext) control.SendResult {
         const self = cast(ctx);
-        if (!self.connected) return false;
+        if (!self.connected) return .offline;
+        if (self.busy) return .busy;
         self.last_surface = surface_id;
         self.last_reply_context = reply_context;
         const n = @min(bytes.len, self.buf.len);
         @memcpy(self.buf[0..n], bytes[0..n]);
         self.len = n;
-        return true;
+        return .ok;
     }
     fn latest_transcript(_: *anyopaque) []const u8 {
+        return "";
+    }
+    fn ai_approval_pending(ctx: *anyopaque) bool {
+        return cast(ctx).approval_pending;
+    }
+    fn resolve_ai_approval(ctx: *anyopaque, approve: bool) bool {
+        const self = cast(ctx);
+        if (!self.approval_pending) return false;
+        self.approval_pending = false;
+        self.resolved_calls += 1;
+        self.last_resolve_approve = approve;
+        return true;
+    }
+    fn inbound_file_dir(_: *anyopaque, _: []u8) []const u8 {
         return "";
     }
     fn cast(ctx: *anyopaque) *FakeControl {
@@ -202,6 +251,9 @@ const FakeControl = struct {
             .open_ai_agent = open_ai_agent,
             .send_input = send_input,
             .latest_transcript = latest_transcript,
+            .ai_approval_pending = ai_approval_pending,
+            .resolve_ai_approval = resolve_ai_approval,
+            .inbound_file_dir = inbound_file_dir,
         } };
     }
 };
@@ -223,6 +275,15 @@ test "default text goes to the AI surface with a carriage return" {
     try t.expectEqualStrings("hello world\r", fake.lastInput());
     try t.expectEqualSlices(u8, &FakeControl.aiId(), &fake.last_surface);
     try t.expect(out.expect_ai_progress);
+}
+
+test "busy copilot replies with a busy notice and does not start a follow-up" {
+    var fake = FakeControl{ .busy = true };
+    var out = Reply.init(t.allocator);
+    defer out.deinit();
+    try route(t.allocator, fake.control_iface(), defaultSettings(), "hello", null, &out);
+    try t.expect(std.mem.indexOf(u8, out.text.items, "正在处理") != null);
+    try t.expect(!out.expect_ai_progress);
 }
 
 test "default AI route forwards Weixin reply context only to AI surface" {
@@ -282,4 +343,47 @@ test "/stop sends ESC to the AI surface and requests followup cancellation" {
     try t.expectEqualStrings(ESC, fake.lastInput());
     try t.expect(out.stop_followup);
     try t.expect(!out.expect_ai_progress);
+}
+
+test "approval pending: Y approves, acks, and streams progress" {
+    var fake = FakeControl{ .approval_pending = true };
+    var out = Reply.init(t.allocator);
+    defer out.deinit();
+    try route(t.allocator, fake.control_iface(), defaultSettings(), "Y", null, &out);
+    try t.expectEqual(@as(u8, 1), fake.resolved_calls);
+    try t.expect(fake.last_resolve_approve);
+    try t.expectEqualStrings("已确认，继续执行。", out.text.items);
+    try t.expect(out.expect_ai_progress);
+}
+
+test "approval pending: 拒绝 denies and streams the continuation" {
+    var fake = FakeControl{ .approval_pending = true };
+    var out = Reply.init(t.allocator);
+    defer out.deinit();
+    try route(t.allocator, fake.control_iface(), defaultSettings(), "拒绝", null, &out);
+    try t.expectEqual(@as(u8, 1), fake.resolved_calls);
+    try t.expect(!fake.last_resolve_approve);
+    try t.expectEqualStrings("已拒绝该操作。", out.text.items);
+    try t.expect(out.expect_ai_progress);
+}
+
+test "approval pending: unrecognized reply reminds without acting" {
+    var fake = FakeControl{ .approval_pending = true };
+    var out = Reply.init(t.allocator);
+    defer out.deinit();
+    try route(t.allocator, fake.control_iface(), defaultSettings(), "先删回收站", null, &out);
+    try t.expectEqual(@as(u8, 0), fake.resolved_calls);
+    try t.expect(!out.expect_ai_progress);
+    try t.expect(std.mem.indexOf(u8, out.text.items, "请先回复") != null);
+    // The unrecognized text must NOT be forwarded to the composer.
+    try t.expectEqual(@as(usize, 0), fake.len);
+}
+
+test "no approval pending: default text still goes to the AI surface" {
+    var fake = FakeControl{}; // approval_pending defaults false
+    var out = Reply.init(t.allocator);
+    defer out.deinit();
+    try route(t.allocator, fake.control_iface(), defaultSettings(), "hello world", null, &out);
+    try t.expectEqualStrings("hello world\r", fake.lastInput());
+    try t.expect(out.expect_ai_progress);
 }

@@ -12,6 +12,7 @@ pub const DEFAULT_REASONING_EFFORT = "high";
 pub const DEFAULT_STREAM = "false";
 pub const DEFAULT_AGENT = "true";
 pub const DEFAULT_MAX_TOKENS = "8192";
+pub const DEFAULT_VISION = "off";
 pub const TOOL_CALL_REASONING_FALLBACK = "Tool call is required before answering.";
 
 // ---------------------------------------------------------------------------
@@ -101,12 +102,48 @@ pub const Role = enum {
     }
 };
 
+/// A base64-encoded image attached to a user message. Both fields are owned by
+/// whoever holds the block (the session message, or a cloned request message).
+pub const ImageBlock = struct {
+    data_b64: []u8,
+    media_type: []u8,
+
+    pub fn deinit(self: ImageBlock, allocator: std.mem.Allocator) void {
+        allocator.free(self.data_b64);
+        allocator.free(self.media_type);
+    }
+
+    pub fn clone(self: ImageBlock, allocator: std.mem.Allocator) !ImageBlock {
+        const data = try allocator.dupe(u8, self.data_b64);
+        errdefer allocator.free(data);
+        const media = try allocator.dupe(u8, self.media_type);
+        return .{ .data_b64 = data, .media_type = media };
+    }
+};
+
+/// Deep-clone a slice of image blocks (or null). Frees partial work on error.
+pub fn cloneImageBlocks(allocator: std.mem.Allocator, images: ?[]const ImageBlock) !?[]ImageBlock {
+    const src = images orelse return null;
+    if (src.len == 0) return null;
+    const out = try allocator.alloc(ImageBlock, src.len);
+    var written: usize = 0;
+    errdefer {
+        for (out[0..written]) |img| img.deinit(allocator);
+        allocator.free(out);
+    }
+    while (written < src.len) : (written += 1) {
+        out[written] = try src[written].clone(allocator);
+    }
+    return out;
+}
+
 pub const RequestMessage = struct {
     role: Role,
     content: []u8,
     reasoning: ?[]u8 = null,
     tool_call_id: ?[]u8 = null,
     tool_calls: ?[]ToolCall = null,
+    images: ?[]ImageBlock = null,
 
     pub fn deinit(self: RequestMessage, allocator: std.mem.Allocator) void {
         allocator.free(self.content);
@@ -116,6 +153,17 @@ pub const RequestMessage = struct {
             for (calls) |call| call.deinit(allocator);
             allocator.free(calls);
         }
+        if (self.images) |images| {
+            for (images) |img| img.deinit(allocator);
+            allocator.free(images);
+        }
+    }
+
+    /// True when this is a user message carrying at least one image.
+    pub fn hasImages(self: RequestMessage) bool {
+        if (self.role != .user) return false;
+        const images = self.images orelse return false;
+        return images.len > 0;
     }
 };
 
@@ -175,6 +223,8 @@ pub const RequestParams = struct {
     reasoning_effort: []const u8,
     stream: bool,
     max_tokens: u32 = 8192,
+    memory_enabled: bool = false,
+    toolset: Toolset = .full,
 };
 
 pub fn buildRequestJson(allocator: std.mem.Allocator, params: RequestParams, messages: []const RequestMessage, include_tools: bool) ![]u8 {
@@ -292,7 +342,11 @@ fn buildChatCompletionsRequestJsonForMessages(
         try out.appendSlice(allocator, "{\"role\":");
         try appendJsonString(allocator, &out, msg.role.apiName());
         try out.appendSlice(allocator, ",\"content\":");
-        try appendJsonString(allocator, &out, msg.content);
+        if (msg.hasImages()) {
+            try appendChatCompletionsImageContent(allocator, &out, msg);
+        } else {
+            try appendJsonString(allocator, &out, msg.content);
+        }
         if (msg.role == .tool) {
             if (msg.tool_call_id) |id| {
                 try out.appendSlice(allocator, ",\"tool_call_id\":");
@@ -339,7 +393,7 @@ fn buildChatCompletionsRequestJsonForMessages(
         try out.appendSlice(allocator, ",\"stream_options\":{\"include_usage\":true}");
     }
     if (include_tools) {
-        try appendToolSchemas(allocator, &out);
+        try appendToolSchemas(allocator, &out, .{ .include_memory = params.memory_enabled, .toolset = params.toolset });
     }
     try out.append(allocator, '}');
 
@@ -373,9 +427,13 @@ fn buildResponsesRequestJsonForMessages(
             continue;
         }
 
-        if (msg.content.len > 0) {
+        if (msg.content.len > 0 or msg.hasImages()) {
             if (wrote_item) try out.append(allocator, ',');
-            try appendResponseMessage(allocator, &out, msg.role, msg.content);
+            if (msg.hasImages()) {
+                try appendResponseUserImageMessage(allocator, &out, msg);
+            } else {
+                try appendResponseMessage(allocator, &out, msg.role, msg.content);
+            }
             wrote_item = true;
         }
 
@@ -398,7 +456,7 @@ fn buildResponsesRequestJsonForMessages(
     try out.appendSlice(allocator, ",\"stream\":");
     try out.appendSlice(allocator, if (params.stream) "true" else "false");
     if (include_tools) {
-        try appendResponseToolSchemas(allocator, &out);
+        try appendResponseToolSchemas(allocator, &out, .{ .include_memory = params.memory_enabled, .toolset = params.toolset });
     }
     try out.append(allocator, '}');
 
@@ -424,7 +482,7 @@ fn buildAnthropicRequestJsonForMessages(
     try out.appendSlice(allocator, ",\"messages\":[");
     try appendAnthropicMessages(allocator, &out, messages);
     try out.append(allocator, ']');
-    if (include_tools) try appendAnthropicTools(allocator, &out);
+    if (include_tools) try appendAnthropicTools(allocator, &out, .{ .include_memory = params.memory_enabled, .toolset = params.toolset });
     try out.append(allocator, '}');
     return out.toOwnedSlice(allocator);
 }
@@ -485,6 +543,8 @@ fn appendAnthropicMessages(allocator: std.mem.Allocator, out: *std.ArrayListUnma
                 try out.append(allocator, '}');
             }
             try out.appendSlice(allocator, "]}");
+        } else if (msg.hasImages()) {
+            try appendAnthropicImageContent(allocator, out, msg);
         } else {
             try out.appendSlice(allocator, ",\"content\":");
             try appendJsonString(allocator, out, msg.content);
@@ -494,10 +554,10 @@ fn appendAnthropicMessages(allocator: std.mem.Allocator, out: *std.ArrayListUnma
     }
 }
 
-fn appendAnthropicTools(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+fn appendAnthropicTools(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), opts: ToolSpecOpts) !void {
     try out.appendSlice(allocator, ",\"tools\":[");
     var ctx = AnthropicToolEmitter{ .allocator = allocator, .out = out };
-    try forEachToolSpec(*AnthropicToolEmitter, &ctx, AnthropicToolEmitter.emit);
+    try forEachToolSpec(*AnthropicToolEmitter, &ctx, opts, AnthropicToolEmitter.emit);
     try out.append(allocator, ']');
 }
 
@@ -532,6 +592,82 @@ fn appendResponseFunctionCallOutput(
     try out.append(allocator, '}');
 }
 
+// --- Multimodal (image) content for user messages ---------------------------
+//
+// Only user messages carry images (RequestMessage.hasImages gates on role). Each
+// protocol wraps the prompt text and the base64 image data into its own content
+// array shape. base64 data and the controlled media type are JSON-safe, so the
+// data URI / data field is appended raw between quotes.
+
+fn appendChatCompletionsImageContent(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), msg: RequestMessage) !void {
+    try out.appendSlice(allocator, "[{\"type\":\"text\",\"text\":");
+    try appendJsonString(allocator, out, msg.content);
+    try out.append(allocator, '}');
+    for (msg.images.?) |img| {
+        try out.appendSlice(allocator, ",{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:");
+        try out.appendSlice(allocator, img.media_type);
+        try out.appendSlice(allocator, ";base64,");
+        try out.appendSlice(allocator, img.data_b64);
+        try out.appendSlice(allocator, "\"}}");
+    }
+    try out.append(allocator, ']');
+}
+
+fn appendAnthropicImageContent(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), msg: RequestMessage) !void {
+    try out.appendSlice(allocator, ",\"content\":[{\"type\":\"text\",\"text\":");
+    try appendJsonString(allocator, out, msg.content);
+    try out.append(allocator, '}');
+    for (msg.images.?) |img| {
+        try out.appendSlice(allocator, ",{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"");
+        try out.appendSlice(allocator, img.media_type);
+        try out.appendSlice(allocator, "\",\"data\":\"");
+        try out.appendSlice(allocator, img.data_b64);
+        try out.appendSlice(allocator, "\"}}");
+    }
+    try out.appendSlice(allocator, "]}");
+}
+
+fn appendResponseUserImageMessage(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), msg: RequestMessage) !void {
+    try out.appendSlice(allocator, "{\"role\":");
+    try appendJsonString(allocator, out, msg.role.apiName());
+    try out.appendSlice(allocator, ",\"content\":[{\"type\":\"input_text\",\"text\":");
+    try appendJsonString(allocator, out, msg.content);
+    try out.append(allocator, '}');
+    for (msg.images.?) |img| {
+        try out.appendSlice(allocator, ",{\"type\":\"input_image\",\"image_url\":\"data:");
+        try out.appendSlice(allocator, img.media_type);
+        try out.appendSlice(allocator, ";base64,");
+        try out.appendSlice(allocator, img.data_b64);
+        try out.appendSlice(allocator, "\"}");
+    }
+    try out.appendSlice(allocator, "]}");
+}
+
+/// Tool visibility for one request. `.subagent` = the nested research
+/// subagent's restricted read-only set; gates BOTH schema emission
+/// (forEachToolSpec) and dispatch (runSubagentTaskWithModel).
+pub const Toolset = enum { full, subagent };
+
+pub const ToolSpecOpts = struct {
+    include_memory: bool,
+    toolset: Toolset = .full,
+};
+
+/// Single source of truth for what a subagent may call. Every listed tool is
+/// read-only and approval-free.
+pub const subagent_allowed_tools = [_][]const u8{
+    "terminal_list", "terminal_snapshot", "read_file",
+    "websearch",     "webread",          "pubmed",
+    "wispterm_docs",
+};
+
+pub fn subagentToolAllowed(name: []const u8) bool {
+    for (subagent_allowed_tools) |allowed| {
+        if (std.mem.eql(u8, name, allowed)) return true;
+    }
+    return false;
+}
+
 // Single source of truth for the agent tool set. Each tool's name, description,
 // and JSON Schema `properties` object is defined exactly once here and yielded to
 // a per-format emitter (OpenAI chat-completions, OpenAI responses, Anthropic), so
@@ -542,24 +678,46 @@ fn appendResponseFunctionCallOutput(
 fn forEachToolSpec(
     comptime Ctx: type,
     ctx: Ctx,
+    opts: ToolSpecOpts,
     comptime emit: fn (Ctx, []const u8, []const u8, []const u8) anyerror!void,
 ) !void {
-    try emit(ctx, "terminal_list", "List WispTerm terminal surfaces visible to the agent, including the current agent-selected write context. Before any terminal write, use terminal_select to choose the intended surface_id; use focused=true only as a default hint.", "{}");
-    try emit(ctx, "terminal_snapshot", "Read a bounded text snapshot from one terminal surface or all surfaces.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Optional surface id from terminal_list.\"}}");
-    try emit(ctx, "terminal_select", platform_pty_command.terminalSelectToolDescription(), "{\"surface_id\":{\"type\":\"string\",\"description\":\"Surface id from terminal_list to make the current agent write context.\"}}");
-    try emit(ctx, platform_process.localCommandToolName(), platform_process.localCommandToolDescription(), "{\"command\":{\"type\":\"string\"},\"cwd\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\"}}");
-    try emit(ctx, "ssh_session_exec", "Run a POSIX shell command in the selected already-open SSH terminal surface. The surface_id must match the current terminal_select context. Use only when the surface is at a shell prompt and the command returns; for R, Python, Codex, Claude Code, other REPLs, or launching full-screen agent apps, use terminal_repl_exec.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Selected surface id from terminal_select.\"},\"command\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\"}}");
+    const Filtered = struct {
+        fn emitTool(c: Ctx, o: ToolSpecOpts, name: []const u8, description: []const u8, properties: []const u8) anyerror!void {
+            if (o.toolset == .subagent and !subagentToolAllowed(name)) return;
+            try emit(c, name, description, properties);
+        }
+    };
+    try Filtered.emitTool(ctx, opts, "terminal_list", "List WispTerm terminal surfaces visible to the agent, including the current agent-selected write context. Before any terminal write, use terminal_select to choose the intended surface_id; use focused=true only as a default hint.", "{}");
+    try Filtered.emitTool(ctx, opts, "terminal_context", "Report the current selected terminal write context/binding without changing it. Use this to verify which terminal Copilot or the agent will write to.", "{}");
+    try Filtered.emitTool(ctx, opts, "terminal_snapshot", "Read a bounded text snapshot from one terminal surface or all surfaces.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Optional surface id from terminal_list.\"}}");
+    try Filtered.emitTool(ctx, opts, "terminal_select", platform_pty_command.terminalSelectToolDescription(), "{\"surface_id\":{\"type\":\"string\",\"description\":\"Surface id from terminal_list to make the current agent write context.\"}}");
+    try Filtered.emitTool(ctx, opts, platform_process.localCommandToolName(), platform_process.localCommandToolDescription(), "{\"command\":{\"type\":\"string\"},\"cwd\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\"}}");
+    try Filtered.emitTool(ctx, opts, "ssh_session_exec", "Run a POSIX shell command in the selected already-open SSH terminal surface. The surface_id must match the current terminal_select context. Use only when the surface is at a shell prompt and the command returns; for R, Python, Codex, Claude Code, other REPLs, or launching full-screen agent apps, use terminal_repl_exec.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Selected surface id from terminal_select.\"},\"command\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\"}}");
     if (platform_pty_command.wslSessionToolsEnabled()) {
-        try emit(ctx, platform_pty_command.wslSessionToolName(), platform_pty_command.wslSessionToolDescription(), platform_pty_command.wslSessionToolPropertiesJson());
+        try Filtered.emitTool(ctx, opts, platform_pty_command.wslSessionToolName(), platform_pty_command.wslSessionToolDescription(), platform_pty_command.wslSessionToolPropertiesJson());
     }
-    try emit(ctx, "terminal_repl_exec", "Send code or text to the selected already-open interactive REPL/app terminal without shell syntax. The surface_id must match the current terminal_select context. Use repl=r for R, repl=python for Python, repl=codex for Codex, repl=claude_code for Claude Code, or repl=plain for raw text input. For Codex and Claude Code, this waits until the app settles, requests approval/input, reports completion/failure, or reaches timeout_ms.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Selected surface id from terminal_select.\"},\"repl\":{\"type\":\"string\",\"description\":\"r, python, codex, claude_code, or plain\"},\"code\":{\"type\":\"string\",\"description\":\"Code or plain text to submit. To send a control key instead, set code to exactly one of <ctrl-c>, <ctrl-d>, <ctrl-u>, <esc>, <enter> — e.g. to interrupt a stuck command or leave a `>` continuation prompt.\"},\"timeout_ms\":{\"type\":\"integer\"}}");
-    try emit(ctx, "ssh_profile_save", "Create or update a saved WispTerm SSH server profile. Use before ssh_profile_connect when the user provides SSH host, user, port, or password details.", "{\"name\":{\"type\":\"string\",\"description\":\"Optional profile name; defaults to host for new profiles.\"},\"host\":{\"type\":\"string\",\"description\":\"SSH host name or IP address.\"},\"user\":{\"type\":\"string\",\"description\":\"SSH username.\"},\"password\":{\"type\":\"string\",\"description\":\"Optional SSH password; omit when using keys.\"},\"port\":{\"type\":\"string\",\"description\":\"Optional SSH port; defaults to 22 for new profiles.\"},\"proxy_jump\":{\"type\":\"string\",\"description\":\"Optional OpenSSH ProxyJump/jump host: [user@]host[:port], comma-separated for multi-hop. Omit for a direct connection.\"}}");
-    try emit(ctx, "ssh_profile_connect", "Create a new tab connected to a saved WispTerm SSH server profile by its profile name or host.", "{\"profile_name\":{\"type\":\"string\",\"description\":\"Saved SSH profile name or host to open in a new tab.\"}}");
-    try emit(ctx, "tab_new", platform_pty_command.tabNewToolDescription(), platform_pty_command.tabNewToolPropertiesJson());
-    try emit(ctx, "tab_close", "Close a terminal tab by tab_number (the one-based `tab` shown by terminal_list, matching the tab number the user sees), surface_id, title, or the active terminal tab when no selector is provided. Cannot close the AI chat tab running the agent.", "{\"tab_number\":{\"type\":\"integer\",\"description\":\"One-based UI tab number — the `tab` value shown by terminal_list and what the user sees.\"},\"tab_index\":{\"type\":\"integer\",\"description\":\"Zero-based tab index (tab_number minus one). Prefer tab_number.\"},\"surface_id\":{\"type\":\"string\",\"description\":\"Surface id from terminal_list.\"},\"title\":{\"type\":\"string\",\"description\":\"Terminal tab title to close, such as CPU2.\"}}");
-    try emit(ctx, "skill_info", "Load a WispTerm skill by stable name. Use when the user explicitly names a skill or asks for specialized skill instructions.", "{\"skill_name\":{\"type\":\"string\",\"description\":\"Skill name or skill directory name.\"}}");
-    try emit(ctx, "wispterm_docs", "Read WispTerm's own documentation (features, configuration, shortcuts, AI agent, file explorer, media). Call with no topic to list available topics, then call again with a topic to read its full text.", "{\"topic\":{\"type\":\"string\",\"description\":\"Topic name from the list. Omit to list available topics.\"}}");
-    try emit(ctx, "weixin_send_attachment", "Send a local file back to the active Weixin conversation that triggered this agent request. Use only when the current request came from Weixin; normal local chat requests have no Weixin reply context. Audio and voice files are sent as ordinary file attachments.", "{\"kind\":{\"type\":\"string\",\"description\":\"Attachment kind: file, image, or voice. Voice is accepted as an alias for file.\"},\"path\":{\"type\":\"string\",\"description\":\"Readable local file path to send.\"},\"display_name\":{\"type\":\"string\",\"description\":\"Optional filename shown in Weixin for file attachments; defaults to the path basename.\"}}");
+    try Filtered.emitTool(ctx, opts, "terminal_repl_exec", "Send code or text to the selected already-open interactive REPL/app terminal without shell syntax. The surface_id must match the current terminal_select context. Use repl=r for R, repl=python for Python, repl=codex for Codex, repl=claude_code for Claude Code, or repl=plain for raw text input. For Codex and Claude Code, this waits until the app settles, requests approval/input, reports completion/failure, or reaches timeout_ms.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Selected surface id from terminal_select.\"},\"repl\":{\"type\":\"string\",\"description\":\"r, python, codex, claude_code, or plain\"},\"code\":{\"type\":\"string\",\"description\":\"Code or plain text to submit. To send a control key instead, set code to exactly one of <ctrl-c>, <ctrl-d>, <ctrl-u>, <esc>, <enter> — e.g. to interrupt a stuck command or leave a `>` continuation prompt.\"},\"timeout_ms\":{\"type\":\"integer\"}}");
+    try Filtered.emitTool(ctx, opts, "terminal_answer_prompt", "Answer a Claude Code or Codex confirmation/approval prompt in a terminal surface. Reads the on-screen options and sends the correct keystroke. Prefer this over terminal_repl_exec to confirm or reject an agent approval menu. Only acts when a prompt is awaiting input; otherwise it reports the screen and sends nothing.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Optional surface id; defaults to the focused terminal.\"},\"answer\":{\"type\":\"string\",\"description\":\"approve (the plain Yes), approve_all (Yes + allow all / don't ask again), reject (No / cancel), enter, esc, or an explicit option digit 1-9.\"}}");
+    try Filtered.emitTool(ctx, opts, "read_file", "Read a local or remote text file. Returns numbered lines. Set surface_id to an open SSH terminal surface to read on that remote host; omit it (or use a local surface) for the local filesystem. Relative paths resolve against the agent working directory. Use offset/limit to read a line range of a large file.", "{\"path\":{\"type\":\"string\",\"description\":\"File path. Absolute, or relative to the working directory.\"},\"surface_id\":{\"type\":\"string\",\"description\":\"Optional SSH surface id (from terminal_list) to read the file on that remote host. Omit for local.\"},\"offset\":{\"type\":\"integer\",\"description\":\"Optional 1-based first line to return.\"},\"limit\":{\"type\":\"integer\",\"description\":\"Optional maximum number of lines to return.\"}}");
+    try Filtered.emitTool(ctx, opts, "copy_file", "Copy a binary/artifact file between local workspace, WSL, and SSH without pasting shell commands into a terminal. Pull mode: omit dest_surface_id and dest_path to copy source_path into local wispterm-files and return local_path, useful before weixin_send_attachment. Push mode: set dest_surface_id to an open WSL or SSH terminal to copy a local/Weixin/workspace file to that environment. Relative source paths resolve against source_surface_id cwd or the agent working directory; relative destination paths resolve against dest_surface_id cwd or the agent working directory.", "{\"source_path\":{\"type\":\"string\",\"description\":\"Path to the source file. Relative paths resolve against source_surface_id cwd, or the agent working directory when source_surface_id is omitted.\"},\"source_surface_id\":{\"type\":\"string\",\"description\":\"Optional source terminal id from terminal_list. SSH pulls via scp; WSL uses a host-accessible WSL path; omitted means local.\"},\"dest_surface_id\":{\"type\":\"string\",\"description\":\"Optional destination terminal id from terminal_list. Use an SSH or WSL surface to send a local file there. Omit to copy into local wispterm-files.\"},\"dest_path\":{\"type\":\"string\",\"description\":\"Optional destination file path. Relative paths resolve against destination surface cwd, or the agent working directory for local destinations. If omitted, uses dest_name or the source basename.\"},\"dest_name\":{\"type\":\"string\",\"description\":\"Optional safe destination filename. In pull mode it is placed inside wispterm-files. Must not contain path separators.\"}}");
+    try Filtered.emitTool(ctx, opts, "write_file", "Create or overwrite a local or remote text file with exact content. Shows a diff and (unless permission is full) asks for approval. Set surface_id to an open SSH terminal surface to write on that remote host; omit for local. Relative paths resolve against the agent working directory.", "{\"path\":{\"type\":\"string\",\"description\":\"File path. Absolute, or relative to the working directory.\"},\"content\":{\"type\":\"string\",\"description\":\"Full file content to write.\"},\"surface_id\":{\"type\":\"string\",\"description\":\"Optional SSH surface id to write on that remote host. Omit for local.\"}}");
+    try Filtered.emitTool(ctx, opts, "edit_file", "Replace an exact unique string in a local or remote text file. old_string must match exactly and be unique unless replace_all is true. Shows a diff and (unless permission is full) asks for approval. Set surface_id to an open SSH terminal surface to edit on that remote host; omit for local.", "{\"path\":{\"type\":\"string\",\"description\":\"File path. Absolute, or relative to the working directory.\"},\"old_string\":{\"type\":\"string\",\"description\":\"Exact text to replace. Must be unique unless replace_all is true.\"},\"new_string\":{\"type\":\"string\",\"description\":\"Replacement text. May be empty to delete.\"},\"replace_all\":{\"type\":\"boolean\",\"description\":\"Replace every occurrence instead of requiring a unique match.\"},\"surface_id\":{\"type\":\"string\",\"description\":\"Optional SSH surface id to edit on that remote host. Omit for local.\"}}");
+    try Filtered.emitTool(ctx, opts, "ssh_profile_save", "Create or update a saved WispTerm SSH server profile. Use before ssh_profile_connect when the user provides SSH host, user, port, or password details.", "{\"name\":{\"type\":\"string\",\"description\":\"Optional profile name; defaults to host for new profiles.\"},\"host\":{\"type\":\"string\",\"description\":\"SSH host name or IP address.\"},\"user\":{\"type\":\"string\",\"description\":\"SSH username.\"},\"password\":{\"type\":\"string\",\"description\":\"Optional SSH password; omit when using keys.\"},\"port\":{\"type\":\"string\",\"description\":\"Optional SSH port; defaults to 22 for new profiles.\"},\"proxy_jump\":{\"type\":\"string\",\"description\":\"Optional OpenSSH ProxyJump/jump host: [user@]host[:port], comma-separated for multi-hop. Omit for a direct connection.\"}}");
+    try Filtered.emitTool(ctx, opts, "ssh_profile_connect", "Create a new tab connected to a saved WispTerm SSH server profile by its profile name or host.", "{\"profile_name\":{\"type\":\"string\",\"description\":\"Saved SSH profile name or host to open in a new tab.\"}}");
+    try Filtered.emitTool(ctx, opts, "tab_new", platform_pty_command.tabNewToolDescription(), platform_pty_command.tabNewToolPropertiesJson());
+    try Filtered.emitTool(ctx, opts, "tab_close", "Close a terminal tab by tab_number (the one-based `tab` shown by terminal_list, matching the tab number the user sees), surface_id, title, or the active terminal tab when no selector is provided. Cannot close the AI chat tab running the agent.", "{\"tab_number\":{\"type\":\"integer\",\"description\":\"One-based UI tab number — the `tab` value shown by terminal_list and what the user sees.\"},\"tab_index\":{\"type\":\"integer\",\"description\":\"Zero-based tab index (tab_number minus one). Prefer tab_number.\"},\"surface_id\":{\"type\":\"string\",\"description\":\"Surface id from terminal_list.\"},\"title\":{\"type\":\"string\",\"description\":\"Terminal tab title to close, such as CPU2.\"}}");
+    try Filtered.emitTool(ctx, opts, "skill_info", "Load a WispTerm skill by stable name. Use when the user explicitly names a skill or asks for specialized skill instructions.", "{\"skill_name\":{\"type\":\"string\",\"description\":\"Skill name or skill directory name.\"}}");
+    try Filtered.emitTool(ctx, opts, "wispterm_docs", "Read WispTerm's own documentation (features, configuration, shortcuts, AI agent, file explorer, media). Call with no topic to list available topics, then call again with a topic to read its full text.", "{\"topic\":{\"type\":\"string\",\"description\":\"Topic name from the list. Omit to list available topics.\"}}");
+    try Filtered.emitTool(ctx, opts, "websearch", "Search the web for current information via Jina. Returns the top results with titles, URLs, and page content. Use when you need facts newer than your training or to look something up online.", "{\"query\":{\"type\":\"string\",\"description\":\"The search query.\"},\"max_results\":{\"type\":\"integer\",\"description\":\"Optional max number of results (default 10, max 20).\"}}");
+    try Filtered.emitTool(ctx, opts, "webread", "Read a web page or local file into clean markdown via Jina Reader. Pass an http(s):// URL to fetch a page, or a local file path (PDF, Word, Excel, PowerPoint) to upload and convert it. Use when you need the full content of one source, not a search.", "{\"url\":{\"type\":\"string\",\"description\":\"An http(s):// URL, or a local file path to upload.\"}}");
+    try Filtered.emitTool(ctx, opts, "pubmed", "Search PubMed (NCBI) for biomedical and life-sciences literature and return matching articles with title, authors, journal, year, PMID, DOI, and abstract. Before calling, decompose the user's academic question into English keywords joined with PubMed boolean operators (AND/OR), then pass that as `query`. Use for scholarly/medical literature questions, not general web search.", "{\"query\":{\"type\":\"string\",\"description\":\"PubMed query: English keywords joined with AND/OR, e.g. metformin AND type 2 diabetes AND cardiovascular events.\"},\"max_results\":{\"type\":\"integer\",\"description\":\"Optional max number of articles (default 10, max 20).\"}}");
+    try Filtered.emitTool(ctx, opts, "subagent", "Delegate a self-contained research or reading task to a background subagent with its own separate context window. The subagent can use websearch, webread, pubmed, read_file, terminal_list, terminal_snapshot, and wispterm_docs, then returns one final report; its intermediate tool output never enters this conversation. Use it whenever a task would pull large content here (full web pages, PDFs, multi-query searches). It cannot see this conversation or ask questions: put every needed detail (URLs, paths, constraints) and the expected report format into task.", "{\"task\":{\"type\":\"string\",\"description\":\"Complete self-contained task description: what to investigate or read, all needed context (URLs, paths, constraints), and what the final report must contain.\"}}");
+    try Filtered.emitTool(ctx, opts, "weixin_send_attachment", "Send a local file back to the active Weixin conversation that triggered this agent request. Use only when the current request came from Weixin; normal local chat requests have no Weixin reply context. Audio and voice files are sent as ordinary file attachments.", "{\"kind\":{\"type\":\"string\",\"description\":\"Attachment kind: file, image, or voice. Voice is accepted as an alias for file.\"},\"path\":{\"type\":\"string\",\"description\":\"Readable local file path to send.\"},\"display_name\":{\"type\":\"string\",\"description\":\"Optional filename shown in Weixin for file attachments; defaults to the path basename.\"}}");
+    if (opts.include_memory) {
+        try Filtered.emitTool(ctx, opts, "memory_save", "Save a durable long-term memory so future sessions remember it. Use for stable user preferences, project conventions, and key decisions — not transient task details. tier=global for facts about the user/preferences; tier=project for facts about the current project/working directory.", "{\"tier\":{\"type\":\"string\",\"description\":\"global or project.\"},\"name\":{\"type\":\"string\",\"description\":\"Short stable slug handle (kebab-case). Reusing an existing name updates that memory.\"},\"description\":{\"type\":\"string\",\"description\":\"One-line summary shown in the resident index.\"},\"type\":{\"type\":\"string\",\"description\":\"Optional: user, feedback, project, or reference. Defaults to user.\"},\"body\":{\"type\":\"string\",\"description\":\"The full memory text.\"}}");
+        try Filtered.emitTool(ctx, opts, "memory_recall", "Read the full text of a memory by its name, when its index line looks relevant to the current task.", "{\"name\":{\"type\":\"string\",\"description\":\"The memory name (slug) from the resident index.\"}}");
+        try Filtered.emitTool(ctx, opts, "memory_delete", "Delete a memory that is wrong or obsolete.", "{\"name\":{\"type\":\"string\",\"description\":\"The memory name (slug) to delete.\"},\"tier\":{\"type\":\"string\",\"description\":\"Optional: global or project. Omit to search both.\"}}");
+    }
 }
 
 const ToolSchemaEmitter = struct {
@@ -617,18 +775,18 @@ const AnthropicToolEmitter = struct {
     }
 };
 
-fn appendToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+fn appendToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), opts: ToolSpecOpts) !void {
     try out.appendSlice(allocator, ",\"tools\":[");
     var ctx = ToolSchemaEmitter{ .allocator = allocator, .out = out };
-    try forEachToolSpec(*ToolSchemaEmitter, &ctx, ToolSchemaEmitter.emit);
+    try forEachToolSpec(*ToolSchemaEmitter, &ctx, opts, ToolSchemaEmitter.emit);
     try out.append(allocator, ']');
     try out.appendSlice(allocator, ",\"tool_choice\":\"auto\"");
 }
 
-fn appendResponseToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+fn appendResponseToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), opts: ToolSpecOpts) !void {
     try out.appendSlice(allocator, ",\"tools\":[");
     var ctx = ResponseToolSchemaEmitter{ .allocator = allocator, .out = out };
-    try forEachToolSpec(*ResponseToolSchemaEmitter, &ctx, ResponseToolSchemaEmitter.emit);
+    try forEachToolSpec(*ResponseToolSchemaEmitter, &ctx, opts, ResponseToolSchemaEmitter.emit);
     try out.append(allocator, ']');
     try out.appendSlice(allocator, ",\"tool_choice\":\"auto\"");
 }
@@ -659,16 +817,95 @@ pub fn parseApiResponse(allocator: std.mem.Allocator, body: []const u8, protocol
 pub fn parseApiErrorResult(allocator: std.mem.Allocator, root: std.json.Value) !?ApiResult {
     if (root != .object) return null;
     if (root.object.get("error")) |err_value| {
-        if (err_value == .object) {
-            if (err_value.object.get("message")) |message_value| {
-                if (message_value == .string) {
-                    return ApiResult{ .content = try allocator.dupe(u8, message_value.string) };
-                }
-            }
-        }
-        return ApiResult{ .content = try allocator.dupe(u8, "API returned an error") };
+        if (err_value == .null) return null;
+        return ApiResult{ .content = try formatApiError(allocator, root, err_value) };
     }
     return null;
+}
+
+fn formatApiError(allocator: std.mem.Allocator, root: std.json.Value, err_value: std.json.Value) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    if (jsonStringValue(err_value)) |message| {
+        if (message.len > 0) try out.appendSlice(allocator, message);
+    } else if (err_value == .object) {
+        if (jsonStringValue(err_value.object.get("message"))) |message| {
+            if (message.len > 0) try out.appendSlice(allocator, message);
+        } else if (jsonStringValue(root.object.get("message"))) |message| {
+            if (message.len > 0) try out.appendSlice(allocator, message);
+        }
+    }
+
+    var wrote_meta = false;
+    if (err_value == .object) {
+        try appendApiErrorMeta(allocator, &out, &wrote_meta, "type", err_value.object.get("type"));
+        try appendApiErrorMeta(allocator, &out, &wrote_meta, "code", err_value.object.get("code"));
+        try appendApiErrorMeta(allocator, &out, &wrote_meta, "param", err_value.object.get("param"));
+        try appendApiErrorMeta(allocator, &out, &wrote_meta, "status", err_value.object.get("status"));
+        try appendApiErrorMeta(allocator, &out, &wrote_meta, "status_code", err_value.object.get("status_code"));
+    }
+    try appendApiErrorMeta(allocator, &out, &wrote_meta, "response_status", root.object.get("status"));
+    if (wrote_meta) try out.append(allocator, ')');
+
+    if (out.items.len == 0) {
+        const json = try std.json.Stringify.valueAlloc(allocator, err_value, .{});
+        defer allocator.free(json);
+        if (json.len > 0) {
+            try out.appendSlice(allocator, "API error: ");
+            try out.appendSlice(allocator, json);
+        }
+    }
+
+    if (out.items.len == 0) try out.appendSlice(allocator, "API returned an error");
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendApiErrorMeta(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    wrote_meta: *bool,
+    label: []const u8,
+    value_opt: ?std.json.Value,
+) !void {
+    const value = value_opt orelse return;
+    switch (value) {
+        .string => |text| {
+            if (text.len == 0) return;
+            try appendApiErrorMetaPrefix(allocator, out, wrote_meta, label);
+            try out.appendSlice(allocator, text);
+        },
+        .integer => |number| {
+            try appendApiErrorMetaPrefix(allocator, out, wrote_meta, label);
+            try out.print(allocator, "{d}", .{number});
+        },
+        .float => |number| {
+            try appendApiErrorMetaPrefix(allocator, out, wrote_meta, label);
+            try out.print(allocator, "{d}", .{number});
+        },
+        .bool => |flag| {
+            try appendApiErrorMetaPrefix(allocator, out, wrote_meta, label);
+            try out.appendSlice(allocator, if (flag) "true" else "false");
+        },
+        else => {},
+    }
+}
+
+fn appendApiErrorMetaPrefix(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    wrote_meta: *bool,
+    label: []const u8,
+) !void {
+    if (!wrote_meta.*) {
+        if (out.items.len == 0) try out.appendSlice(allocator, "API error");
+        try out.appendSlice(allocator, " (");
+        wrote_meta.* = true;
+    } else {
+        try out.appendSlice(allocator, ", ");
+    }
+    try out.appendSlice(allocator, label);
+    try out.append(allocator, '=');
 }
 
 fn parseChatCompletionsResponse(allocator: std.mem.Allocator, root: std.json.Value) !ApiResult {
@@ -1042,6 +1279,49 @@ test "buildRequestJson chat_completions emits model, roles, flags" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"stream\":false") != null);
 }
 
+test "buildRequestJson chat_completions emits a multimodal image_url block for a user image" {
+    const a = std.testing.allocator;
+    var images = [_]ImageBlock{.{ .data_b64 = @constCast("QUJD"), .media_type = @constCast("image/png") }};
+    var msgs = [_]RequestMessage{.{ .role = .user, .content = @constCast("look"), .images = &images }};
+    const params = RequestParams{ .model = "m1", .system_prompt = "", .protocol = .chat_completions, .thinking_enabled = false, .reasoning_effort = "", .stream = false };
+    const json = try buildRequestJson(a, params, &msgs, false);
+    defer a.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"content\":[{\"type\":\"text\",\"text\":\"look\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,QUJD\"}") != null);
+}
+
+test "buildRequestJson chat_completions keeps a plain string content when a user message has no image" {
+    const a = std.testing.allocator;
+    var msgs = [_]RequestMessage{.{ .role = .user, .content = @constCast("hi") }};
+    const params = RequestParams{ .model = "m1", .system_prompt = "", .protocol = .chat_completions, .thinking_enabled = false, .reasoning_effort = "", .stream = false };
+    const json = try buildRequestJson(a, params, &msgs, false);
+    defer a.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"content\":\"hi\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"content\":[") == null);
+}
+
+test "buildRequestJson anthropic emits an image source block for a user image" {
+    const a = std.testing.allocator;
+    var images = [_]ImageBlock{.{ .data_b64 = @constCast("QUJD"), .media_type = @constCast("image/png") }};
+    var msgs = [_]RequestMessage{.{ .role = .user, .content = @constCast("look"), .images = &images }};
+    const params = RequestParams{ .model = "m1", .system_prompt = "", .protocol = .anthropic, .thinking_enabled = false, .reasoning_effort = "", .stream = false };
+    const json = try buildRequestJson(a, params, &msgs, false);
+    defer a.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "{\"type\":\"text\",\"text\":\"look\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"QUJD\"}") != null);
+}
+
+test "buildRequestJson responses emits an input_image block for a user image" {
+    const a = std.testing.allocator;
+    var images = [_]ImageBlock{.{ .data_b64 = @constCast("QUJD"), .media_type = @constCast("image/png") }};
+    var msgs = [_]RequestMessage{.{ .role = .user, .content = @constCast("look"), .images = &images }};
+    const params = RequestParams{ .model = "m1", .system_prompt = "", .protocol = .responses, .thinking_enabled = false, .reasoning_effort = "", .stream = false };
+    const json = try buildRequestJson(a, params, &msgs, false);
+    defer a.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"input_text\",\"text\":\"look\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,QUJD\"") != null);
+}
+
 test "buildRequestJson chat_completions omits reasoning_effort when thinking disabled" {
     const a = std.testing.allocator;
     var msgs = [_]RequestMessage{.{ .role = .user, .content = @constCast("hi") }};
@@ -1081,6 +1361,46 @@ test "parseApiResponse surfaces an error object as content" {
     var result = try parseApiResponse(a, body, .chat_completions);
     defer result.deinit(a);
     try std.testing.expectEqualStrings("boom", result.content);
+}
+
+test "parseApiResponse surfaces an error string as content" {
+    const a = std.testing.allocator;
+    const body =
+        \\{"error":"model unavailable"}
+    ;
+    var result = try parseApiResponse(a, body, .responses);
+    defer result.deinit(a);
+    try std.testing.expectEqualStrings("model unavailable", result.content);
+}
+
+test "parseApiResponse surfaces error metadata without a message" {
+    const a = std.testing.allocator;
+    const body =
+        \\{"error":{"type":"invalid_request_error","code":"model_not_found","param":"model"}}
+    ;
+    var result = try parseApiResponse(a, body, .responses);
+    defer result.deinit(a);
+    try std.testing.expectEqualStrings("API error (type=invalid_request_error, code=model_not_found, param=model)", result.content);
+}
+
+test "parseApiResponse surfaces responses failed error metadata" {
+    const a = std.testing.allocator;
+    const body =
+        \\{"status":"failed","error":{"code":"unsupported_model","status_code":400}}
+    ;
+    var result = try parseApiResponse(a, body, .responses);
+    defer result.deinit(a);
+    try std.testing.expectEqualStrings("API error (code=unsupported_model, status_code=400, response_status=failed)", result.content);
+}
+
+test "parseApiResponse ignores null error on completed responses result" {
+    const a = std.testing.allocator;
+    const body =
+        \\{"status":"completed","error":null,"output_text":"hello"}
+    ;
+    var result = try parseApiResponse(a, body, .responses);
+    defer result.deinit(a);
+    try std.testing.expectEqualStrings("hello", result.content);
 }
 
 test "isDeepSeekBaseUrl" {
@@ -1204,6 +1524,48 @@ test "anthropic maps tool_calls to tool_use and tool results to grouped tool_res
     try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"tool_result\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"tool_use_id\":\"call_1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"input_schema\"") != null);
+}
+
+test "agent tool set includes websearch" {
+    const a = std.testing.allocator;
+    var msgs = [_]RequestMessage{.{ .role = .user, .content = @constCast("hi") }};
+    const params = RequestParams{ .model = "m", .system_prompt = "", .protocol = .anthropic, .thinking_enabled = false, .reasoning_effort = "", .stream = false, .max_tokens = 8192 };
+    const json = try buildRequestJson(a, params, &msgs, true);
+    defer a.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"websearch\"") != null);
+}
+
+test "agent tool set includes webread" {
+    const a = std.testing.allocator;
+    var msgs = [_]RequestMessage{.{ .role = .user, .content = @constCast("hi") }};
+    const params = RequestParams{ .model = "m", .system_prompt = "", .protocol = .anthropic, .thinking_enabled = false, .reasoning_effort = "", .stream = false, .max_tokens = 8192 };
+    const json = try buildRequestJson(a, params, &msgs, true);
+    defer a.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"webread\"") != null);
+}
+
+test "agent tool set includes pubmed" {
+    const a = std.testing.allocator;
+    var msgs = [_]RequestMessage{.{ .role = .user, .content = @constCast("hi") }};
+    const params = RequestParams{ .model = "m", .system_prompt = "", .protocol = .anthropic, .thinking_enabled = false, .reasoning_effort = "", .stream = false, .max_tokens = 8192 };
+    const json = try buildRequestJson(a, params, &msgs, true);
+    defer a.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"pubmed\"") != null);
+}
+
+test "buildRequestJson advertises memory tools only when enabled" {
+    const a = std.testing.allocator;
+    const params_on = RequestParams{ .model = "m", .system_prompt = "s", .protocol = .chat_completions, .thinking_enabled = false, .reasoning_effort = "", .stream = false, .memory_enabled = true };
+    const on = try buildRequestJson(a, params_on, &.{}, true);
+    defer a.free(on);
+    try std.testing.expect(std.mem.indexOf(u8, on, "\"memory_save\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, on, "\"memory_recall\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, on, "\"memory_delete\"") != null);
+
+    const params_off = RequestParams{ .model = "m", .system_prompt = "s", .protocol = .chat_completions, .thinking_enabled = false, .reasoning_effort = "", .stream = false, .memory_enabled = false };
+    const off = try buildRequestJson(a, params_off, &.{}, true);
+    defer a.free(off);
+    try std.testing.expect(std.mem.indexOf(u8, off, "\"memory_save\"") == null);
 }
 
 // ---------------------------------------------------------------------------
@@ -1342,4 +1704,100 @@ test "ai chat Responses API stream aggregates output text and usage" {
     try std.testing.expectEqual(@as(u64, 12), result.usage.?.total_tokens);
     try std.testing.expectEqual(@as(u64, 2), result.usage.?.prompt_cache_hit_tokens);
     try std.testing.expectEqual(@as(u64, 7), result.usage.?.prompt_cache_miss_tokens);
+}
+
+test "file-edit tools appear in the tool schema" {
+    const a = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try appendToolSchemas(a, &out, .{ .include_memory = false });
+    const json = out.items;
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"read_file\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"write_file\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"edit_file\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"replace_all\"") != null);
+}
+
+test "copy_file appears in the tool schema" {
+    const a = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try appendToolSchemas(a, &out, .{ .include_memory = false });
+    const json = out.items;
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"copy_file\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source_path\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"dest_surface_id\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"dest_path\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"dest_name\"") != null);
+}
+
+test "terminal_answer_prompt appears in the tool schema" {
+    const a = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try appendToolSchemas(a, &out, .{ .include_memory = false });
+    const json = out.items;
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"terminal_answer_prompt\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "approve_all") != null);
+}
+
+test "subagentToolAllowed accepts exactly the research tools" {
+    const allowed = [_][]const u8{
+        "terminal_list", "terminal_snapshot", "read_file",
+        "websearch",     "webread",          "pubmed",
+        "wispterm_docs",
+    };
+    for (allowed) |name| try std.testing.expect(subagentToolAllowed(name));
+    const denied = [_][]const u8{
+        "subagent",   "memory_save", "ssh_session_exec", "write_file",
+        "edit_file",  "tab_new",     "tab_close",        "terminal_select",
+        "terminal_repl_exec",
+    };
+    for (denied) |name| try std.testing.expect(!subagentToolAllowed(name));
+}
+
+test "subagent toolset restricts tool schemas to research tools" {
+    const a = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try appendToolSchemas(a, &out, .{ .include_memory = true, .toolset = .subagent });
+    const json = out.items;
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"websearch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"webread\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"pubmed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"read_file\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"terminal_list\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"terminal_snapshot\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"wispterm_docs\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"subagent\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"memory_save\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ssh_session_exec\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"write_file\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"tab_new\"") == null);
+}
+
+test "full toolset includes the subagent tool" {
+    const a = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try appendToolSchemas(a, &out, .{ .include_memory = false });
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"name\":\"subagent\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"task\"") != null);
+}
+
+test "subagent toolset gating applies to all three protocol emitters" {
+    const a = std.testing.allocator;
+    var responses_out: std.ArrayListUnmanaged(u8) = .empty;
+    defer responses_out.deinit(a);
+    try appendResponseToolSchemas(a, &responses_out, .{ .include_memory = true, .toolset = .subagent });
+    try std.testing.expect(std.mem.indexOf(u8, responses_out.items, "\"websearch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, responses_out.items, "\"name\":\"subagent\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, responses_out.items, "\"write_file\"") == null);
+
+    var anthropic_out: std.ArrayListUnmanaged(u8) = .empty;
+    defer anthropic_out.deinit(a);
+    try appendAnthropicTools(a, &anthropic_out, .{ .include_memory = true, .toolset = .subagent });
+    try std.testing.expect(std.mem.indexOf(u8, anthropic_out.items, "\"websearch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, anthropic_out.items, "\"name\":\"subagent\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, anthropic_out.items, "\"write_file\"") == null);
 }

@@ -120,10 +120,69 @@ pub threadlocal var g_ft_lib: ?freetype.Library = null;
 pub threadlocal var g_font_discovery: ?*font_backend.FontDiscovery = null;
 pub threadlocal var g_fallback_faces: std.AutoHashMapUnmanaged(u32, freetype.Face) = .empty; // codepoint -> fallback face
 pub threadlocal var g_no_fallback: std.AutoHashMapUnmanaged(u32, void) = .empty; // codepoints with no fallback (negative cache)
+pub threadlocal var g_fallback_font_data: std.ArrayListUnmanaged([]u8) = .empty; // backing memory for initMemoryFace fallbacks (must outlive the faces)
 pub threadlocal var g_font_size: u32 = DEFAULT_FONT_SIZE;
 pub threadlocal var g_dpi: u32 = platform_display.default_dpi;
 pub threadlocal var g_cjk_font_family: ?[]const u8 = null;
 pub threadlocal var g_fallback_font_families: ?[]const u8 = null;
+
+// The globals above must never alias config-owned memory: the config that
+// carries these strings is deinit'd right after a reload is applied, and the
+// globals are read lazily on the next fallback-face lookup. Set them only
+// through these setters, which copy into the thread's own buffers.
+threadlocal var g_cjk_font_family_buf: [256]u8 = undefined;
+threadlocal var g_fallback_font_families_buf: [1024]u8 = undefined;
+
+pub fn setCjkFontFamily(family: ?[]const u8) void {
+    const value = family orelse {
+        g_cjk_font_family = null;
+        return;
+    };
+    const n = @min(value.len, g_cjk_font_family_buf.len);
+    @memcpy(g_cjk_font_family_buf[0..n], value[0..n]);
+    g_cjk_font_family = g_cjk_font_family_buf[0..n];
+}
+
+pub fn setFallbackFontFamilies(csv: ?[]const u8) void {
+    const value = csv orelse {
+        g_fallback_font_families = null;
+        return;
+    };
+    const n = @min(value.len, g_fallback_font_families_buf.len);
+    @memcpy(g_fallback_font_families_buf[0..n], value[0..n]);
+    g_fallback_font_families = g_fallback_font_families_buf[0..n];
+}
+
+test "fallback family setters keep a private copy of config-owned strings" {
+    // Regression: config reload assigned cfg-owned slices directly to the
+    // globals, which dangled once the reloaded Config was deinit'd. The
+    // setters must copy, so clobbering the source must not change the values.
+    var src: [16]u8 = undefined;
+    @memcpy(src[0..6], "Sarasa");
+    setCjkFontFamily(src[0..6]);
+    @memset(&src, 'x');
+    try std.testing.expectEqualStrings("Sarasa", g_cjk_font_family.?);
+
+    @memcpy(src[0..8], "AA, B, C");
+    setFallbackFontFamilies(src[0..8]);
+    @memset(&src, 'y');
+    try std.testing.expectEqualStrings("AA, B, C", g_fallback_font_families.?);
+
+    setCjkFontFamily(null);
+    try std.testing.expect(g_cjk_font_family == null);
+    setFallbackFontFamilies(null);
+    try std.testing.expect(g_fallback_font_families == null);
+}
+
+test "fallback family setters truncate values longer than their buffers" {
+    const long = "x" ** 2000;
+    setCjkFontFamily(long);
+    try std.testing.expect(g_cjk_font_family.?.len < long.len);
+    setFallbackFontFamilies(long);
+    try std.testing.expect(g_fallback_font_families.?.len < long.len);
+    setCjkFontFamily(null);
+    setFallbackFontFamilies(null);
+}
 
 // HarfBuzz shaping state
 pub threadlocal var g_hb_buf: ?harfbuzz.Buffer = null;
@@ -351,15 +410,17 @@ fn isCjkCodepoint(codepoint: u32) bool {
 fn preferredFallbackFamilies(codepoint: u32) []const []const u8 {
     if (isCjkCodepoint(codepoint)) {
         if (builtin.os.tag == .macos) {
-            // macOS 26 moved PingFang into PrivateFrameworks/.../Reserved as a
-            // system-reserved .ttc that FreeType cannot open (FT_New_Face fails),
-            // and CoreText's default cascade prefers exactly that reserved font —
-            // which is why CJK rendered as tofu. List the public system CJK
-            // families (all FreeType-loadable from /System/Library/Fonts) first
-            // so findOrLoadFallbackFace resolves a usable face before falling
-            // back to the broken CoreText default. Third-party families follow
-            // for users who installed them.
+            // PingFang is the only CJK font guaranteed present on a stock macOS,
+            // but macOS 26 relocated it under PrivateFrameworks/.../Reserved as a
+            // .ttc whose path FreeType cannot open (FT_New_Face fails) — which is
+            // why CJK rendered as tofu. openFallbackFreetypeFace now loads such
+            // fonts from CoreText-extracted sfnt bytes, so list PingFang first
+            // (it resolves on every machine). Public optional families and
+            // third-party installs follow as nicer monospace alternatives.
             return &.{
+                "PingFang SC",
+                "PingFang TC",
+                "PingFang HK",
                 "Hiragino Sans GB",
                 "Songti SC",
                 "Heiti SC",
@@ -657,6 +718,29 @@ pub fn packColorBitmapIntoAtlas(
     region.height = height;
 
     return region;
+}
+
+/// True when any of this thread's atlases has CPU pixel writes the GPU
+/// texture has not seen yet (mirrors syncAtlasTexture's modified check).
+/// Glyphs are rasterized lazily DURING a frame's cell rebuild and overlay
+/// draws — after that frame's top-of-frame syncAtlasTexture already ran — so
+/// the presented frame sampled stale textures. The render gate uses this to
+/// schedule one follow-up frame; without it the event-driven idle loop can
+/// freeze the garbled frame on screen (e.g. the first emoji a window shows).
+pub fn atlasSyncPending() bool {
+    if (g_atlas) |a| {
+        if (a.modified.load(.monotonic) > g_atlas_modified) return true;
+    }
+    if (g_color_atlas) |a| {
+        if (a.modified.load(.monotonic) > g_color_atlas_modified) return true;
+    }
+    if (g_icon_atlas) |a| {
+        if (a.modified.load(.monotonic) > g_icon_atlas_modified) return true;
+    }
+    if (g_titlebar_atlas) |a| {
+        if (a.modified.load(.monotonic) > g_titlebar_atlas_modified) return true;
+    }
+    return false;
 }
 
 /// Sync the font atlas CPU data to the GPU texture.
@@ -1217,25 +1301,52 @@ pub fn loadBellEmoji() ?BellCache {
 
 /// Find or load a fallback font that contains the given codepoint
 /// Resolve a FallbackFont to a FreeType face, verifying FreeType can actually
-/// open the file AND that the face contains `codepoint`. Returns null (after
-/// cleaning up) if either check fails, so callers can try the next candidate.
-/// This is the crux of the macOS CJK fix: CoreText happily hands back the
-/// reserved PingFangUI.ttc which FreeType cannot open, so we must validate the
-/// load rather than trust the discovery result.
+/// load it AND that the face contains `codepoint`. Returns null (after cleaning
+/// up) if either check fails, so callers can try the next candidate.
+///
+/// This is the crux of the macOS CJK fix. CoreText happily resolves CJK to the
+/// reserved PingFang.ttc, whose file path FreeType's FT_New_Face cannot open
+/// (macOS 26 relocated it under PrivateFrameworks/.../Reserved). We first try
+/// the cheap path-based load, then — when that fails — pull the font's sfnt
+/// bytes straight from the backend (CoreText tables) and load them from memory,
+/// which works regardless of file accessibility. The memory buffer must outlive
+/// the face, so it is tracked in g_fallback_font_data and freed in
+/// clearFallbackFaces.
 fn openFallbackFreetypeFace(
     ft_lib: freetype.Library,
     font: *font_backend.FallbackFont,
     codepoint: u32,
     alloc: std.mem.Allocator,
 ) ?freetype.Face {
-    var font_path = font_backend.fontFilePathAlloc(alloc, font) orelse return null;
-    defer font_path.deinit();
+    // 1. Cheap path: open by file path (no data copy). Works for ordinary
+    //    user/system fonts that resolve to a readable file.
+    if (font_backend.fontFilePathAlloc(alloc, font)) |path_result| {
+        var font_path = path_result;
+        defer font_path.deinit();
+        if (ft_lib.initFace(font_path.path, @intCast(font_path.face_index))) |ft_face| {
+            if ((ft_face.getCharIndex(codepoint) orelse 0) != 0) return ft_face;
+            ft_face.deinit();
+        } else |_| {}
+    }
 
-    const ft_face = ft_lib.initFace(font_path.path, @intCast(font_path.face_index)) catch return null;
+    // 2. Memory path: for fonts FreeType cannot open by path (reserved system
+    //    .ttc files), reconstruct the sfnt from the backend and load it from
+    //    memory. The buffer is borrowed by FreeType, so retain it.
+    const data = font_backend.fontDataAlloc(alloc, font) orelse return null;
+    const ft_face = ft_lib.initMemoryFace(data, 0) catch {
+        alloc.free(data);
+        return null;
+    };
     if ((ft_face.getCharIndex(codepoint) orelse 0) == 0) {
         ft_face.deinit();
+        alloc.free(data);
         return null;
     }
+    g_fallback_font_data.append(alloc, data) catch {
+        ft_face.deinit();
+        alloc.free(data);
+        return null;
+    };
     return ft_face;
 }
 
@@ -1553,6 +1664,14 @@ pub fn clearFallbackFaces(allocator: std.mem.Allocator) void {
     }
     g_fallback_faces.deinit(allocator);
     g_fallback_faces = .empty;
+
+    // Free sfnt buffers backing memory-loaded fallback faces. Must happen after
+    // the faces above are deinited, since FreeType borrows these buffers.
+    for (g_fallback_font_data.items) |data| {
+        allocator.free(data);
+    }
+    g_fallback_font_data.deinit(allocator);
+    g_fallback_font_data = .empty;
 
     // Also clear negative cache
     g_no_fallback.deinit(allocator);

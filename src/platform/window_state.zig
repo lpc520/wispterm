@@ -50,7 +50,7 @@ fn loadPersisted(allocator: std.mem.Allocator) codec.PersistedState {
 fn savePersisted(allocator: std.mem.Allocator, state: codec.PersistedState) void {
     const path = stateFilePath(allocator) orelse return;
     defer allocator.free(path);
-    var buf: [256]u8 = undefined;
+    var buf: [384]u8 = undefined;
     const content = codec.format(&buf, state) catch return;
     if (std.fs.cwd().createFile(path, .{})) |file| {
         defer file.close();
@@ -125,4 +125,60 @@ pub fn setAiSetupPrompted(allocator: std.mem.Allocator) void {
     if (current.ai_setup_prompted) return;
     current.ai_setup_prompted = true;
     savePersisted(allocator, current);
+}
+
+/// The last app version whose "What's New" the user has seen (empty when none).
+/// The returned slice is copied into `buf`; pass a buffer at least
+/// `codec.version_max_len` bytes.
+pub fn lastSeenVersion(allocator: std.mem.Allocator, buf: []u8) []const u8 {
+    const v = loadPersisted(allocator).lastSeenVersion();
+    const n = @min(v.len, buf.len);
+    @memcpy(buf[0..n], v[0..n]);
+    return buf[0..n];
+}
+
+/// Record `version` as the last-seen "What's New" version (read-modify-write to
+/// preserve geometry + the onboarding flag). No-op if already equal.
+pub fn recordSeenVersion(allocator: std.mem.Allocator, version: []const u8) void {
+    const current = loadPersisted(allocator);
+    if (std.mem.eql(u8, current.lastSeenVersion(), version)) return;
+    savePersisted(allocator, codec.withLastSeenVersion(current, version));
+}
+
+/// The stored D3D present bring-up marker (empty when none). The returned
+/// slice is copied into `buf`; pass at least `codec.bringup_max_len` bytes.
+pub fn d3dBringup(allocator: std.mem.Allocator, buf: []u8) []const u8 {
+    const m = loadPersisted(allocator).d3dBringup();
+    const n = @min(m.len, buf.len);
+    @memcpy(buf[0..n], m[0..n]);
+    return buf[0..n];
+}
+
+/// Persist a D3D bring-up marker (read-modify-write). Written *before* the
+/// first presenter init so a driver crash during bring-up leaves it behind.
+pub fn recordD3dBringup(allocator: std.mem.Allocator, marker: []const u8) void {
+    const current = loadPersisted(allocator);
+    savePersisted(allocator, codec.withD3dBringup(current, marker));
+}
+
+/// Clear the marker after the process survived its first present — but only
+/// a "probing" marker. A "blocked" marker must persist across launches, or a
+/// machine whose driver crashes at init would alternate crash/run forever.
+pub fn settleD3dBringup(allocator: std.mem.Allocator) void {
+    const current = loadPersisted(allocator);
+    if (current.d3d_bringup_len == 0) return;
+    if (!std.mem.startsWith(u8, current.d3dBringup(), "probing:")) return;
+    savePersisted(allocator, codec.withD3dBringup(current, ""));
+}
+
+/// Persist "blocked:<version>" so every later launch of this app version
+/// skips the D3D present path from frame 0. Written when the flip path
+/// proved broken or degraded *mid-session* — the only supported way to be on
+/// GDI is to never flip-present the HWND, so recovery happens at the next
+/// launch rather than in-session. An upgrade retries the flip path once.
+pub fn blockD3dBringup(allocator: std.mem.Allocator, version: []const u8) void {
+    const dxgi_core = @import("dxgi_core.zig");
+    var buf: [dxgi_core.bringup_marker_max_len]u8 = undefined;
+    const marker = dxgi_core.bringupBlockedMarker(&buf, version) catch return;
+    recordD3dBringup(allocator, marker);
 }

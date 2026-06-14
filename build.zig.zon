@@ -1,6 +1,6 @@
 .{
     .name = .wispterm,
-    .version = "1.7.1",
+    .version = "1.21.0",
     .fingerprint = 0x2db6e9e774428a6f,
     .minimum_zig_version = "0.15.2",
 
@@ -25,6 +25,8 @@
         },
         .freetype = .{ .path = "pkg/freetype" },
         .opengl = .{ .path = "pkg/opengl" },
+        .sdl = .{ .path = "pkg/sdl" },
+        .fontconfig = .{ .path = "pkg/fontconfig" },
         .zlib = .{ .path = "pkg/zlib" },
         .libpng = .{ .path = "pkg/libpng" },
         .@"apple-sdk" = .{ .path = "pkg/apple-sdk" },

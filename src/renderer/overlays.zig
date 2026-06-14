@@ -124,6 +124,10 @@ const UPDATE_STATUS_DURATION_MS: i64 = 2500;
 const SSH_CWD_HELP_URL = "https://github.com/xuzhougeng/wispterm#ssh-current-directory-for-downloads-and-uploads";
 const update_prompt_model = @import("overlays/update_prompt_model.zig");
 const UpdatePromptAction = update_prompt_model.UpdatePromptAction;
+const md = @import("../markdown_text.zig");
+const whats_new_model = @import("overlays/whats_new_model.zig");
+threadlocal var g_whats_new_visible: bool = false;
+threadlocal var g_whats_new_scroll: i64 = 0;
 threadlocal var g_update_prompt_until_ms: i64 = 0;
 threadlocal var g_update_prompt_buf: [128]u8 = undefined;
 threadlocal var g_update_prompt_len: usize = 0;
@@ -516,9 +520,10 @@ fn transferCancelConfirmExecuteAtForTest(xpos: f32, ypos: f32, window_width: f32
 
 fn executeCommand(action: CommandAction) void {
     switch (action) {
-        .new_tab => sessionLauncherOpen(),
+        .new_tab => sessionLauncherOpenFromCommandPalette(),
+        .load_openssh_config => loadOpenSshConfigDefault(),
         .new_agent => openDefaultAgentSessionFromCommandCenter(),
-        .manage_ai_profiles => openAiList(),
+        .manage_ai_profiles => openAiListFromCommandPalette(),
         .select_agent_history => commandPaletteOpenAgentHistory(),
         .split_right => AppWindow.splitFocused(.right),
         .split_down => AppWindow.splitFocused(.down),
@@ -531,6 +536,7 @@ fn executeCommand(action: CommandAction) void {
         .toggle_sidebar => AppWindow.input.toggleSidebar(),
         .toggle_file_explorer => AppWindow.input.toggleFileExplorer(),
         .toggle_browser_panel => AppWindow.input.toggleBrowserPanel(),
+        .open_jupyter_panel => AppWindow.input.openJupyterPanel(),
         .toggle_quake => AppWindow.toggleQuakeVisibility(),
         .open_settings => settingsPageOpen(),
         .show_shortcuts => startupShortcutsShow(),
@@ -566,6 +572,7 @@ fn executeCommand(action: CommandAction) void {
             }
         },
         .open_latest_release => openLatestRelease(),
+        .show_whats_new => showWhatsNew(),
         .update_skills => {
             if (AppWindow.g_app) |app| {
                 showStatusToast(i18n.s().toast_updating_skills);
@@ -576,6 +583,22 @@ fn executeCommand(action: CommandAction) void {
         },
         .install_claude_code_integration => installClaudeCodeIntegration(),
         .remove_claude_code_integration => removeClaudeCodeIntegration(),
+        .open_skill_center => {
+            _ = AppWindow.spawnSkillCenterTab();
+        },
+        .open_port_forwarding => {
+            _ = AppWindow.spawnPortForwardingTab();
+        },
+        .split_preview => {
+            if (AppWindow.g_allocator) |gpa| {
+                // Focus the new (empty) preview so Ctrl+Shift+W closes it.
+                if (AppWindow.tab.splitIntoPreview(gpa)) |pane| {
+                    _ = AppWindow.tab.focusPreviewPane(pane);
+                }
+                AppWindow.g_force_rebuild = true;
+                AppWindow.g_cells_valid = false;
+            }
+        },
     }
 }
 
@@ -1374,6 +1397,49 @@ fn renderTitlebarTextStrongLimited(text: []const u8, x_start: f32, y: f32, color
     renderTitlebarTextLimited(text, x + 1, y_aligned, color, max_w - 1);
 }
 
+const jupyter_picker = @import("../jupyter_picker.zig");
+
+/// Render the multi-server Jupyter picker overlay.
+pub fn renderJupyterPicker(window_width: f32, window_height: f32) void {
+    if (!jupyter_picker.isVisible()) return;
+    const n = jupyter_picker.count();
+    if (n == 0) return;
+
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const panel = mixColor(bg, fg, 0.05);
+    const border = mixColor(bg, fg, 0.18);
+    const sel_bg = mixColor(bg, accent, 0.5);
+    const text_color = mixColor(bg, fg, 0.88);
+
+    const row_h: f32 = @max(28.0, font.g_titlebar_cell_height + 12);
+    const box_w: f32 = @min(window_width - 80, 720);
+    const title_h: f32 = row_h;
+    const box_h: f32 = title_h + row_h * @as(f32, @floatFromInt(n)) + 16;
+    const box_x = @round((window_width - box_w) / 2);
+    const box_top = @round((window_height - box_h) / 2);
+    const box_y = @round(window_height - box_top - box_h);
+
+    ui_pipeline.fillQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.30);
+    renderRoundedQuadAlpha(box_x - 1, box_y - 1, box_w + 2, box_h + 2, 9, border, 0.5);
+    renderRoundedQuadAlpha(box_x, box_y, box_w, box_h, 8, panel, 0.99);
+
+    const title_y = @round(box_y + box_h - title_h + (title_h - font.g_titlebar_cell_height) / 2);
+    _ = titlebar.renderTextLimited("Select a Jupyter server (Up/Down, Enter, Esc)", box_x + 16, title_y, mixColor(bg, fg, 0.6), box_w - 32);
+
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const row_top_px = box_top + title_h + row_h * @as(f32, @floatFromInt(i));
+        const row_y = @round(window_height - row_top_px - row_h);
+        if (i == jupyter_picker.selectedIndex()) {
+            renderRoundedQuadAlpha(box_x + 8, row_y + 3, box_w - 16, row_h - 6, 5, sel_bg, 0.6);
+        }
+        const ty = @round(row_y + (row_h - font.g_titlebar_cell_height) / 2);
+        _ = titlebar.renderTextLimited(jupyter_picker.urlAt(i), box_x + 18, ty, text_color, box_w - 36);
+    }
+}
+
 pub fn renderBrowserUrlBar(window_width: f32, window_height: f32, top_offset: f32) void {
     if (!browser_panel.isVisibleForActiveTab()) return;
 
@@ -1411,11 +1477,14 @@ pub fn renderBrowserUrlBar(window_width: f32, window_height: f32, top_offset: f3
         .top = @floatFromInt(url_bar.top),
         .height = @floatFromInt(url_bar.bottom - url_bar.top),
     };
-    const close = hit_test.panelCloseButtonRect(close_layout) orelse return;
+    const close = hit_test.panelHeaderButtonRect(close_layout, 0) orelse return;
+    const toggle_rect = hit_test.panelHeaderButtonRect(close_layout, 1);
+    const refresh_rect = hit_test.panelHeaderButtonRect(close_layout, 2);
     const close_btn_w: f32 = @floatCast(close.width);
     const close_x = @round(@as(f32, @floatCast(close.left)));
     const input_x = @round(@as(f32, @floatFromInt(url_bar.left)) + margin);
-    const input_w = @max(1.0, close_x - input_x - margin);
+    const first_button_x = if (refresh_rect) |r| @round(@as(f32, @floatCast(r.left))) else close_x;
+    const input_w = @max(1.0, first_button_x - input_x - margin);
     const input_h = @max(24.0, bar_h - margin * 2);
     const input_y = @round(bar_y + margin);
     renderRoundedQuadAlpha(input_x - 1, input_y - 1, input_w + 2, input_h + 2, 6, field_border, if (browser_panel.urlBarFocused()) 0.70 else 0.34);
@@ -1447,6 +1516,48 @@ pub fn renderBrowserUrlBar(window_width: f32, window_height: f32, top_offset: f3
         ui_pipeline.fillQuadAlpha(close_x + 6, bar_y + @round((bar_h - 20) / 2), 20, 20, mixColor(bg, fg, 0.14), 0.95);
     }
     titlebar.renderCloseIcon(close_x, bar_y, close_btn_w, bar_h, if (close_hovered) fg else mixColor(bg, fg, 0.68));
+
+    if (toggle_rect) |t| {
+        const t_left = @round(@as(f32, @floatCast(t.left)));
+        const toggle_hovered = blk: {
+            const win = AppWindow.g_window orelse break :blk false;
+            if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
+            break :blk hit_test.panelHeaderSecondButton(close_layout, @floatFromInt(win.mouse_x), @floatFromInt(win.mouse_y));
+        };
+        if (toggle_hovered) {
+            ui_pipeline.fillQuadAlpha(t_left + 6, bar_y + @round((bar_h - 20) / 2), 20, 20, mixColor(bg, fg, 0.14), 0.95);
+        }
+        const glyph_color = if (toggle_hovered) fg else mixColor(bg, fg, 0.68);
+        const gx = t_left + @as(f32, @floatCast(t.width)) / 2 - 6;
+        const gy = bar_y + bar_h / 2 - 6;
+        if (browser_panel.displayMode() == .full) {
+            ui_pipeline.fillQuadAlpha(gx, gy, 12, 12, glyph_color, 0.9);
+        } else {
+            ui_pipeline.fillQuadAlpha(gx, gy, 12, 1.5, glyph_color, 0.9);
+            ui_pipeline.fillQuadAlpha(gx, gy + 10.5, 12, 1.5, glyph_color, 0.9);
+            ui_pipeline.fillQuadAlpha(gx, gy, 1.5, 12, glyph_color, 0.9);
+            ui_pipeline.fillQuadAlpha(gx + 10.5, gy, 1.5, 12, glyph_color, 0.9);
+        }
+    }
+
+    if (refresh_rect) |r| {
+        const r_left = @round(@as(f32, @floatCast(r.left)));
+        const refresh_hovered = blk: {
+            const win = AppWindow.g_window orelse break :blk false;
+            if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
+            break :blk hit_test.panelHeaderButton(close_layout, 2, @floatFromInt(win.mouse_x), @floatFromInt(win.mouse_y));
+        };
+        if (refresh_hovered) {
+            ui_pipeline.fillQuadAlpha(r_left + 6, bar_y + @round((bar_h - 20) / 2), 20, 20, mixColor(bg, fg, 0.14), 0.95);
+        }
+        const glyph_color = if (refresh_hovered) fg else mixColor(bg, fg, 0.68);
+        const cx = r_left + @as(f32, @floatCast(r.width)) / 2;
+        const cy = bar_y + bar_h / 2;
+        ui_pipeline.fillQuadAlpha(cx - 5, cy - 6, 8, 1.5, glyph_color, 0.9);
+        ui_pipeline.fillQuadAlpha(cx + 3, cy - 6, 1.5, 6, glyph_color, 0.9);
+        ui_pipeline.fillQuadAlpha(cx - 5, cy + 4.5, 8, 1.5, glyph_color, 0.9);
+        ui_pipeline.fillQuadAlpha(cx - 6.5, cy - 1, 1.5, 6, glyph_color, 0.9);
+    }
 
     ui_pipeline.fillQuadAlpha(panel_x, bar_y, panel_w, 1, mixColor(bg, fg, 0.18), 0.55);
 }
@@ -1644,6 +1755,7 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
 // ============================================================================
 
 const profile_codec = @import("overlays/profile_codec.zig");
+const openssh_config_import = @import("../openssh_config_import.zig");
 const SSH_FIELD_COUNT = profile_codec.SSH_FIELD_COUNT;
 const SSH_FIELD_MAX = profile_codec.SSH_FIELD_MAX;
 const SSH_PROFILE_MAX = 16;
@@ -1666,6 +1778,7 @@ const SessionAction = enum {
     ai_history_wsl,
     ai_history_ssh,
     connect_selected,
+    load_openssh_config,
     new_ssh,
     edit_selected,
     delete_selected,
@@ -1723,6 +1836,7 @@ const SessionLayout = struct {
 
 pub threadlocal var g_session_launcher_visible: bool = false;
 threadlocal var g_session_launcher_selected: usize = 0;
+threadlocal var g_session_launcher_return_to_command_palette: bool = false;
 threadlocal var g_ssh_list_visible: bool = false;
 threadlocal var g_ssh_form_visible: bool = false;
 threadlocal var g_ai_list_visible: bool = false;
@@ -1780,6 +1894,7 @@ fn commandCenterStateSnapshot() command_center_state.State {
         .startup_shortcuts_visible = startup_shortcuts.g_startup_shortcuts_visible,
         .session_launcher_visible = g_session_launcher_visible,
         .session_launcher_selected = g_session_launcher_selected,
+        .session_launcher_return_to_command_palette = g_session_launcher_return_to_command_palette,
         .ssh_list_visible = g_ssh_list_visible,
         .ssh_form_visible = g_ssh_form_visible,
         .ai_list_visible = g_ai_list_visible,
@@ -1806,6 +1921,7 @@ fn commandCenterStateApply(state: command_center_state.State) void {
     startup_shortcuts.g_startup_shortcuts_visible = state.startup_shortcuts_visible;
     g_session_launcher_visible = state.session_launcher_visible;
     g_session_launcher_selected = state.session_launcher_selected;
+    g_session_launcher_return_to_command_palette = state.session_launcher_return_to_command_palette;
     g_ssh_list_visible = state.ssh_list_visible;
     g_ssh_form_visible = state.ssh_form_visible;
     g_ai_list_visible = state.ai_list_visible;
@@ -1818,6 +1934,17 @@ pub fn sessionLauncherOpen() void {
     var state = commandCenterStateSnapshot();
     state.sessionLauncherOpen();
     commandCenterStateCommit(state);
+    resetSessionLauncherTransientModes();
+}
+
+pub fn sessionLauncherOpenFromCommandPalette() void {
+    var state = commandCenterStateSnapshot();
+    state.sessionLauncherOpenFromCommandPalette();
+    commandCenterStateCommit(state);
+    resetSessionLauncherTransientModes();
+}
+
+fn resetSessionLauncherTransientModes() void {
     g_ssh_list_mode = .manage;
     g_ai_list_mode = .manage;
     g_ai_history_source_selected = 0;
@@ -1827,9 +1954,34 @@ pub fn sessionLauncherClose() void {
     var state = commandCenterStateSnapshot();
     state.sessionLauncherClose();
     commandCenterStateCommit(state);
-    g_ssh_list_mode = .manage;
-    g_ai_list_mode = .manage;
-    g_ai_history_source_selected = 0;
+    resetSessionLauncherTransientModes();
+}
+
+fn sessionLauncherBackOrClose() void {
+    var state = commandCenterStateSnapshot();
+    if (!state.sessionLauncherBackToCommandPalette()) {
+        state.sessionLauncherClose();
+    }
+    commandCenterStateCommit(state);
+    resetSessionLauncherTransientModes();
+}
+
+fn sessionLauncherCancelLabel() []const u8 {
+    return if (g_session_launcher_return_to_command_palette) i18n.s().sl_back else i18n.s().sl_cancel;
+}
+
+fn markSessionLauncherReturnToCommandPalette() void {
+    g_session_launcher_return_to_command_palette = true;
+}
+
+fn openAiListFromCommandPalette() void {
+    openAiList();
+    markSessionLauncherReturnToCommandPalette();
+}
+
+fn openAiFormNewFromCommandPalette() void {
+    openAiFormNew();
+    markSessionLauncherReturnToCommandPalette();
 }
 
 pub fn sessionLauncherInsertChar(codepoint: u21) void {
@@ -1917,7 +2069,7 @@ pub fn sessionLauncherHandleKey(ev: input_key.KeyEvent) void {
             openAiHistorySourcePicker();
             return;
         }
-        cancelAiFormOrLauncher();
+        sessionLauncherBackOrClose();
         return;
     }
 
@@ -1935,8 +2087,8 @@ pub fn sessionLauncherHandleKey(ev: input_key.KeyEvent) void {
             return;
         }
         switch (ev.key) {
-            .arrow_down, .tab => g_session_launcher_selected = (g_session_launcher_selected + 1) % command_center_state.SESSION_LAUNCHER_ROW_COUNT,
-            .arrow_up => g_session_launcher_selected = if (g_session_launcher_selected == 0) command_center_state.SESSION_LAUNCHER_ROW_COUNT - 1 else g_session_launcher_selected - 1,
+            .arrow_down, .tab => g_session_launcher_selected = (g_session_launcher_selected + 1) % platform_pty_command.sessionLauncherRowCount(),
+            .arrow_up => g_session_launcher_selected = if (g_session_launcher_selected == 0) platform_pty_command.sessionLauncherRowCount() - 1 else g_session_launcher_selected - 1,
             .enter => runSessionLauncherRow(g_session_launcher_selected),
             .key_p => {
                 g_session_launcher_selected = 0;
@@ -1953,11 +2105,11 @@ pub fn sessionLauncherHandleKey(ev: input_key.KeyEvent) void {
                 }
             },
             .key_a => {
-                g_session_launcher_selected = command_center_state.SESSION_LAUNCHER_ROW_AI_AGENT;
+                g_session_launcher_selected = platform_pty_command.sessionLauncherAiAgentRow();
                 runSessionLauncherRow(g_session_launcher_selected);
             },
             .key_h => {
-                g_session_launcher_selected = command_center_state.SESSION_LAUNCHER_ROW_AI_HISTORY;
+                g_session_launcher_selected = platform_pty_command.sessionLauncherAiHistoryRow();
                 runSessionLauncherRow(g_session_launcher_selected);
             },
             else => {},
@@ -1971,9 +2123,11 @@ pub fn sessionLauncherHandleKey(ev: input_key.KeyEvent) void {
             .arrow_up => g_ai_focus = if (g_ai_focus == 0) AI_FIELD_COUNT + 2 else g_ai_focus - 1,
             .arrow_right => {
                 if (g_ai_focus == @intFromEnum(AiField.protocol)) cycleAiFormProtocol(true);
+                if (g_ai_focus == @intFromEnum(AiField.vision)) toggleAiFormVision();
             },
             .arrow_left => {
                 if (g_ai_focus == @intFromEnum(AiField.protocol)) cycleAiFormProtocol(false);
+                if (g_ai_focus == @intFromEnum(AiField.vision)) toggleAiFormVision();
             },
             .backspace => {
                 if (g_ai_focus < AI_FIELD_COUNT) backspaceAiFormField(g_ai_focus);
@@ -2016,6 +2170,7 @@ pub fn sessionLauncherExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_
         .ai_history_wsl => openWslAiHistorySession(),
         .ai_history_ssh => openAiHistorySshPicker(),
         .connect_selected => runSshListRow(g_ssh_list_selected),
+        .load_openssh_config => loadOpenSshConfigDefault(),
         .new_ssh => openSshFormNew(),
         .edit_selected => openSshEditPicker(),
         .delete_selected => openSshDeletePicker(),
@@ -2027,7 +2182,7 @@ pub fn sessionLauncherExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_
         .save => saveSshFormOnly(),
         .connect_ai => connectAiFromForm(),
         .save_ai => saveAiFormOnly(),
-        .cancel => sessionLauncherClose(),
+        .cancel => sessionLauncherBackOrClose(),
     }
     return true;
 }
@@ -2115,9 +2270,9 @@ fn runSessionLauncherRow(row: usize) void {
             return;
         }
     }
-    if (row == command_center_state.SESSION_LAUNCHER_ROW_AI_AGENT) {
+    if (row == platform_pty_command.sessionLauncherAiAgentRow()) {
         openDefaultAiSession();
-    } else if (row == command_center_state.SESSION_LAUNCHER_ROW_AI_HISTORY) {
+    } else if (row == platform_pty_command.sessionLauncherAiHistoryRow()) {
         openAiHistorySourcePicker();
     }
 }
@@ -2202,8 +2357,28 @@ fn handleSshListKey(ev: input_key.KeyEvent) void {
 
 fn sshListRowCount() usize {
     return switch (g_ssh_list_mode) {
-        .manage => sshVisibleProfileCount() + 4,
+        .manage => sshVisibleProfileCount() + 5,
         .edit_select, .delete_select, .ai_history_select, .tmux_connect => sshVisibleProfileCount() + 1,
+    };
+}
+
+const SshManageAction = enum {
+    profile,
+    load_openssh_config,
+    new_ssh,
+    edit_ssh,
+    delete_ssh,
+    cancel,
+};
+
+fn sshManageActionForRow(row: usize, visible_profile_count: usize) SshManageAction {
+    if (row < visible_profile_count) return .profile;
+    return switch (row - visible_profile_count) {
+        0 => .load_openssh_config,
+        1 => .new_ssh,
+        2 => .edit_ssh,
+        3 => .delete_ssh,
+        else => .cancel,
     };
 }
 
@@ -2287,6 +2462,10 @@ const profileField = profile_codec.profileField;
 
 fn findSshProfileIndex(identifier_raw: []const u8) ?usize {
     loadSshProfiles();
+    return findLoadedSshProfileIndex(identifier_raw);
+}
+
+fn findLoadedSshProfileIndex(identifier_raw: []const u8) ?usize {
     const identifier = std.mem.trim(u8, identifier_raw, " \t\r\n");
     if (identifier.len == 0) return null;
 
@@ -2346,9 +2525,112 @@ pub fn aiHistorySshConnection(identifier: []const u8) ?ssh_connection.SshConnect
     return conn;
 }
 
+/// Enumerate the saved SSH profile names (UI thread; loads the threadlocal
+/// store on demand). Returns an owned slice of owned name strings — the caller
+/// frees each name and then the slice. Used by the Skill Center to build one
+/// scan column per SSH profile. Empty/unsafe names are skipped.
+pub fn sshProfileNames(allocator: std.mem.Allocator) ![][]u8 {
+    loadSshProfiles();
+    var out: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (out.items) |n| allocator.free(n);
+        out.deinit(allocator);
+    }
+    for (0..g_ssh_profile_count) |idx| {
+        const name = profileField(&g_ssh_profiles[idx], .name);
+        if (name.len == 0) continue;
+        try out.append(allocator, try allocator.dupe(u8, name));
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 const copySshProfileField = profile_codec.copySshProfileField;
 
 const makeSshProfile = profile_codec.makeSshProfile;
+
+const OpenSshImportStats = struct {
+    created: usize = 0,
+    updated: usize = 0,
+    skipped: usize = 0,
+    capped: bool = false,
+};
+
+fn mergeOpenSshCandidate(candidate: openssh_config_import.Candidate, stats: *OpenSshImportStats) void {
+    const name = candidate.name();
+    const host = candidate.host();
+    const user = candidate.user();
+    const port = candidate.port();
+    const proxy_jump = candidate.proxyJump();
+    if (name.len == 0 or host.len == 0 or user.len == 0) {
+        stats.skipped += 1;
+        return;
+    }
+    if (!isSshTokenSafe(name) or !isSshTokenSafe(host) or !isSshTokenSafe(user)) {
+        stats.skipped += 1;
+        return;
+    }
+    if (!isPortTokenSafe(port) or !command_palette_model.isProxyJumpSafe(proxy_jump)) {
+        stats.skipped += 1;
+        return;
+    }
+
+    const found_idx = findLoadedSshProfileIndex(name) orelse findLoadedSshProfileIndex(host);
+    var created_new = false;
+    const idx = found_idx orelse blk: {
+        if (g_ssh_profile_count >= SSH_PROFILE_MAX) {
+            stats.capped = true;
+            return;
+        }
+        const next = g_ssh_profile_count;
+        g_ssh_profile_count += 1;
+        g_ssh_profiles[next] = .{};
+        created_new = true;
+        break :blk next;
+    };
+
+    if (idx >= g_ssh_profile_count) {
+        stats.skipped += 1;
+        return;
+    }
+
+    if (created_new) {
+        stats.created += 1;
+    } else {
+        stats.updated += 1;
+    }
+    const profile = &g_ssh_profiles[idx];
+    copySshProfileField(profile, .name, name);
+    copySshProfileField(profile, .ip, host);
+    copySshProfileField(profile, .user, user);
+    copySshProfileField(profile, .port, if (port.len > 0) port else "22");
+    copySshProfileField(profile, .proxy_jump, proxy_jump);
+}
+
+fn opensshCandidateSetForTest(candidate: *openssh_config_import.Candidate, comptime field: enum { name, host, user, port, proxy_jump }, value: []const u8) void {
+    const len = @min(value.len, openssh_config_import.FIELD_MAX);
+    switch (field) {
+        .name => {
+            @memcpy(candidate.name_buf[0..len], value[0..len]);
+            candidate.name_len = len;
+        },
+        .host => {
+            @memcpy(candidate.host_buf[0..len], value[0..len]);
+            candidate.host_len = len;
+        },
+        .user => {
+            @memcpy(candidate.user_buf[0..len], value[0..len]);
+            candidate.user_len = len;
+        },
+        .port => {
+            @memcpy(candidate.port_buf[0..len], value[0..len]);
+            candidate.port_len = len;
+        },
+        .proxy_jump => {
+            @memcpy(candidate.proxy_jump_buf[0..len], value[0..len]);
+            candidate.proxy_jump_len = len;
+        },
+    }
+}
 
 pub fn agentSaveSshProfile(allocator: std.mem.Allocator, args: AppWindow.ai_chat.SshProfileSaveArgs) !AppWindow.ai_chat.SavedSshProfile {
     loadSshProfiles();
@@ -2421,17 +2703,16 @@ fn runSshListRow(row: usize) void {
     const visible_profile_count = sshVisibleProfileCount();
     switch (g_ssh_list_mode) {
         .manage => {
-            if (row < visible_profile_count) {
-                const profile_idx = sshVisibleProfileIndexAt(row) orelse return;
-                connectSshProfile(profile_idx);
-                return;
-            }
-            const action_row = row - visible_profile_count;
-            switch (action_row) {
-                0 => openSshFormNew(),
-                1 => openSshEditPicker(),
-                2 => openSshDeletePicker(),
-                else => sessionLauncherClose(),
+            switch (sshManageActionForRow(row, visible_profile_count)) {
+                .profile => {
+                    const profile_idx = sshVisibleProfileIndexAt(row) orelse return;
+                    connectSshProfile(profile_idx);
+                },
+                .load_openssh_config => loadOpenSshConfigDefault(),
+                .new_ssh => openSshFormNew(),
+                .edit_ssh => openSshEditPicker(),
+                .delete_ssh => openSshDeletePicker(),
+                .cancel => sessionLauncherClose(),
             }
         },
         .edit_select => {
@@ -2747,7 +3028,7 @@ fn surfaceIsOpen(surface: *const Surface) bool {
     for (0..tab.g_tab_count) |tab_index| {
         const tab_state = tab.g_tabs[tab_index] orelse continue;
         if (tab_state.kind != .terminal) continue;
-        var it = tab_state.tree.iterator();
+        var it = tab_state.tree.surfaces();
         while (it.next()) |entry| {
             if (@intFromPtr(entry.surface) == @intFromPtr(surface)) return true;
         }
@@ -2831,7 +3112,7 @@ fn openDefaultAiSession() void {
 fn openDefaultAgentSessionFromCommandCenter() void {
     loadAiProfiles();
     switch (command_center_state.resolveNewAgentLaunch(g_ai_profile_count != 0)) {
-        .open_form => openAiFormNew(),
+        .open_form => openAiFormNewFromCommandPalette(),
         .connect_default_profile_as_agent => connectAiProfileWithAgentOverride(defaultAiProfileIndex(), "true"),
     }
 }
@@ -2917,6 +3198,7 @@ pub fn openAiConfigForSession(session: *AppWindow.ai_chat.Session) void {
     setAiDefault(.stream, session.streamConfigValue());
     setAiDefault(.agent, session.agentConfigValue());
     setAiDefault(.protocol, session.apiProtocolName());
+    setAiDefault(.vision, session.visionConfigValue());
     var max_tokens_buf: [16]u8 = undefined;
     if (std.fmt.bufPrint(max_tokens_buf[0..], "{d}", .{session.maxTokens()})) |s| {
         setAiDefault(.max_tokens, s);
@@ -2979,12 +3261,14 @@ fn clearAiForm() void {
     setAiDefault(.agent, AppWindow.ai_chat.DEFAULT_AGENT);
     setAiDefault(.protocol, AppWindow.ai_chat.DEFAULT_PROTOCOL);
     setAiDefault(.max_tokens, AppWindow.ai_chat.DEFAULT_MAX_TOKENS);
+    setAiDefault(.vision, AppWindow.ai_chat.DEFAULT_VISION);
 }
 
 fn appendAiFormCodepoint(field: usize, codepoint: u21) void {
     if (field >= AI_FIELD_COUNT) return;
-    // Protocol is a ←/→ toggle over the valid protocols, not a free-text field.
+    // Protocol and Vision are ←/→ toggles, not free-text fields.
     if (field == @intFromEnum(AiField.protocol)) return;
+    if (field == @intFromEnum(AiField.vision)) return;
     var buf: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(codepoint, &buf) catch return;
     if (g_ai_lens[field] + len > AI_FIELD_MAX) return;
@@ -3024,8 +3308,9 @@ fn appendSshFormText(field: usize, text: []const u8) void {
 
 fn backspaceAiFormField(field: usize) void {
     if (field >= AI_FIELD_COUNT or g_ai_lens[field] == 0) return;
-    // Protocol is a toggle field; it is not text-editable.
+    // Protocol and Vision are toggle fields; they are not text-editable.
     if (field == @intFromEnum(AiField.protocol)) return;
+    if (field == @intFromEnum(AiField.vision)) return;
     g_ai_lens[field] -= 1;
     while (g_ai_lens[field] > 0 and (g_ai_bufs[field][g_ai_lens[field]] & 0xC0) == 0x80) {
         g_ai_lens[field] -= 1;
@@ -3049,6 +3334,22 @@ fn aiProtocolDisplay() []const u8 {
     };
     const p = AppWindow.ai_chat.ApiProtocol.parse(aiField(.protocol));
     return std.fmt.bufPrint(&S.buf, "{s}   <-/->", .{p.name()}) catch p.name();
+}
+
+/// Vision is an on/off ←/→ toggle (default off). Models with vision enabled can
+/// receive images pasted into the chat composer with Ctrl+Shift+V.
+fn toggleAiFormVision() void {
+    const on = AppWindow.ai_chat.parseVisionEnabled(aiField(.vision));
+    setAiDefault(.vision, if (on) "off" else "on");
+}
+
+/// Vision row display: on/off plus the ←/→ toggle affordance.
+fn aiVisionDisplay() []const u8 {
+    const S = struct {
+        threadlocal var buf: [32]u8 = undefined;
+    };
+    const on = AppWindow.ai_chat.parseVisionEnabled(aiField(.vision));
+    return std.fmt.bufPrint(&S.buf, "{s}   <-/->", .{if (on) "on" else "off"}) catch (if (on) "on" else "off");
 }
 
 fn handleAiListKey(ev: input_key.KeyEvent) void {
@@ -3136,7 +3437,7 @@ fn saveAiFormOnly() void {
 }
 
 fn cancelAiFormOrLauncher() void {
-    sessionLauncherClose();
+    sessionLauncherBackOrClose();
 }
 
 fn runAiFormFocusAction() void {
@@ -3225,11 +3526,12 @@ fn spawnAiProfileWithAgentOverride(idx: usize, agent_override: ?[]const u8) bool
     const agent_val = agent_override orelse aiProfileField(profile, .agent);
     const protocol = aiProfileField(profile, .protocol);
     const max_tokens = std.fmt.parseInt(u32, std.mem.trim(u8, aiProfileField(profile, .max_tokens), " \t"), 10) catch 8192;
+    const vision_val = aiProfileField(profile, .vision);
     if (base_url.len == 0 or model.len == 0) return false;
     if (!isHttpUrlish(base_url)) return false;
 
     sessionLauncherClose();
-    return AppWindow.spawnAiChatTab(name, base_url, api_key, model, protocol, system_prompt, thinking, reasoning_effort, stream_val, agent_val, max_tokens);
+    return AppWindow.spawnAiChatTab(name, base_url, api_key, model, protocol, system_prompt, thinking, reasoning_effort, stream_val, agent_val, max_tokens, vision_val);
 }
 
 /// Build a standalone copilot Session from the default AI profile (Issue #98).
@@ -3249,10 +3551,11 @@ pub fn makeCopilotSessionForDefaultProfile() ?*ai_chat.Session {
     const stream_val = aiProfileField(profile, .stream);
     const protocol = aiProfileField(profile, .protocol);
     const max_tokens = std.fmt.parseInt(u32, std.mem.trim(u8, aiProfileField(profile, .max_tokens), " \t"), 10) catch 8192;
+    const vision_val = aiProfileField(profile, .vision);
     if (base_url.len == 0 or model.len == 0) return null;
     if (!isHttpUrlish(base_url)) return null;
     const allocator = AppWindow.g_allocator orelse return null;
-    const session = ai_chat.Session.initWithProtocol(
+    const session = ai_chat.Session.initWithVision(
         allocator,
         "Copilot",
         base_url,
@@ -3264,6 +3567,7 @@ pub fn makeCopilotSessionForDefaultProfile() ?*ai_chat.Session {
         reasoning_effort,
         stream_val,
         "true", // agent_enabled
+        vision_val,
     ) catch return null;
     session.max_tokens = max_tokens;
     session.copilot = true;
@@ -3295,6 +3599,65 @@ fn invalidateAiDefaultName() void {
     g_ai_default_loaded = false;
 }
 
+threadlocal var g_subagent_profile_name_buf: [256]u8 = undefined;
+threadlocal var g_subagent_profile_name_len: usize = 0;
+
+/// Cache of the `ai-subagent-profile` config key, pushed by the app layer at
+/// startup and on config reload (no file IO on the resolve path).
+pub fn setSubagentProfileName(name: []const u8) void {
+    const len = @min(name.len, g_subagent_profile_name_buf.len);
+    @memcpy(g_subagent_profile_name_buf[0..len], name[0..len]);
+    g_subagent_profile_name_len = len;
+}
+
+/// ai_chat.SubagentProfileResolver: map the configured profile name to owned
+/// credentials. Any miss (unset key, unknown name, invalid profile) returns
+/// null — the subagent then falls back to the main conversation's profile.
+pub fn resolveSubagentProfileOverride(allocator: std.mem.Allocator) ?ai_chat.SubagentProfileOverride {
+    const name = g_subagent_profile_name_buf[0..g_subagent_profile_name_len];
+    if (name.len == 0) return null;
+    loadAiProfiles();
+    var found: ?usize = null;
+    for (0..g_ai_profile_count) |i| {
+        if (std.mem.eql(u8, aiProfileField(&g_ai_profiles[i], .name), name)) {
+            found = i;
+            break;
+        }
+    }
+    const idx = found orelse return null;
+    const profile = &g_ai_profiles[idx];
+    const base_url = aiProfileField(profile, .base_url);
+    const model = aiProfileField(profile, .model);
+    if (base_url.len == 0 or model.len == 0) return null;
+    if (!isHttpUrlish(base_url)) return null;
+
+    const base_url_copy = allocator.dupe(u8, base_url) catch return null;
+    const api_key_copy = allocator.dupe(u8, aiProfileField(profile, .api_key)) catch {
+        allocator.free(base_url_copy);
+        return null;
+    };
+    const model_copy = allocator.dupe(u8, model) catch {
+        allocator.free(base_url_copy);
+        allocator.free(api_key_copy);
+        return null;
+    };
+    const reasoning_copy = allocator.dupe(u8, aiProfileField(profile, .reasoning_effort)) catch {
+        allocator.free(base_url_copy);
+        allocator.free(api_key_copy);
+        allocator.free(model_copy);
+        return null;
+    };
+    return .{
+        .base_url = base_url_copy,
+        .api_key = api_key_copy,
+        .model = model_copy,
+        .protocol = ai_chat.ApiProtocol.parse(aiProfileField(profile, .protocol)),
+        .thinking_enabled = !std.mem.eql(u8, aiProfileField(profile, .thinking), "disabled"),
+        .reasoning_effort = reasoning_copy,
+        .max_tokens = std.fmt.parseInt(u32, std.mem.trim(u8, aiProfileField(profile, .max_tokens), " \t"), 10) catch 8192,
+    };
+}
+
 /// Index of the default AI profile, resolved by name from config. Falls back
 /// to the first profile. Returns 0 when no profiles exist (callers guard).
 fn defaultAiProfileIndex() usize {
@@ -3307,13 +3670,24 @@ fn defaultAiProfileIndex() usize {
     return command_palette_model.resolveDefaultIndex(names[0..g_ai_profile_count], aiDefaultProfileName());
 }
 
-/// Name of the profile after the current default, wrapping around. Empty when
-/// no profiles exist.
-fn nextDefaultAiProfileName() []const u8 {
+/// Name of the profile `delta` positions from the current default, wrapping in
+/// both directions (+1 for next, -1 for previous). Empty when no profiles exist.
+fn cycledDefaultAiProfileName(delta: i64) []const u8 {
     loadAiProfiles();
     if (g_ai_profile_count == 0) return "";
-    const next = (defaultAiProfileIndex() + 1) % g_ai_profile_count;
-    return aiProfileField(&g_ai_profiles[next], .name);
+    const idx = command_palette_model.cycleIndex(defaultAiProfileIndex(), g_ai_profile_count, delta);
+    return aiProfileField(&g_ai_profiles[idx], .name);
+}
+
+/// Persist the default AI profile `delta` positions from the current one
+/// (+1 next, -1 previous). No-op when no profiles exist.
+fn cycleDefaultAiProfile(delta: i64) void {
+    const allocator = AppWindow.g_allocator orelse return;
+    loadAiProfiles();
+    if (g_ai_profile_count == 0) return;
+    const next_name = cycledDefaultAiProfileName(delta);
+    Config.setConfigValue(allocator, "ai-default-profile", next_name) catch {};
+    invalidateAiDefaultName();
 }
 
 fn isHttpUrlish(value: []const u8) bool {
@@ -3362,7 +3736,7 @@ fn saveAiProfiles(allocator: std.mem.Allocator) void {
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(allocator);
-    out.appendSlice(allocator, "# WispTerm AI Chat profiles. Fields are hex encoded: name, base_url, api_key, model, system_prompt, thinking, reasoning_effort, stream, agent, protocol, max_tokens.\n") catch return;
+    out.appendSlice(allocator, "# WispTerm AI Chat profiles. Fields are hex encoded: name, base_url, api_key, model, system_prompt, thinking, reasoning_effort, stream, agent, protocol, max_tokens, vision.\n") catch return;
     for (g_ai_profiles[0..g_ai_profile_count]) |profile| {
         for (0..AI_FIELD_COUNT) |i| {
             if (i > 0) out.append(allocator, '\t') catch return;
@@ -3404,26 +3778,70 @@ fn loadSshProfiles() void {
 const decodeSshProfileLine = profile_codec.decodeSshProfileLine;
 
 fn saveSshProfiles(allocator: std.mem.Allocator) void {
-    const path = sshProfilesPath(allocator) catch return;
+    _ = saveSshProfilesChecked(allocator);
+}
+
+fn saveSshProfilesChecked(allocator: std.mem.Allocator) bool {
+    const path = sshProfilesPath(allocator) catch return false;
     defer allocator.free(path);
     if (std.fs.path.dirname(path)) |dir| {
-        std.fs.cwd().makePath(dir) catch return;
+        std.fs.cwd().makePath(dir) catch return false;
     }
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(allocator);
-    out.appendSlice(allocator, "# WispTerm SSH profiles. Fields are hex encoded: name, host, user, password, port, proxy_jump.\n") catch return;
+    out.appendSlice(allocator, "# WispTerm SSH profiles. Fields are hex encoded: name, host, user, password, port, proxy_jump.\n") catch return false;
     for (g_ssh_profiles[0..g_ssh_profile_count]) |profile| {
         for (0..SSH_FIELD_COUNT) |i| {
-            if (i > 0) out.append(allocator, '\t') catch return;
-            appendHexField(allocator, &out, profile.fields[i][0..profile.lens[i]]) catch return;
+            if (i > 0) out.append(allocator, '\t') catch return false;
+            appendHexField(allocator, &out, profile.fields[i][0..profile.lens[i]]) catch return false;
         }
-        out.append(allocator, '\n') catch return;
+        out.append(allocator, '\n') catch return false;
     }
 
-    const file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch return;
+    const file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch return false;
     defer file.close();
-    file.writeAll(out.items) catch {};
+    file.writeAll(out.items) catch return false;
+    return true;
+}
+
+fn loadOpenSshConfigDefault() void {
+    const allocator = AppWindow.g_allocator orelse return;
+    loadSshProfiles();
+
+    const path = platform_dirs.openSshConfigPath(allocator) catch {
+        openSshList();
+        showStatusToast("OpenSSH config not found");
+        return;
+    };
+    defer allocator.free(path);
+
+    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch {
+        openSshList();
+        showStatusToast("OpenSSH config not found");
+        return;
+    };
+    defer allocator.free(content);
+
+    var candidates_buf: [64]openssh_config_import.Candidate = undefined;
+    const candidates = openssh_config_import.parseCandidates(content, &candidates_buf);
+    var stats = OpenSshImportStats{};
+    for (candidates) |candidate| mergeOpenSshCandidate(candidate, &stats);
+
+    var saved = true;
+    if (stats.created + stats.updated > 0) {
+        saved = saveSshProfilesChecked(allocator);
+    }
+    openSshList();
+
+    var msg_buf: [96]u8 = undefined;
+    const msg = if (stats.created + stats.updated == 0)
+        "No OpenSSH hosts imported"
+    else if (!saved)
+        std.fmt.bufPrint(&msg_buf, "Imported {d}, updated {d} SSH profiles (not saved)", .{ stats.created, stats.updated }) catch "Imported OpenSSH profiles (not saved)"
+    else
+        std.fmt.bufPrint(&msg_buf, "Imported {d}, updated {d} SSH profiles", .{ stats.created, stats.updated }) catch "Imported OpenSSH profiles";
+    showStatusToast(msg);
 }
 
 fn appendHexField(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), value: []const u8) !void {
@@ -3444,7 +3862,7 @@ fn sessionTwoColumnWidth(left: []const u8, right: []const u8) f32 {
 }
 
 fn sessionLauncherTitle() []const u8 {
-    if (g_ai_history_source_visible) return "AI History";
+    if (g_ai_history_source_visible) return i18n.s().sl_sessions;
     if (g_ai_form_visible) {
         return i18n.s().sl_ai_agent;
     }
@@ -3461,7 +3879,7 @@ fn sessionLauncherTitle() []const u8 {
             .manage => i18n.s().sl_ssh_servers,
             .edit_select => i18n.s().sl_edit_ssh_server,
             .delete_select => i18n.s().sl_delete_ssh_server,
-            .ai_history_select => "AI History SSH Profile",
+            .ai_history_select => "Sessions SSH Profile",
             .tmux_connect => "tmux SSH Profile",
         };
     }
@@ -3510,9 +3928,10 @@ fn sessionDesiredBoxWidth() f32 {
         desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_stream, aiField(.stream)));
         desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_protocol, aiProtocolDisplay()));
         desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_max_tokens, aiField(.max_tokens)));
+        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_vision, aiVisionDisplay()));
         desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_save_open, i18n.s().sl_v_agent));
         desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_save, i18n.s().sl_v_profile));
-        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_cancel, "Esc"));
+        desired = @max(desired, sessionTwoColumnWidth(sessionLauncherCancelLabel(), "Esc"));
         return desired;
     }
 
@@ -3525,7 +3944,7 @@ fn sessionDesiredBoxWidth() f32 {
         desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ssh_jump_host, sshField(.proxy_jump)));
         desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_save_connect, platform_pty_command.sshLauncherDetail()));
         desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_save, i18n.s().sl_v_profile));
-        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_cancel, "Esc"));
+        desired = @max(desired, sessionTwoColumnWidth(sessionLauncherCancelLabel(), "Esc"));
         return desired;
     }
 
@@ -3547,7 +3966,7 @@ fn sessionDesiredBoxWidth() f32 {
                 desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_new_llm_provider, i18n.s().sl_v_add));
                 desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_edit_llm_provider, if (g_ai_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_profile));
                 desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_delete_llm_provider, if (g_ai_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_profile));
-                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_cancel, "Esc"));
+                desired = @max(desired, sessionTwoColumnWidth(sessionLauncherCancelLabel(), "Esc"));
             },
             .edit_select, .delete_select => {
                 desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_back, i18n.s().sl_v_manage));
@@ -3573,16 +3992,17 @@ fn sessionDesiredBoxWidth() f32 {
         }
         switch (g_ssh_list_mode) {
             .manage => {
+                desired = @max(desired, sessionTwoColumnWidth("Load OpenSSH config", "~/.ssh/config"));
                 desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_new_ssh_server, i18n.s().sl_v_add));
                 desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_edit_ssh_server, if (g_ssh_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_server));
                 desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_delete_ssh_server, if (g_ssh_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_server));
-                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_cancel, "Esc"));
+                desired = @max(desired, sessionTwoColumnWidth(sessionLauncherCancelLabel(), "Esc"));
             },
             .edit_select, .delete_select => {
                 desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_back, i18n.s().sl_v_manage));
             },
             .ai_history_select => {
-                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_back, "AI History"));
+                desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_back, i18n.s().sl_sessions));
             },
             .tmux_connect => {
                 desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_back, "tmux"));
@@ -3597,17 +4017,17 @@ fn sessionDesiredBoxWidth() f32 {
             desired = @max(desired, sessionTwoColumnWidth("WSL", "Default distro"));
         }
         desired = @max(desired, sessionTwoColumnWidth("SSH Profile...", "Choose server"));
-        desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_cancel, "Esc"));
+        desired = @max(desired, sessionTwoColumnWidth(sessionLauncherCancelLabel(), "Esc"));
         return desired;
     }
 
-    desired = @max(desired, sessionTwoColumnWidth(platform_pty_command.localShellLauncherTitle(), AppWindow.configuredLocalShellSessionDetail()));
+    desired = @max(desired, sessionTwoColumnWidth(AppWindow.configuredLocalShellSessionTitle(), AppWindow.configuredLocalShellSessionDetail()));
     desired = @max(desired, sessionTwoColumnWidth("SSH", i18n.s().sl_v_connect_server));
     if (platform_pty_command.sessionLauncherWslRow() != null) {
         desired = @max(desired, sessionTwoColumnWidth("WSL", platform_pty_command.wslLauncherDetail()));
     }
     desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_ai_agent, defaultAiModeLabel()));
-    desired = @max(desired, sessionTwoColumnWidth("AI History", "Browse Codex / Claude Code"));
+    desired = @max(desired, sessionTwoColumnWidth(i18n.s().sl_sessions, i18n.s().sl_sessions_detail));
     return desired;
 }
 
@@ -3630,7 +4050,7 @@ fn sessionLayout(window_width: f32, window_height: f32, top_offset: f32) Session
     else if (g_ssh_list_visible)
         sshListRowCount()
     else
-        command_center_state.SESSION_LAUNCHER_ROW_COUNT;
+        platform_pty_command.sessionLauncherRowCount();
     const box_h = @round(header_h + row_h * @as(f32, @floatFromInt(row_count)) + bottom_pad);
     const box_x = @round(@max(16, (window_width - box_w) / 2));
     const box_top_px = @round(top_offset + @max(16, (content_height - box_h) / 2));
@@ -3668,10 +4088,12 @@ fn sessionHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, t
         g_ssh_list_selected = row;
         if (row < sshVisibleProfileCount()) return .connect_selected;
         if (g_ssh_list_mode != .manage) return .connect_selected;
-        return switch (row - sshVisibleProfileCount()) {
-            0 => .new_ssh,
-            1 => .edit_selected,
-            2 => .delete_selected,
+        return switch (sshManageActionForRow(row, sshVisibleProfileCount())) {
+            .profile => .connect_selected,
+            .load_openssh_config => .load_openssh_config,
+            .new_ssh => .new_ssh,
+            .edit_ssh => .edit_selected,
+            .delete_ssh => .delete_selected,
             else => .cancel,
         };
     }
@@ -3690,7 +4112,7 @@ fn sessionHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, t
     }
 
     if (!g_ssh_form_visible and !g_ai_form_visible) {
-        if (row >= command_center_state.SESSION_LAUNCHER_ROW_COUNT) return null;
+        if (row >= platform_pty_command.sessionLauncherRowCount()) return null;
         g_session_launcher_selected = row;
         if (row == 0) return .local_shell;
         if (row == 1) return .ssh;
@@ -3698,8 +4120,8 @@ fn sessionHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, t
         if (platform_pty_command.sessionLauncherWslRow()) |wsl_row| {
             if (row == wsl_row) return .wsl;
         }
-        if (row == command_center_state.SESSION_LAUNCHER_ROW_AI_AGENT) return .ai_chat;
-        if (row == command_center_state.SESSION_LAUNCHER_ROW_AI_HISTORY) return .ai_history;
+        if (row == platform_pty_command.sessionLauncherAiAgentRow()) return .ai_chat;
+        if (row == platform_pty_command.sessionLauncherAiHistoryRow()) return .ai_history;
         return null;
     }
 
@@ -3854,7 +4276,7 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
             }
             renderSessionRow(layout, window_height, row, "SSH Profile...", "Choose server", g_ai_history_source_selected == row);
             row += 1;
-            renderSessionRow(layout, window_height, row, i18n.s().sl_cancel, "Esc", g_ai_history_source_selected == row);
+            renderSessionRow(layout, window_height, row, sessionLauncherCancelLabel(), "Esc", g_ai_history_source_selected == row);
             return;
         }
         if (g_ai_list_visible) {
@@ -3870,7 +4292,7 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
                     row += 1;
                     renderSessionRow(layout, window_height, row, i18n.s().sl_delete_llm_provider, if (g_ai_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_profile, g_ai_list_selected == row);
                     row += 1;
-                    renderSessionRow(layout, window_height, row, i18n.s().sl_cancel, "Esc", g_ai_list_selected == row);
+                    renderSessionRow(layout, window_height, row, sessionLauncherCancelLabel(), "Esc", g_ai_list_selected == row);
                 },
                 .edit_select, .delete_select => {
                     renderSessionRow(layout, window_height, row, i18n.s().sl_back, i18n.s().sl_v_manage, g_ai_list_selected == row);
@@ -3889,19 +4311,21 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
             }
             switch (g_ssh_list_mode) {
                 .manage => {
+                    renderSessionRow(layout, window_height, row, "Load OpenSSH config", "~/.ssh/config", g_ssh_list_selected == row);
+                    row += 1;
                     renderSessionRow(layout, window_height, row, i18n.s().sl_new_ssh_server, i18n.s().sl_v_add, g_ssh_list_selected == row);
                     row += 1;
                     renderSessionRow(layout, window_height, row, i18n.s().sl_edit_ssh_server, if (g_ssh_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_server, g_ssh_list_selected == row);
                     row += 1;
                     renderSessionRow(layout, window_height, row, i18n.s().sl_delete_ssh_server, if (g_ssh_profile_count > 0) i18n.s().sl_v_choose else i18n.s().sl_v_no_server, g_ssh_list_selected == row);
                     row += 1;
-                    renderSessionRow(layout, window_height, row, i18n.s().sl_cancel, "Esc", g_ssh_list_selected == row);
+                    renderSessionRow(layout, window_height, row, sessionLauncherCancelLabel(), "Esc", g_ssh_list_selected == row);
                 },
                 .edit_select, .delete_select => {
                     renderSessionRow(layout, window_height, row, i18n.s().sl_back, i18n.s().sl_v_manage, g_ssh_list_selected == row);
                 },
                 .ai_history_select => {
-                    renderSessionRow(layout, window_height, row, i18n.s().sl_back, "AI History", g_ssh_list_selected == row);
+                    renderSessionRow(layout, window_height, row, i18n.s().sl_back, i18n.s().sl_sessions, g_ssh_list_selected == row);
                 },
                 .tmux_connect => {
                     renderSessionRow(layout, window_height, row, i18n.s().sl_back, "tmux", g_ssh_list_selected == row);
@@ -3910,7 +4334,7 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
             return;
         }
         var row: usize = 0;
-        renderSessionRow(layout, window_height, row, platform_pty_command.localShellLauncherTitle(), AppWindow.configuredLocalShellSessionDetail(), g_session_launcher_selected == row);
+        renderSessionRow(layout, window_height, row, AppWindow.configuredLocalShellSessionTitle(), AppWindow.configuredLocalShellSessionDetail(), g_session_launcher_selected == row);
         row += 1;
         renderSessionRow(layout, window_height, row, "SSH", i18n.s().sl_v_connect_server, g_session_launcher_selected == row);
         row += 1;
@@ -3921,8 +4345,8 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
             renderSessionRow(layout, window_height, row, "WSL", platform_pty_command.wslLauncherDetail(), g_session_launcher_selected == row);
             row += 1;
         }
-        renderSessionRow(layout, window_height, command_center_state.SESSION_LAUNCHER_ROW_AI_AGENT, i18n.s().sl_ai_agent, defaultAiModeLabel(), g_session_launcher_selected == command_center_state.SESSION_LAUNCHER_ROW_AI_AGENT);
-        renderSessionRow(layout, window_height, command_center_state.SESSION_LAUNCHER_ROW_AI_HISTORY, "AI History", "Browse Codex / Claude Code", g_session_launcher_selected == command_center_state.SESSION_LAUNCHER_ROW_AI_HISTORY);
+        renderSessionRow(layout, window_height, platform_pty_command.sessionLauncherAiAgentRow(), i18n.s().sl_ai_agent, defaultAiModeLabel(), g_session_launcher_selected == platform_pty_command.sessionLauncherAiAgentRow());
+        renderSessionRow(layout, window_height, platform_pty_command.sessionLauncherAiHistoryRow(), i18n.s().sl_sessions, i18n.s().sl_sessions_detail, g_session_launcher_selected == platform_pty_command.sessionLauncherAiHistoryRow());
         return;
     }
 
@@ -3938,9 +4362,10 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
         renderAiSessionField(layout, window_height, @intFromEnum(AiField.agent), i18n.s().sl_ai_agent_field, aiField(.agent), false);
         renderAiSessionField(layout, window_height, @intFromEnum(AiField.protocol), i18n.s().sl_ai_protocol, aiProtocolDisplay(), false);
         renderAiSessionField(layout, window_height, @intFromEnum(AiField.max_tokens), i18n.s().sl_ai_max_tokens, aiField(.max_tokens), false);
+        renderAiSessionField(layout, window_height, @intFromEnum(AiField.vision), i18n.s().sl_ai_vision, aiVisionDisplay(), false);
         renderSessionRow(layout, window_height, AI_FIELD_COUNT, i18n.s().sl_save_open, i18n.s().sl_v_agent, g_ai_focus == AI_FIELD_COUNT);
         renderSessionRow(layout, window_height, AI_FIELD_COUNT + 1, i18n.s().sl_save, i18n.s().sl_v_profile, g_ai_focus == AI_FIELD_COUNT + 1);
-        renderSessionRow(layout, window_height, AI_FIELD_COUNT + 2, i18n.s().sl_cancel, "Esc", g_ai_focus == AI_FIELD_COUNT + 2);
+        renderSessionRow(layout, window_height, AI_FIELD_COUNT + 2, sessionLauncherCancelLabel(), "Esc", g_ai_focus == AI_FIELD_COUNT + 2);
         return;
     }
 
@@ -3952,7 +4377,7 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
     renderSessionField(layout, window_height, @intFromEnum(SshField.proxy_jump), i18n.s().sl_ssh_jump_host, sshField(.proxy_jump), false);
     renderSessionRow(layout, window_height, SSH_FIELD_COUNT, i18n.s().sl_save_connect, platform_pty_command.sshLauncherDetail(), g_ssh_focus == SSH_FIELD_COUNT);
     renderSessionRow(layout, window_height, SSH_FIELD_COUNT + 1, i18n.s().sl_save, i18n.s().sl_v_profile, g_ssh_focus == SSH_FIELD_COUNT + 1);
-    renderSessionRow(layout, window_height, SSH_FIELD_COUNT + 2, i18n.s().sl_cancel, "Esc", g_ssh_focus == SSH_FIELD_COUNT + 2);
+    renderSessionRow(layout, window_height, SSH_FIELD_COUNT + 2, sessionLauncherCancelLabel(), "Esc", g_ssh_focus == SSH_FIELD_COUNT + 2);
 }
 
 // ============================================================================
@@ -3975,7 +4400,7 @@ const SETTINGS_THEME_PRESETS = [_]ThemePreset{
 
 const SETTINGS_THEME_ROW = 1;
 const SETTINGS_CONTROL_ROW_START = SETTINGS_THEME_ROW + 1;
-const SETTINGS_ROW_COUNT = SETTINGS_CONTROL_ROW_START + 11;
+const SETTINGS_ROW_COUNT = SETTINGS_CONTROL_ROW_START + 12;
 
 const SettingsAction = enum {
     font_size_minus,
@@ -3986,9 +4411,11 @@ const SettingsAction = enum {
     toggle_focus_follows_mouse,
     cycle_shell,
     cycle_default_ai_profile,
+    cycle_default_ai_profile_prev,
     toggle_weixin_direct,
     cycle_language,
     toggle_restore_tabs,
+    toggle_distill_suggest,
     open_raw_config,
     restore_defaults,
     close,
@@ -4131,9 +4558,10 @@ fn settingsHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, 
         5 => .toggle_weixin_direct,
         6 => .cycle_language,
         7 => .toggle_restore_tabs,
-        8 => .open_raw_config,
-        9 => .restore_defaults,
-        10 => .close,
+        8 => .toggle_distill_suggest,
+        9 => .open_raw_config,
+        10 => .restore_defaults,
+        11 => .close,
         else => null,
     };
 }
@@ -4157,17 +4585,12 @@ fn executeSettingsAction(action: SettingsAction) void {
         .toggle_cursor_blink => Config.setConfigValue(allocator, "cursor-style-blink", if (cfg.@"cursor-style-blink") "false" else "true") catch {},
         .toggle_focus_follows_mouse => Config.setConfigValue(allocator, "focus-follows-mouse", if (cfg.@"focus-follows-mouse") "false" else "true") catch {},
         .cycle_shell => Config.setConfigValue(allocator, "shell", platform_pty_command.nextConfigShell(cfg.shell)) catch {},
-        .cycle_default_ai_profile => {
-            loadAiProfiles();
-            if (g_ai_profile_count > 0) {
-                const next_name = nextDefaultAiProfileName();
-                Config.setConfigValue(allocator, "ai-default-profile", next_name) catch {};
-                invalidateAiDefaultName();
-            }
-        },
+        .cycle_default_ai_profile => cycleDefaultAiProfile(1),
+        .cycle_default_ai_profile_prev => cycleDefaultAiProfile(-1),
         .toggle_weixin_direct => Config.setConfigValue(allocator, "weixin-direct-enabled", if (cfg.@"weixin-direct-enabled") "false" else "true") catch {},
         .cycle_language => Config.setConfigValue(allocator, "language", nextLanguageSetting(cfg.language)) catch {},
         .toggle_restore_tabs => Config.setConfigValue(allocator, "restore-tabs-on-startup", if (cfg.@"restore-tabs-on-startup") "false" else "true") catch {},
+        .toggle_distill_suggest => Config.setConfigValue(allocator, "ai-distill-suggest", if (cfg.@"ai-distill-suggest") "false" else "true") catch {},
         .open_raw_config => Config.openConfigInEditor(allocator),
         .restore_defaults => restoreDefaultsConfirmOpen(),
         .close => settingsPageClose(),
@@ -4194,9 +4617,10 @@ fn runSettingsFocusPrimary() void {
         SETTINGS_CONTROL_ROW_START + 5 => executeSettingsAction(.toggle_weixin_direct),
         SETTINGS_CONTROL_ROW_START + 6 => executeSettingsAction(.cycle_language),
         SETTINGS_CONTROL_ROW_START + 7 => executeSettingsAction(.toggle_restore_tabs),
-        SETTINGS_CONTROL_ROW_START + 8 => executeSettingsAction(.open_raw_config),
-        SETTINGS_CONTROL_ROW_START + 9 => executeSettingsAction(.restore_defaults),
-        SETTINGS_CONTROL_ROW_START + 10 => executeSettingsAction(.close),
+        SETTINGS_CONTROL_ROW_START + 8 => executeSettingsAction(.toggle_distill_suggest),
+        SETTINGS_CONTROL_ROW_START + 9 => executeSettingsAction(.open_raw_config),
+        SETTINGS_CONTROL_ROW_START + 10 => executeSettingsAction(.restore_defaults),
+        SETTINGS_CONTROL_ROW_START + 11 => executeSettingsAction(.close),
         else => {},
     }
 }
@@ -4205,6 +4629,7 @@ fn runSettingsFocusLeft() void {
     switch (g_settings_focus) {
         0 => executeSettingsAction(.font_size_minus),
         SETTINGS_THEME_ROW => cycleThemePreset(-1),
+        SETTINGS_CONTROL_ROW_START + 4 => executeSettingsAction(.cycle_default_ai_profile_prev),
         else => {},
     }
 }
@@ -4271,12 +4696,6 @@ fn currentThemePresetLabel(cfg: *const Config) []const u8 {
     if (activeThemePresetIndex(cfg)) |idx| return SETTINGS_THEME_PRESETS[idx].label;
     if (cfg.theme) |theme_name| return theme_name;
     return SETTINGS_THEME_PRESETS[0].label;
-}
-
-fn currentThemePresetDetail(cfg: *const Config) []const u8 {
-    if (activeThemePresetIndex(cfg)) |idx| return SETTINGS_THEME_PRESETS[idx].detail;
-    if (cfg.theme != null) return "Custom theme";
-    return SETTINGS_THEME_PRESETS[0].detail;
 }
 
 fn cursorStyleText(style: Config.CursorStyle) []const u8 {
@@ -4394,16 +4813,16 @@ pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32
 
     var font_buf: [24]u8 = undefined;
     const font_value = std.fmt.bufPrint(&font_buf, "-  {d}  +", .{cfg.@"font-size"}) catch "";
-    renderSettingsRow(layout, window_height, 0, i18n.s().settings_font_size, font_value, i18n.s().settings_hint_left_right, true, g_settings_focus == 0);
+    renderSettingsRow(layout, window_height, 0, i18n.s().settings_font_size, font_value, "", true, g_settings_focus == 0);
 
     var theme_buf: [96]u8 = undefined;
     const theme_value = std.fmt.bufPrint(&theme_buf, "< {s} >", .{currentThemePresetLabel(cfg)}) catch currentThemePresetLabel(cfg);
-    renderSettingsRow(layout, window_height, SETTINGS_THEME_ROW, i18n.s().settings_theme, theme_value, currentThemePresetDetail(cfg), true, g_settings_focus == SETTINGS_THEME_ROW);
+    renderSettingsRow(layout, window_height, SETTINGS_THEME_ROW, i18n.s().settings_theme, theme_value, "", true, g_settings_focus == SETTINGS_THEME_ROW);
 
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 0, i18n.s().settings_cursor_style, cursorStyleText(cfg.@"cursor-style"), i18n.s().settings_hint_enter_cycle, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 0);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 1, i18n.s().settings_cursor_blink, boolText(cfg.@"cursor-style-blink"), i18n.s().settings_hint_enter_cycle, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 1);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 2, i18n.s().settings_focus_follows_mouse, boolText(cfg.@"focus-follows-mouse"), i18n.s().settings_hint_enter_cycle, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 2);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 3, i18n.s().settings_shell, cfg.shell, platform_pty_command.shellSettingChoicesHint(), true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 3);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 0, i18n.s().settings_cursor_style, cursorStyleText(cfg.@"cursor-style"), "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 0);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 1, i18n.s().settings_cursor_blink, boolText(cfg.@"cursor-style-blink"), "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 1);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 2, i18n.s().settings_focus_follows_mouse, boolText(cfg.@"focus-follows-mouse"), "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 2);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 3, i18n.s().settings_shell, cfg.shell, "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 3);
     loadAiProfiles();
     const ai_default_value = if (g_ai_profile_count > 0)
         aiProfileField(&g_ai_profiles[defaultAiProfileIndex()], .name)
@@ -4414,12 +4833,13 @@ pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32
     else
         i18n.s().settings_hint_add_profiles;
     renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 4, i18n.s().settings_default_ai, ai_default_value, ai_default_hint, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 4);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 5, i18n.s().settings_weixin_direct, boolText(cfg.@"weixin-direct-enabled"), i18n.s().settings_hint_enter_cycle, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 5);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 5, i18n.s().settings_weixin_direct, boolText(cfg.@"weixin-direct-enabled"), "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 5);
     renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 6, i18n.s().settings_language, languageSettingText(cfg.language), i18n.s().settings_hint_restart, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 6);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 7, i18n.s().settings_restore_tabs, boolText(cfg.@"restore-tabs-on-startup"), i18n.s().settings_hint_enter_cycle, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 7);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 8, i18n.s().settings_raw_config, i18n.s().settings_value_open, i18n.s().settings_hint_advanced_editor, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 8);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 9, i18n.s().settings_restore_defaults, "Enter", "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 9);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 10, i18n.s().settings_close, "Esc", "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 10);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 7, i18n.s().settings_restore_tabs, boolText(cfg.@"restore-tabs-on-startup"), "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 7);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 8, i18n.s().settings_distill_suggest, boolText(cfg.@"ai-distill-suggest"), "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 8);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 9, i18n.s().settings_raw_config, i18n.s().settings_value_open, i18n.s().settings_hint_advanced_editor, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 9);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 10, i18n.s().settings_restore_defaults, "Enter", "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 10);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 11, i18n.s().settings_close, "Esc", "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 11);
 }
 
 // ============================================================================
@@ -4473,6 +4893,39 @@ pub fn renderUnfocusedOverlaySimple(width: f32, height: f32) void {
         AppWindow.g_theme.background[2],
         alpha,
     });
+}
+
+/// Highlight a panel that is the current Alt-drag swap drop target. Drawn inside
+/// the panel's own viewport (coords 0..width / 0..height), like the unfocused
+/// overlay: a faint accent wash plus an accent border. Uses real alpha blending
+/// (fillOverlay) so the underlying terminal content stays visible.
+pub fn renderSwapTargetHighlight(width: f32, height: f32) void {
+    const accent = AppWindow.g_theme.cursor_color;
+    const border: f32 = 2.0;
+
+    const fillRectOverlay = struct {
+        fn call(x: f32, y: f32, w: f32, h: f32, color: [3]f32, alpha: f32) void {
+            if (w <= 0 or h <= 0) return;
+            const verts = [6][4]f32{
+                .{ x, y + h, 0.0, 0.0 },
+                .{ x, y, 0.0, 1.0 },
+                .{ x + w, y, 1.0, 1.0 },
+                .{ x, y + h, 0.0, 0.0 },
+                .{ x + w, y, 1.0, 1.0 },
+                .{ x + w, y + h, 1.0, 0.0 },
+            };
+            ui_pipeline.fillOverlay(verts, .{ color[0], color[1], color[2], alpha });
+        }
+    }.call;
+
+    // Faint accent wash over the whole panel.
+    fillRectOverlay(0, 0, width, height, accent, 0.14);
+
+    // Accent border on all four edges.
+    fillRectOverlay(0, 0, width, border, accent, 0.85); // bottom
+    fillRectOverlay(0, height - border, width, border, accent, 0.85); // top
+    fillRectOverlay(0, 0, border, height, accent, 0.85); // left
+    fillRectOverlay(width - border, 0, border, height, accent, 0.85); // right
 }
 
 /// Render split dividers between panes in the active tab.
@@ -4551,7 +5004,7 @@ pub fn renderPaneAgentDots(active_tab: *const TabState, content_x: i32, content_
     const dot_size: f32 = 6; // diameter of the dot square
     const dot_margin: f32 = 4; // inset from the pane corner
 
-    var it = active_tab.tree.iterator();
+    var it = active_tab.tree.surfaces();
     while (it.next()) |entry| {
         const det = entry.surface.agent_detection;
         if (!det.visible()) continue;
@@ -4844,11 +5297,66 @@ test "overlays: SSH list filter matches server name prefixes case-insensitively"
     try std.testing.expectEqual(@as(usize, 2), sshVisibleProfileCount());
     try std.testing.expectEqual(@as(?usize, 1), sshVisibleProfileIndexAt(0));
     try std.testing.expectEqual(@as(?usize, 2), sshVisibleProfileIndexAt(1));
-    try std.testing.expectEqual(@as(usize, 6), sshListRowCount());
+    try std.testing.expectEqual(@as(usize, 7), sshListRowCount());
 
     appendSshListFilterText("x1");
     try std.testing.expectEqual(@as(usize, 1), sshVisibleProfileCount());
     try std.testing.expectEqual(@as(?usize, 1), sshVisibleProfileIndexAt(0));
+}
+
+test "overlays: SSH manage list includes Load OpenSSH config action" {
+    const saved_count = g_ssh_profile_count;
+    const saved_mode = g_ssh_list_mode;
+    const saved_filter_len = g_ssh_list_filter_len;
+    const saved_selected = g_ssh_list_selected;
+    defer {
+        g_ssh_profile_count = saved_count;
+        g_ssh_list_mode = saved_mode;
+        g_ssh_list_filter_len = saved_filter_len;
+        g_ssh_list_selected = saved_selected;
+    }
+
+    g_ssh_profile_count = 0;
+    g_ssh_list_mode = .manage;
+    g_ssh_list_filter_len = 0;
+    g_ssh_list_selected = 0;
+    try std.testing.expectEqual(@as(usize, 5), sshListRowCount());
+    try std.testing.expectEqual(SshManageAction.load_openssh_config, sshManageActionForRow(0, sshVisibleProfileCount()));
+    try std.testing.expectEqual(SshManageAction.new_ssh, sshManageActionForRow(1, sshVisibleProfileCount()));
+
+    g_ssh_profile_count = 1;
+    g_ssh_profiles[0] = makeSshProfile("GPU", "10.0.0.1", "user", "22");
+    try std.testing.expectEqual(@as(usize, 6), sshListRowCount());
+    try std.testing.expectEqual(SshManageAction.profile, sshManageActionForRow(0, sshVisibleProfileCount()));
+    try std.testing.expectEqual(SshManageAction.load_openssh_config, sshManageActionForRow(1, sshVisibleProfileCount()));
+}
+
+test "overlays: OpenSSH import merge preserves existing password" {
+    const saved_count = g_ssh_profile_count;
+    defer {
+        g_ssh_profile_count = saved_count;
+    }
+
+    g_ssh_profile_count = 1;
+    g_ssh_profiles[0] = makeSshProfile("lab", "old.example", "olduser", "22");
+    copySshProfileField(&g_ssh_profiles[0], .password, "secret");
+
+    var candidate = openssh_config_import.Candidate{};
+    opensshCandidateSetForTest(&candidate, .name, "lab");
+    opensshCandidateSetForTest(&candidate, .host, "new.example");
+    opensshCandidateSetForTest(&candidate, .user, "alice");
+    opensshCandidateSetForTest(&candidate, .port, "2222");
+    opensshCandidateSetForTest(&candidate, .proxy_jump, "jump.example");
+
+    var stats = OpenSshImportStats{};
+    mergeOpenSshCandidate(candidate, &stats);
+
+    try std.testing.expectEqual(@as(usize, 1), stats.updated);
+    try std.testing.expectEqualStrings("new.example", profileField(&g_ssh_profiles[0], .ip));
+    try std.testing.expectEqualStrings("alice", profileField(&g_ssh_profiles[0], .user));
+    try std.testing.expectEqualStrings("2222", profileField(&g_ssh_profiles[0], .port));
+    try std.testing.expectEqualStrings("jump.example", profileField(&g_ssh_profiles[0], .proxy_jump));
+    try std.testing.expectEqualStrings("secret", profileField(&g_ssh_profiles[0], .password));
 }
 
 test "overlays: SSH list filter backspace restores matching rows" {
@@ -4867,6 +5375,73 @@ test "overlays: SSH list filter backspace restores matching rows" {
     try std.testing.expectEqual(@as(usize, 1), sshVisibleProfileCount());
     try std.testing.expectEqual(@as(?usize, 0), sshVisibleProfileIndexAt(0));
     try std.testing.expectEqual(@as(usize, 2), sshListRowCount());
+}
+
+test "overlays: anyBlockingOverlayVisible reflects each modal overlay" {
+    const saved_palette = g_command_palette_visible;
+    const saved_settings = g_settings_visible;
+    const saved_whats_new = g_whats_new_visible;
+    const saved_close = g_window_close_confirm_visible;
+    const saved_restore = g_restore_defaults_confirm_visible;
+    const saved_transfer = g_transfer_cancel_confirm_visible;
+    const saved_session = g_session_launcher_visible;
+    const saved_ssh_list = g_ssh_list_visible;
+    const saved_ssh_form = g_ssh_form_visible;
+    const saved_ai_list = g_ai_list_visible;
+    const saved_ai_form = g_ai_form_visible;
+    const saved_ai_history = g_ai_history_source_visible;
+    defer {
+        g_command_palette_visible = saved_palette;
+        g_settings_visible = saved_settings;
+        g_whats_new_visible = saved_whats_new;
+        g_window_close_confirm_visible = saved_close;
+        g_restore_defaults_confirm_visible = saved_restore;
+        g_transfer_cancel_confirm_visible = saved_transfer;
+        g_session_launcher_visible = saved_session;
+        g_ssh_list_visible = saved_ssh_list;
+        g_ssh_form_visible = saved_ssh_form;
+        g_ai_list_visible = saved_ai_list;
+        g_ai_form_visible = saved_ai_form;
+        g_ai_history_source_visible = saved_ai_history;
+    }
+
+    // Clear every blocking flag → nothing should report blocking.
+    g_command_palette_visible = false;
+    g_settings_visible = false;
+    g_whats_new_visible = false;
+    g_window_close_confirm_visible = false;
+    g_restore_defaults_confirm_visible = false;
+    g_transfer_cancel_confirm_visible = false;
+    g_session_launcher_visible = false;
+    g_ssh_list_visible = false;
+    g_ssh_form_visible = false;
+    g_ai_list_visible = false;
+    g_ai_form_visible = false;
+    g_ai_history_source_visible = false;
+    try std.testing.expect(!anyBlockingOverlayVisible());
+
+    // Each modal independently makes the webview need hiding.
+    g_command_palette_visible = true;
+    try std.testing.expect(anyBlockingOverlayVisible());
+    g_command_palette_visible = false;
+
+    g_settings_visible = true;
+    try std.testing.expect(anyBlockingOverlayVisible());
+    g_settings_visible = false;
+
+    g_whats_new_visible = true;
+    try std.testing.expect(anyBlockingOverlayVisible());
+    g_whats_new_visible = false;
+
+    g_window_close_confirm_visible = true;
+    try std.testing.expect(anyBlockingOverlayVisible());
+    g_window_close_confirm_visible = false;
+
+    g_session_launcher_visible = true;
+    try std.testing.expect(anyBlockingOverlayVisible());
+    g_session_launcher_visible = false;
+
+    try std.testing.expect(!anyBlockingOverlayVisible());
 }
 
 fn showVersionToast() void {
@@ -5213,6 +5788,338 @@ pub fn renderTransferToast(window_width: f32, window_height: f32) void {
     const text_x = layout.x + pad_h;
     const y = layout.y + pad_v;
     renderTitlebarTextStrongLimited(text, text_x, y, accent, layout.w - pad_h * 2);
+}
+
+fn whatsNewNotes() []const u8 {
+    return app_metadata.release_notes;
+}
+
+pub fn showWhatsNew() void {
+    g_whats_new_scroll = 0;
+    g_whats_new_visible = true;
+}
+
+pub fn hideWhatsNew() void {
+    g_whats_new_visible = false;
+}
+
+pub fn whatsNewVisible() bool {
+    return g_whats_new_visible;
+}
+
+/// True when a full-window GPU overlay is up that the native browser/Jupyter
+/// webview would otherwise occlude. The webview is an OS-level control
+/// composited ABOVE the GPU surface, so in full mode it covers the entire
+/// content area — including these modals. Callers (browser_panel.sync) hide the
+/// webview while this holds so the command center, settings, confirm dialogs,
+/// etc. stay visible.
+pub fn anyBlockingOverlayVisible() bool {
+    return commandPaletteVisible() or
+        settingsPageVisible() or
+        sessionLauncherVisible() or
+        whatsNewVisible() or
+        windowCloseConfirmVisible() or
+        restoreDefaultsConfirmVisible() or
+        transferCancelConfirmVisible();
+}
+
+/// 脏门控用：是否有任何 overlay 时间动画处于活动状态。
+/// 与 `anyBlockingOverlayVisible`（仅模态遮挡 webview）不同 —— 这里要尽量全，
+/// 漏判会导致 overlay 动画卡住，所以宁可多列。静态打开态 overlay 不放这里；
+/// 打开/输入/关闭时已有 g_force_rebuild 触发一帧。`now` = std.time.milliTimestamp()。
+pub fn anyOverlayActive(now: i64) bool {
+    // 时间动画：到期前每帧需持续渲染
+    if (now < g_copy_toast_until_ms) return true;
+    if (now < g_transfer_toast_until_ms) return true;
+    if (now < g_update_prompt_until_ms) return true;
+    if (now < g_close_shortcut_confirm_until_ms) return true;
+    if (now < g_remote_key_copied_until_ms) return true;
+    if (now < resize.g_split_resize_overlay_until) return true;
+
+    // FPS 叠层开启时每秒刷新
+    if (g_debug_fps) return true;
+
+    return false;
+}
+
+pub fn whatsNewHandleKey(ev: input_key.KeyEvent) void {
+    if (!g_whats_new_visible) return;
+    switch (ev.key) {
+        .escape, .enter => hideWhatsNew(),
+        .page_up => g_whats_new_scroll -= 10,
+        .page_down => g_whats_new_scroll += 10,
+        .arrow_up => g_whats_new_scroll -= 1,
+        .arrow_down => g_whats_new_scroll += 1,
+        .home => g_whats_new_scroll = 0,
+        .end => g_whats_new_scroll = std.math.maxInt(i32),
+        else => {},
+    }
+}
+
+pub fn whatsNewHandleScroll(delta_y: f64) void {
+    if (!g_whats_new_visible) return;
+    g_whats_new_scroll += if (delta_y > 0) @as(i64, -3) else 3;
+}
+
+fn openWhatsNewRelease() void {
+    const allocator = AppWindow.g_allocator orelse return;
+    var url_buf: [256]u8 = undefined;
+    const url = whats_new_model.releaseTagUrl(&url_buf, app_metadata.version);
+    _ = platform_open_url.open(allocator, .{ .url = url });
+}
+
+/// Returns true if the click was consumed by the modal (always true while open,
+/// so clicks never fall through to the terminal underneath).
+pub fn whatsNewExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_height: f32) bool {
+    if (!g_whats_new_visible) return false;
+    const layout = whatsNewLayout(window_width, window_height);
+    const px: f32 = @floatCast(xpos);
+    const py: f32 = @floatCast(ypos);
+    switch (whats_new_model.buttonActionAt(layout, px, py)) {
+        .view_on_github => {
+            openWhatsNewRelease();
+            hideWhatsNew();
+        },
+        .close => hideWhatsNew(),
+        .none => {
+            // A click outside the panel dismisses; inside is ignored (so users can
+            // click/select within the modal without closing it).
+            if (!layout.panel.contains(px, py)) hideWhatsNew();
+        },
+    }
+    return true;
+}
+
+fn whatsNewTrimV(v: []const u8) []const u8 {
+    return std.mem.trimLeft(u8, v, "vV");
+}
+
+fn whatsNewLineHeight() f32 {
+    return @round(@max(@as(f32, 24), font.g_titlebar_cell_height + 6));
+}
+
+const WHATS_NEW_VIEW_LABEL = "View on GitHub";
+const WHATS_NEW_OK_LABEL = "OK";
+
+fn whatsNewButtonMetrics() whats_new_model.ButtonMetrics {
+    return .{
+        .view_w = @round(measureTitlebarText(WHATS_NEW_VIEW_LABEL) + 44),
+        .close_w = @round(measureTitlebarText(WHATS_NEW_OK_LABEL) + 42),
+    };
+}
+
+fn whatsNewLayout(window_width: f32, window_height: f32) whats_new_model.Layout {
+    return whats_new_model.computeLayoutWithButtons(window_width, window_height, whatsNewLineHeight(), whatsNewButtonMetrics());
+}
+
+fn topRectY(window_height: f32, rect: whats_new_model.Rect) f32 {
+    return window_height - rect.y - rect.h;
+}
+
+fn drawWhatsNewButton(rect: whats_new_model.Rect, label: []const u8, window_height: f32, border: [3]f32, fill: [3]f32, text: [3]f32, strong: bool) void {
+    const y_bu = window_height - rect.y - rect.h;
+    renderRoundedQuadAlpha(rect.x - 1, y_bu - 1, rect.w + 2, rect.h + 2, 8, border, 0.64);
+    renderRoundedQuadAlpha(rect.x, y_bu, rect.w, rect.h, 7, fill, 0.96);
+    const tw = measureTitlebarText(label);
+    const tx = if (tw <= rect.w - 18) rect.x + (rect.w - tw) / 2 else rect.x + 12;
+    const ty = rowTextY(y_bu, rect.h);
+    if (strong) {
+        renderTitlebarTextStrongLimited(label, tx, ty, text, rect.x + rect.w - tx - 12);
+    } else {
+        renderTitlebarTextLimited(label, tx, ty, text, rect.x + rect.w - tx - 12);
+    }
+}
+
+const WhatsNewRows = struct {
+    row_index: usize = 0,
+    drawn: usize = 0,
+    scroll: usize = 0,
+};
+
+fn renderWhatsNewWrappedLine(
+    layout: whats_new_model.Layout,
+    window_height: f32,
+    text: []const u8,
+    x: f32,
+    color: [3]f32,
+    strong: bool,
+    wrap_cols: usize,
+    line_h: f32,
+    rows_state: *WhatsNewRows,
+) bool {
+    const rows = whats_new_model.lineRows(text.len, wrap_cols);
+    var r: usize = 0;
+    while (r < rows) : (r += 1) {
+        defer rows_state.row_index += 1;
+        if (rows_state.row_index < rows_state.scroll) continue;
+        if (rows_state.drawn >= layout.visible_rows) return false;
+
+        const start = r * wrap_cols;
+        const end = @min(text.len, start + wrap_cols);
+        const slice = if (start < text.len) text[start..end] else "";
+        const top = layout.content.y + @as(f32, @floatFromInt(rows_state.drawn)) * line_h;
+        const row_y = window_height - top - line_h;
+        const text_y = rowTextY(row_y, line_h);
+        if (slice.len > 0) {
+            const max_w = layout.content.x + layout.content.w - x;
+            if (strong) {
+                renderTitlebarTextStrongLimited(slice, x, text_y, color, max_w);
+            } else {
+                renderTitlebarTextLimited(slice, x, text_y, color, max_w);
+            }
+        }
+        rows_state.drawn += 1;
+    }
+    return true;
+}
+
+fn whatsNewHighlightsRows(highlights: whats_new_model.Highlights, wrap_cols: usize) usize {
+    if (highlights.len == 0) return 0;
+    var total: usize = whats_new_model.lineRows("Highlights".len, wrap_cols);
+    var i: usize = 0;
+    while (i < highlights.len) : (i += 1) {
+        total += whats_new_model.lineRows(highlights.items[i].len + 2, wrap_cols);
+    }
+    return total + 1; // spacer after highlights
+}
+
+fn renderWhatsNewHighlights(
+    layout: whats_new_model.Layout,
+    window_height: f32,
+    highlights: whats_new_model.Highlights,
+    wrap_cols: usize,
+    line_h: f32,
+    rows_state: *WhatsNewRows,
+    heading_color: [3]f32,
+    accent: [3]f32,
+    body: [3]f32,
+) bool {
+    if (highlights.len == 0) return true;
+    if (!renderWhatsNewWrappedLine(layout, window_height, "Highlights", layout.content.x, heading_color, true, wrap_cols, line_h, rows_state)) return false;
+
+    var i: usize = 0;
+    while (i < highlights.len) : (i += 1) {
+        var line_buf: [512]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "* {s}", .{highlights.items[i]}) catch highlights.items[i];
+        if (!renderWhatsNewWrappedLine(layout, window_height, line, layout.content.x + 16, mixColor(body, accent, 0.08), false, wrap_cols, line_h, rows_state)) return false;
+    }
+    return renderWhatsNewWrappedLine(layout, window_height, "", layout.content.x, body, false, wrap_cols, line_h, rows_state);
+}
+
+fn renderWhatsNewBody(
+    layout: whats_new_model.Layout,
+    window_height: f32,
+    notes: []const u8,
+    wrap_cols: usize,
+    line_h: f32,
+    rows_state: *WhatsNewRows,
+    heading_color: [3]f32,
+    body: [3]f32,
+    muted: [3]f32,
+) void {
+    var in_code = false;
+    var it = std.mem.splitScalar(u8, notes, '\n');
+    while (it.next()) |raw| {
+        var cbuf: [1024]u8 = undefined;
+        const cleaned = md.cleanedLine(&cbuf, raw, in_code);
+        if (cleaned.style == .fence) {
+            in_code = !in_code;
+            if (!renderWhatsNewWrappedLine(layout, window_height, "", layout.content.x, muted, false, wrap_cols, line_h, rows_state)) return;
+            continue;
+        }
+
+        const x = switch (cleaned.style) {
+            .list, .quote, .code => layout.content.x + 16,
+            else => layout.content.x,
+        };
+        const color = switch (cleaned.style) {
+            .heading => heading_color,
+            .quote, .code => muted,
+            else => body,
+        };
+        const strong = cleaned.style == .heading;
+        if (!renderWhatsNewWrappedLine(layout, window_height, cleaned.text, x, color, strong, wrap_cols, line_h, rows_state)) return;
+    }
+}
+
+pub fn renderWhatsNew(window_width: f32, window_height: f32) void {
+    if (!g_whats_new_visible) return;
+
+    const line_h = whatsNewLineHeight();
+    const layout = whatsNewLayout(window_width, window_height);
+
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const panel = mixColor(bg, fg, 0.05);
+    const panel_top = mixColor(bg, fg, 0.075);
+    const panel_footer = mixColor(bg, fg, 0.060);
+    const panel_border = mixColor(bg, fg, 0.24);
+    const quiet_border = mixColor(bg, fg, 0.15);
+    const muted = mixColor(bg, fg, 0.56);
+    const body = mixColor(bg, fg, 0.82);
+    const heading = mixColor(fg, accent, 0.12);
+
+    // Background scrim + panel (panel drawn in bottom-up space).
+    ui_pipeline.fillQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.46);
+    const panel_y_bu = window_height - layout.panel.y - layout.panel.h;
+    renderRoundedQuadAlpha(layout.panel.x + 10, panel_y_bu - 10, layout.panel.w, layout.panel.h, 13, .{ 0.0, 0.0, 0.0 }, 0.26);
+    renderRoundedQuadAlpha(layout.panel.x - 1, panel_y_bu - 1, layout.panel.w + 2, layout.panel.h + 2, 13, panel_border, 0.42);
+    renderRoundedQuadAlpha(layout.panel.x, panel_y_bu, layout.panel.w, layout.panel.h, 12, panel, 0.99);
+    renderRoundedQuadAlpha(layout.panel.x, panel_y_bu, 5, layout.panel.h, 12, accent, 0.78);
+
+    const header_y = topRectY(window_height, layout.header);
+    const footer_y = topRectY(window_height, layout.footer);
+    renderRoundedQuadAlpha(layout.header.x + 1, header_y, layout.header.w - 2, layout.header.h - 1, 12, panel_top, 0.76);
+    ui_pipeline.fillQuadAlpha(layout.header.x + 5, header_y, layout.header.w - 5, 1, quiet_border, 0.45);
+    ui_pipeline.fillQuadAlpha(layout.footer.x + 5, footer_y + layout.footer.h - 1, layout.footer.w - 5, 1, quiet_border, 0.50);
+    ui_pipeline.fillQuadAlpha(layout.footer.x + 1, footer_y, layout.footer.w - 2, layout.footer.h, panel_footer, 0.45);
+
+    const notes = whatsNewNotes();
+    var title_buf: [96]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "WispTerm v{s}", .{whatsNewTrimV(app_metadata.version)}) catch "WispTerm";
+    const title_top = layout.header.y + 20;
+    const header_right = layout.title_close_btn.x - 16;
+    renderTitlebarTextStrongLimited(title, layout.content.x, textYFromTop(window_height, title_top), fg, header_right - layout.content.x);
+
+    const close_y = topRectY(window_height, layout.title_close_btn);
+    titlebar.renderCloseIcon(layout.title_close_btn.x, close_y, layout.title_close_btn.w, layout.title_close_btn.h, muted);
+
+    if (notes.len > 0) {
+        var summary_buf: [512]u8 = undefined;
+        const summary = whats_new_model.summaryText(&summary_buf, notes);
+        if (summary.len > 0) {
+            const subtitle_top = title_top + overlayTextHeight() + 12;
+            renderTitlebarTextLimited(summary, layout.content.x, textYFromTop(window_height, subtitle_top), body, header_right - layout.content.x);
+        }
+    }
+
+    if (notes.len == 0) {
+        renderTitlebarText("Release notes unavailable for this version.", layout.content.x, window_height - layout.content.y - line_h, muted);
+    } else {
+        const adv = @max(@as(f32, 1), titlebar.titlebarGlyphAdvance('M'));
+        var wrap_cols: usize = @intFromFloat(layout.content.w / adv);
+        if (wrap_cols < whats_new_model.MIN_WRAP_COLS) wrap_cols = whats_new_model.MIN_WRAP_COLS;
+
+        const body_notes = whats_new_model.bodyNotes(notes);
+        var summary_buf: [512]u8 = undefined;
+        const summary = whats_new_model.summaryText(&summary_buf, notes);
+        var highlights_buf: [512]u8 = undefined;
+        const highlights = whats_new_model.highlightClauses(&highlights_buf, summary);
+
+        const total = whatsNewHighlightsRows(highlights, wrap_cols) + whats_new_model.totalRows(body_notes, wrap_cols);
+        const scroll = whats_new_model.clampScroll(g_whats_new_scroll, total, layout.visible_rows);
+        g_whats_new_scroll = @intCast(scroll);
+
+        var rows_state: WhatsNewRows = .{ .scroll = scroll };
+        if (renderWhatsNewHighlights(layout, window_height, highlights, wrap_cols, line_h, &rows_state, heading, accent, body)) {
+            renderWhatsNewBody(layout, window_height, body_notes, wrap_cols, line_h, &rows_state, heading, body, muted);
+        }
+    }
+
+    // Footer buttons.
+    drawWhatsNewButton(layout.view_btn, WHATS_NEW_VIEW_LABEL, window_height, quiet_border, mixColor(bg, fg, 0.10), body, false);
+    drawWhatsNewButton(layout.close_btn, WHATS_NEW_OK_LABEL, window_height, mixColor(accent, fg, 0.22), mixColor(bg, accent, 0.24), mixColor(fg, accent, 0.16), true);
 }
 
 pub fn renderUpdatePrompt(window_width: f32, window_height: f32) void {

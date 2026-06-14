@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 pub const Backend = enum {
     windows,
     macos,
+    linux,
     unsupported,
 };
 
@@ -11,6 +12,7 @@ pub fn backendForOs(comptime os_tag: std.Target.Os.Tag) Backend {
     return switch (os_tag) {
         .windows => .windows,
         .macos => .macos,
+        .linux => .linux,
         else => .unsupported,
     };
 }
@@ -18,6 +20,7 @@ pub fn backendForOs(comptime os_tag: std.Target.Os.Tag) Backend {
 const impl = switch (backendForOs(builtin.os.tag)) {
     .windows => @import("font_backend_windows.zig"),
     .macos => @import("font_backend_macos.zig"),
+    .linux => @import("font_backend_linux.zig"),
     .unsupported => @import("font_backend_unsupported.zig"),
 };
 
@@ -70,12 +73,21 @@ pub fn fontFilePathAlloc(allocator: std.mem.Allocator, font: *FallbackFont) ?Fon
     return impl.fontFilePathAlloc(allocator, font);
 }
 
+/// Copy a fallback font's raw sfnt bytes into an allocator-owned buffer, for
+/// loading via FreeType's memory-face API. Returns null when the backend cannot
+/// extract data (only macOS implements this; other backends rely on path-based
+/// loading). Caller owns the returned slice.
+pub fn fontDataAlloc(allocator: std.mem.Allocator, font: *FallbackFont) ?[]u8 {
+    return impl.fontDataAlloc(allocator, font);
+}
+
 test "platform font backend exposes discovery and weight APIs" {
     _ = FontDiscovery;
     _ = LoadedFont;
     _ = FallbackFont;
     _ = FontFilePath;
     try std.testing.expect(@hasDecl(@This(), "fontFilePathAlloc"));
+    try std.testing.expect(@hasDecl(@This(), "fontDataAlloc"));
     try std.testing.expectEqual(FontWeight.BOLD, fontWeightFromValue(700));
     try std.testing.expectEqual(FontWeight.NORMAL, fontWeightFromValue(123));
 }
@@ -103,6 +115,6 @@ test "platform font backend owns titlebar icon glyph mapping" {
 
 test "platform font backend selects backend by target OS" {
     try std.testing.expectEqual(Backend.windows, backendForOs(.windows));
-    try std.testing.expectEqual(Backend.unsupported, backendForOs(.linux));
+    try std.testing.expectEqual(Backend.linux, backendForOs(.linux));
     try std.testing.expectEqual(Backend.macos, backendForOs(.macos));
 }

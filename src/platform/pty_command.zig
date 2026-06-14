@@ -17,6 +17,12 @@ pub fn backend() Backend {
     return backendForOs(builtin.os.tag);
 }
 
+/// 本地文件浏览器是否直接跟随 shell 的实时原生 cwd。
+/// POSIX（含 macOS）本地路径即原生路径，为 true；Windows 上本地 cwd 可能是
+/// WSL guest 路径、需要专门转换，故为 false。把 OS 判定收在平台层，避免
+/// AppWindow.zig 出现 OS 分支（见 test_main.zig 的源码守卫）。
+pub const local_explorer_uses_live_cwd: bool = backendForOs(builtin.os.tag) != .windows;
+
 const impl = switch (backendForOs(builtin.os.tag)) {
     .windows => @import("pty_command_windows.zig"),
     .unsupported => @import("pty_command_unsupported.zig"),
@@ -69,6 +75,10 @@ pub fn resolveShellCommandLine(out_buf: *CommandLineBuffer, cmd: []const u8) usi
     return impl.resolveShellCommandLine(out_buf, cmd);
 }
 
+pub fn commandLineDisplay(command: CommandLine, out: []u8) []const u8 {
+    return impl.commandLineDisplay(command, out);
+}
+
 pub fn localShellLauncherTitle() []const u8 {
     return local_shell_launcher_title;
 }
@@ -77,7 +87,7 @@ pub const local_shell_launcher_title = localShellLauncherTitleForOs(builtin.os.t
 
 pub fn localShellLauncherTitleForOs(os_tag: std.Target.Os.Tag) []const u8 {
     return switch (backendForOs(os_tag)) {
-        .windows => "PowerShell",
+        .windows => "Shell",
         .unsupported => "Shell",
     };
 }
@@ -102,66 +112,80 @@ pub const session_launcher_detail = sessionLauncherDetailForOs(builtin.os.tag);
 
 pub fn sessionLauncherDetailForOs(os_tag: std.Target.Os.Tag) []const u8 {
     return switch (backendForOs(os_tag)) {
-        .windows => "Choose PowerShell, SSH, tmux, WSL, AI Agent, or AI History",
-        .unsupported => "Choose Shell, SSH, tmux, AI Agent, or AI History",
+        .windows => "Choose Shell, SSH, WSL, tmux, Copilot, or Sessions",
+        .unsupported => "Choose Shell, SSH, tmux, Copilot, or Sessions",
     };
 }
 
 pub fn sessionLauncherRowCount() usize {
-    return session_launcher_row_count;
+    return sessionLauncherRowCountForLayout(sessionLauncherWslRow() != null);
 }
 
-pub const session_launcher_row_count = sessionLauncherRowCountForOs(builtin.os.tag);
+/// Row count given whether a WSL row is shown. Without WSL the launcher is
+/// Shell(0)/SSH(1)/tmux(2)/Copilot(3)/Sessions(4); with WSL it is inserted at
+/// index 2, pushing tmux to 3 and Copilot/Sessions to 4/5.
+pub fn sessionLauncherRowCountForLayout(wsl_present: bool) usize {
+    return if (wsl_present) 6 else 5;
+}
 
 pub fn sessionLauncherRowCountForOs(os_tag: std.Target.Os.Tag) usize {
-    return switch (backendForOs(os_tag)) {
-        .windows => 6,
-        .unsupported => 5,
-    };
+    return sessionLauncherRowCountForLayout(backendForOs(os_tag) == .windows);
 }
 
-/// Row of the "Connect with tmux" entry (right after SSH).
+// Comptime, OS-based launcher row indices (Windows assumes WSL present). Consumed
+// by command_center_state's SESSION_LAUNCHER_ROW_* constants; the runtime
+// sessionLauncher*Row() helpers above account for actual WSL availability.
+pub const session_launcher_row_count = sessionLauncherRowCountForOs(builtin.os.tag);
+pub const session_launcher_ai_agent_row = sessionLauncherAiAgentRowForOs(builtin.os.tag);
+pub const session_launcher_ai_history_row = sessionLauncherAiHistoryRowForOs(builtin.os.tag);
+
+/// Row of the "Connect with tmux" entry: right after SSH, or after WSL when it
+/// is shown (Shell/SSH/tmux without WSL; Shell/SSH/WSL/tmux with WSL).
 pub fn sessionLauncherTmuxRow() usize {
-    return session_launcher_tmux_row;
+    return sessionLauncherTmuxRowForLayout(sessionLauncherWslRow() != null);
+}
+
+pub fn sessionLauncherTmuxRowForLayout(wsl_present: bool) usize {
+    return if (wsl_present) 3 else 2;
 }
 
 pub const session_launcher_tmux_row = sessionLauncherTmuxRowForOs(builtin.os.tag);
 
 pub fn sessionLauncherTmuxRowForOs(os_tag: std.Target.Os.Tag) usize {
-    return switch (backendForOs(os_tag)) {
-        .windows => 3, // powershell0 ssh1 wsl2 tmux3
-        .unsupported => 2, // shell0 ssh1 tmux2
-    };
+    return sessionLauncherTmuxRowForLayout(backendForOs(os_tag) == .windows);
 }
 
 pub fn sessionLauncherAiAgentRow() usize {
-    return session_launcher_ai_agent_row;
+    return sessionLauncherAiAgentRowForLayout(sessionLauncherWslRow() != null);
 }
 
-pub const session_launcher_ai_agent_row = sessionLauncherAiAgentRowForOs(builtin.os.tag);
+pub fn sessionLauncherAiAgentRowForLayout(wsl_present: bool) usize {
+    return if (wsl_present) 4 else 3;
+}
 
 pub fn sessionLauncherAiAgentRowForOs(os_tag: std.Target.Os.Tag) usize {
-    return switch (backendForOs(os_tag)) {
-        .windows => 4,
-        .unsupported => 3,
-    };
+    return sessionLauncherAiAgentRowForLayout(backendForOs(os_tag) == .windows);
 }
 
 pub fn sessionLauncherAiHistoryRow() usize {
-    return session_launcher_ai_history_row;
+    return sessionLauncherAiHistoryRowForLayout(sessionLauncherWslRow() != null);
 }
 
-pub const session_launcher_ai_history_row = sessionLauncherAiHistoryRowForOs(builtin.os.tag);
+pub fn sessionLauncherAiHistoryRowForLayout(wsl_present: bool) usize {
+    return if (wsl_present) 5 else 4;
+}
 
 pub fn sessionLauncherAiHistoryRowForOs(os_tag: std.Target.Os.Tag) usize {
-    return switch (backendForOs(os_tag)) {
-        .windows => 5,
-        .unsupported => 4,
-    };
+    return sessionLauncherAiHistoryRowForLayout(backendForOs(os_tag) == .windows);
 }
 
+/// The WSL launcher row index, or null when WSL should not be offered. WSL is
+/// only offered on Windows AND when an installed distribution is detected, so a
+/// machine without WSL never shows the row — and therefore can never create a
+/// `.wsl` surface that splits would propagate.
 pub fn sessionLauncherWslRow() ?usize {
-    return sessionLauncherWslRowForOs(builtin.os.tag);
+    const slot = sessionLauncherWslRowForOs(builtin.os.tag) orelse return null;
+    return if (wslAvailable()) slot else null;
 }
 
 pub fn sessionLauncherWslRowForOs(os_tag: std.Target.Os.Tag) ?usize {
@@ -169,6 +193,21 @@ pub fn sessionLauncherWslRowForOs(os_tag: std.Target.Os.Tag) ?usize {
         .windows => 2,
         .unsupported => null,
     };
+}
+
+/// Whether a usable WSL installation (at least one installed distribution) is
+/// present. Probed once and cached by the platform backend; always false on
+/// non-Windows. Note: on Windows 10/11 the `wsl.exe` stub ships in System32
+/// even with no distro installed, so this checks for an installed distro rather
+/// than the executable's mere existence.
+pub fn wslAvailable() bool {
+    return impl.wslAvailable();
+}
+
+/// Whether a resolved shell command should fall back to a guaranteed local
+/// shell because it targets WSL while no WSL installation is available.
+pub fn shellFallBackDecision(kind: LaunchKind, wsl_available: bool) bool {
+    return kind == .wsl and !wsl_available;
 }
 
 pub fn wslSessionToolsEnabled() bool {
@@ -465,6 +504,7 @@ test "platform pty command resolves shell aliases to native command lines" {
         .unsupported => "cmd",
     };
     try std.testing.expectEqualStrings(expected_cmd, cmd_utf8);
+    try std.testing.expectEqualStrings(expected_cmd, commandLineDisplay(out[0..cmd_len :0], &utf8));
 
     const powershell_len = resolveShellCommandLine(&out, "powershell");
     const powershell_utf8 = try nativeCommandSliceToUtf8(&utf8, out[0..powershell_len]);
@@ -574,7 +614,7 @@ test "platform pty command exposes tab_new tool text by target OS" {
 }
 
 test "platform pty command exposes configured local shell launcher by target OS" {
-    try std.testing.expectEqualStrings("PowerShell", localShellLauncherTitleForOs(.windows));
+    try std.testing.expectEqualStrings("Shell", localShellLauncherTitleForOs(.windows));
     try std.testing.expectEqualStrings("Shell", localShellLauncherTitleForOs(.linux));
     try std.testing.expectEqualStrings("Shell", localShellLauncherTitleForOs(.macos));
 
@@ -651,7 +691,7 @@ test "platform pty command exposes session launcher layout by target OS" {
     try std.testing.expectEqual(@as(?usize, null), sessionLauncherWslRowForOs(.linux));
 
     try std.testing.expect(std.mem.indexOf(u8, sessionLauncherDetailForOs(.windows), "WSL") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sessionLauncherDetailForOs(.windows), "AI History") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sessionLauncherDetailForOs(.windows), "Sessions") != null);
     try std.testing.expect(std.mem.indexOf(u8, sessionLauncherDetailForOs(.linux), "WSL") == null);
     try std.testing.expect(std.mem.indexOf(u8, sessionLauncherDetailForOs(.macos), "Shell") != null);
 
@@ -659,6 +699,31 @@ test "platform pty command exposes session launcher layout by target OS" {
     try std.testing.expect(!wslSessionToolsEnabledForOs(.linux));
     try std.testing.expect(std.mem.indexOf(u8, terminalSelectToolDescriptionForOs(.windows), wslSessionToolName()) != null);
     try std.testing.expect(std.mem.indexOf(u8, terminalSelectToolDescriptionForOs(.linux), wslSessionToolName()) == null);
+}
+
+test "platform pty command derives session launcher layout from WSL presence" {
+    // With a WSL row present: Shell(0) SSH(1) WSL(2) tmux(3) Copilot(4) Sessions(5).
+    try std.testing.expectEqual(@as(usize, 6), sessionLauncherRowCountForLayout(true));
+    try std.testing.expectEqual(@as(usize, 3), sessionLauncherTmuxRowForLayout(true));
+    try std.testing.expectEqual(@as(usize, 4), sessionLauncherAiAgentRowForLayout(true));
+    try std.testing.expectEqual(@as(usize, 5), sessionLauncherAiHistoryRowForLayout(true));
+
+    // No WSL row: Shell(0) SSH(1) tmux(2) Copilot(3) Sessions(4) — the rows below
+    // it shift up so nothing maps to a hidden/absent WSL slot.
+    try std.testing.expectEqual(@as(usize, 5), sessionLauncherRowCountForLayout(false));
+    try std.testing.expectEqual(@as(usize, 2), sessionLauncherTmuxRowForLayout(false));
+    try std.testing.expectEqual(@as(usize, 3), sessionLauncherAiAgentRowForLayout(false));
+    try std.testing.expectEqual(@as(usize, 4), sessionLauncherAiHistoryRowForLayout(false));
+}
+
+test "platform pty command falls back from an unavailable WSL shell" {
+    // shell=wsl is only honored when WSL is actually available; otherwise the
+    // default tab must fall back to a guaranteed local shell rather than spawn
+    // a broken wsl.exe pane.
+    try std.testing.expect(shellFallBackDecision(.wsl, false));
+    try std.testing.expect(!shellFallBackDecision(.wsl, true));
+    try std.testing.expect(!shellFallBackDecision(.local, false));
+    try std.testing.expect(!shellFallBackDecision(.ssh, false));
 }
 
 test "platform pty command exposes OpenSSH helper executable names" {

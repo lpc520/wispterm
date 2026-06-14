@@ -8,16 +8,21 @@ const std = @import("std");
 const Config = @import("../config.zig");
 const Surface = @import("../Surface.zig");
 const SplitTree = @import("../split_tree.zig");
+const PreviewPane = @import("../preview_pane.zig");
+const markdown_preview = @import("../markdown_preview.zig");
 const input_key = @import("../input/key.zig");
 const remote_client = @import("../remote_client.zig");
 const session_persist = @import("../session_persist.zig");
 const ai_chat = @import("../ai_chat.zig");
 const ai_history_session = @import("../ai_history_session.zig");
 const ai_history_source = @import("../ai_history_source.zig");
+const skill_center = @import("../skill_center.zig");
+const port_forwarding = @import("../port_forwarding.zig");
 const ai_history_time = @import("../ai_history_time.zig");
 const agent_history = @import("../agent_history.zig");
 const platform_pty_command = @import("../platform/pty_command.zig");
 const active_tab_state = @import("active_tab.zig");
+const i18n = @import("../i18n.zig");
 
 const CursorStyle = Config.CursorStyle;
 const Selection = Surface.Selection;
@@ -47,10 +52,16 @@ pub const TabState = struct {
     focused: SplitTree.Node.Handle = .root,
     ai_chat_session: ?*ai_chat.Session = null,
     ai_history_session: ?*ai_history_session.Session = null,
+    skill_center_session: ?*skill_center.Session = null,
+    port_forwarding_session: ?*port_forwarding.Session = null,
     /// Copilot conversation for a terminal tab (Issue #98). Distinct from
     /// `ai_chat_session`, which backs a dedicated AI-chat tab. Lazily created
     /// the first time the copilot sidebar is opened on this tab.
     copilot_session: ?*ai_chat.Session = null,
+    /// Whether this terminal tab's right-side Copilot sidebar is currently
+    /// open. The session is also per-tab; this flag prevents a Copilot opened
+    /// on one tab from appearing on another tab.
+    copilot_visible: bool = false,
 
     /// tmux control-mode window id this tab mirrors (Phase 3c-2), or null for a
     /// normal local tab. `tmux_owner` is the controller/bridge that owns this
@@ -66,6 +77,8 @@ pub const TabState = struct {
         terminal,
         ai_chat,
         ai_history,
+        skill_center,
+        port_forwarding,
     };
 
     /// Get the focused surface in this tab, or null if tree is empty
@@ -74,7 +87,7 @@ pub const TabState = struct {
         if (self.tree.isEmpty()) return null;
         if (self.focused.idx() >= self.tree.nodes.len) return null;
         return switch (self.tree.nodes[self.focused.idx()]) {
-            .leaf => |surface| surface,
+            .leaf => |pane| pane.surface(),
             .split => null,
         };
     }
@@ -90,13 +103,19 @@ pub const TabState = struct {
             return self.tmux_name_buf[0..self.tmux_name_len];
         }
         if (self.kind == .ai_chat) {
-            const chat = self.ai_chat_session orelse return "AI Chat";
+            const chat = self.ai_chat_session orelse return i18n.s().sl_ai_agent;
             const chat_title = chat.title();
-            return if (chat_title.len > 0) chat_title else "AI Chat";
+            return if (chat_title.len > 0) chat_title else i18n.s().sl_ai_agent;
         }
         if (self.kind == .ai_history) {
-            const session = self.ai_history_session orelse return "AI History";
-            return if (session.source.name.len > 0) session.source.name else "AI History";
+            const session = self.ai_history_session orelse return i18n.s().sl_sessions;
+            return session.tabTitle();
+        }
+        if (self.kind == .skill_center) {
+            return i18n.s().sl_skill_center;
+        }
+        if (self.kind == .port_forwarding) {
+            return i18n.s().pf_title;
         }
         const surface = self.focusedSurface() orelse return "wispterm";
         return surface.getTitle();
@@ -122,6 +141,19 @@ pub const TabState = struct {
                     session.deinit();
                     allocator.destroy(session);
                     self.ai_history_session = null;
+                }
+            },
+            .skill_center => {
+                if (self.skill_center_session) |session| {
+                    session.destroy();
+                    self.skill_center_session = null;
+                }
+            },
+            .port_forwarding => {
+                if (self.port_forwarding_session) |session| {
+                    session.destroy();
+                    allocator.destroy(session);
+                    self.port_forwarding_session = null;
                 }
             },
         }
@@ -236,6 +268,26 @@ pub fn activeCopilotSession(
         t.copilot_session = make() orelse return null;
     }
     return t.copilot_session;
+}
+
+pub fn activeCopilotVisible() bool {
+    const t = activeTab() orelse return false;
+    return t.kind == .terminal and t.copilot_visible;
+}
+
+pub fn setActiveCopilotVisible(visible: bool) bool {
+    const t = activeTab() orelse return false;
+    if (t.kind != .terminal) return false;
+    if (t.copilot_visible == visible) return false;
+    t.copilot_visible = visible;
+    return true;
+}
+
+pub fn toggleActiveCopilotVisible() bool {
+    const t = activeTab() orelse return false;
+    if (t.kind != .terminal) return false;
+    t.copilot_visible = !t.copilot_visible;
+    return t.copilot_visible;
 }
 
 pub fn findAiTabBySessionId(session_id: []const u8) ?usize {
@@ -367,6 +419,8 @@ pub fn spawnTabWithCommandAndCwd(allocator: std.mem.Allocator, cols: u16, rows: 
     t.focused = .root;
     t.ai_chat_session = null;
     t.ai_history_session = null;
+    t.skill_center_session = null;
+    t.port_forwarding_session = null;
     t.copilot_session = null;
     // allocator.create returns undefined memory and struct-default values are
     // NOT applied to field-by-field init, so these must be set explicitly or
@@ -374,6 +428,7 @@ pub fn spawnTabWithCommandAndCwd(allocator: std.mem.Allocator, cols: u16, rows: 
     t.tmux_window_id = null;
     t.tmux_owner = null;
     t.tmux_name_len = 0;
+    t.copilot_visible = false;
 
     g_tabs[g_tab_count] = t;
     active_tab_state.g_active_tab = g_tab_count;
@@ -396,10 +451,11 @@ pub fn spawnAiChatTab(
     stream_val: []const u8,
     agent_val: []const u8,
     max_tokens: u32,
+    vision_val: []const u8,
 ) bool {
     if (g_tab_count >= MAX_TABS) return false;
 
-    const session = ai_chat.Session.initWithProtocol(
+    const session = ai_chat.Session.initWithVision(
         allocator,
         name,
         base_url,
@@ -411,6 +467,7 @@ pub fn spawnAiChatTab(
         reasoning_effort,
         stream_val,
         agent_val,
+        vision_val,
     ) catch {
         std.debug.print("Failed to create AI Chat session\n", .{});
         return false;
@@ -427,6 +484,8 @@ pub fn spawnAiChatTab(
     t.focused = .root;
     t.ai_chat_session = session;
     t.ai_history_session = null;
+    t.skill_center_session = null;
+    t.port_forwarding_session = null;
     t.copilot_session = null;
     // allocator.create returns undefined memory and struct-default values are
     // NOT applied to field-by-field init, so these must be set explicitly or
@@ -434,6 +493,7 @@ pub fn spawnAiChatTab(
     t.tmux_window_id = null;
     t.tmux_owner = null;
     t.tmux_name_len = 0;
+    t.copilot_visible = false;
 
     g_tabs[g_tab_count] = t;
     active_tab_state.g_active_tab = g_tab_count;
@@ -462,6 +522,8 @@ pub fn spawnAiChatTabFromHistoryRecord(allocator: std.mem.Allocator, record: age
     t.focused = .root;
     t.ai_chat_session = session;
     t.ai_history_session = null;
+    t.skill_center_session = null;
+    t.port_forwarding_session = null;
     t.copilot_session = null;
     // allocator.create returns undefined memory and struct-default values are
     // NOT applied to field-by-field init, so these must be set explicitly or
@@ -469,6 +531,7 @@ pub fn spawnAiChatTabFromHistoryRecord(allocator: std.mem.Allocator, record: age
     t.tmux_window_id = null;
     t.tmux_owner = null;
     t.tmux_name_len = 0;
+    t.copilot_visible = false;
 
     g_tabs[g_tab_count] = t;
     active_tab_state.g_active_tab = g_tab_count;
@@ -503,12 +566,86 @@ pub fn spawnAiHistoryTab(allocator: std.mem.Allocator, source: ai_history_source
     t.tmux_window_id = null;
     t.tmux_owner = null;
     t.tmux_name_len = 0;
+    t.copilot_visible = false;
     t.ai_history_session = session_ptr;
+    t.skill_center_session = null;
+    t.port_forwarding_session = null;
 
     g_tabs[g_tab_count] = t;
     active_tab_state.g_active_tab = g_tab_count;
     g_tab_count += 1;
     return true;
+}
+
+/// Create and activate a new Skill Center tab. Mirrors `spawnAiHistoryTab`:
+/// allocates the tab + Session, rolls back cleanly on any failure. The caller
+/// (AppWindow) seeds the cache and starts the scan after this returns.
+pub fn spawnSkillCenterTab(allocator: std.mem.Allocator) bool {
+    if (g_tab_count >= MAX_TABS) return false;
+    const session_ptr = skill_center.Session.create(allocator) catch return false;
+
+    const t = allocator.create(TabState) catch {
+        session_ptr.destroy();
+        return false;
+    };
+    t.kind = .skill_center;
+    t.tree = .empty;
+    t.focused = .root;
+    t.ai_chat_session = null;
+    t.ai_history_session = null;
+    t.skill_center_session = session_ptr;
+    t.port_forwarding_session = null;
+    t.copilot_session = null;
+    t.copilot_visible = false;
+
+    g_tabs[g_tab_count] = t;
+    active_tab_state.g_active_tab = g_tab_count;
+    g_tab_count += 1;
+    return true;
+}
+
+/// Create and activate a new Port Forwarding management tab.
+pub fn spawnPortForwardingTab(allocator: std.mem.Allocator) bool {
+    if (g_tab_count >= MAX_TABS) return false;
+    const session_ptr = allocator.create(port_forwarding.Session) catch return false;
+    session_ptr.* = port_forwarding.Session.create(allocator) catch {
+        allocator.destroy(session_ptr);
+        return false;
+    };
+
+    const t = allocator.create(TabState) catch {
+        session_ptr.destroy();
+        allocator.destroy(session_ptr);
+        return false;
+    };
+    t.kind = .port_forwarding;
+    t.tree = .empty;
+    t.focused = .root;
+    t.ai_chat_session = null;
+    t.ai_history_session = null;
+    t.skill_center_session = null;
+    t.port_forwarding_session = session_ptr;
+    t.copilot_session = null;
+    t.copilot_visible = false;
+
+    g_tabs[g_tab_count] = t;
+    active_tab_state.g_active_tab = g_tab_count;
+    g_tab_count += 1;
+    return true;
+}
+
+/// Active tab's Skill Center session, or null if the active tab isn't one.
+pub fn activeSkillCenter() ?*skill_center.Session {
+    const t = activeTab() orelse return null;
+    if (t.kind != .skill_center) return null;
+    return t.skill_center_session;
+}
+
+/// Active tab's Port Forwarding session, or null if the active tab isn't one.
+pub fn activePortForwarding() ?*port_forwarding.Session {
+    const t = activeTab() orelse return null;
+    if (t.kind != .port_forwarding) return null;
+    return t.port_forwarding_session;
 }
 
 /// Close the tab at the given index.
@@ -613,7 +750,7 @@ pub fn switchTab(idx: usize) void {
     // Clear bell indicator and force rebuild for surfaces in this tab
     if (g_tabs[idx]) |t| {
         if (t.kind != .terminal) return;
-        var it = t.tree.iterator();
+        var it = t.tree.surfaces();
         while (it.next()) |entry| {
             entry.surface.bell_indicator = false;
             entry.surface.surface_renderer.force_rebuild = true;
@@ -629,6 +766,190 @@ fn installAiChatHistoryHook(session: *ai_chat.Session) void {
 // ============================================================================
 // Split operations
 // ============================================================================
+
+/// Initial right-edge split ratio: give the terminal (left child) the bulk of
+/// the width, the preview (right child) ~DEFAULT_WIDTH px. Falls back to 0.62
+/// because tab.zig is UI-free (no AppWindow dependency).
+fn rightEdgeRatio() f16 {
+    return 0.62;
+}
+
+/// Create a preview pane at the RIGHT EDGE of the active tab's layout (a
+/// full-height right column). Does NOT move focus (opening a preview keeps the
+/// terminal focused). Returns the new PreviewPane (BORROWED — the tree owns it).
+///
+/// Mirrors the refcount dance of splitFocusedSurfaceWithCommand:
+///   create() → refcount 1
+///   initPane (pane.ref()) → refcount 2  (insert tree owns it)
+///   split (refNodes) → refcount 3  (new_tree owns another ref)
+///   old_tree.deinit() → refcount 3  (unrefs the OLD tree's terminal, not the preview)
+///   defer insert.deinit() → refcount 2  (insert's ref released)
+///   p.unref(gpa) → refcount 1  (local create() ref released; new_tree holds the one owning ref)
+pub fn splitIntoPreview(gpa: std.mem.Allocator) ?*PreviewPane {
+    const t = activeTab() orelse return null;
+    if (t.kind != .terminal) return null;
+
+    const p = PreviewPane.create(gpa) catch return null;
+    // insert tree takes ownership of one ref (via pane.ref() inside initPane)
+    var insert = SplitTree.initPane(gpa, .{ .preview = p }) catch {
+        p.unref(gpa);
+        return null;
+    };
+    defer insert.deinit(); // releases insert's ref when scope exits
+
+    // Remember: split(.root, .right, ...) moves the node at .root to the LAST
+    // position in the new tree. We must remap t.focused accordingly so the
+    // terminal pane stays focused after the tree rebuild.
+    const old_len = t.tree.nodes.len;
+    const old_focused = t.focused;
+
+    const new_tree = t.tree.split(gpa, .root, .right, rightEdgeRatio(), &insert) catch {
+        p.unref(gpa); // insert.deinit (deferred) will also unref, so keep balanced
+        return null;
+    };
+
+    // Swap the tree exactly as splitFocusedSurfaceWithCommand does
+    var old_tree = t.tree;
+    t.tree = new_tree;
+    old_tree.deinit();
+
+    // Remap focused handle: split(.root) moves node[0] to node[nodes.len - 1].
+    // Any other handles keep their indices because insert nodes are placed at
+    // positions old_len .. old_len + insert.nodes.len, and the split node takes
+    // over position 0.
+    t.focused = if (old_focused.idx() == 0)
+        @enumFromInt(old_len + 1) // new_tree.nodes.len - 1 = old_len + insert.len(1)
+    else
+        old_focused;
+
+    // Release the local create() reference; the tree now holds the sole ref.
+    p.unref(gpa);
+    return p; // borrowed — tree holds the owning ref
+}
+
+/// Handle of the bottom-most preview pane in reading order, or null when the
+/// tab has no preview pane.
+fn lastPreviewInReadingOrder(gpa: std.mem.Allocator, t: *const TabState) ?SplitTree.Node.Handle {
+    const order = t.tree.readingOrder(gpa) catch return null;
+    defer gpa.free(order);
+    var last: ?SplitTree.Node.Handle = null;
+    for (order) |h| {
+        switch (t.tree.nodes[h.idx()]) {
+            .leaf => |pane| switch (pane) {
+                .preview => last = h,
+                else => {},
+            },
+            .split => {},
+        }
+    }
+    return last;
+}
+
+/// Create a preview pane stacked BELOW the bottom-most existing preview pane,
+/// so previews pile up in the right column instead of carving another
+/// full-height column off the terminal. Falls back to splitIntoPreview (the
+/// right-edge column) when the tab has no preview yet. Does NOT move focus.
+/// Returns the new PreviewPane (BORROWED — the tree owns it). The refcount
+/// dance mirrors splitIntoPreview.
+pub fn splitIntoPreviewStacked(gpa: std.mem.Allocator) ?*PreviewPane {
+    const t = activeTab() orelse return null;
+    if (t.kind != .terminal) return null;
+
+    const at = lastPreviewInReadingOrder(gpa, t) orelse return splitIntoPreview(gpa);
+
+    const p = PreviewPane.create(gpa) catch return null;
+    var insert = SplitTree.initPane(gpa, .{ .preview = p }) catch {
+        p.unref(gpa);
+        return null;
+    };
+    defer insert.deinit();
+
+    const old_len = t.tree.nodes.len;
+    const old_focused = t.focused;
+
+    const new_tree = t.tree.split(gpa, at, .down, 0.5, &insert) catch {
+        p.unref(gpa);
+        return null;
+    };
+
+    var old_tree = t.tree;
+    t.tree = new_tree;
+    old_tree.deinit();
+
+    // split(at) copies the node at `at` to the LAST index (old_len + insert
+    // count) and writes the new split node at `at`'s old index; every other
+    // old handle keeps its index. So only a focus sitting exactly on `at`
+    // needs remapping.
+    t.focused = if (old_focused == at)
+        @enumFromInt(old_len + 1) // = new nodes.len - 1
+    else
+        old_focused;
+
+    p.unref(gpa);
+    return p;
+}
+
+/// Handle of the preview pane to reuse for `kind`: the focused leaf if it is a
+/// preview of that kind, else the first same-kind preview in reading order,
+/// else null (caller creates a new pane). Per-kind reuse keeps one pane per
+/// content type so e.g. an image preview never evicts the markdown preview.
+pub fn previewForReuse(gpa: std.mem.Allocator, t: *const TabState, kind: markdown_preview.Kind) ?SplitTree.Node.Handle {
+    // Fast path: focused node is a same-kind preview leaf.
+    if (t.focused.idx() < t.tree.nodes.len) {
+        switch (t.tree.nodes[t.focused.idx()]) {
+            .leaf => |pane| switch (pane) {
+                .preview => |p| if (p.kind == kind) return t.focused,
+                else => {},
+            },
+            .split => {},
+        }
+    }
+
+    // Scan in reading order (top-left → bottom-right) for the first
+    // same-kind preview.
+    const order = t.tree.readingOrder(gpa) catch return null;
+    defer gpa.free(order);
+
+    for (order) |h| {
+        switch (t.tree.nodes[h.idx()]) {
+            .leaf => |pane| switch (pane) {
+                .preview => |p| if (p.kind == kind) return h,
+                else => {},
+            },
+            .split => {},
+        }
+    }
+    return null;
+}
+
+/// Move split-tree focus to the leaf holding `pane` in the active tab, so a
+/// just-opened (or reused) preview becomes the focused pane. With the preview
+/// focused, Ctrl+Shift+W closes IT — not the terminal the user came from — and
+/// PgUp/PgDn/arrows/Home/End/+/- scroll & zoom it (see input.zig). Closing the
+/// preview refocuses the surviving terminal, so typing resumes naturally.
+///
+/// Matching is by pointer identity (the leaf handle equals the node index), so
+/// it is allocation-free and unambiguous even with multiple same-kind previews.
+/// Returns false without changing focus when there is no active terminal tab or
+/// `pane` is not a leaf of its tree — defensive against a tree reshaped between
+/// pane creation and this call.
+pub fn focusPreviewPane(pane: *PreviewPane) bool {
+    const t = activeTab() orelse return false;
+    if (t.kind != .terminal) return false;
+    for (t.tree.nodes, 0..) |node, i| {
+        switch (node) {
+            .leaf => |pn| switch (pn) {
+                .preview => |p| if (p == pane) {
+                    t.focused = @enumFromInt(i);
+                    return true;
+                },
+                else => {},
+            },
+            .split => {},
+        }
+    }
+    return false;
+}
 
 /// Split the focused surface in the given direction.
 /// Returns true on success. The caller handles g_resize_active and rebuild flags.
@@ -831,7 +1152,7 @@ pub fn closeFocusedSplit(allocator: std.mem.Allocator) CloseResult {
     }
 
     // Find valid focus in new tree
-    var it = t.tree.iterator();
+    var it = t.tree.surfaces();
     if (it.next()) |entry| {
         if (next_focus) |nf| {
             if (nf != t.focused and @intFromEnum(nf) < t.tree.nodes.len) {
@@ -843,7 +1164,10 @@ pub fn closeFocusedSplit(allocator: std.mem.Allocator) CloseResult {
             t.focused = entry.handle;
         }
     } else {
-        t.focused = .root;
+        // No terminal remains (preview-only tab): focus the first leaf pane so
+        // keyboard routing still targets a real pane, never the root split node.
+        var pit = t.tree.panes();
+        t.focused = if (pit.next()) |pane_entry| pane_entry.handle else .root;
     }
 
     std.debug.print("Split closed, new focused handle: {}, tree nodes: {}\n", .{ @intFromEnum(t.focused), t.tree.nodes.len });
@@ -862,12 +1186,24 @@ pub fn gotoSplit(allocator: std.mem.Allocator, direction: SplitTree.Goto) bool {
     return false;
 }
 
+/// Focus the n-th panel (1-based) of the active tab in screen reading order
+/// (top-left → bottom-right). Returns false if there is no such panel (n out of
+/// range, empty/non-terminal tab), leaving focus unchanged so the caller can let
+/// the key fall through to the terminal.
+pub fn focusPanelByIndex(allocator: std.mem.Allocator, n: usize) bool {
+    const t = activeTab() orelse return false;
+    if (t.kind != .terminal) return false;
+    const handle = (t.tree.panelHandleAt(allocator, n) catch return false) orelse return false;
+    t.focused = handle;
+    return true;
+}
+
 /// Equalize all split ratios. Returns true if equalization was performed.
 pub fn equalizeSplits(allocator: std.mem.Allocator) bool {
     const t = activeTab() orelse return false;
     if (t.kind != .terminal) return false;
 
-    var it = t.tree.iterator();
+    var it = t.tree.surfaces();
     while (it.next()) |entry| {
         entry.surface.resize_overlay_active = true;
         entry.surface.resize_overlay_last_cols = entry.surface.size.grid.cols;
@@ -878,6 +1214,27 @@ pub fn equalizeSplits(allocator: std.mem.Allocator) bool {
     t.tree.deinit();
     t.tree = new_tree;
 
+    return true;
+}
+
+/// Swap the panels at handles `a` (drag source) and `b` (drop target). The two
+/// leaves exchange their surfaces; the split-tree topology and ratios are
+/// unchanged. Focus follows the dragged surface to the target slot.
+///
+/// Returns false (no-op) if there is no terminal tab, either handle is out of
+/// range, either node is not a leaf, or `a == b`. The leaf/range checks are
+/// defensive: a shell may have exited mid-drag and reshaped the tree, leaving
+/// the caller holding stale handles.
+pub fn swapPanels(a: SplitTree.Node.Handle, b: SplitTree.Node.Handle) bool {
+    const t = activeTab() orelse return false;
+    if (t.kind != .terminal) return false;
+    if (a == b) return false;
+    if (a.idx() >= t.tree.nodes.len or b.idx() >= t.tree.nodes.len) return false;
+    if (t.tree.nodes[a.idx()] != .leaf or t.tree.nodes[b.idx()] != .leaf) return false;
+
+    t.tree.swapLeaves(a, b);
+    // The dragged surface (was at `a`) now lives at `b`; keep it focused.
+    t.focused = b;
     return true;
 }
 
@@ -915,6 +1272,8 @@ pub fn commitTabRename() void {
                         session.setTitle(g_tab_rename_buf[0..g_tab_rename_len]);
                     },
                     .ai_history => {},
+                    .skill_center => {},
+                    .port_forwarding => {},
                 }
             }
         }
@@ -1126,7 +1485,15 @@ fn snapshotNode(
 ) !session_persist.NodeSnap {
     const node = tree.nodes[handle.idx()];
     return switch (node) {
-        .leaf => |surface| .{ .leaf = .{ .surface = try snapshotSurface(arena, surface) } },
+        .leaf => |pane| switch (pane) {
+            .terminal => |s| .{ .leaf = .{ .surface = try snapshotSurface(arena, s) } },
+            // Persist the preview's kind + file path so it can be re-loaded
+            // (best-effort) on the next launch.
+            .preview => |p| .{ .leaf = .{
+                .kind = .preview,
+                .preview = .{ .kind = p.kind, .path = try arena.dupe(u8, p.path()) },
+            } },
+        },
         .split => |sp| blk: {
             const left = try arena.create(session_persist.NodeSnap);
             left.* = try snapshotNode(arena, tree, sp.left);
@@ -1357,6 +1724,8 @@ pub fn restoreTab(
     t.focused = handleOfNthLeaf(&t.tree, snap.focused_leaf) orelse .root;
     t.ai_chat_session = null;
     t.ai_history_session = null;
+    t.skill_center_session = null;
+    t.port_forwarding_session = null;
     t.copilot_session = null;
     // allocator.create returns undefined memory and struct-default values are
     // NOT applied to field-by-field init, so these must be set explicitly or
@@ -1364,6 +1733,7 @@ pub fn restoreTab(
     t.tmux_window_id = null;
     t.tmux_owner = null;
     t.tmux_name_len = 0;
+    t.copilot_visible = false;
     applyRestoredTabMetadata(t, snap);
 
     g_tabs[g_tab_count] = t;
@@ -1382,6 +1752,8 @@ fn applyRestoredTabMetadata(t: *TabState, snap: *const session_persist.TabSnap) 
             session.setTitle(title);
         },
         .ai_history => {},
+        .skill_center => {},
+        .port_forwarding => {},
     }
 }
 
@@ -1632,6 +2004,47 @@ test "tab: restoreTab skips an ai_history tab when no restore hook is installed"
     try std.testing.expectEqual(@as(usize, 0), g_tab_count);
 }
 
+test "tab: copilot visibility is scoped to the active terminal tab" {
+    resetTestTabGlobals();
+
+    var first = TabState{
+        .kind = .terminal,
+        .tree = .empty,
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .copilot_session = null,
+    };
+    var second = TabState{
+        .kind = .terminal,
+        .tree = .empty,
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .copilot_session = null,
+    };
+
+    g_tabs[0] = &first;
+    g_tabs[1] = &second;
+    g_tab_count = 2;
+
+    active_tab_state.g_active_tab = 0;
+    try std.testing.expect(!activeCopilotVisible());
+    try std.testing.expect(toggleActiveCopilotVisible());
+    try std.testing.expect(activeCopilotVisible());
+
+    active_tab_state.g_active_tab = 1;
+    try std.testing.expect(!activeCopilotVisible());
+    try std.testing.expect(!second.copilot_visible);
+    try std.testing.expect(!setActiveCopilotVisible(false));
+    try std.testing.expect(setActiveCopilotVisible(true));
+    try std.testing.expect(activeCopilotVisible());
+
+    active_tab_state.g_active_tab = 0;
+    try std.testing.expect(activeCopilotVisible());
+    try std.testing.expect(first.copilot_visible);
+}
+
 test "tab: snapshotTab persists focused surface title override" {
     const allocator = std.testing.allocator;
 
@@ -1860,7 +2273,8 @@ test "tab: spawnAiHistoryTab owns mutable ssh source buffers" {
     try std.testing.expectEqualStrings("ssh-history", session.source.id);
     try std.testing.expectEqualStrings("Build Box", session.source.name);
     try std.testing.expectEqualStrings("buildbox", session.source.target.ssh.profile_name);
-    try std.testing.expectEqualStrings("Build Box", active.getTitle());
+    // The tab conveys the sessions workbench, not the bare source name.
+    try std.testing.expectEqualStrings("Sessions · Build Box", active.getTitle());
 }
 
 test "tab: spawnAiHistoryTab rolls back when tab allocation fails" {
@@ -2098,4 +2512,609 @@ test "TabState.getTitle returns the tmux window name when set" {
     // With no tmux name, an empty terminal tab falls back to the default.
     t.tmux_name_len = 0;
     try std.testing.expectEqualStrings("wispterm", t.getTitle());
+}
+
+test "focusPanelByIndex focuses panels in screen reading order" {
+    // Two side-by-side panels: root horizontal, left | right.
+    var l = session_persist.NodeSnap{ .leaf = .{ .surface = .{ .local_shell = .{} } } };
+    var r = session_persist.NodeSnap{ .leaf = .{ .surface = .{ .local_shell = .{} } } };
+    var root = session_persist.NodeSnap{ .split = .{ .layout = .horizontal, .ratio = 0.5, .left = &l, .right = &r } };
+    const Stub = struct {
+        var counter: usize = 0;
+        var sentinels: [8]usize = undefined;
+        fn make(_: *const session_persist.SurfaceSnap, _: std.mem.Allocator) ?*Surface {
+            const ptr = &sentinels[counter];
+            counter += 1;
+            return @ptrCast(@alignCast(ptr));
+        }
+    };
+    Stub.counter = 0;
+
+    var ts = TabState{
+        .kind = .terminal,
+        .tree = try SplitTree.fromSnapshot(std.testing.allocator, &root, Stub.make),
+        .focused = .root,
+    };
+    // Sentinel surfaces can't be unref'd, so free the arena directly (no TabState.deinit).
+    defer ts.tree.arena.deinit();
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = &ts;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    // Handles: root=0, left=1, right=2. Reading order: [left(1), right(2)].
+    try std.testing.expect(focusPanelByIndex(std.testing.allocator, 1));
+    try std.testing.expectEqual(@as(SplitTree.Node.Handle.Backing, 1), @intFromEnum(ts.focused));
+    try std.testing.expect(focusPanelByIndex(std.testing.allocator, 2));
+    try std.testing.expectEqual(@as(SplitTree.Node.Handle.Backing, 2), @intFromEnum(ts.focused));
+    // Out of range → false, focus unchanged.
+    try std.testing.expect(!focusPanelByIndex(std.testing.allocator, 3));
+    try std.testing.expectEqual(@as(SplitTree.Node.Handle.Backing, 2), @intFromEnum(ts.focused));
+}
+
+test "tab: splitIntoPreview adds a preview leaf and grows the tree by 2 nodes" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    // Build a minimal terminal tab with a stack-allocated surface stub.
+    // ref_count starts at 1; SplitTree.init will call pane.ref() → 2.
+    // We never let refcount reach 0 (would call surface.deinit → crash on stub),
+    // because tree ops keep it ≥ 1 after all cleanup. The testing allocator never
+    // tracks the stack surface, so no leak is reported.
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    const before = t.tree.nodes.len; // 1
+    const focused_before = t.focused;
+
+    const p = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+
+    // Tree should have grown by exactly 2 nodes (one split node + one preview leaf)
+    try std.testing.expectEqual(before + 2, t.tree.nodes.len);
+
+    // Exactly one preview leaf must exist in the tree
+    var preview_count: usize = 0;
+    var it = t.tree.panes();
+    while (it.next()) |entry| {
+        switch (entry.pane) {
+            .preview => preview_count += 1,
+            .terminal => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), preview_count);
+
+    // The returned pointer is the pane in the tree
+    _ = p; // borrowed, owned by the tree
+
+    // Focus must NOT have moved to the preview — terminal is still focused.
+    // After split(.root, .right, ...), terminal moved from handle 0 to handle 2.
+    // focused_before was 0 (.root), so it should now be 2.
+    const expected_focused: SplitTree.Node.Handle = @enumFromInt(focused_before.idx() + 2);
+    try std.testing.expectEqual(expected_focused, t.focused);
+
+    // Verify the focused node is indeed the terminal leaf, not a split or preview.
+    try std.testing.expect(t.focused.idx() < t.tree.nodes.len);
+    const focused_node = t.tree.nodes[t.focused.idx()];
+    switch (focused_node) {
+        .leaf => |pane| switch (pane) {
+            .terminal => {}, // correct
+            .preview => return error.FocusedIsPreviewNotTerminal,
+        },
+        .split => return error.FocusedIsSplitNotLeaf,
+    }
+
+    // t.deinit (deferred) will call tree.deinit(), which unrefs the preview pane
+    // (freeing it) and decrements the surface refcount. The testing allocator
+    // must report no leak after the defer runs.
+}
+
+test "tab: focusPreviewPane selects the just-opened preview leaf" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    // splitIntoPreview keeps the TERMINAL focused (its documented contract).
+    const p = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    switch (t.tree.nodes[t.focused.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .terminal => {}, // precondition: terminal focused, preview not.
+            .preview => return error.PreconditionPreviewAlreadyFocused,
+        },
+        .split => return error.PreconditionFocusedIsSplit,
+    }
+
+    // focusPreviewPane moves focus onto the preview leaf holding `p`.
+    try std.testing.expect(focusPreviewPane(p));
+    try std.testing.expect(t.focused.idx() < t.tree.nodes.len);
+    switch (t.tree.nodes[t.focused.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .preview => |fp| try std.testing.expectEqual(p, fp),
+            .terminal => return error.FocusedIsTerminalNotPreview,
+        },
+        .split => return error.FocusedIsSplitNotPreview,
+    }
+
+    // A pane that is not in the tree leaves focus untouched (returns false).
+    const focused_before = t.focused;
+    const foreign = try PreviewPane.create(gpa);
+    defer foreign.unref(gpa);
+    try std.testing.expect(!focusPreviewPane(foreign));
+    try std.testing.expectEqual(focused_before, t.focused);
+}
+
+test "tab: closeFocusedSplit closes a focused preview and refocuses the terminal" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    _ = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    t.focused = previewForReuse(gpa, t, .markdown) orelse return error.NoPreviewAfterSplit;
+
+    // Ctrl+Shift+W now closes the focused pane — a focused preview included.
+    try std.testing.expectEqual(CloseResult.closed_split, closeFocusedSplit(gpa));
+
+    // The surviving terminal leaf takes focus.
+    try std.testing.expectEqual(@as(usize, 1), t.tree.nodes.len);
+    try std.testing.expect(t.focused.idx() < t.tree.nodes.len);
+    switch (t.tree.nodes[t.focused.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .terminal => {},
+            .preview => return error.FocusedIsPreview,
+        },
+        .split => return error.FocusedIsSplit,
+    }
+}
+
+test "tab: closeFocusedSplit on the last terminal focuses a preview leaf, not a split node" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    // Two preview panes around the focused terminal, then close the terminal.
+    _ = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    _ = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+
+    try std.testing.expectEqual(CloseResult.closed_split, closeFocusedSplit(gpa));
+
+    // Remaining tree: [split, preview, preview]. Focus must land on a LEAF
+    // pane (a preview), never on the root split node, so keyboard routing
+    // (focusedPreviewPane) still targets a real pane.
+    try std.testing.expect(t.focused.idx() < t.tree.nodes.len);
+    switch (t.tree.nodes[t.focused.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .preview => {},
+            .terminal => return error.TerminalSurvivedClose,
+        },
+        .split => return error.FocusedIsSplitNode,
+    }
+}
+
+test "tab: previewForReuse matches preview panes by kind" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    // No preview pane at all → null for every kind.
+    try std.testing.expect(previewForReuse(gpa, t, .markdown) == null);
+
+    // One markdown pane: markdown matches it, image does not.
+    const p1 = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    p1.kind = .markdown;
+    const h_md = previewForReuse(gpa, t, .markdown) orelse return error.NoMarkdownMatch;
+    switch (t.tree.nodes[h_md.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .preview => |p| try std.testing.expectEqual(p1, p),
+            .terminal => return error.MatchedTerminal,
+        },
+        .split => return error.MatchedSplit,
+    }
+    try std.testing.expect(previewForReuse(gpa, t, .image) == null);
+
+    // Add an image pane: each kind now resolves to its own pane.
+    const p2 = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    p2.kind = .image;
+    const h_img = previewForReuse(gpa, t, .image) orelse return error.NoImageMatch;
+    switch (t.tree.nodes[h_img.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .preview => |p| try std.testing.expectEqual(p2, p),
+            .terminal => return error.MatchedTerminal,
+        },
+        .split => return error.MatchedSplit,
+    }
+    const h_md2 = previewForReuse(gpa, t, .markdown) orelse return error.NoMarkdownMatch;
+    switch (t.tree.nodes[h_md2.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .preview => |p| try std.testing.expectEqual(p1, p),
+            .terminal => return error.MatchedTerminal,
+        },
+        .split => return error.MatchedSplit,
+    }
+    // No csv pane exists → null even though other kinds do.
+    try std.testing.expect(previewForReuse(gpa, t, .csv) == null);
+}
+
+test "tab: previewForReuse prefers the focused same-kind preview" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    // Two markdown panes; reading order would pick p1, but focusing p2's leaf
+    // must win.
+    const p1 = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    p1.kind = .markdown;
+    const p2 = splitIntoPreview(gpa) orelse return error.SplitIntoPreviewFailed;
+    p2.kind = .markdown;
+
+    var h_p2: ?SplitTree.Node.Handle = null;
+    for (t.tree.nodes, 0..) |node, i| switch (node) {
+        .leaf => |pane| switch (pane) {
+            .preview => |p| if (p == p2) {
+                h_p2 = @enumFromInt(i);
+            },
+            .terminal => {},
+        },
+        .split => {},
+    };
+    t.focused = h_p2 orelse return error.P2NotInTree;
+
+    const h = previewForReuse(gpa, t, .markdown) orelse return error.NoMatch;
+    try std.testing.expectEqual(t.focused, h);
+}
+
+test "tab: splitIntoPreviewStacked stacks below the existing preview column" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    // First preview: no preview exists yet → delegates to the right-edge
+    // column split. Tree: [0]=split, [1]=preview, [2]=terminal(focused).
+    _ = splitIntoPreviewStacked(gpa) orelse return error.StackedFailed;
+    try std.testing.expectEqual(@as(usize, 3), t.tree.nodes.len);
+    try std.testing.expectEqual(@as(usize, 2), t.focused.idx());
+
+    // Second preview: splits the existing preview (handle 1) downward.
+    // split(at=1): node[1] becomes the new VERTICAL split, old preview moves
+    // to the last index, the new pane lands at old_len. Terminal focus (2)
+    // is not the split target, so it must not move.
+    _ = splitIntoPreviewStacked(gpa) orelse return error.StackedFailed;
+    try std.testing.expectEqual(@as(usize, 5), t.tree.nodes.len);
+    switch (t.tree.nodes[1]) {
+        .split => |s| try std.testing.expectEqual(SplitTree.Split.Layout.vertical, s.layout),
+        .leaf => return error.ExpectedSplitNode,
+    }
+
+    // Both previews exist; the terminal keeps focus.
+    var preview_count: usize = 0;
+    var it = t.tree.panes();
+    while (it.next()) |entry| {
+        switch (entry.pane) {
+            .preview => preview_count += 1,
+            .terminal => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), preview_count);
+    try std.testing.expectEqual(@as(usize, 2), t.focused.idx());
+    switch (t.tree.nodes[t.focused.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .terminal => {},
+            .preview => return error.FocusedIsPreview,
+        },
+        .split => return error.FocusedIsSplit,
+    }
+}
+
+test "tab: splitIntoPreviewStacked remaps focus when the split target is focused" {
+    resetTestTabGlobals();
+    const gpa = std.testing.allocator;
+
+    var surface: Surface = undefined;
+    surface.ref_count = 1;
+    surface.ssh_connection = null;
+    surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.title_override_len = 0;
+    surface.agent_recent_output_len = 0;
+
+    const t = try gpa.create(TabState);
+    t.* = .{
+        .kind = .terminal,
+        .tree = try SplitTree.init(gpa, &surface),
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .skill_center_session = null,
+        .copilot_session = null,
+        .copilot_visible = false,
+    };
+    defer {
+        t.deinit(gpa);
+        gpa.destroy(t);
+        resetTestTabGlobals();
+    }
+
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_count = g_tab_count;
+    const saved_tab0 = g_tabs[0];
+    defer {
+        active_tab_state.g_active_tab = saved_active;
+        g_tab_count = saved_count;
+        g_tabs[0] = saved_tab0;
+    }
+    g_tabs[0] = t;
+    active_tab_state.g_active_tab = 0;
+    g_tab_count = 1;
+
+    // One preview at handle 1; focus it, then stack a second preview. The
+    // split target IS the focused node, so focus must follow the original
+    // preview to the last index (old_len + 1 = 4).
+    const p1 = splitIntoPreviewStacked(gpa) orelse return error.StackedFailed;
+    t.focused = @enumFromInt(1);
+
+    _ = splitIntoPreviewStacked(gpa) orelse return error.StackedFailed;
+    try std.testing.expectEqual(@as(usize, 4), t.focused.idx());
+    switch (t.tree.nodes[t.focused.idx()]) {
+        .leaf => |pane| switch (pane) {
+            .preview => |p| try std.testing.expectEqual(p1, p),
+            .terminal => return error.FocusedIsTerminal,
+        },
+        .split => return error.FocusedIsSplit,
+    }
 }

@@ -1,7 +1,75 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const pty_command = @import("pty_command.zig");
 const platform_wsl = @import("wsl.zig");
 const platform_process = @import("process.zig");
+const child_output = @import("../child_output.zig");
+
+/// Run a POSIX-shell command on the LOCAL host (`sh -c <command>`) and capture
+/// stdout, capped at `max_bytes`. On non-POSIX hosts (Windows native) there is
+/// no POSIX shell, so this returns `error.Unreachable`. Centralizing the OS
+/// switch here keeps AppWindow platform-neutral.
+/// TODO: Windows-native local POSIX support (e.g. via WSL fallback).
+pub fn localPosixExec(allocator: std.mem.Allocator, command: []const u8, max_bytes: usize) ![]u8 {
+    if (builtin.os.tag == .windows) return error.Unreachable;
+    const argv = [_][]const u8{ "sh", "-c", command };
+    var child = initHiddenCaptureChild(&argv, allocator);
+    try child.spawn();
+
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    defer output.deinit(allocator);
+    const stdout = child.stdout orelse {
+        _ = child.wait() catch {};
+        return error.RemoteExecFailed;
+    };
+    var buf: [4096]u8 = undefined;
+    while (output.items.len < max_bytes) {
+        const n = stdout.read(&buf) catch break;
+        if (n == 0) break;
+        try output.appendSlice(allocator, buf[0..n]);
+    }
+    // If we stopped at the cap, drain the rest of stdout to EOF so the child
+    // can't block on a full pipe — otherwise child.wait() (and the scan worker
+    // thread joining on it at teardown) would hang forever.
+    while (output.items.len >= max_bytes) {
+        const n = stdout.read(&buf) catch break;
+        if (n == 0) break;
+    }
+    _ = child.wait() catch {};
+    return output.toOwnedSlice(allocator);
+}
+
+/// True if the local host can run POSIX shell commands (false on Windows
+/// native). Lets platform-neutral callers decide whether the "local" source is
+/// reachable without touching `builtin.os.tag` themselves.
+pub fn localPosixExecSupported() bool {
+    return builtin.os.tag != .windows;
+}
+
+/// Run a POSIX-shell command on the LOCAL host and return whether it exited 0,
+/// discarding stdout. Returns false on a non-POSIX host, spawn failure, or a
+/// non-zero exit. Use this when only success/failure matters (e.g. a local
+/// `tar` extract) — unlike `localPosixExec`, which returns stdout WITHOUT
+/// checking the exit status and so would mask a failed command.
+pub fn localPosixExecOk(allocator: std.mem.Allocator, command: []const u8) bool {
+    if (builtin.os.tag == .windows) return false;
+    const argv = [_][]const u8{ "sh", "-c", command };
+    var child = initHiddenCaptureChild(&argv, allocator);
+    child.spawn() catch return false;
+    // Drain stdout to EOF so the child can't block on a full pipe at exit.
+    if (child.stdout) |stdout| {
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = stdout.read(&buf) catch break;
+            if (n == 0) break;
+        }
+    }
+    const term = child.wait() catch return false;
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+}
 
 pub fn wslHomeCommand() []const u8 {
     return "printf %s \"$HOME\"";
@@ -46,7 +114,23 @@ fn initHiddenCaptureChild(argv: []const []const u8, allocator: std.mem.Allocator
     return child;
 }
 
-pub fn sshExecCapture(allocator: std.mem.Allocator, conn: anytype, command: []const u8) ![]u8 {
+/// Result of an ssh exec: owned stdout + stderr, plus whether ssh exited 0.
+pub const SshCapture = struct {
+    stdout: []u8,
+    stderr: []u8,
+    exited_ok: bool,
+
+    pub fn deinit(self: *SshCapture, allocator: std.mem.Allocator) void {
+        allocator.free(self.stdout);
+        allocator.free(self.stderr);
+        self.* = undefined;
+    }
+};
+
+/// Like `sshExecCapture` but always returns stdout AND stderr (even on failure)
+/// so callers can surface the real ssh error. Reads both pipes concurrently to
+/// avoid a full-stderr-pipe deadlock.
+pub fn sshExecCaptureFull(allocator: std.mem.Allocator, conn: anytype, command: []const u8) !SshCapture {
     var askpass_path: ?[]const u8 = null;
     defer if (askpass_path) |p| allocator.free(p);
     var env_map: ?std.process.EnvMap = null;
@@ -56,10 +140,7 @@ pub fn sshExecCapture(allocator: std.mem.Allocator, conn: anytype, command: []co
         askpass_path = platform_process.ensureSshAskPassScript(allocator) orelse return error.SpawnFailed;
         env_map = try std.process.getEnvMap(allocator);
         if (env_map) |*map| {
-            try map.put("SSH_ASKPASS", askpass_path.?);
-            try map.put("SSH_ASKPASS_REQUIRE", "force");
-            try map.put("DISPLAY", "wispterm");
-            try map.put("WISPTERM_SSH_PASSWORD", conn.password());
+            try platform_process.putSshAskPassEnv(map, askpass_path.?, conn.password());
         }
     }
 
@@ -140,21 +221,31 @@ pub fn sshExecCapture(allocator: std.mem.Allocator, conn: anytype, command: []co
 
     const stdout = child.stdout orelse return error.SpawnFailed;
     const stderr = child.stderr orelse return error.SpawnFailed;
-    const stdout_output = try stdout.readToEndAlloc(allocator, 2 * 1024 * 1024);
-    errdefer allocator.free(stdout_output);
-    const stderr_output = stderr.readToEndAlloc(allocator, 16 * 1024) catch null;
-    defer if (stderr_output) |bytes| allocator.free(bytes);
+    // Drain both pipes concurrently — a full stderr pipe must not deadlock the
+    // stdout reader (the old "read stdout to EOF, then stderr" order could).
+    var cap = child_output.capture(allocator, stdout, stderr, 2 * 1024 * 1024, 16 * 1024) catch |err| {
+        _ = child.wait() catch {};
+        return err; // preserve the real error (e.g. OutOfMemory)
+    };
+    errdefer cap.deinit(allocator);
 
     const term = try child.wait();
     const ok = switch (term) {
         .Exited => |code| code == 0,
         else => false,
     };
-    if (!ok) {
-        logSshFailure(stderr_output);
+    return .{ .stdout = cap.stdout, .stderr = cap.stderr, .exited_ok = ok };
+}
+
+pub fn sshExecCapture(allocator: std.mem.Allocator, conn: anytype, command: []const u8) ![]u8 {
+    var cap = try sshExecCaptureFull(allocator, conn, command);
+    if (!cap.exited_ok) {
+        logSshFailure(cap.stderr);
+        cap.deinit(allocator);
         return error.RemoteExecFailed;
     }
-    return stdout_output;
+    allocator.free(cap.stderr);
+    return cap.stdout; // ownership transferred to caller
 }
 
 pub fn wslPathExpr(buf: *[1024]u8, path: []const u8) ?[]const u8 {

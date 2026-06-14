@@ -47,6 +47,12 @@ pub fn commandLineFromOwned(command: OwnedCommandLine) CommandLine {
     return command;
 }
 
+pub fn commandLineDisplay(command: CommandLine, out: []u8) []const u8 {
+    const len = @min(command.len, out.len);
+    @memcpy(out[0..len], command[0..len]);
+    return out[0..len];
+}
+
 pub fn allocCwdFromUtf8(allocator: std.mem.Allocator, cwd: []const u8) !OwnedCwd {
     return allocator.dupeZ(u8, cwd);
 }
@@ -149,6 +155,10 @@ pub fn tabCommandForKind(kind: []const u8, current_shell: CommandLine) ![]const 
     _ = kind;
     _ = current_shell;
     return error.InvalidTabKind;
+}
+
+pub fn wslAvailable() bool {
+    return false;
 }
 
 pub fn wslInteractiveCommand(buf: []u8, cwd: ?[]const u8) ?[]const u8 {

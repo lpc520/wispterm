@@ -4,6 +4,7 @@ const std = @import("std");
 
 pub const CommandAction = enum {
     new_tab,
+    load_openssh_config,
     new_agent,
     manage_ai_profiles,
     select_agent_history,
@@ -18,6 +19,7 @@ pub const CommandAction = enum {
     toggle_sidebar,
     toggle_file_explorer,
     toggle_browser_panel,
+    open_jupyter_panel,
     toggle_quake,
     open_settings,
     show_shortcuts,
@@ -37,9 +39,13 @@ pub const CommandAction = enum {
     check_for_updates,
     download_update,
     open_latest_release,
+    show_whats_new,
     update_skills,
     install_claude_code_integration,
     remove_claude_code_integration,
+    open_skill_center,
+    open_port_forwarding,
+    split_preview,
 };
 
 pub const CommandEntry = struct {
@@ -51,9 +57,9 @@ pub const CommandEntry = struct {
 
 pub const command_entries = [_]CommandEntry{
     .{ .title = "New Session", .detail = platform_pty_command.session_launcher_detail, .shortcut = "", .action = .new_tab },
-    .{ .title = "New Agent", .detail = "Open a new Agent tab with the default AI config", .shortcut = "", .action = .new_agent },
+    .{ .title = "New Copilot", .detail = "Open a new Copilot tab with the default AI config", .shortcut = "", .action = .new_agent },
     .{ .title = "Manage AI Profiles", .detail = "Create, edit, or delete saved AI profiles", .shortcut = "", .action = .manage_ai_profiles },
-    .{ .title = "Select Agent History", .detail = "Open the command-center agent history picker", .shortcut = "", .action = .select_agent_history },
+    .{ .title = "Select Copilot History", .detail = "Open the command-center Copilot history picker", .shortcut = "", .action = .select_agent_history },
     .{ .title = "Split Right", .detail = "Create a panel to the right", .shortcut = "", .action = .split_right },
     .{ .title = "Split Down", .detail = "Create a panel below", .shortcut = "", .action = .split_down },
     .{ .title = "Split Left", .detail = "Create a panel to the left", .shortcut = "", .action = .split_left },
@@ -65,10 +71,12 @@ pub const command_entries = [_]CommandEntry{
     .{ .title = "Toggle Sidebar", .detail = "Show or hide the tab sidebar", .shortcut = "", .action = .toggle_sidebar },
     .{ .title = "Toggle File Explorer", .detail = "Show or hide the left-side file explorer", .shortcut = "", .action = .toggle_file_explorer },
     .{ .title = "Toggle Browser", .detail = "Open the configured browser for local or SSH URLs", .shortcut = "", .action = .toggle_browser_panel },
+    .{ .title = "Open Jupyter", .detail = "Open the panel and paste a running Jupyter URL (local or SSH)", .shortcut = "", .action = .open_jupyter_panel },
     .{ .title = "Toggle Quake Window", .detail = "Show or hide the drop-down terminal window", .shortcut = "", .action = .toggle_quake },
     .{ .title = "Settings", .detail = "Open the settings page", .shortcut = "", .action = .open_settings },
     .{ .title = "Keyboard Shortcuts", .detail = "Show the shortcut reference overlay", .shortcut = "", .action = .show_shortcuts },
     .{ .title = "Open Config", .detail = "Open the WispTerm config file", .shortcut = "", .action = .open_config },
+    .{ .title = "Load OpenSSH Config", .detail = "Import ~/.ssh/config into SSH profiles", .shortcut = "", .action = .load_openssh_config },
     .{ .title = "Decrease Font Size", .detail = "Make terminal text smaller", .shortcut = "", .action = .font_size_decrease },
     .{ .title = "Increase Font Size", .detail = "Make terminal text larger", .shortcut = "", .action = .font_size_increase },
     .{ .title = "Toggle Maximize", .detail = "Maximize or restore the window", .shortcut = "", .action = .toggle_maximize },
@@ -78,15 +86,19 @@ pub const command_entries = [_]CommandEntry{
     .{ .title = "WeChat: Stop", .detail = "Stop polling and keep the saved WeChat binding", .shortcut = "", .action = .stop_wechat },
     .{ .title = "WeChat: Status", .detail = "Show the WeChat direct connection state", .shortcut = "", .action = .wechat_status },
     .{ .title = "WeChat: Unbind", .detail = "Clear the stored WeChat direct binding", .shortcut = "", .action = .unbind_wechat },
-    .{ .title = "Export AI Chat Markdown", .detail = "Save the active AI Chat transcript as Markdown", .shortcut = "", .action = .export_ai_chat_markdown },
-    .{ .title = "Export AI Chat Markdown Clean", .detail = "Save user prompts and the final AI result without thinking", .shortcut = "", .action = .export_ai_chat_markdown_clean },
+    .{ .title = "Export Copilot Markdown", .detail = "Save the active Copilot transcript as Markdown", .shortcut = "", .action = .export_ai_chat_markdown },
+    .{ .title = "Export Copilot Markdown Clean", .detail = "Save user prompts and the final AI result without thinking", .shortcut = "", .action = .export_ai_chat_markdown_clean },
     .{ .title = "Version", .detail = "Show WispTerm version", .shortcut = app_metadata.version, .action = .show_version },
     .{ .title = "Check for Updates", .detail = "Check GitHub Releases for a newer WispTerm version", .shortcut = "", .action = .check_for_updates },
     .{ .title = "Download Update", .detail = "Download the latest update to your Downloads folder", .shortcut = "", .action = .download_update },
     .{ .title = "Open Latest Release", .detail = "Open the latest WispTerm GitHub Release", .shortcut = "", .action = .open_latest_release },
+    .{ .title = "What's New", .detail = "Show what changed in this version of WispTerm", .shortcut = app_metadata.version, .action = .show_whats_new },
     .{ .title = "Update Skills", .detail = "Download the latest skills from GitHub", .shortcut = "", .action = .update_skills },
     .{ .title = "Install Claude Code Integration", .detail = "Add WispTerm agent hooks to ~/.claude/settings.json", .shortcut = "", .action = .install_claude_code_integration },
     .{ .title = "Remove Claude Code Integration", .detail = "Remove WispTerm agent hooks from ~/.claude/settings.json", .shortcut = "", .action = .remove_claude_code_integration },
+    .{ .title = "Port Forwarding", .detail = "Manage SSH port forwarding rules", .shortcut = "", .action = .open_port_forwarding },
+    .{ .title = "Skill Center", .detail = "Inventory Claude Code / Codex skills across servers", .shortcut = "", .action = .open_skill_center },
+    .{ .title = "Split Preview", .detail = "Open a preview panel on the right", .shortcut = "", .action = .split_preview },
 };
 
 pub const CommandPaletteMode = enum {
@@ -113,6 +125,7 @@ pub const State = struct {
     startup_shortcuts_visible: bool = false,
     session_launcher_visible: bool = false,
     session_launcher_selected: usize = 0,
+    session_launcher_return_to_command_palette: bool = false,
     ssh_list_visible: bool = false,
     ssh_form_visible: bool = false,
     ai_list_visible: bool = false,
@@ -139,6 +152,7 @@ pub const State = struct {
         self.command_palette_filter_len = 0;
         self.commandPaletteSetMode(mode);
         self.command_palette_history_selected = 0;
+        self.session_launcher_return_to_command_palette = false;
         self.startup_shortcuts_visible = false;
     }
 
@@ -152,6 +166,7 @@ pub const State = struct {
         self.command_palette_selected = 0;
         self.commandPaletteSetMode(.commands);
         self.command_palette_history_selected = 0;
+        self.session_launcher_return_to_command_palette = false;
     }
 
     pub fn commandPaletteOpenAgentHistory(self: *State) void {
@@ -220,8 +235,14 @@ pub const State = struct {
         self.ai_form_visible = false;
         self.ai_history_source_visible = false;
         self.command_palette_visible = false;
+        self.session_launcher_return_to_command_palette = false;
         self.settings_visible = false;
         self.startup_shortcuts_visible = false;
+    }
+
+    pub fn sessionLauncherOpenFromCommandPalette(self: *State) void {
+        self.sessionLauncherOpen();
+        self.session_launcher_return_to_command_palette = true;
     }
 
     pub fn sessionLauncherClose(self: *State) void {
@@ -231,6 +252,14 @@ pub const State = struct {
         self.ai_list_visible = false;
         self.ai_form_visible = false;
         self.ai_history_source_visible = false;
+        self.session_launcher_return_to_command_palette = false;
+    }
+
+    pub fn sessionLauncherBackToCommandPalette(self: *State) bool {
+        if (!self.session_launcher_return_to_command_palette) return false;
+        self.sessionLauncherClose();
+        self.commandPaletteOpen();
+        return true;
     }
 
     pub fn settingsPageOpen(self: *State) void {
@@ -257,16 +286,16 @@ pub fn resolveNewAgentLaunch(has_profiles: bool) NewAgentLaunchAction {
     return if (has_profiles) .connect_default_profile_as_agent else .open_form;
 }
 
-test "command center includes New Agent action" {
-    try std.testing.expectEqual(CommandAction.new_agent, findCommandAction("New Agent"));
+test "command center includes New Copilot action" {
+    try std.testing.expectEqual(CommandAction.new_agent, findCommandAction("New Copilot"));
 }
 
 test "command center includes Manage AI Profiles action" {
     try std.testing.expectEqual(CommandAction.manage_ai_profiles, findCommandAction("Manage AI Profiles"));
 }
 
-test "command center includes Select Agent History action" {
-    try std.testing.expectEqual(CommandAction.select_agent_history, findCommandAction("Select Agent History"));
+test "command center includes Select Copilot History action" {
+    try std.testing.expectEqual(CommandAction.select_agent_history, findCommandAction("Select Copilot History"));
 }
 
 test "command center includes update check actions" {
@@ -275,9 +304,40 @@ test "command center includes update check actions" {
     try std.testing.expectEqual(CommandAction.open_latest_release, findCommandAction("Open Latest Release"));
 }
 
-test "command center includes AI Markdown export actions" {
-    try std.testing.expectEqual(CommandAction.export_ai_chat_markdown, findCommandAction("Export AI Chat Markdown"));
-    try std.testing.expectEqual(CommandAction.export_ai_chat_markdown_clean, findCommandAction("Export AI Chat Markdown Clean"));
+test "findCommandAction resolves What's New" {
+    try std.testing.expectEqual(CommandAction.show_whats_new, findCommandAction("What's New"));
+}
+
+test "command center includes Skill Center action" {
+    try std.testing.expectEqual(CommandAction.open_skill_center, findCommandAction("Skill Center"));
+}
+
+test "command center includes Port Forwarding action" {
+    try std.testing.expectEqual(CommandAction.open_port_forwarding, findCommandAction("Port Forwarding"));
+}
+
+test "findCommandAction resolves Open Jupyter" {
+    try std.testing.expectEqual(CommandAction.open_jupyter_panel, findCommandAction("Open Jupyter"));
+}
+
+test "findCommandAction resolves Load OpenSSH Config" {
+    try std.testing.expectEqual(CommandAction.load_openssh_config, findCommandAction("Load OpenSSH Config"));
+}
+
+test "Load OpenSSH Config is not on the default first command center page" {
+    const default_first_page_rows: usize = 14;
+    for (command_entries, 0..) |entry, idx| {
+        if (entry.action == .load_openssh_config) {
+            try std.testing.expect(idx >= default_first_page_rows);
+            return;
+        }
+    }
+    return error.MissingLoadOpenSshConfigCommand;
+}
+
+test "command center includes Copilot Markdown export actions" {
+    try std.testing.expectEqual(CommandAction.export_ai_chat_markdown, findCommandAction("Export Copilot Markdown"));
+    try std.testing.expectEqual(CommandAction.export_ai_chat_markdown_clean, findCommandAction("Export Copilot Markdown Clean"));
 }
 
 test "command center includes WeChat direct actions" {
@@ -369,6 +429,32 @@ test "agent history picker escape returns to command list mode" {
 
     try std.testing.expect(state.command_palette_visible);
     try std.testing.expect(!state.commandPaletteIsHistoryMode());
+}
+
+test "session launcher opened from command center escapes back to command list" {
+    var state = State{};
+    state.commandPaletteOpen();
+
+    state.sessionLauncherOpenFromCommandPalette();
+    try std.testing.expect(!state.command_palette_visible);
+    try std.testing.expect(state.sessionLauncherVisible());
+    try std.testing.expect(state.session_launcher_return_to_command_palette);
+
+    try std.testing.expect(state.sessionLauncherBackToCommandPalette());
+    try std.testing.expect(state.command_palette_visible);
+    try std.testing.expect(!state.sessionLauncherVisible());
+    try std.testing.expect(!state.session_launcher_return_to_command_palette);
+}
+
+test "standalone session launcher escape still closes" {
+    var state = State{};
+    state.sessionLauncherOpen();
+
+    try std.testing.expect(!state.sessionLauncherBackToCommandPalette());
+    state.sessionLauncherClose();
+
+    try std.testing.expect(!state.command_palette_visible);
+    try std.testing.expect(!state.sessionLauncherVisible());
 }
 
 test "agent history picker has no selection when the history list is empty" {

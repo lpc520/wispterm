@@ -919,7 +919,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
             var states_buf: [64]agent_detector.State = undefined;
             var states_len: usize = 0;
             if (tab.g_tabs[tab_idx]) |tb| {
-                var it = tb.tree.iterator();
+                var it = tb.tree.surfaces();
                 while (it.next()) |entry| {
                     if (states_len >= states_buf.len) break;
                     const det = entry.surface.agent_detection;
@@ -1135,7 +1135,7 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
                 // split-sibling runs the agent). visible() requires app != .none,
                 // so this guarantees the synthetic Detection below is visible.
                 var agg_app: agent_detector.App = .none;
-                var it = t.tree.iterator();
+                var it = t.tree.surfaces();
                 while (it.next()) |entry| {
                     if (states_len >= states_buf.len) break;
                     const det = entry.surface.agent_detection;

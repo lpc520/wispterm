@@ -3,11 +3,13 @@ const std = @import("std");
 pub const ProviderId = enum {
     codex,
     claude,
+    reasonix,
 
     pub fn label(self: ProviderId) []const u8 {
         return switch (self) {
             .codex => "Codex",
             .claude => "Claude Code",
+            .reasonix => "Reasonix",
         };
     }
 };
@@ -16,6 +18,18 @@ pub const CategoryFilter = enum {
     all,
     codex,
     claude,
+    reasonix,
+    subagent,
+};
+
+pub const CATEGORY_ORDER = [_]CategoryFilter{ .all, .codex, .claude, .reasonix, .subagent };
+
+pub const CategoryCounts = struct {
+    all: usize = 0,
+    codex: usize = 0,
+    claude: usize = 0,
+    reasonix: usize = 0,
+    subagent: usize = 0,
 };
 
 pub fn categoryMatches(category: CategoryFilter, provider: ProviderId) bool {
@@ -23,6 +37,24 @@ pub fn categoryMatches(category: CategoryFilter, provider: ProviderId) bool {
         .all => true,
         .codex => provider == .codex,
         .claude => provider == .claude,
+        .reasonix => provider == .reasonix,
+        .subagent => false,
+    };
+}
+
+pub fn isSubagentSession(meta: SessionMeta) bool {
+    const title = std.mem.trimLeft(u8, meta.title, " \t\r\n");
+    return std.mem.startsWith(u8, title, "You are");
+}
+
+pub fn categoryMatchesMeta(category: CategoryFilter, meta: SessionMeta) bool {
+    const subagent = isSubagentSession(meta);
+    return switch (category) {
+        .all => true,
+        .codex => meta.provider == .codex and !subagent,
+        .claude => meta.provider == .claude and !subagent,
+        .reasonix => meta.provider == .reasonix and !subagent,
+        .subagent => subagent,
     };
 }
 
@@ -31,6 +63,18 @@ pub fn categoryLabel(category: CategoryFilter) []const u8 {
         .all => "All",
         .codex => "Codex",
         .claude => "Claude Code",
+        .reasonix => "Reasonix",
+        .subagent => "Subagent",
+    };
+}
+
+pub fn categoryCount(counts: CategoryCounts, category: CategoryFilter) usize {
+    return switch (category) {
+        .all => counts.all,
+        .codex => counts.codex,
+        .claude => counts.claude,
+        .reasonix => counts.reasonix,
+        .subagent => counts.subagent,
     };
 }
 
@@ -76,7 +120,7 @@ pub fn formatDateKey(key: DateKey, buf: []u8) []const u8 {
 pub const MessageRole = enum { user, assistant, system, tool };
 pub const MessageKind = enum { normal, tool_call, tool_result, meta };
 pub const ScanStatus = enum { ok, partial, not_found, invalid };
-pub const ResumeKind = enum { codex_resume, claude_resume, unavailable };
+pub const ResumeKind = enum { codex_resume, claude_resume, reasonix_resume, unavailable };
 
 pub const SessionMeta = struct {
     provider: ProviderId,
@@ -137,6 +181,7 @@ fn containsIgnoreCase(haystack: []const u8, query: []const u8) bool {
 test "ai_history_types: provider labels are stable" {
     try std.testing.expectEqualStrings("Codex", ProviderId.codex.label());
     try std.testing.expectEqualStrings("Claude Code", ProviderId.claude.label());
+    try std.testing.expectEqualStrings("Reasonix", ProviderId.reasonix.label());
 }
 
 test "ai_history_types: metadata search covers title summary project session and path" {
@@ -196,12 +241,40 @@ test "ai_history_types: categoryMatches respects provider" {
     try std.testing.expect(!categoryMatches(.codex, .claude));
     try std.testing.expect(categoryMatches(.claude, .claude));
     try std.testing.expect(!categoryMatches(.claude, .codex));
+    try std.testing.expect(categoryMatches(.reasonix, .reasonix));
+    try std.testing.expect(!categoryMatches(.reasonix, .codex));
+}
+
+test "ai_history_types: You are titles are classified as subagent metadata" {
+    const subagent: SessionMeta = .{
+        .provider = .claude,
+        .session_id = "subagent",
+        .title = "  You are implementing Task 3 of the plan",
+        .source_path = "subagent.jsonl",
+        .resume_kind = .claude_resume,
+    };
+    const normal: SessionMeta = .{
+        .provider = .claude,
+        .session_id = "normal",
+        .title = "Fix renderer panel",
+        .source_path = "normal.jsonl",
+        .resume_kind = .claude_resume,
+    };
+
+    try std.testing.expect(isSubagentSession(subagent));
+    try std.testing.expect(categoryMatchesMeta(.subagent, subagent));
+    try std.testing.expect(!categoryMatchesMeta(.claude, subagent));
+    try std.testing.expect(!isSubagentSession(normal));
+    try std.testing.expect(categoryMatchesMeta(.claude, normal));
+    try std.testing.expect(!categoryMatchesMeta(.subagent, normal));
 }
 
 test "ai_history_types: categoryLabel is stable" {
     try std.testing.expectEqualStrings("All", categoryLabel(.all));
     try std.testing.expectEqualStrings("Codex", categoryLabel(.codex));
     try std.testing.expectEqualStrings("Claude Code", categoryLabel(.claude));
+    try std.testing.expectEqualStrings("Reasonix", categoryLabel(.reasonix));
+    try std.testing.expectEqualStrings("Subagent", categoryLabel(.subagent));
 }
 
 test "ai_history_types: dateKeyFromMs packs local civil date and handles sentinels" {

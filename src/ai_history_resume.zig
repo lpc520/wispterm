@@ -3,21 +3,28 @@ const types = @import("ai_history_types.zig");
 
 pub const ResumeError = error{ MissingProjectDir, UnsupportedProvider, CommandTooLong };
 
+const ResumeCommandParts = struct {
+    prefix: []const u8,
+    suffix: []const u8,
+};
+
 pub fn resumeCommand(meta: types.SessionMeta, out: []u8) ResumeError![]const u8 {
     if (meta.project_dir.len == 0) return error.MissingProjectDir;
-    const prefix = switch (meta.resume_kind) {
-        .codex_resume => "codex resume ",
-        .claude_resume => "claude --resume ",
+    const parts: ResumeCommandParts = switch (meta.resume_kind) {
+        .codex_resume => .{ .prefix = "codex resume ", .suffix = "" },
+        .claude_resume => .{ .prefix = "claude --resume ", .suffix = "" },
+        .reasonix_resume => .{ .prefix = "reasonix chat --session ", .suffix = " --resume" },
         .unavailable => return error.UnsupportedProvider,
     };
 
     var pos: usize = 0;
-    try append(out, &pos, prefix);
+    try append(out, &pos, parts.prefix);
     if (isShellSafeBareWord(meta.session_id)) {
         try append(out, &pos, meta.session_id);
     } else {
         try appendShellSingleQuote(out, &pos, meta.session_id);
     }
+    try append(out, &pos, parts.suffix);
     return out[0..pos];
 }
 
@@ -77,13 +84,25 @@ pub fn checkedPowerShellResume(meta: types.SessionMeta, out: []u8) ResumeError![
     switch (meta.resume_kind) {
         .codex_resume => try append(out, &pos, "codex resume "),
         .claude_resume => try append(out, &pos, "claude --resume "),
+        .reasonix_resume => try append(out, &pos, "reasonix chat --session "),
         .unavailable => return error.UnsupportedProvider,
     }
     try appendPowerShellSingleQuote(out, &pos, meta.session_id);
+    if (meta.resume_kind == .reasonix_resume) try append(out, &pos, " --resume");
     try append(out, &pos, " } else { Write-Error ");
-    try appendPowerShellSingleQuote(out, &pos, "AI History resume failed: project path unavailable");
+    try appendPowerShellProjectNotFound(out, &pos, meta.project_dir);
     try append(out, &pos, " }");
     return out[0..pos];
+}
+
+pub fn failureMessage(err: ResumeError, meta: types.SessionMeta, out: []u8) []const u8 {
+    _ = meta;
+    _ = out;
+    return switch (err) {
+        error.MissingProjectDir => "Cannot resume: history has no project folder",
+        error.UnsupportedProvider => "Cannot resume: provider does not support resume",
+        error.CommandTooLong => "Cannot resume: command is too long",
+    };
 }
 
 fn append(out: []u8, pos: *usize, value: []const u8) ResumeError!void {
@@ -112,6 +131,18 @@ fn appendShellSingleQuote(out: []u8, pos: *usize, value: []const u8) ResumeError
 
 fn appendPowerShellSingleQuote(out: []u8, pos: *usize, value: []const u8) ResumeError!void {
     try appendByte(out, pos, '\'');
+    try appendPowerShellSingleQuoteBody(out, pos, value);
+    try appendByte(out, pos, '\'');
+}
+
+fn appendPowerShellProjectNotFound(out: []u8, pos: *usize, project_dir: []const u8) ResumeError!void {
+    try appendByte(out, pos, '\'');
+    try append(out, pos, "Cannot resume: project folder not found: ");
+    try appendPowerShellSingleQuoteBody(out, pos, project_dir);
+    try appendByte(out, pos, '\'');
+}
+
+fn appendPowerShellSingleQuoteBody(out: []u8, pos: *usize, value: []const u8) ResumeError!void {
     for (value) |ch| {
         if (ch == '\'') {
             try append(out, pos, "''");
@@ -119,7 +150,6 @@ fn appendPowerShellSingleQuote(out: []u8, pos: *usize, value: []const u8) Resume
             try appendByte(out, pos, ch);
         }
     }
-    try appendByte(out, pos, '\'');
 }
 
 fn shellSingleQuoteLen(value: []const u8) ResumeError!usize {
@@ -177,6 +207,16 @@ test "ai_history_resume: builds provider resume commands" {
         .resume_kind = .claude_resume,
     };
     try std.testing.expectEqualStrings("claude --resume xyz", try resumeCommand(claude, &out));
+
+    const reasonix: types.SessionMeta = .{
+        .provider = .reasonix,
+        .session_id = "code-project",
+        .title = "C",
+        .project_dir = "/home/me/project",
+        .source_path = "c.jsonl",
+        .resume_kind = .reasonix_resume,
+    };
+    try std.testing.expectEqualStrings("reasonix chat --session code-project --resume", try resumeCommand(reasonix, &out));
 }
 
 test "ai_history_resume: quotes unsafe session ids" {
@@ -200,6 +240,16 @@ test "ai_history_resume: quotes unsafe session ids" {
         .resume_kind = .claude_resume,
     };
     try std.testing.expectEqualStrings("claude --resume 'it'\\''s-here'", try resumeCommand(with_quote, &out));
+
+    const reasonix_with_quote: types.SessionMeta = .{
+        .provider = .reasonix,
+        .session_id = "it'has space",
+        .title = "R",
+        .project_dir = "/home/me/project",
+        .source_path = "r.jsonl",
+        .resume_kind = .reasonix_resume,
+    };
+    try std.testing.expectEqualStrings("reasonix chat --session 'it'\\''has space' --resume", try resumeCommand(reasonix_with_quote, &out));
 
     const with_metacharacters: types.SessionMeta = .{
         .provider = .codex,
@@ -334,8 +384,45 @@ test "ai_history_resume: checked PowerShell resume checks directory before resum
         .resume_kind = .codex_resume,
     };
     try std.testing.expectEqualStrings(
-        "if (Test-Path -LiteralPath 'C:\\Users\\me\\it''s project' -PathType Container) { Set-Location -LiteralPath 'C:\\Users\\me\\it''s project'; codex resume 'abc def' } else { Write-Error 'AI History resume failed: project path unavailable' }",
+        "if (Test-Path -LiteralPath 'C:\\Users\\me\\it''s project' -PathType Container) { Set-Location -LiteralPath 'C:\\Users\\me\\it''s project'; codex resume 'abc def' } else { Write-Error 'Cannot resume: project folder not found: C:\\Users\\me\\it''s project' }",
         try checkedPowerShellResume(meta, &out),
+    );
+
+    const reasonix: types.SessionMeta = .{
+        .provider = .reasonix,
+        .session_id = "code-project",
+        .title = "R",
+        .project_dir = "C:\\Project",
+        .source_path = "r.jsonl",
+        .resume_kind = .reasonix_resume,
+    };
+    try std.testing.expectEqualStrings(
+        "if (Test-Path -LiteralPath 'C:\\Project' -PathType Container) { Set-Location -LiteralPath 'C:\\Project'; reasonix chat --session 'code-project' --resume } else { Write-Error 'Cannot resume: project folder not found: C:\\Project' }",
+        try checkedPowerShellResume(reasonix, &out),
+    );
+}
+
+test "ai_history_resume: build failure messages explain what the user can fix" {
+    var out: [128]u8 = undefined;
+    const meta: types.SessionMeta = .{
+        .provider = .claude,
+        .session_id = "abc",
+        .title = "A",
+        .source_path = "a.jsonl",
+        .resume_kind = .claude_resume,
+    };
+
+    try std.testing.expectEqualStrings(
+        "Cannot resume: history has no project folder",
+        failureMessage(error.MissingProjectDir, meta, &out),
+    );
+    try std.testing.expectEqualStrings(
+        "Cannot resume: provider does not support resume",
+        failureMessage(error.UnsupportedProvider, meta, &out),
+    );
+    try std.testing.expectEqualStrings(
+        "Cannot resume: command is too long",
+        failureMessage(error.CommandTooLong, meta, &out),
     );
 }
 
