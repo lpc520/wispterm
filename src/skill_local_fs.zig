@@ -233,6 +233,15 @@ pub fn transferLocalToLocal(
     try std.fs.renameAbsolute(staged_skill, final);
 }
 
+/// Read an absolute local file into an owned buffer (capped at `max_bytes`).
+/// Used to preview a local skill's SKILL.md without a shell — `cat` via
+/// localPosixExec is unavailable on native Windows. Works on every platform.
+pub fn readFileAllocAbsolute(allocator: std.mem.Allocator, abs_path: []const u8, max_bytes: usize) ![]u8 {
+    var file = try std.fs.openFileAbsolute(abs_path, .{});
+    defer file.close();
+    return file.readToEndAlloc(allocator, max_bytes);
+}
+
 // --- Tests ---
 
 const testing = std.testing;
@@ -312,6 +321,18 @@ test "skill_local_fs: scanOutcome on a missing root is reachable-but-empty" {
     defer outcome.deinit(a);
     try testing.expect(outcome.reachable);
     try testing.expectEqual(@as(usize, 0), outcome.rows.len);
+}
+
+test "skill_local_fs: readFileAllocAbsolute reads a file by absolute path" {
+    const a = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "SKILL.md", .data = "# hi\nbody\n" });
+    const abs = try tmp.dir.realpathAlloc(a, "SKILL.md");
+    defer a.free(abs);
+    const text = try readFileAllocAbsolute(a, abs, 1024);
+    defer a.free(text);
+    try testing.expectEqualStrings("# hi\nbody\n", text);
 }
 
 test "skill_local_fs: transferLocalToLocal copies and overwrites a skill dir" {
