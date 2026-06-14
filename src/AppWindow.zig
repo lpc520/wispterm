@@ -2161,12 +2161,20 @@ fn skillCenterPreviewServerSkill(allocator: std.mem.Allocator) void {
         allocator.free(name);
         return;
     };
+    // Absolute SKILL.md path for a LOCAL target so the worker can read it
+    // natively on a non-POSIX host; null for remote (uses the ssh cat cmd).
+    const local_md_path: ?[]u8 = if (target.is_local) blk: {
+        const root = skillCenterLocalRootPath(allocator, target.software) orelse break :blk null;
+        defer allocator.free(root);
+        break :blk std.fs.path.join(allocator, &.{ root, name, "SKILL.md" }) catch null;
+    } else null;
     const job = allocator.create(SkillPreviewJob) catch {
         allocator.free(name);
         allocator.free(cmd);
+        if (local_md_path) |p| allocator.free(p);
         return;
     };
-    job.* = .{ .conn = conn, .name = name, .cmd = cmd };
+    job.* = .{ .conn = conn, .name = name, .cmd = cmd, .local_md_path = local_md_path };
     if (!session.startOp(.{ .ctx = job, .run = SkillPreviewJob.run, .destroy = SkillPreviewJob.destroy }, window_backend.postWakeup, i18n.s().sc_busy_loading)) {
         SkillPreviewJob.destroy(@ptrCast(job), allocator);
         overlays.showStatusToast(i18n.s().sc_toast_op_busy);
@@ -2378,9 +2386,9 @@ pub fn skillCenterPreviewSelected() bool {
     defer allocator.free(lib_dir);
     const abs = std.fs.path.join(allocator, &.{ lib_dir, rp }) catch return true;
     defer allocator.free(abs);
-    const command = skill_center.catCommand(allocator, abs) catch return true;
-    defer allocator.free(command);
-    const text = remote_file.localPosixExec(allocator, command, 1024 * 1024) catch null;
+    // Read the library file directly (no shell): the library is always a local
+    // absolute path, and `cat` via localPosixExec is unavailable on Windows.
+    const text = skill_local_fs.readFileAllocAbsolute(allocator, abs, 1024 * 1024) catch null;
     if (text) |t| {
         defer allocator.free(t);
         openSkillMdInPreviewLeaf(allocator, name_buf[0..name_len], t);
@@ -3024,12 +3032,22 @@ const SkillPreviewJob = struct {
     conn: ?ssh_connection.SshConnection,
     name: []u8, // owned — becomes the preview title
     cmd: []u8, // owned — `cat <root>/'<name>'/'SKILL.md'`
+    local_md_path: ?[]u8, // owned absolute SKILL.md path for a LOCAL target (native read)
 
     fn run(ctx: *anyopaque, allocator: std.mem.Allocator) skill_center.OpResult {
         const job: *SkillPreviewJob = @ptrCast(@alignCast(ctx));
-        var le = SkillLocExec{ .conn = job.conn };
-        const host = le.host();
-        const content = host.exec(host.ctx, allocator, job.cmd) catch return .failed;
+        // Local target on a non-POSIX host (Windows): read SKILL.md natively;
+        // `cat` via localPosixExec is unavailable. Remote/posix use the shell cmd.
+        const content = if (job.conn == null and !remote_file.localPosixExecSupported())
+            blk: {
+                const p = job.local_md_path orelse return .failed;
+                break :blk skill_local_fs.readFileAllocAbsolute(allocator, p, 1024 * 1024) catch return .failed;
+            }
+        else blk: {
+            var le = SkillLocExec{ .conn = job.conn };
+            const host = le.host();
+            break :blk host.exec(host.ctx, allocator, job.cmd) catch return .failed;
+        };
         const title = allocator.dupe(u8, job.name) catch {
             allocator.free(content);
             return .failed;
@@ -3040,6 +3058,7 @@ const SkillPreviewJob = struct {
         const job: *SkillPreviewJob = @ptrCast(@alignCast(ctx));
         allocator.free(job.name);
         allocator.free(job.cmd);
+        if (job.local_md_path) |p| allocator.free(p);
         allocator.destroy(job);
     }
 };
