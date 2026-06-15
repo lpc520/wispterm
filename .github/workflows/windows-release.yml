@@ -156,7 +156,8 @@ jobs:
       - name: Build diagnostic (debug-console) bundle
         shell: pwsh
         run: |
-          zig build -Doptimize=ReleaseSafe -Ddebug-console
+          # Dependencies were already fetched by the release build step above, so
+          # package.ps1's -DebugConsole branch does the (single) debug build itself.
           powershell -ExecutionPolicy Bypass -File .\packaging\windows\package.ps1 -DebugConsole -Optimize ReleaseSafe -SkipInstaller
           if (!(Test-Path "zig-out\dist\portable-debug\wispterm.exe")) {
             throw "Debug bundle not found: zig-out\dist\portable-debug\wispterm.exe"
