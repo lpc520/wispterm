@@ -427,8 +427,14 @@ pub fn copySelectionToClipboard() void {
         std.mem.swap(usize, &start_col, &end_col);
     }
 
-    var text: std.ArrayListUnmanaged(u8) = .empty;
-    defer text.deinit(allocator);
+    // Collect each selected row's text plus its soft-wrap flag, then join.
+    // Soft-wrapped rows (a visually wrapped logical line, e.g. a long path)
+    // must copy back as a single line — see selection_unit.joinSelectionRows.
+    var rows: std.ArrayListUnmanaged(selection_unit.SelectionRow) = .empty;
+    defer {
+        for (rows.items) |r| allocator.free(r.text);
+        rows.deinit(allocator);
+    }
 
     // Lock while reading terminal cells
     surface.render_state.mutex.lock();
@@ -442,7 +448,7 @@ pub fn copySelectionToClipboard() void {
         row_end_col = @min(row_end_col, grid_cols - 1);
         if (row_start_col > row_end_col) continue;
 
-        const row_text_start = text.items.len;
+        var row_buf: std.ArrayListUnmanaged(u8) = .empty;
         var col: usize = row_start_col;
         while (col <= row_end_col) : (col += 1) {
             const cell_data = screen.pages.getCell(.{ .screen = .{
@@ -457,11 +463,11 @@ pub fn copySelectionToClipboard() void {
 
             const cp = cell_data.cell.codepoint();
             if (cp == 0 or cp == ' ') {
-                text.append(allocator, ' ') catch continue;
+                row_buf.append(allocator, ' ') catch continue;
             } else {
                 var buf: [4]u8 = undefined;
                 const len = std.unicode.utf8Encode(@intCast(cp), &buf) catch continue;
-                text.appendSlice(allocator, buf[0..len]) catch continue;
+                row_buf.appendSlice(allocator, buf[0..len]) catch continue;
 
                 // Append grapheme cluster continuation codepoints (emoji ZWJ sequences, etc.)
                 if (cell_data.cell.hasGrapheme()) {
@@ -469,26 +475,44 @@ pub fn copySelectionToClipboard() void {
                     if (page.lookupGrapheme(cell_data.cell)) |extra_cps| {
                         for (extra_cps) |ecp| {
                             const elen = std.unicode.utf8Encode(@intCast(ecp), &buf) catch continue;
-                            text.appendSlice(allocator, buf[0..elen]) catch {};
+                            row_buf.appendSlice(allocator, buf[0..elen]) catch {};
                         }
                     }
                 }
             }
         }
-        text.items.len = row_text_start + selection_unit.trimTrailingClipboardSpaces(text.items[row_text_start..]).len;
-        if (row < end_row) {
-            text.appendSlice(allocator, "\r\n") catch {};
-        }
+
+        // Read the soft-wrap flag in the same .screen coordinate space as the
+        // cells above so it stays correct when the viewport is scrolled.
+        const wraps_next = wn: {
+            const pin = screen.pages.pin(.{ .screen = .{
+                .x = 0,
+                .y = @intCast(row),
+            } }) orelse break :wn false;
+            break :wn pin.rowAndCell().row.wrap;
+        };
+
+        const owned = row_buf.toOwnedSlice(allocator) catch {
+            row_buf.deinit(allocator);
+            continue;
+        };
+        rows.append(allocator, .{ .text = owned, .wraps_next = wraps_next }) catch {
+            allocator.free(owned);
+            continue;
+        };
     }
     surface.render_state.mutex.unlock();
 
-    if (text.items.len == 0) return;
+    const text = selection_unit.joinSelectionRows(allocator, rows.items) catch return;
+    defer allocator.free(text);
 
-    if (copyTextToClipboard(text.items)) {
-        overlays.showCopyToast(text.items.len);
+    if (text.len == 0) return;
+
+    if (copyTextToClipboard(text)) {
+        overlays.showCopyToast(text.len);
         AppWindow.g_force_rebuild = true;
         AppWindow.g_cells_valid = false;
-        std.debug.print("Copied {} bytes to clipboard\n", .{text.items.len});
+        std.debug.print("Copied {} bytes to clipboard\n", .{text.len});
     }
 }
 
