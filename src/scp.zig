@@ -5,6 +5,7 @@
 //! image paste path and the file explorer remote operations.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ssh_connection = @import("ssh_connection.zig");
 const SshConnection = ssh_connection.SshConnection;
 const platform_dirs = @import("platform/dirs.zig");
@@ -337,6 +338,15 @@ fn drainOutputPipesCapped(
 pub const SSH_EXEC_MAX_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 /// stderr is diagnostics only; keep the first chunk for the error log.
 const SSH_EXEC_MAX_STDERR_BYTES: usize = 16 * 1024;
+
+/// Convert a caller timeout (ms) into a watchdog wait (ns). null = no watchdog
+/// (0 disables it, preserving the historical unbounded behavior). Clamps to a
+/// 120 s ceiling so a bad value can't effectively remove the cap.
+pub fn watchdogTimeoutNs(timeout_ms: u64) ?u64 {
+    if (timeout_ms == 0) return null;
+    const clamped: u64 = @min(timeout_ms, 120_000);
+    return clamped * std.time.ns_per_ms;
+}
 
 /// Run `ssh user@host "<command>"` and capture stdout.
 /// Returns allocated output slice on success, null on failure
@@ -1209,4 +1219,13 @@ test "drainOutputPipesCapped starts stderr draining before waiting for stdout EO
     try std.testing.expectEqual(DrainPipesResult{ .stdout = .complete, .stderr = .complete }, result);
     try std.testing.expectEqualStrings("out", stdout_list.items);
     try std.testing.expectEqualStrings("err", stderr_list.items);
+}
+
+test "watchdogTimeoutNs: 0 disables the watchdog" {
+    try std.testing.expectEqual(@as(?u64, null), watchdogTimeoutNs(0));
+}
+
+test "watchdogTimeoutNs: converts ms to ns and clamps to the ceiling" {
+    try std.testing.expectEqual(@as(?u64, 5_000 * std.time.ns_per_ms), watchdogTimeoutNs(5_000));
+    try std.testing.expectEqual(@as(?u64, 120_000 * std.time.ns_per_ms), watchdogTimeoutNs(10_000_000));
 }
