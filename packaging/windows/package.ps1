@@ -6,7 +6,9 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipInstaller,
     [switch]$SkipCompatBundle,
-    [switch]$SkipNoWebViewBundle
+    [switch]$SkipNoWebViewBundle,
+    [switch]$DebugConsole,
+    [string]$Optimize = 'ReleaseFast'
 )
 
 Set-StrictMode -Version Latest
@@ -158,6 +160,31 @@ function Copy-PortablePayload {
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $resolvedOutputDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputDir))
 $releaseVersion = Get-ReleaseVersion -ExplicitVersion $Version
+
+if ($DebugConsole) {
+    Push-Location $repoRoot
+    try {
+        & zig build "-Doptimize=$Optimize" -Ddebug-console
+        if ($LASTEXITCODE -ne 0) { throw "zig build -Doptimize=$Optimize -Ddebug-console failed." }
+    } finally {
+        Pop-Location
+    }
+
+    $debugBinary = Join-Path $repoRoot 'zig-out\bin\wispterm.exe'
+    if (-not (Test-Path $debugBinary)) { throw "Debug binary not found: $debugBinary" }
+
+    $debugDir = Join-Path $resolvedOutputDir 'portable-debug'
+    Remove-Item -Path $debugDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    # Bundle the compat DLLs so the debug build runs on older Windows 10 too.
+    $webView2LoaderPath = Get-WebView2Loader -RepoRoot $repoRoot -Version $WebView2Version
+    $conPtyPair = Get-ConPtyPair -RepoRoot $repoRoot -Version $ConPtyVersion
+    Copy-PortablePayload -BinaryPath $debugBinary -TargetDir $debugDir -ReleaseVersion $releaseVersion -WebView2LoaderPath $webView2LoaderPath -ConPtyPair $conPtyPair
+
+    Write-Host "Debug build ($Optimize, console): $(Join-Path $debugDir 'wispterm.exe')"
+    exit 0
+}
+
 $noWebViewInstallDir = Join-Path $repoRoot 'zig-out-no-webview'
 
 if (-not $SkipBuild) {

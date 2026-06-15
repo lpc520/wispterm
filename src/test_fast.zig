@@ -121,6 +121,7 @@ test {
     _ = @import("sync_output.zig");
     _ = @import("agent_history.zig");
     _ = @import("render_diagnostics.zig");
+    _ = @import("diag_log.zig");
     _ = @import("notification.zig");
     _ = @import("clipboard_osc52.zig");
     _ = @import("renderer/gpu/backend.zig");

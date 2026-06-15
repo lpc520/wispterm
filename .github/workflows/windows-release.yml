@@ -153,6 +153,16 @@ jobs:
             }
           }
 
+      - name: Build diagnostic (debug-console) bundle
+        shell: pwsh
+        run: |
+          # Dependencies were already fetched by the release build step above, so
+          # package.ps1's -DebugConsole branch does the (single) debug build itself.
+          powershell -ExecutionPolicy Bypass -File .\packaging\windows\package.ps1 -DebugConsole -Optimize ReleaseSafe -SkipInstaller
+          if (!(Test-Path "zig-out\dist\portable-debug\wispterm.exe")) {
+            throw "Debug bundle not found: zig-out\dist\portable-debug\wispterm.exe"
+          }
+
       - name: Create release assets
         shell: pwsh
         run: |
@@ -160,6 +170,7 @@ jobs:
           $portableAsset = "wispterm-windows-portable-$tag.zip"
           $portableCompatAsset = "wispterm-windows-portable-compat-$tag.zip"
           $portableNoWebViewAsset = "wispterm-windows-portable-no-webview-$tag.zip"
+          $debugAsset = "wispterm-windows-debug-$tag.zip"
 
           if (Test-Path $portableAsset) {
             Remove-Item $portableAsset -Force
@@ -170,10 +181,12 @@ jobs:
           if (Test-Path $portableNoWebViewAsset) {
             Remove-Item $portableNoWebViewAsset -Force
           }
+          if (Test-Path $debugAsset) { Remove-Item $debugAsset -Force }
 
           Compress-Archive -Path zig-out\dist\portable\* -DestinationPath $portableAsset -Force
           Compress-Archive -Path zig-out\dist\portable-compat\* -DestinationPath $portableCompatAsset -Force
           Compress-Archive -Path zig-out\dist\portable-no-webview\* -DestinationPath $portableNoWebViewAsset -Force
+          Compress-Archive -Path zig-out\dist\portable-debug\* -DestinationPath $debugAsset -Force
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
@@ -196,6 +209,13 @@ jobs:
           path: wispterm-windows-portable-no-webview-${{ github.ref_name }}.zip
           if-no-files-found: error
 
+      - name: Upload diagnostic artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wispterm-windows-debug-${{ github.ref_name }}
+          path: wispterm-windows-debug-${{ github.ref_name }}.zip
+          if-no-files-found: error
+
       - name: Publish GitHub release
         shell: pwsh
         env:
@@ -205,6 +225,7 @@ jobs:
           $portableAsset = "wispterm-windows-portable-$tag.zip"
           $portableCompatAsset = "wispterm-windows-portable-compat-$tag.zip"
           $portableNoWebViewAsset = "wispterm-windows-portable-no-webview-$tag.zip"
+          $debugAsset = "wispterm-windows-debug-$tag.zip"
 
           if (!(Test-Path $portableAsset)) {
             throw "Portable release asset not found: $portableAsset"
@@ -215,10 +236,13 @@ jobs:
           if (!(Test-Path $portableNoWebViewAsset)) {
             throw "Portable no-WebView release asset not found: $portableNoWebViewAsset"
           }
+          if (!(Test-Path $debugAsset)) {
+            throw "Diagnostic release asset not found: $debugAsset"
+          }
 
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $portableAsset $portableCompatAsset $portableNoWebViewAsset --repo $env:GITHUB_REPOSITORY --clobber
+            gh release upload $tag $portableAsset $portableCompatAsset $portableNoWebViewAsset $debugAsset --repo $env:GITHUB_REPOSITORY --clobber
           } else {
             $assetNotes = @(
               "Windows assets included in this release:",
@@ -226,6 +250,7 @@ jobs:
               "- Portable: lightweight zip archive containing wispterm.exe",
               "- Portable compat: zip archive for older Windows 10 machines - bundles WebView2Loader.dll for the embedded browser plus a modern ConPTY (conpty.dll + OpenConsole.exe) so TUI apps like Codex and Claude Code get mouse scrolling and scrollbars",
               "- Portable no-WebView: zip archive containing wispterm.exe, built with embedded WebView2 disabled",
+              "- Diagnostic (debug): console build with on-disk logging + crash reports for troubleshooting (ReleaseSafe). See docs/windows-debug-build.md.",
               "",
               "The unsigned IExpress setup executable is not published because Windows Defender can quarantine it as a false positive. Use one of the portable zip assets for now."
             ) -join "`n"
@@ -242,7 +267,7 @@ jobs:
               $notes = $assetNotes
             }
 
-            gh release create $tag $portableAsset $portableCompatAsset $portableNoWebViewAsset `
+            gh release create $tag $portableAsset $portableCompatAsset $portableNoWebViewAsset $debugAsset `
               --repo $env:GITHUB_REPOSITORY `
               --verify-tag `
               --generate-notes `

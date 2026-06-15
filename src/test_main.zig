@@ -664,6 +664,7 @@ comptime {
     _ = @import("appwindow/tab.zig");
     _ = @import("appwindow/thread_message.zig");
     _ = @import("scp.zig");
+    _ = @import("diag_log.zig");
     _ = if (build_options.webview) @import("browser_panel.zig") else @import("browser_panel_stub.zig");
     _ = @import("browser_url.zig");
     _ = @import("build_guards.zig");

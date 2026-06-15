@@ -5,6 +5,7 @@
 //! image paste path and the file explorer remote operations.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ssh_connection = @import("ssh_connection.zig");
 const SshConnection = ssh_connection.SshConnection;
 const platform_dirs = @import("platform/dirs.zig");
@@ -57,7 +58,7 @@ pub const TransferControl = struct {
 /// Build the scp argv up to (but excluding) the src/dst path arguments.
 /// Returns the count of arguments written into `argv_buf`. Pure/testable.
 fn buildScpFlagArgs(
-    argv_buf: *[32][]const u8,
+    argv_buf: *[40][]const u8,
     conn: *const SshConnection,
     control_path: ?[]const u8,
     legacy_protocol: bool,
@@ -170,7 +171,7 @@ fn runScpTransfer(
 ) TransferResult {
     if (control.cancelRequested()) return .cancelled;
 
-    var argv_buf: [32][]const u8 = undefined;
+    var argv_buf: [40][]const u8 = undefined;
     var argc = buildScpFlagArgs(&argv_buf, conn, control_path, legacy_protocol, recursive);
 
     argv_buf[argc] = src;
@@ -212,7 +213,7 @@ fn runScpTransfer(
 }
 
 fn appendSshExecPrefix(
-    argv_buf: *[32][]const u8,
+    argv_buf: *[40][]const u8,
     conn: *const SshConnection,
     control_path: ?[]const u8,
     dest_buf: *[280]u8,
@@ -338,6 +339,57 @@ pub const SSH_EXEC_MAX_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 /// stderr is diagnostics only; keep the first chunk for the error log.
 const SSH_EXEC_MAX_STDERR_BYTES: usize = 16 * 1024;
 
+/// Convert a caller timeout (ms) into a watchdog wait (ns). null = no watchdog
+/// (0 disables it, preserving the historical unbounded behavior). Clamps to a
+/// 120 s ceiling so a bad value can't effectively remove the cap.
+pub fn watchdogTimeoutNs(timeout_ms: u64) ?u64 {
+    if (timeout_ms == 0) return null;
+    const clamped: u64 = @min(timeout_ms, WATCHDOG_CLAMP_MS);
+    return clamped * std.time.ns_per_ms;
+}
+
+/// Ceiling for the ssh exec watchdog: a caller timeout above this is clamped so a
+/// bad value can't effectively disable the kill.
+const WATCHDOG_CLAMP_MS: u64 = 120_000;
+
+pub const ExecOpts = struct {
+    /// Hard wall-clock cap in ms. 0 = no watchdog (default). On expiry the ssh
+    /// child is killed so a post-connect hang becomes a bounded failure.
+    timeout_ms: u64 = 0,
+};
+
+const ExecWatchdog = struct {
+    child: *std.process.Child,
+    timeout_ns: u64,
+    cancel: std.Thread.ResetEvent = .{},
+
+    fn run(self: *ExecWatchdog) void {
+        self.cancel.timedWait(self.timeout_ns) catch {
+            // Timed out: kill by raw OS handle so the blocked stdout read sees
+            // EOF and child.wait() can reap. (Does NOT touch Child state, so it
+            // can't race the main thread's wait()/kill().)
+            killChildRaw(self.child);
+        };
+    }
+};
+
+fn killChildRaw(child: *std.process.Child) void {
+    switch (builtin.os.tag) {
+        .windows => std.os.windows.TerminateProcess(child.id, 1) catch {},
+        else => std.posix.kill(child.id, std.posix.SIG.KILL) catch {},
+    }
+}
+
+/// Stop the watchdog and join it. MUST be called before any child.wait()/kill()
+/// so the watchdog cannot fire on an already-reaped (and possibly recycled) pid.
+fn disarmWatchdog(wd: *ExecWatchdog, thread: *?std.Thread) void {
+    if (thread.*) |t| {
+        wd.cancel.set();
+        t.join();
+        thread.* = null;
+    }
+}
+
 /// Run `ssh user@host "<command>"` and capture stdout.
 /// Returns allocated output slice on success, null on failure
 /// (including stdout exceeding the default capture cap).
@@ -349,7 +401,18 @@ pub fn sshExec(allocator: std.mem.Allocator, conn: *const SshConnection, command
 /// than `max_stdout_bytes`, the ssh child is killed and null is returned —
 /// callers get a clean failure instead of an unbounded allocation (or, worse,
 /// silently truncated file content that could be written back).
+///
+/// Preserved signature (no watchdog): used as a function pointer
+/// (`SshExecCappedFn` in src/input/preview_source.zig). New callers that need a
+/// wall-clock cap call `sshExecCappedOpts` directly.
 pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, command: []const u8, max_stdout_bytes: usize) ?[]u8 {
+    return sshExecCappedOpts(allocator, conn, command, max_stdout_bytes, .{});
+}
+
+/// sshExecCapped plus an optional wall-clock watchdog (see `ExecOpts`). On
+/// timeout a background thread kills the ssh child by its raw OS handle so a
+/// post-connect hang on the UI thread becomes a bounded failure.
+pub fn sshExecCappedOpts(allocator: std.mem.Allocator, conn: *const SshConnection, command: []const u8, max_stdout_bytes: usize, opts: ExecOpts) ?[]u8 {
     var askpass_path: ?[]const u8 = null;
     defer if (askpass_path) |p| allocator.free(p);
     var env_map: ?std.process.EnvMap = null;
@@ -365,7 +428,7 @@ pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, c
 
     const control_path: ?[]const u8 = null;
 
-    var argv_buf: [32][]const u8 = undefined;
+    var argv_buf: [40][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = platform_pty_command.sshExecutableName();
     argc += 1;
@@ -397,12 +460,25 @@ pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, c
         return null;
     };
 
+    // Wall-clock watchdog: kills the ssh child by raw OS handle on expiry so a
+    // hung post-connect read can't block the caller forever. disarmWatchdog must
+    // run before every child.wait()/child.kill() below (the defer is an
+    // idempotent safety net for any early return that skips a wait).
+    var wd = ExecWatchdog{ .child = &child, .timeout_ns = 0 };
+    var wd_thread: ?std.Thread = null;
+    if (watchdogTimeoutNs(opts.timeout_ms)) |ns| {
+        wd.timeout_ns = ns;
+        wd_thread = std.Thread.spawn(.{}, ExecWatchdog.run, .{&wd}) catch null;
+    }
+    defer disarmWatchdog(&wd, &wd_thread); // safety net; explicit disarms below run first
+
     // Read stdout, bounded: a runaway/oversized remote command must not grow
     // memory without limit. On exceed, kill ssh rather than read on.
     var output: std.ArrayListUnmanaged(u8) = .empty;
     defer output.deinit(allocator);
 
     const stdout = child.stdout orelse {
+        disarmWatchdog(&wd, &wd_thread);
         _ = child.wait() catch {};
         return null;
     };
@@ -412,6 +488,7 @@ pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, c
     var stderr_text: std.ArrayListUnmanaged(u8) = .empty;
     defer stderr_text.deinit(allocator);
     const stderr = child.stderr orelse {
+        disarmWatchdog(&wd, &wd_thread);
         _ = child.wait() catch {};
         return null;
     };
@@ -428,6 +505,7 @@ pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, c
     };
     const stderr_thread = std.Thread.spawn(.{}, StderrDrain.run, .{&stderr_ctx}) catch |err| {
         std.debug.print("sshExec: stderr drain thread spawn failed: {}\n", .{err});
+        disarmWatchdog(&wd, &wd_thread);
         _ = child.kill() catch {};
         return null;
     };
@@ -435,6 +513,7 @@ pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, c
     const stdout_drain = drainCapped(stdout, allocator, &output, max_stdout_bytes, true) catch .exceeded;
     if (stdout_drain == .exceeded) {
         std.debug.print("sshExec: stdout exceeded {d} bytes; killing ssh\n", .{max_stdout_bytes});
+        disarmWatchdog(&wd, &wd_thread);
         _ = child.kill() catch {};
         stderr_thread.join();
         return null;
@@ -445,6 +524,7 @@ pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, c
         std.debug.print("sshExec: stderr drain failed: {}\n", .{err});
     }
 
+    disarmWatchdog(&wd, &wd_thread);
     const term = child.wait() catch return null;
     const ok = switch (term) {
         .Exited => |code| code == 0,
@@ -604,7 +684,7 @@ fn sshExecStdin(allocator: std.mem.Allocator, conn: *const SshConnection, comman
 
     const control_path: ?[]const u8 = null;
 
-    var argv_buf: [32][]const u8 = undefined;
+    var argv_buf: [40][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = platform_pty_command.sshExecutableName();
     argc += 1;
@@ -681,7 +761,7 @@ fn sshStreamUpload(
     var command_buf: [2048]u8 = undefined;
     const command = buildUploadCommand(&command_buf, remote_path, local_path) orelse return .failed;
 
-    var argv_buf: [32][]const u8 = undefined;
+    var argv_buf: [40][]const u8 = undefined;
     var dest_buf: [280]u8 = undefined;
     var argc = appendSshExecPrefix(&argv_buf, conn, control_path, &dest_buf);
     argv_buf[argc] = command;
@@ -764,7 +844,7 @@ fn sshStreamDownload(
     var command_buf: [2048]u8 = undefined;
     const command = buildDownloadCommand(&command_buf, remote_path) orelse return .failed;
 
-    var argv_buf: [32][]const u8 = undefined;
+    var argv_buf: [40][]const u8 = undefined;
     var dest_buf: [280]u8 = undefined;
     var argc = appendSshExecPrefix(&argv_buf, conn, control_path, &dest_buf);
     argv_buf[argc] = command;
@@ -819,7 +899,7 @@ fn logProcessFailure(label: []const u8, stderr_output: ?[]const u8) void {
 }
 
 fn appendSshOptions(
-    argv_buf: *[32][]const u8,
+    argv_buf: *[40][]const u8,
     start_argc: usize,
     conn: *const SshConnection,
     port_mode: PortMode,
@@ -890,6 +970,16 @@ fn appendSshOptions(
         argv_buf[argc] = path;
         argc += 1;
     }
+    // Detect a dead post-connect session (ConnectTimeout only covers connect).
+    // ~10 s to give up: ServerAliveInterval=5 x ServerAliveCountMax=2.
+    argv_buf[argc] = "-o";
+    argc += 1;
+    argv_buf[argc] = "ServerAliveInterval=5";
+    argc += 1;
+    argv_buf[argc] = "-o";
+    argc += 1;
+    argv_buf[argc] = "ServerAliveCountMax=2";
+    argc += 1;
     return argc;
 }
 
@@ -969,7 +1059,7 @@ test "buildScpFlagArgs includes -r only for recursive transfers" {
     conn.password_auth = false;
     conn.port_len = 0;
 
-    var argv_buf: [32][]const u8 = undefined;
+    var argv_buf: [40][]const u8 = undefined;
 
     // argv_buf is reused, so each build's slice must be asserted before the
     // next call overwrites it.
@@ -1002,11 +1092,13 @@ test "appendSshOptions key-based auth" {
     conn.password_auth = false;
     conn.port_len = 0;
 
-    var argv_buf: [32][]const u8 = undefined;
+    var argv_buf: [40][]const u8 = undefined;
     const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh, null);
-    // -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -o BatchMode=yes = 6 args
-    try std.testing.expectEqual(@as(usize, 6), argc);
+    // Strict + ConnectTimeout + BatchMode (6) + ServerAliveInterval/CountMax (4) = 10
+    try std.testing.expectEqual(@as(usize, 10), argc);
     try std.testing.expectEqualStrings("BatchMode=yes", argv_buf[5]);
+    try std.testing.expectEqualStrings("ServerAliveInterval=5", argv_buf[7]);
+    try std.testing.expectEqualStrings("ServerAliveCountMax=2", argv_buf[9]);
 }
 
 test "appendSshOptions password auth" {
@@ -1014,10 +1106,10 @@ test "appendSshOptions password auth" {
     conn.password_auth = true;
     conn.port_len = 0;
 
-    var argv_buf: [32][]const u8 = undefined;
+    var argv_buf: [40][]const u8 = undefined;
     const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh, null);
-    // -o StrictHostKeyChecking -o ConnectTimeout -o PreferredAuth -o NumPasswords = 8
-    try std.testing.expectEqual(@as(usize, 8), argc);
+    // Strict + ConnectTimeout + Preferred + NumPasswords (8) + ServerAlive (4) = 12
+    try std.testing.expectEqual(@as(usize, 12), argc);
     try std.testing.expectEqualStrings("NumberOfPasswordPrompts=1", argv_buf[7]);
 }
 
@@ -1027,10 +1119,10 @@ test "appendSshOptions with ssh port" {
     @memcpy(conn.port_buf[0..4], "2222");
     conn.port_len = 4;
 
-    var argv_buf: [32][]const u8 = undefined;
+    var argv_buf: [40][]const u8 = undefined;
     const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh, null);
-    // 6 (base key-auth) + 2 (-p 2222) = 8
-    try std.testing.expectEqual(@as(usize, 8), argc);
+    // 6 (base key-auth) + 2 (-p 2222) + 4 (ServerAlive) = 12
+    try std.testing.expectEqual(@as(usize, 12), argc);
     try std.testing.expectEqualStrings("-p", argv_buf[6]);
     try std.testing.expectEqualStrings("2222", argv_buf[7]);
 }
@@ -1041,9 +1133,10 @@ test "appendSshOptions with scp port" {
     @memcpy(conn.port_buf[0..4], "2222");
     conn.port_len = 4;
 
-    var argv_buf: [32][]const u8 = undefined;
+    var argv_buf: [40][]const u8 = undefined;
     const argc = appendSshOptions(&argv_buf, 0, &conn, .scp, null);
-    try std.testing.expectEqual(@as(usize, 8), argc);
+    // 6 (base key-auth) + 2 (-P 2222) + 4 (ServerAlive) = 12
+    try std.testing.expectEqual(@as(usize, 12), argc);
     try std.testing.expectEqualStrings("-P", argv_buf[6]);
     try std.testing.expectEqualStrings("2222", argv_buf[7]);
 }
@@ -1053,9 +1146,10 @@ test "appendSshOptions with control path" {
     conn.password_auth = false;
     conn.port_len = 0;
 
-    var argv_buf: [32][]const u8 = undefined;
+    var argv_buf: [40][]const u8 = undefined;
     const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh, "ControlPath=C:/Temp/wispterm-ssh-%C");
-    try std.testing.expectEqual(@as(usize, 12), argc);
+    // 6 (base key-auth) + 6 (control path) + 4 (ServerAlive) = 16
+    try std.testing.expectEqual(@as(usize, 16), argc);
     try std.testing.expectEqualStrings("ControlMaster=auto", argv_buf[7]);
     try std.testing.expectEqualStrings("ControlPersist=10m", argv_buf[9]);
     try std.testing.expectEqualStrings("ControlPath=C:/Temp/wispterm-ssh-%C", argv_buf[11]);
@@ -1066,9 +1160,10 @@ test "appendSshOptions includes legacy algorithms when enabled" {
     conn.password_auth = false;
     conn.legacy_algorithms = true;
 
-    var argv_buf: [32][]const u8 = undefined;
+    var argv_buf: [40][]const u8 = undefined;
     const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh, null);
-    try std.testing.expectEqual(@as(usize, 14), argc);
+    // 6 (base key-auth) + 8 (legacy algorithms) + 4 (ServerAlive) = 18
+    try std.testing.expectEqual(@as(usize, 18), argc);
     try std.testing.expectEqualStrings("HostkeyAlgorithms=+ssh-rsa,ssh-dss", argv_buf[7]);
     try std.testing.expectEqualStrings("PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-dss", argv_buf[9]);
     try std.testing.expectEqualStrings("KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1", argv_buf[11]);
@@ -1209,4 +1304,13 @@ test "drainOutputPipesCapped starts stderr draining before waiting for stdout EO
     try std.testing.expectEqual(DrainPipesResult{ .stdout = .complete, .stderr = .complete }, result);
     try std.testing.expectEqualStrings("out", stdout_list.items);
     try std.testing.expectEqualStrings("err", stderr_list.items);
+}
+
+test "watchdogTimeoutNs: 0 disables the watchdog" {
+    try std.testing.expectEqual(@as(?u64, null), watchdogTimeoutNs(0));
+}
+
+test "watchdogTimeoutNs: converts ms to ns and clamps to the ceiling" {
+    try std.testing.expectEqual(@as(?u64, 5_000 * std.time.ns_per_ms), watchdogTimeoutNs(5_000));
+    try std.testing.expectEqual(@as(?u64, 120_000 * std.time.ns_per_ms), watchdogTimeoutNs(10_000_000));
 }
