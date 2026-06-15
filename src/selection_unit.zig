@@ -76,6 +76,14 @@ pub fn paragraphRange(rows: []const []const u21, row: usize) ?RowRange {
     };
 }
 
+/// Range covering a single row's text, from its first to last non-blank cell.
+/// Used by triple-click to select the whole line. Null for a blank row.
+pub fn lineRange(row: []const u21) ?ColRange {
+    const start = firstNonBlankCol(row) orelse return null;
+    const end = lastNonBlankCol(row) orelse return null;
+    return .{ .start = start, .end = end };
+}
+
 pub fn firstNonBlankCol(row: []const u21) ?usize {
     for (row, 0..) |cp, i| {
         if (!isBlankCodepoint(cp)) return i;
@@ -203,6 +211,16 @@ test "selection unit: paragraph range selects contiguous nonblank rows" {
         .start_col = 2,
         .end_col = 10,
     }, paragraphRange(&rows, 2).?);
+}
+
+test "selection unit: line range spans first to last nonblank cell" {
+    const row = comptime toCodepoints("  hello world  ");
+    try std.testing.expectEqual(ColRange{ .start = 2, .end = 12 }, lineRange(&row).?);
+}
+
+test "selection unit: line range is null for a blank row" {
+    const row = comptime toCodepoints("    ");
+    try std.testing.expect(lineRange(&row) == null);
 }
 
 test "selection unit: clipboard row trim removes trailing terminal blanks only" {
