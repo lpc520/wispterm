@@ -2,6 +2,18 @@ English | [简体中文](README.zh-CN.md)
 
 # WispTerm
 
+<p>
+<a href="https://github.com/xuzhougeng/wispterm/actions/workflows/windows-release.yml"><img src="https://img.shields.io/github/actions/workflow/status/xuzhougeng/wispterm/windows-release.yml?label=Windows" alt="Windows release"></a>
+<a href="https://github.com/xuzhougeng/wispterm/actions/workflows/macos-release.yml"><img src="https://img.shields.io/github/actions/workflow/status/xuzhougeng/wispterm/macos-release.yml?label=macOS" alt="macOS release"></a>
+<a href="https://github.com/xuzhougeng/wispterm/actions/workflows/linux-release.yml"><img src="https://img.shields.io/github/actions/workflow/status/xuzhougeng/wispterm/linux-release.yml?label=Linux" alt="Linux release"></a>
+<a href="https://github.com/xuzhougeng/wispterm/blob/main/LICENSE"><img src="https://img.shields.io/github/license/xuzhougeng/wispterm" alt="License"></a>
+<br>
+<a href="https://github.com/xuzhougeng/wispterm/stargazers"><img src="https://img.shields.io/github/stars/xuzhougeng/wispterm?style=social" alt="Stars"></a>
+<a href="https://github.com/xuzhougeng/wispterm/releases"><img src="https://img.shields.io/github/v/release/xuzhougeng/wispterm?include_prereleases" alt="Release"></a>
+<a href="https://github.com/xuzhougeng/wispterm/releases"><img src="https://img.shields.io/github/downloads/xuzhougeng/wispterm/total" alt="Downloads"></a>
+<a href="https://github.com/xuzhougeng/wispterm/commits/main"><img src="https://img.shields.io/github/last-commit/xuzhougeng/wispterm" alt="Last commit"></a>
+</p>
+
 **WispTerm**, formerly Phantty, is a cross-platform terminal workspace for remote development and AI agent workflows. It is written in Zig and powered by [libghostty-vt](https://github.com/ghostty-org/ghostty) for terminal emulation.
 
 > [!NOTE]
