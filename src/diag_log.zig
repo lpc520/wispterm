@@ -36,6 +36,108 @@ pub fn shouldRollover(written: usize, incoming: usize, max: usize) bool {
     return written != 0 and written + incoming > max;
 }
 
+const platform_dirs = @import("platform/dirs.zig");
+const build_options = @import("build_options");
+
+const LOG_BASENAME = "wispterm-debug.log";
+const LOG_BASENAME_PREV = "wispterm-debug.log.1";
+
+var g_mutex: std.Thread.Mutex = .{};
+var g_file: ?std.fs.File = null;
+var g_written: usize = 0;
+var g_start_ms: i64 = 0;
+/// Config dir cached at first open so crash handlers (which may run mid-panic)
+/// don't need to re-resolve it.
+var g_dir: ?[]u8 = null;
+
+/// Open (truncate) the log eagerly so an early crash still has a file. Safe to
+/// call when not a diagnostic build — it just opens the file. Best-effort.
+pub fn init() void {
+    g_mutex.lock();
+    defer g_mutex.unlock();
+    _ = openLocked() catch {};
+}
+
+pub fn close() void {
+    g_mutex.lock();
+    defer g_mutex.unlock();
+    if (g_file) |f| {
+        f.close();
+        g_file = null;
+    }
+}
+
+/// std.Options.logFn: tee every std.log record to stderr (console build) and the
+/// on-disk log. Best-effort: any failure silently degrades to stderr-only.
+pub fn logFn(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    std.log.defaultLog(level, scope, format, args); // stderr (visible in console build)
+
+    g_mutex.lock();
+    defer g_mutex.unlock();
+
+    var msg_buf: [4000]u8 = undefined;
+    const message = std.fmt.bufPrint(&msg_buf, format, args) catch msg_buf[0..msg_buf.len];
+
+    const now = std.time.milliTimestamp();
+    const elapsed = if (g_start_ms == 0) 0 else now - g_start_ms;
+    var line_buf: [4200]u8 = undefined;
+    const line = formatLine(&line_buf, elapsed, level.asText(), @tagName(scope), message);
+
+    if (shouldRollover(g_written, line.len + 1, MAX_LOG_BYTES)) rolloverLocked();
+    const file = openLocked() catch return;
+    appendLocked(file, line);
+    appendLocked(file, "\n");
+}
+
+fn appendLocked(file: std.fs.File, bytes: []const u8) void {
+    file.writeAll(bytes) catch return;
+    g_written += bytes.len;
+}
+
+/// Caller holds g_mutex. Opens (creating/truncating) the current log file.
+fn openLocked() !std.fs.File {
+    if (g_file) |f| return f;
+    const a = std.heap.page_allocator;
+    const dir = try platform_dirs.configDir(a);
+    defer a.free(dir);
+    if (g_dir == null) g_dir = a.dupe(u8, dir) catch null;
+    std.fs.cwd().makePath(dir) catch {};
+    const path = try std.fs.path.join(a, &.{ dir, LOG_BASENAME });
+    defer a.free(path);
+    const f = try std.fs.createFileAbsolute(path, .{ .truncate = true });
+    g_file = f;
+    g_written = 0;
+    g_start_ms = std.time.milliTimestamp();
+    var hdr: [256]u8 = undefined;
+    const head = std.fmt.bufPrint(&hdr, "WispTerm debug log started ts_ms={d} version={s}\n", .{ g_start_ms, build_options.app_version }) catch "";
+    f.writeAll(head) catch {};
+    g_written += head.len;
+    return f;
+}
+
+/// Caller holds g_mutex. Rename current -> .1 (keeping one prior generation),
+/// then drop the handle so the next openLocked() recreates a fresh file.
+fn rolloverLocked() void {
+    const a = std.heap.page_allocator;
+    if (g_file) |f| {
+        f.close();
+        g_file = null;
+    }
+    const dir = g_dir orelse return;
+    const cur = std.fs.path.join(a, &.{ dir, LOG_BASENAME }) catch return;
+    defer a.free(cur);
+    const prev = std.fs.path.join(a, &.{ dir, LOG_BASENAME_PREV }) catch return;
+    defer a.free(prev);
+    std.fs.cwd().deleteFile(prev) catch {};
+    std.fs.cwd().rename(cur, prev) catch {};
+    g_written = 0;
+}
+
 test "diag_log: formatLine assembles prefix, level, scope, message" {
     var buf: [128]u8 = undefined;
     const line = formatLine(&buf, 42, "info", "weixin", "QR login started");
