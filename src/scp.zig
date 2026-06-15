@@ -344,9 +344,13 @@ const SSH_EXEC_MAX_STDERR_BYTES: usize = 16 * 1024;
 /// 120 s ceiling so a bad value can't effectively remove the cap.
 pub fn watchdogTimeoutNs(timeout_ms: u64) ?u64 {
     if (timeout_ms == 0) return null;
-    const clamped: u64 = @min(timeout_ms, 120_000);
+    const clamped: u64 = @min(timeout_ms, WATCHDOG_CLAMP_MS);
     return clamped * std.time.ns_per_ms;
 }
+
+/// Ceiling for the ssh exec watchdog: a caller timeout above this is clamped so a
+/// bad value can't effectively disable the kill.
+const WATCHDOG_CLAMP_MS: u64 = 120_000;
 
 pub const ExecOpts = struct {
     /// Hard wall-clock cap in ms. 0 = no watchdog (default). On expiry the ssh
