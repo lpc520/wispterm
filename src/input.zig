@@ -3203,15 +3203,14 @@ fn selectWordAtCell(surface: *Surface, cell_pos: CellPos) bool {
     return true;
 }
 
-fn selectSentenceAtCell(surface: *Surface, cell_pos: CellPos) bool {
+fn selectLineAtCell(surface: *Surface, cell_pos: CellPos) bool {
     var row_buf: [MAX_SELECTION_COLS]u21 = undefined;
 
     surface.render_state.mutex.lock();
     defer surface.render_state.mutex.unlock();
 
     const row = readViewportRowLocked(surface, cell_pos.row, &row_buf);
-    if (cell_pos.col >= row.len) return false;
-    const range = selection_unit.sentenceRange(row, cell_pos.col) orelse return false;
+    const range = selection_unit.lineRange(row) orelse return false;
     const abs_row = viewportOffsetForSurfaceLocked(surface) + cell_pos.row;
     activateSelection(surface, range.start, abs_row, range.end, abs_row);
     return true;
@@ -3240,6 +3239,75 @@ fn selectParagraphAtCell(surface: *Surface, cell_pos: CellPos) bool {
 
     activateSelection(surface, start_col, vp_off + start_row, end_col, vp_off + end_row);
     return true;
+}
+
+/// Resolve a left-button click in terminal content into focus + selection.
+/// Shared by the normal press path and the macOS double_click fall-through:
+/// the click count comes from click_tracker (time+distance based, identical on
+/// every platform), so 1=drag-select, 2=word, 3=line, 4=paragraph.
+fn handleTerminalSelectionPress(ev: platform_input.MouseButtonEvent, xpos: f64, ypos: f64) void {
+    // Find which surface was clicked and focus it
+    const clicked_surface = split_layout.surfaceAtPoint(@intFromFloat(xpos), @intFromFloat(ypos)) orelse AppWindow.activeSurface() orelse return;
+
+    // Focus the clicked split if different from current focus
+    if (AppWindow.activeTab()) |tb| {
+        const previous_focus = tb.focused;
+        for (0..split_layout.g_split_rect_count) |i| {
+            const rect = split_layout.g_split_rects[i];
+            if (!split_layout.cachedRectIsLive(rect)) continue;
+            if (rect.surface()) |s| {
+                if (s == clicked_surface) {
+                    tb.focused = rect.handle;
+                    break;
+                }
+            }
+        }
+        if (tb.focused != previous_focus) {
+            AppWindow.handleActiveSurfaceChangeWithinTab();
+        }
+    }
+
+    const cell_pos = mouseToSurfaceCell(clicked_surface, xpos, ypos);
+    switch (terminalPathClickAction(clicked_surface.launch_kind, clicked_surface.ssh_connection != null, primaryOpenMod(ev.ctrl, ev.super), ev.shift, ev.alt)) {
+        .download_ssh_file => {
+            if (downloadTerminalFileAtCell(clicked_surface, cell_pos)) return;
+        },
+        .open_url_or_preview => {
+            if (openUrlAtCell(clicked_surface, cell_pos)) return;
+            if (openHtmlPanelForCell(clicked_surface, cell_pos)) return;
+            if (openPreviewPanelForCell(clicked_surface, cell_pos, ev.shift)) return;
+        },
+        .pass_through => {},
+    }
+
+    clearUrlUnderline();
+    const shift_range_select = ev.shift and !ev.ctrl and !ev.alt;
+    const click_count: u8 = if (shift_range_select) blk: {
+        resetLeftClickCount();
+        break :blk 1;
+    } else nextLeftClickCount(xpos, ypos);
+    switch (click_count) {
+        1 => {
+            // Shift-click extends from the last click anchor, matching
+            // document editor style range selection.
+            if (!(shift_range_select and extendSelectionAtCell(clicked_surface, cell_pos, xpos, ypos))) {
+                startSelectionAtCell(clicked_surface, cell_pos, xpos, ypos);
+            }
+        },
+        2 => {
+            g_selecting = false;
+            if (!selectWordAtCell(clicked_surface, cell_pos)) clearSelectionAtCell(clicked_surface, cell_pos);
+        },
+        3 => {
+            g_selecting = false;
+            if (!selectLineAtCell(clicked_surface, cell_pos)) clearSelectionAtCell(clicked_surface, cell_pos);
+        },
+        4 => {
+            g_selecting = false;
+            if (!selectParagraphAtCell(clicked_surface, cell_pos)) clearSelectionAtCell(clicked_surface, cell_pos);
+        },
+        else => unreachable,
+    }
 }
 
 fn extractTokenRangeAtCell(allocator: std.mem.Allocator, surface: *Surface, cell_pos: CellPos) ?TokenAtCell {
@@ -3907,7 +3975,10 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
         if (beginTerminalMouseReport(ev)) return;
     }
 
-    // Double-click on tab text to rename, elsewhere to maximize
+    // A natively-reported double-click (macOS backend) targets UI chrome:
+    // double-click a tab to rename, the bare titlebar to zoom, or a file-
+    // explorer entry to open it. If it hits none of those, it is a terminal
+    // content double-click and falls through to selection below.
     if (ev.button == .left and ev.action == .double_click) {
         const xpos: f64 = @floatFromInt(ev.x);
         const titlebar_h: f64 = titlebarHeight();
@@ -3924,10 +3995,23 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 // on the macOS traffic-light strip) zooms / unzooms.
                 toggleMaximize();
             }
-        } else if (hitTestSidebarTab(xpos, ypos)) |tab_idx| {
+            return;
+        }
+        if (hitTestSidebarTab(xpos, ypos)) |tab_idx| {
             if (shouldStartSidebarTabRename(xpos, ypos, tab_idx)) {
                 tab.startTabRename(tab_idx);
             }
+            return;
+        }
+        // No chrome hit — this is a double-click in terminal content. The macOS
+        // backend reports the 2nd/3rd/4th click of a multi-click as
+        // double_click (clickCount > 1) rather than press, so they never reach
+        // the press-path selection. Route terminal-content double-clicks
+        // through the same click_tracker path: the opening press already
+        // registered count=1, so this registers 2/3/4 → word/line/paragraph.
+        // Windows/Linux never emit double_click, so their behavior is unchanged.
+        if (split_layout.surfaceAtPoint(ev.x, ev.y) != null) {
+            handleTerminalSelectionPress(ev, xpos, ypos);
         }
         return;
     }
@@ -4391,68 +4475,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 }
             }
 
-            // Find which surface was clicked and focus it
-            const clicked_surface = split_layout.surfaceAtPoint(@intFromFloat(xpos), @intFromFloat(ypos)) orelse AppWindow.activeSurface() orelse return;
-
-            // Focus the clicked split if different from current focus
-            if (AppWindow.activeTab()) |tb| {
-                const previous_focus = tb.focused;
-                for (0..split_layout.g_split_rect_count) |i| {
-                    const rect = split_layout.g_split_rects[i];
-                    if (!split_layout.cachedRectIsLive(rect)) continue;
-                    if (rect.surface()) |s| {
-                        if (s == clicked_surface) {
-                            tb.focused = rect.handle;
-                            break;
-                        }
-                    }
-                }
-                if (tb.focused != previous_focus) {
-                    AppWindow.handleActiveSurfaceChangeWithinTab();
-                }
-            }
-
-            const cell_pos = mouseToSurfaceCell(clicked_surface, xpos, ypos);
-            switch (terminalPathClickAction(clicked_surface.launch_kind, clicked_surface.ssh_connection != null, primaryOpenMod(ev.ctrl, ev.super), ev.shift, ev.alt)) {
-                .download_ssh_file => {
-                    if (downloadTerminalFileAtCell(clicked_surface, cell_pos)) return;
-                },
-                .open_url_or_preview => {
-                    if (openUrlAtCell(clicked_surface, cell_pos)) return;
-                    if (openHtmlPanelForCell(clicked_surface, cell_pos)) return;
-                    if (openPreviewPanelForCell(clicked_surface, cell_pos, ev.shift)) return;
-                },
-                .pass_through => {},
-            }
-
-            clearUrlUnderline();
-            const shift_range_select = ev.shift and !ev.ctrl and !ev.alt;
-            const click_count: u8 = if (shift_range_select) blk: {
-                resetLeftClickCount();
-                break :blk 1;
-            } else nextLeftClickCount(xpos, ypos);
-            switch (click_count) {
-                1 => {
-                    // Shift-click extends from the last click anchor, matching
-                    // document editor style range selection.
-                    if (!(shift_range_select and extendSelectionAtCell(clicked_surface, cell_pos, xpos, ypos))) {
-                        startSelectionAtCell(clicked_surface, cell_pos, xpos, ypos);
-                    }
-                },
-                2 => {
-                    g_selecting = false;
-                    if (!selectWordAtCell(clicked_surface, cell_pos)) clearSelectionAtCell(clicked_surface, cell_pos);
-                },
-                3 => {
-                    g_selecting = false;
-                    if (!selectSentenceAtCell(clicked_surface, cell_pos)) clearSelectionAtCell(clicked_surface, cell_pos);
-                },
-                4 => {
-                    g_selecting = false;
-                    if (!selectParagraphAtCell(clicked_surface, cell_pos)) clearSelectionAtCell(clicked_surface, cell_pos);
-                },
-                else => unreachable,
-            }
+            handleTerminalSelectionPress(ev, xpos, ypos);
         } else {
             // Mouse up
             if (g_preview_image_drag.active()) {
