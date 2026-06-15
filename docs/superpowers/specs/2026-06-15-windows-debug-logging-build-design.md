@@ -1,7 +1,7 @@
 # Windows debug/diagnostic build + field-bug fixes
 
 Date: 2026-06-15
-Status: Approved design, pending spec review → implementation plan
+Status: Implemented (pending Windows GUI sign-off / merge) — all phases landed and reviewed; cumulative `zig build test` + `test-full` green. Remaining gate: Windows GUI verification (console window, `%APPDATA%\wispterm\` log + crash file, ctrl+click/WeChat repro), which can't run on Linux.
 Branch: `feat/windows-debug-logging-build`
 
 ## Problem
