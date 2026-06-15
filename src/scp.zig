@@ -348,6 +348,44 @@ pub fn watchdogTimeoutNs(timeout_ms: u64) ?u64 {
     return clamped * std.time.ns_per_ms;
 }
 
+pub const ExecOpts = struct {
+    /// Hard wall-clock cap in ms. 0 = no watchdog (default). On expiry the ssh
+    /// child is killed so a post-connect hang becomes a bounded failure.
+    timeout_ms: u64 = 0,
+};
+
+const ExecWatchdog = struct {
+    child: *std.process.Child,
+    timeout_ns: u64,
+    cancel: std.Thread.ResetEvent = .{},
+
+    fn run(self: *ExecWatchdog) void {
+        self.cancel.timedWait(self.timeout_ns) catch {
+            // Timed out: kill by raw OS handle so the blocked stdout read sees
+            // EOF and child.wait() can reap. (Does NOT touch Child state, so it
+            // can't race the main thread's wait()/kill().)
+            killChildRaw(self.child);
+        };
+    }
+};
+
+fn killChildRaw(child: *std.process.Child) void {
+    switch (builtin.os.tag) {
+        .windows => std.os.windows.TerminateProcess(child.id, 1) catch {},
+        else => std.posix.kill(child.id, std.posix.SIG.KILL) catch {},
+    }
+}
+
+/// Stop the watchdog and join it. MUST be called before any child.wait()/kill()
+/// so the watchdog cannot fire on an already-reaped (and possibly recycled) pid.
+fn disarmWatchdog(wd: *ExecWatchdog, thread: *?std.Thread) void {
+    if (thread.*) |t| {
+        wd.cancel.set();
+        t.join();
+        thread.* = null;
+    }
+}
+
 /// Run `ssh user@host "<command>"` and capture stdout.
 /// Returns allocated output slice on success, null on failure
 /// (including stdout exceeding the default capture cap).
@@ -359,7 +397,18 @@ pub fn sshExec(allocator: std.mem.Allocator, conn: *const SshConnection, command
 /// than `max_stdout_bytes`, the ssh child is killed and null is returned —
 /// callers get a clean failure instead of an unbounded allocation (or, worse,
 /// silently truncated file content that could be written back).
+///
+/// Preserved signature (no watchdog): used as a function pointer
+/// (`SshExecCappedFn` in src/input/preview_source.zig). New callers that need a
+/// wall-clock cap call `sshExecCappedOpts` directly.
 pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, command: []const u8, max_stdout_bytes: usize) ?[]u8 {
+    return sshExecCappedOpts(allocator, conn, command, max_stdout_bytes, .{});
+}
+
+/// sshExecCapped plus an optional wall-clock watchdog (see `ExecOpts`). On
+/// timeout a background thread kills the ssh child by its raw OS handle so a
+/// post-connect hang on the UI thread becomes a bounded failure.
+pub fn sshExecCappedOpts(allocator: std.mem.Allocator, conn: *const SshConnection, command: []const u8, max_stdout_bytes: usize, opts: ExecOpts) ?[]u8 {
     var askpass_path: ?[]const u8 = null;
     defer if (askpass_path) |p| allocator.free(p);
     var env_map: ?std.process.EnvMap = null;
@@ -407,12 +456,25 @@ pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, c
         return null;
     };
 
+    // Wall-clock watchdog: kills the ssh child by raw OS handle on expiry so a
+    // hung post-connect read can't block the caller forever. disarmWatchdog must
+    // run before every child.wait()/child.kill() below (the defer is an
+    // idempotent safety net for any early return that skips a wait).
+    var wd = ExecWatchdog{ .child = &child, .timeout_ns = 0 };
+    var wd_thread: ?std.Thread = null;
+    if (watchdogTimeoutNs(opts.timeout_ms)) |ns| {
+        wd.timeout_ns = ns;
+        wd_thread = std.Thread.spawn(.{}, ExecWatchdog.run, .{&wd}) catch null;
+    }
+    defer disarmWatchdog(&wd, &wd_thread); // safety net; explicit disarms below run first
+
     // Read stdout, bounded: a runaway/oversized remote command must not grow
     // memory without limit. On exceed, kill ssh rather than read on.
     var output: std.ArrayListUnmanaged(u8) = .empty;
     defer output.deinit(allocator);
 
     const stdout = child.stdout orelse {
+        disarmWatchdog(&wd, &wd_thread);
         _ = child.wait() catch {};
         return null;
     };
@@ -422,6 +484,7 @@ pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, c
     var stderr_text: std.ArrayListUnmanaged(u8) = .empty;
     defer stderr_text.deinit(allocator);
     const stderr = child.stderr orelse {
+        disarmWatchdog(&wd, &wd_thread);
         _ = child.wait() catch {};
         return null;
     };
@@ -438,6 +501,7 @@ pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, c
     };
     const stderr_thread = std.Thread.spawn(.{}, StderrDrain.run, .{&stderr_ctx}) catch |err| {
         std.debug.print("sshExec: stderr drain thread spawn failed: {}\n", .{err});
+        disarmWatchdog(&wd, &wd_thread);
         _ = child.kill() catch {};
         return null;
     };
@@ -445,6 +509,7 @@ pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, c
     const stdout_drain = drainCapped(stdout, allocator, &output, max_stdout_bytes, true) catch .exceeded;
     if (stdout_drain == .exceeded) {
         std.debug.print("sshExec: stdout exceeded {d} bytes; killing ssh\n", .{max_stdout_bytes});
+        disarmWatchdog(&wd, &wd_thread);
         _ = child.kill() catch {};
         stderr_thread.join();
         return null;
@@ -455,6 +520,7 @@ pub fn sshExecCapped(allocator: std.mem.Allocator, conn: *const SshConnection, c
         std.debug.print("sshExec: stderr drain failed: {}\n", .{err});
     }
 
+    disarmWatchdog(&wd, &wd_thread);
     const term = child.wait() catch return null;
     const ok = switch (term) {
         .Exited => |code| code == 0,
