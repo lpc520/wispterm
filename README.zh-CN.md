@@ -248,3 +248,13 @@ MIT
 
 Xu, Z.-G. (2026). *WispTerm* (Version 1.20.0) [Computer software]. Zenodo.
 https://doi.org/10.5281/zenodo.20660542
+
+可直接复制的致谢模板：
+
+```text
+我们在生命科学数据分析中使用 WispTerm 作为计算环境的一部分，用于远程计算流程、
+可重复的命令行处理，以及相关文献与分析代码的整理。
+
+Xu, Z.-G. (2026). WispTerm (Version 1.20.0) [Computer software]. Zenodo.
+https://doi.org/10.5281/zenodo.20660542
+```
