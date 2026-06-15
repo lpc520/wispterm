@@ -138,6 +138,67 @@ fn rolloverLocked() void {
     g_written = 0;
 }
 
+const win = std.os.windows;
+
+/// std.debug.FullPanic hook: write a crash report, then chain to the default
+/// panic so the process still aborts (and prints the trace to the console).
+pub fn panicFn(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    writeCrashReport(msg, first_trace_addr);
+    std.debug.defaultPanic(msg, first_trace_addr);
+}
+
+/// Best-effort crash file at <config-dir>/crash-<ts>.txt. MUST NOT call into
+/// logFn (g_mutex is non-reentrant and may already be held by the faulting
+/// thread). Uses its own file handle.
+pub fn writeCrashReport(msg: []const u8, first_trace_addr: ?usize) void {
+    const a = std.heap.page_allocator;
+    const dir = g_dir orelse (platform_dirs.configDir(a) catch return);
+    // If g_dir was set, it's owned by the module; only free a fresh resolution.
+    const owned_dir = g_dir == null;
+    defer if (owned_dir) a.free(dir);
+    std.fs.cwd().makePath(dir) catch {};
+
+    var name_buf: [64]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "crash-{d}.txt", .{std.time.milliTimestamp()}) catch return;
+    const path = std.fs.path.join(a, &.{ dir, name }) catch return;
+    defer a.free(path);
+
+    const file = std.fs.createFileAbsolute(path, .{}) catch return;
+    defer file.close();
+    var wbuf: [4096]u8 = undefined;
+    var w = file.writerStreaming(&wbuf);
+    w.interface.print(
+        "WispTerm crash\nversion: {s}\nmessage: {s}\n\nstack trace:\n",
+        .{ build_options.app_version, msg },
+    ) catch {};
+    std.debug.dumpCurrentStackTraceToWriter(first_trace_addr, &w.interface) catch {};
+    w.interface.flush() catch {};
+}
+
+/// Install OS-level crash capture. Currently the Windows unhandled-exception
+/// filter for native (non-Zig) faults (D3D / WebView2 / win32 access
+/// violations) that never reach Zig's panic. No-op elsewhere.
+pub fn installCrashHandlers() void {
+    if (builtin.os.tag == .windows) {
+        _ = SetUnhandledExceptionFilter(winExceptionFilter);
+    }
+}
+
+// Declared here (not in std) — mirrors the extern pattern in
+// src/platform/clipboard_windows.zig. Only referenced on Windows, so the
+// non-Windows build never links kernel32.
+extern "kernel32" fn SetUnhandledExceptionFilter(
+    filter: ?win.VECTORED_EXCEPTION_HANDLER,
+) callconv(.winapi) ?win.VECTORED_EXCEPTION_HANDLER;
+
+fn winExceptionFilter(info: *win.EXCEPTION_POINTERS) callconv(.winapi) c_long {
+    var msg_buf: [64]u8 = undefined;
+    const code = info.ExceptionRecord.ExceptionCode;
+    const msg = std.fmt.bufPrint(&msg_buf, "native exception 0x{x}", .{code}) catch "native exception";
+    writeCrashReport(msg, null);
+    return win.EXCEPTION_CONTINUE_SEARCH; // let the OS crash normally
+}
+
 test "diag_log: formatLine assembles prefix, level, scope, message" {
     var buf: [128]u8 = undefined;
     const line = formatLine(&buf, 42, "info", "weixin", "QR login started");
