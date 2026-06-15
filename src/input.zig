@@ -3654,7 +3654,9 @@ fn buildRemotePathKindCommand(buf: []u8, remote_path: []const u8) ?[]const u8 {
 fn remotePathIsDirectoryForDownload(allocator: std.mem.Allocator, conn: *const @import("ssh_connection.zig").SshConnection, remote_path: []const u8) ?bool {
     var cmd_buf: [2300]u8 = undefined;
     const cmd = buildRemotePathKindCommand(cmd_buf[0..], remote_path) orelse return null;
-    const output = scp.sshExecCapped(allocator, conn, cmd, 8) orelse return null;
+    // Runs on the UI thread, so bound it: a hung remote `test -d` becomes a
+    // ~5 s delay + null result instead of a permanent freeze (see scp watchdog).
+    const output = scp.sshExecCappedOpts(allocator, conn, cmd, 8, .{ .timeout_ms = 5_000 }) orelse return null;
     defer allocator.free(output);
 
     const trimmed = std.mem.trim(u8, output, " \t\r\n");
