@@ -1,16 +1,19 @@
 name: Publish macOS Release (x86_64)
 
-# Manually-triggered Intel (x86_64) macOS release build.
+# Intel (x86_64) macOS release build. The aarch64 release (macos-release.yml)
+# is tag-triggered and ships Apple Silicon only; this workflow builds, signs,
+# and notarizes the x86_64 DMG and attaches it to that same GitHub release.
 #
-# The automatic tag-triggered release (macos-release.yml) ships Apple Silicon
-# (aarch64) only. The Intel build is produced here on demand because of a
-# toolchain issue affecting the x86_64 binary (see issue #114). This workflow
-# builds, signs, and notarizes the x86_64 DMG and attaches it to the existing
-# GitHub release for the given tag.
+# Triggers:
+#   - Automatically after "Publish macOS Release" finishes successfully for a
+#     tag push (workflow_run) — no manual step needed for a normal release. By
+#     the time it runs, the aarch64 job has already created the GitHub release,
+#     so the Intel DMG is just uploaded to it.
+#   - Manually (workflow_dispatch) with an explicit tag, e.g. to (re)build the
+#     Intel DMG for an existing release.
 #
-# Trigger: Actions tab -> "Publish macOS Release (x86_64)" -> Run workflow,
-# then enter the release tag (e.g. v1.6.0). The release for that tag must
-# already exist (created by the aarch64 tag-triggered release).
+# Note: the workflow_run trigger only fires once this file is on the default
+# branch (GitHub requirement), so merge it to main before tagging a release.
 
 on:
   workflow_dispatch:
@@ -19,6 +22,10 @@ on:
         description: Release tag to build the x86_64 DMG for (e.g. v1.6.0)
         required: true
         type: string
+  workflow_run:
+    workflows: ["Publish macOS Release"]
+    types:
+      - completed
 
 permissions:
   contents: write
@@ -27,23 +34,38 @@ jobs:
   build-macos-x86_64:
     name: Build macOS (x86_64)
     runs-on: macos-latest
+    # Manual dispatch always runs. The automatic (workflow_run) path runs only
+    # when the upstream aarch64 release finished successfully for a tag push.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     env:
       ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-global-cache
 
     steps:
-      - name: Validate release tag
+      - name: Resolve release tag
+        id: tag
         shell: bash
         run: |
-          tag="${{ github.event.inputs.tag }}"
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            # For a tag push the upstream run's head_branch is the tag name.
+            tag="${{ github.event.workflow_run.head_branch }}"
+          fi
           if [[ ! "$tag" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+|[0-9]+\.[0-9]+(\.[0-9]+)?)$ ]]; then
             echo "Release tag must match vX.Y.Z, X.Y, or X.Y.Z. Received: $tag" >&2
             exit 1
           fi
+          echo "RELEASE_TAG=${tag}" >> "${GITHUB_ENV}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ steps.tag.outputs.tag }}
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
@@ -110,7 +132,7 @@ jobs:
       - name: Fetch dependencies and build release
         shell: bash
         env:
-          WISPTERM_MACOS_VERSION: ${{ github.event.inputs.tag }}
+          WISPTERM_MACOS_VERSION: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
 
@@ -143,7 +165,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ github.event.inputs.tag }}"
+          tag="${{ env.RELEASE_TAG }}"
           dmg_tag="$tag"
           [[ "$dmg_tag" != v* ]] && dmg_tag="v$dmg_tag"
           dmg_path="zig-out/dist/macos/wispterm-macos-${dmg_tag}.dmg"
@@ -162,7 +184,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ github.event.inputs.tag }}"
+          tag="${{ env.RELEASE_TAG }}"
           dmg_tag="$tag"
           [[ "$dmg_tag" != v* ]] && dmg_tag="v$dmg_tag"
           src="zig-out/dist/macos/wispterm-macos-${dmg_tag}.dmg"
@@ -177,7 +199,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          tag="${{ github.event.inputs.tag }}"
+          tag="${{ env.RELEASE_TAG }}"
           if ! gh release view "${tag}" --repo "${GH_REPO}" >/dev/null 2>&1; then
             echo "::error::Release ${tag} does not exist yet. Create it first via the tag-triggered (aarch64) release, then re-run this workflow." >&2
             exit 1
@@ -187,7 +209,7 @@ jobs:
       - name: Also upload as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wispterm-macos-x86_64-${{ github.event.inputs.tag }}
+          name: wispterm-macos-x86_64-${{ env.RELEASE_TAG }}
           path: ${{ env.ASSET_PATH }}
           if-no-files-found: error
 
