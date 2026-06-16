@@ -20,6 +20,21 @@ pub fn shimmerDecision(
     return .shimmer;
 }
 
+/// Whether the closed-state edge handle should exist at all, independent of
+/// cursor proximity and window-fit geometry. ALL three call sites — render,
+/// mouse-move reveal, and click hit-test — MUST agree on this, or the handle can
+/// be drawn-but-unclickable or (worse) clickable-but-invisible and steal clicks
+/// from the scrollbar / a right-docked panel. `right_dock_visible` is true when a
+/// browser/Jupyter panel occupies the shared right slot.
+pub fn handleEligible(
+    feature_enabled: bool,
+    copilot_visible: bool,
+    active_tab_is_terminal: bool,
+    right_dock_visible: bool,
+) bool {
+    return feature_enabled and !copilot_visible and active_tab_is_terminal and !right_dock_visible;
+}
+
 /// Target reveal alpha [0, revealed_alpha] for the closed-state handle, from the
 /// cursor's proximity to the window's right content edge. Pure math; the
 /// renderer eases the actual alpha toward this and applies the hover boost.
@@ -45,6 +60,14 @@ test "shimmer only on first eligible terminal frame" {
     try std.testing.expectEqual(ShimmerDecision.skip, shimmerDecision(false, true, false)); // disabled
     try std.testing.expectEqual(ShimmerDecision.skip, shimmerDecision(true, false, false)); // not eligible
     try std.testing.expectEqual(ShimmerDecision.skip, shimmerDecision(true, true, true)); // already shown
+}
+
+test "handleEligible requires feature on, copilot closed, terminal tab, no right dock" {
+    try std.testing.expect(handleEligible(true, false, true, false));
+    try std.testing.expect(!handleEligible(false, false, true, false)); // feature off
+    try std.testing.expect(!handleEligible(true, true, true, false)); // copilot already open
+    try std.testing.expect(!handleEligible(true, false, false, false)); // not a terminal tab
+    try std.testing.expect(!handleEligible(true, false, true, true)); // right-dock panel up
 }
 
 test "reveal target rises near the right edge only, below the titlebar" {

@@ -2691,8 +2691,15 @@ fn hitTestAiCopilotResizeHandle(xpos: f64, ypos: f64) bool {
 /// Hit-test the closed-state Copilot summon handle (valid only when Copilot is
 /// closed). Widens the click zone for comfort without a heavier visual.
 fn hitTestCopilotEdgeHandle(xpos: f64, ypos: f64) bool {
-    if (AppWindow.aiCopilotVisible()) return false;
-    if (!AppWindow.isActiveTabTerminal()) return false;
+    // Must match the render + mouse-move eligibility exactly, or this becomes an
+    // invisible click-band that steals clicks (e.g. from the scrollbar when the
+    // feature is disabled, or from a browser/Jupyter panel sharing the slot).
+    if (!copilot_hint_gate.handleEligible(
+        AppWindow.g_copilot_hint,
+        AppWindow.aiCopilotVisible(),
+        AppWindow.isActiveTabTerminal(),
+        AppWindow.anyRightDockPanelVisible(),
+    )) return false;
     if (ypos < titlebarHeight()) return false;
     const win = AppWindow.g_window orelse return false;
     const fb = window_backend.framebufferSize(win);
@@ -4961,7 +4968,12 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         }
         // Closed-state Copilot summon handle: reveal as the cursor nears the edge.
         if (!AppWindow.aiCopilotVisible()) {
-            const handle_eligible = AppWindow.g_copilot_hint and AppWindow.isActiveTabTerminal() and !AppWindow.anyRightDockPanelVisible();
+            const handle_eligible = copilot_hint_gate.handleEligible(
+                AppWindow.g_copilot_hint,
+                AppWindow.aiCopilotVisible(),
+                AppWindow.isActiveTabTerminal(),
+                AppWindow.anyRightDockPanelVisible(),
+            );
             if (handle_eligible) {
                 if (AppWindow.g_window) |handle_win| {
                     const handle_fb = window_backend.framebufferSize(handle_win);

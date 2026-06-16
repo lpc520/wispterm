@@ -6291,6 +6291,9 @@ pub fn anyOverlayActive(now: i64) bool {
     if (now < g_remote_key_copied_until_ms) return true;
     if (now < resize.g_split_resize_overlay_until) return true;
 
+    // Copilot edge handle: shimmer / reveal-fade / hover-tooltip dwell.
+    if (copilot_edge_handle.isAnimating()) return true;
+
     // FPS 叠层开启时每秒刷新
     if (g_debug_fps) return true;
 

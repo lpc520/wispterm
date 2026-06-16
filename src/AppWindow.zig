@@ -8206,7 +8206,7 @@ fn runMainLoop(self: *AppWindow) !void {
         // after terminal content, occupying the exclusive right slot.
         renderAiCopilotPanel(fb_width, fb_height, titlebar_offset);
         overlays.renderBrowserUrlBar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-        if (!aiCopilotVisible() and isActiveTabTerminal() and !anyRightDockPanelVisible() and g_copilot_hint) {
+        if (copilot_hint_gate.handleEligible(g_copilot_hint, aiCopilotVisible(), isActiveTabTerminal(), anyRightDockPanelVisible())) {
             if (!g_copilot_shimmer_checked) {
                 g_copilot_shimmer_checked = true;
                 const hint_shown = if (g_allocator) |alloc| platform_window_state.copilotHintShown(alloc) else true;

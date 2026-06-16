@@ -36,6 +36,21 @@ pub fn startShimmer() void {
     g_shimmer_start = std.time.milliTimestamp();
 }
 
+/// Whether the handle still needs per-frame repaints: a shimmer is in progress,
+/// the eased alpha has not yet reached its effective target, or a hover tooltip
+/// dwell is still pending. The render loop's frame driver
+/// (overlays.anyOverlayActive) consults this so these time-based animations keep
+/// producing frames even without input events. Returns false at steady state
+/// (fully hidden, or settled hover with the tooltip already shown) so an idle
+/// terminal does not repaint.
+pub fn isAnimating() bool {
+    if (g_shimmer_start != 0) return true;
+    const target = if (g_hovered) HOVER_ALPHA else g_target;
+    if (@abs(g_alpha - target) > 0.01) return true;
+    if (g_hovered and std.time.milliTimestamp() - g_hover_since < TOOLTIP_DWELL_MS) return true;
+    return false;
+}
+
 fn shortcutText(buf: []u8) []const u8 {
     const binding = AppWindow.g_keybinds.firstForAction(.toggle_ai_copilot) orelse return "";
     return keybind.formatTrigger(binding.trigger, buf) catch "";
