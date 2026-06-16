@@ -1011,6 +1011,29 @@ pre.code-block code {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.code-copy {
+  position: relative;
+}
+.code-copy .copy-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  padding: 5px 13px;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--fg-muted);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.code-copy .copy-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 
 /* Credits */
 .credits ul {

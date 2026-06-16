@@ -14,7 +14,7 @@
   <link rel="apple-touch-icon" href="assets/wispterm.png">
   <link rel="alternate" hreflang="en" href="./">
   <link rel="alternate" hreflang="zh-CN" href="./zh.html">
-  <link rel="stylesheet" href="style.css?v=7">
+  <link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
   <header class="site-header">
@@ -241,31 +241,41 @@ ai-agent-output-limit  = 16384</code></pre>
     <section id="ssh-setup" class="section">
       <div class="container">
         <h2>SSH downloads &amp; uploads that follow your current directory</h2>
-        <p class="section-lead">WispTerm can download a relative file path from SSH terminal output and upload dragged files into the interactive SSH shell's current directory — but only when the remote shell reports that directory with <strong>OSC 7</strong>, the same terminal convention <a href="https://ghostty.org/docs/help/terminfo" target="_blank" rel="noopener">Ghostty's shell integration</a> uses. When OSC 7 is missing, helper <code>ssh.exe</code> / <code>scp.exe</code> commands open a fresh session that usually sees the login directory, not the directory you <code>cd</code>'d to — so WispTerm shows <em>“SSH cwd unknown; click for setup”</em> instead of guessing <code>~/file</code>.</p>
+        <p class="section-lead">WispTerm can download a relative file path from SSH terminal output, and upload dragged files into the interactive SSH shell's current directory — but only when the remote shell reports that directory with <strong>OSC 7</strong>, the same terminal convention <a href="https://ghostty.org/docs/help/terminfo" target="_blank" rel="noopener">Ghostty's shell integration</a> uses.</p>
+        <p class="section-lead">When OSC 7 is missing, the helper <code>ssh.exe</code> / <code>scp.exe</code> commands open a fresh session that usually sees the login directory, not the directory you <code>cd</code>'d to. In that case WispTerm shows <em>“SSH cwd unknown; click for setup”</em> instead of guessing <code>~/file</code>.</p>
         <p class="section-lead">Add one of these snippets to the remote shell's startup file, then start a new WispTerm SSH session.</p>
         <div class="shell-setup">
           <div class="setup-panel">
             <h3>Bash — <code>~/.bashrc</code></h3>
+            <div class="code-copy">
+              <button class="copy-btn" type="button" data-copied="Copied">Copy</button>
 <pre class="code-block"><code>__wispterm_report_cwd() {
   printf '\033]7;file://%s%s\a' "${HOSTNAME:-localhost}" "$PWD"
 }
 PROMPT_COMMAND="__wispterm_report_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"</code></pre>
+            </div>
           </div>
           <div class="setup-panel">
             <h3>Zsh — <code>~/.zshrc</code></h3>
+            <div class="code-copy">
+              <button class="copy-btn" type="button" data-copied="Copied">Copy</button>
 <pre class="code-block"><code>__wispterm_report_cwd() {
   printf '\033]7;file://%s%s\a' "${HOST:-localhost}" "$PWD"
 }
 autoload -Uz add-zsh-hook
 add-zsh-hook chpwd __wispterm_report_cwd
 add-zsh-hook precmd __wispterm_report_cwd</code></pre>
+            </div>
           </div>
           <div class="setup-panel">
             <h3>Fish — <code>~/.config/fish/config.fish</code></h3>
+            <div class="code-copy">
+              <button class="copy-btn" type="button" data-copied="Copied">Copy</button>
 <pre class="code-block"><code>function __wispterm_report_cwd --on-variable PWD
     printf '\e]7;file://%s%s\a' (hostname) (string escape --style=url $PWD)
 end
 __wispterm_report_cwd</code></pre>
+            </div>
           </div>
         </div>
       </div>
@@ -367,5 +377,22 @@ __wispterm_report_cwd</code></pre>
       </div>
     </div>
   </footer>
+
+  <script>
+    document.querySelectorAll(".code-copy .copy-btn").forEach((btn) => {
+      const label = btn.textContent;
+      const copied = btn.dataset.copied || "Copied";
+      btn.addEventListener("click", async () => {
+        const code = btn.parentElement.querySelector("code");
+        try {
+          await navigator.clipboard.writeText(code ? code.textContent : "");
+          btn.textContent = copied;
+        } catch {
+          btn.textContent = "Press Ctrl+C";
+        }
+        window.setTimeout(() => { btn.textContent = label; }, 1400);
+      });
+    });
+  </script>
 </body>
 </html>

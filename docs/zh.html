@@ -14,7 +14,7 @@
   <link rel="apple-touch-icon" href="assets/wispterm.png">
   <link rel="alternate" hreflang="en" href="./">
   <link rel="alternate" hreflang="zh-CN" href="./zh.html">
-  <link rel="stylesheet" href="style.css?v=7">
+  <link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
   <header class="site-header">
@@ -241,31 +241,41 @@ ai-agent-output-limit  = 16384</code></pre>
     <section id="ssh-setup" class="section">
       <div class="container">
         <h2>让 SSH 下载与上传跟随当前目录</h2>
-        <p class="section-lead">WispTerm 只有在远端 shell 通过 <strong>OSC 7</strong> 上报当前目录时，才能从 SSH 终端输出里下载相对路径文件，并把拖拽进来的文件上传到当前交互 shell 的真实目录——这与 <a href="https://ghostty.org/docs/help/terminfo" target="_blank" rel="noopener">Ghostty shell 集成</a>使用的是同一套终端约定。如果缺少 OSC 7，辅助的 <code>ssh.exe</code> / <code>scp.exe</code> 命令会另开一个新会话，通常只能看到登录目录，而不是你 <code>cd</code> 之后的目录，于是 WispTerm 会显示<em>“SSH cwd unknown；点击查看设置”</em>，而不是去猜 <code>~/file</code>。</p>
+        <p class="section-lead">WispTerm 只有在远端 shell 通过 <strong>OSC 7</strong> 上报当前目录时，才能从 SSH 终端输出里下载相对路径文件，并把拖拽进来的文件上传到当前交互 shell 的真实目录——这与 <a href="https://ghostty.org/docs/help/terminfo" target="_blank" rel="noopener">Ghostty shell 集成</a>使用的是同一套终端约定。</p>
+        <p class="section-lead">如果缺少 OSC 7，辅助的 <code>ssh.exe</code> / <code>scp.exe</code> 命令会另开一个新会话，通常只能看到登录目录，而不是你 <code>cd</code> 之后的目录。这时 WispTerm 会显示<em>“SSH cwd unknown；点击查看设置”</em>，而不是去猜 <code>~/file</code>。</p>
         <p class="section-lead">把下面任意一段加到远端 shell 的启动文件里，然后重新开一个 WispTerm SSH 会话即可。</p>
         <div class="shell-setup">
           <div class="setup-panel">
             <h3>Bash — <code>~/.bashrc</code></h3>
+            <div class="code-copy">
+              <button class="copy-btn" type="button" data-copied="已复制">复制</button>
 <pre class="code-block"><code>__wispterm_report_cwd() {
   printf '\033]7;file://%s%s\a' "${HOSTNAME:-localhost}" "$PWD"
 }
 PROMPT_COMMAND="__wispterm_report_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"</code></pre>
+            </div>
           </div>
           <div class="setup-panel">
             <h3>Zsh — <code>~/.zshrc</code></h3>
+            <div class="code-copy">
+              <button class="copy-btn" type="button" data-copied="已复制">复制</button>
 <pre class="code-block"><code>__wispterm_report_cwd() {
   printf '\033]7;file://%s%s\a' "${HOST:-localhost}" "$PWD"
 }
 autoload -Uz add-zsh-hook
 add-zsh-hook chpwd __wispterm_report_cwd
 add-zsh-hook precmd __wispterm_report_cwd</code></pre>
+            </div>
           </div>
           <div class="setup-panel">
             <h3>Fish — <code>~/.config/fish/config.fish</code></h3>
+            <div class="code-copy">
+              <button class="copy-btn" type="button" data-copied="已复制">复制</button>
 <pre class="code-block"><code>function __wispterm_report_cwd --on-variable PWD
     printf '\e]7;file://%s%s\a' (hostname) (string escape --style=url $PWD)
 end
 __wispterm_report_cwd</code></pre>
+            </div>
           </div>
         </div>
       </div>
@@ -367,5 +377,22 @@ __wispterm_report_cwd</code></pre>
       </div>
     </div>
   </footer>
+
+  <script>
+    document.querySelectorAll(".code-copy .copy-btn").forEach((btn) => {
+      const label = btn.textContent;
+      const copied = btn.dataset.copied || "Copied";
+      btn.addEventListener("click", async () => {
+        const code = btn.parentElement.querySelector("code");
+        try {
+          await navigator.clipboard.writeText(code ? code.textContent : "");
+          btn.textContent = copied;
+        } catch {
+          btn.textContent = "请按 Ctrl+C";
+        }
+        window.setTimeout(() => { btn.textContent = label; }, 1400);
+      });
+    });
+  </script>
 </body>
 </html>
