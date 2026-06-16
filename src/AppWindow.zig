@@ -3504,6 +3504,13 @@ pub fn aiCopilotVisible() bool {
     return tab.activeCopilotVisible();
 }
 
+/// True when a right-docked panel (browser / Jupyter webview) is showing for the
+/// active tab. The Copilot edge handle defers while one is up, since they share
+/// the exclusive right slot.
+pub fn anyRightDockPanelVisible() bool {
+    return browser_panel.isVisibleForActiveTab();
+}
+
 /// Hide the active tab's copilot panel if visible (used by the right-slot
 /// arbiter when another right panel opens). No-op if already hidden.
 pub fn hideAiCopilot() void {
@@ -3604,6 +3611,7 @@ pub fn toggleAiCopilot() void {
     _ = tab.setActiveCopilotVisible(true);
     _ = ensureActiveCopilotSession();
     input.focusAiCopilot();
+    if (g_allocator) |alloc| platform_window_state.setCopilotHintShown(alloc);
     g_force_rebuild = true;
     g_cells_valid = false;
 }
@@ -8196,6 +8204,14 @@ fn runMainLoop(self: *AppWindow) !void {
         // after terminal content, occupying the exclusive right slot.
         renderAiCopilotPanel(fb_width, fb_height, titlebar_offset);
         overlays.renderBrowserUrlBar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+        if (!aiCopilotVisible() and isActiveTabTerminal() and !anyRightDockPanelVisible() and g_copilot_hint) {
+            overlays.renderCopilotEdgeHandle(
+                @floatFromInt(fb_width),
+                @floatFromInt(fb_height),
+                titlebar_offset,
+                leftPanelsWidth(),
+            );
+        }
         overlays.renderStartupShortcutsOverlay(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderCommandPalette(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderJupyterPicker(@floatFromInt(fb_width), @floatFromInt(fb_height));

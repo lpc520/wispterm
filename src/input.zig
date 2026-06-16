@@ -23,6 +23,7 @@ const browser_panel = AppWindow.browser_panel;
 const html_server = @import("html_server.zig");
 const html_server_model = @import("html_server_model.zig");
 const ai_sidebar = @import("ai_sidebar.zig");
+const copilot_hint_gate = @import("copilot_hint_gate.zig");
 const ui_perf = AppWindow.ui_perf;
 const render_diagnostics = @import("render_diagnostics.zig");
 const link_open = @import("link_open.zig");
@@ -2687,6 +2688,28 @@ fn hitTestAiCopilotResizeHandle(xpos: f64, ypos: f64) bool {
     return xpos >= panel_x - half_hit and xpos <= panel_x + half_hit;
 }
 
+/// Hit-test the closed-state Copilot summon handle (valid only when Copilot is
+/// closed). Widens the click zone for comfort without a heavier visual.
+fn hitTestCopilotEdgeHandle(xpos: f64, ypos: f64) bool {
+    if (AppWindow.aiCopilotVisible()) return false;
+    if (!AppWindow.isActiveTabTerminal()) return false;
+    if (ypos < titlebarHeight()) return false;
+    const win = AppWindow.g_window orelse return false;
+    const fb = window_backend.framebufferSize(win);
+    const rect = ai_sidebar.closedHandleRect(
+        @floatFromInt(fb.width),
+        @floatFromInt(fb.height),
+        @floatCast(titlebarHeight()),
+        AppWindow.leftPanelsWidth(),
+    );
+    if (!rect.eligible) return false;
+    const hit_w: f64 = @max(@as(f64, @floatCast(rect.w)), 12);
+    const right: f64 = @floatFromInt(fb.width);
+    const top: f64 = @floatCast(rect.y);
+    const bottom: f64 = @floatCast(rect.y + rect.h);
+    return xpos >= right - hit_w and ypos >= top and ypos <= bottom;
+}
+
 fn applyAiCopilotWidthFromMouse(xpos: f64) void {
     const win = AppWindow.g_window orelse return;
     const fb = window_backend.framebufferSize(win);
@@ -4126,6 +4149,10 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 platform_cursor.set(.size_we);
                 return;
             }
+            if (!AppWindow.aiCopilotVisible() and hitTestCopilotEdgeHandle(xpos, ypos)) {
+                AppWindow.toggleAiCopilot();
+                return;
+            }
 
             if (over_browser_url_bar) {
                 file_explorer.g_focused = false;
@@ -4911,6 +4938,34 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
         } else if (g_ai_copilot_resize_hover) {
             platform_cursor.set(.arrow);
             g_ai_copilot_resize_hover = false;
+        }
+        // Closed-state Copilot summon handle: reveal as the cursor nears the edge.
+        if (!AppWindow.aiCopilotVisible()) {
+            const handle_eligible = AppWindow.g_copilot_hint and AppWindow.isActiveTabTerminal() and !AppWindow.anyRightDockPanelVisible();
+            if (handle_eligible) {
+                if (AppWindow.g_window) |handle_win| {
+                    const handle_fb = window_backend.framebufferSize(handle_win);
+                    const tgt = copilot_hint_gate.handleRevealTarget(
+                        @floatCast(xpos),
+                        @floatCast(ypos),
+                        @floatFromInt(handle_fb.width),
+                        @floatCast(titlebarHeight()),
+                        overlays.copilot_edge_handle.REVEAL_ZONE_W,
+                        overlays.copilot_edge_handle.REVEALED_ALPHA,
+                    );
+                    overlays.copilotEdgeHandleSetTarget(tgt);
+                    const handle_hovered = hitTestCopilotEdgeHandle(xpos, ypos);
+                    overlays.copilotEdgeHandleSetHovered(handle_hovered);
+                    AppWindow.g_force_rebuild = true;
+                    if (handle_hovered) {
+                        platform_cursor.set(.arrow);
+                        return;
+                    }
+                }
+            } else {
+                overlays.copilotEdgeHandleSetTarget(0);
+                overlays.copilotEdgeHandleSetHovered(false);
+            }
         }
     }
 
