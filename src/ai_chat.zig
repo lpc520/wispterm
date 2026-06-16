@@ -3867,6 +3867,16 @@ pub fn applyProviderProfile(
     max_tokens: u32,
     vision_str: []const u8,
 ) void {
+    // Join any prior summary worker before starting a new switch, so its thread
+    // handle isn't lost (it would otherwise leak and could race deinit / UAF the
+    // session). Taken out under the lock, joined OUTSIDE it to avoid deadlocking
+    // against the worker's own applySummaryResult (which locks the same mutex).
+    session.mutex.lock();
+    const prior_summary = session.summary_thread;
+    session.summary_thread = null;
+    session.mutex.unlock();
+    if (prior_summary) |t| t.join();
+
     var sreq: ?*SummaryRequest = null;
     session.mutex.lock();
     locked: {
