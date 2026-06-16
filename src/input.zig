@@ -4956,7 +4956,9 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
                     overlays.copilotEdgeHandleSetTarget(tgt);
                     const handle_hovered = hitTestCopilotEdgeHandle(xpos, ypos);
                     overlays.copilotEdgeHandleSetHovered(handle_hovered);
-                    AppWindow.g_force_rebuild = true;
+                    // Only repaint while the handle is actually near/visible — avoids a
+                    // full rebuild on every mouse move across the terminal when it is hidden.
+                    if (tgt > 0 or handle_hovered) AppWindow.g_force_rebuild = true;
                     if (handle_hovered) {
                         platform_cursor.set(.arrow);
                         return;
