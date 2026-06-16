@@ -92,6 +92,9 @@ pub const Message = struct {
     persist_to_history: bool = true,
     content_collapsed: bool = false,
     content_auto_expand: bool = false,
+    /// Synthetic "上文摘要" card produced by a model switch. Rendered like a
+    /// collapsible tool card but sent to the model as a normal user message.
+    is_context_summary: bool = false,
     reasoning_collapsed: bool = true,
     reasoning_auto_expand: bool = false,
 
@@ -525,6 +528,9 @@ fn slashCommandOutput(allocator: std.mem.Allocator, command: SlashCommand) ![]u8
         // .remember, .memory, .forget suppress output and emit their own messages;
         // this path is never reached, but the arm is required for exhaustiveness.
         .remember, .memory, .forget => allocator.dupe(u8, ""),
+        // .model_switch suppresses output and defers to the picker / by-name path;
+        // this path is never reached, but the arm is required for exhaustiveness.
+        .model_switch => allocator.dupe(u8, ""),
     };
 }
 
@@ -1605,7 +1611,7 @@ pub const Session = struct {
         defer self.mutex.unlock();
         if (message_index >= self.messages.items.len) return;
         var msg = &self.messages.items[message_index];
-        if (msg.role != .tool) return;
+        if (msg.role != .tool and !msg.is_context_summary) return;
         msg.content_collapsed = !msg.content_collapsed;
         msg.content_auto_expand = false;
     }
@@ -7188,4 +7194,19 @@ test "composeSystemPromptWithMemory appends the index block when enabled" {
     const without = try composeSystemPromptWithMemory(a, "BASE", false, "");
     defer a.free(without);
     try std.testing.expectEqualStrings("BASE", without);
+}
+
+test "is_context_summary messages are collapsible" {
+    var session = try Session.initWithVision(std.testing.allocator, "T", "https://x", "k", "m", "chat_completions", "sp", "enabled", "low", "false", "false", "false");
+    defer session.deinit();
+    const content = try std.testing.allocator.dupe(u8, "summary body");
+    try session.messages.append(std.testing.allocator, .{
+        .role = .user,
+        .content = content,
+        .is_context_summary = true,
+        .content_collapsed = true,
+    });
+    try std.testing.expect(session.messages.items[0].content_collapsed);
+    session.toggleToolMessageCollapsed(0);
+    try std.testing.expect(!session.messages.items[0].content_collapsed);
 }
