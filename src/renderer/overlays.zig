@@ -48,6 +48,7 @@ pub const renderRoundedQuadAlpha = primitives.renderRoundedQuadAlpha;
 pub const scrollbar = @import("overlays/scrollbar.zig");
 pub const resize = @import("overlays/resize.zig");
 pub const startup_shortcuts = @import("overlays/startup_shortcuts.zig");
+pub const copilot_edge_handle = @import("overlays/copilot_edge_handle.zig");
 
 pub const SCROLLBAR_WIDTH = scrollbar.SCROLLBAR_WIDTH;
 pub const ScrollbarGeometry = scrollbar.ScrollbarGeometry;
@@ -74,6 +75,10 @@ pub const startupShortcutsShow = startup_shortcuts.startupShortcutsShow;
 pub const startupShortcutsDismiss = startup_shortcuts.startupShortcutsDismiss;
 pub const startupShortcutsToggle = startup_shortcuts.startupShortcutsToggle;
 pub const renderStartupShortcutsOverlay = startup_shortcuts.renderStartupShortcutsOverlay;
+pub const renderCopilotEdgeHandle = copilot_edge_handle.render;
+pub const copilotEdgeHandleSetTarget = copilot_edge_handle.setProximityTarget;
+pub const copilotEdgeHandleSetHovered = copilot_edge_handle.setHovered;
+pub const copilotEdgeHandleStartShimmer = copilot_edge_handle.startShimmer;
 
 // ============================================================================
 // Split divider rendering
