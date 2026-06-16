@@ -341,11 +341,13 @@ const BuiltinResult = struct {
 /// Fires a deferred built-in side-effect. Call ONLY after `self.mutex` has been
 /// unlocked: `resume_picker`/`export_markdown` re-enter the session through the
 /// app layer and would deadlock if fired while the mutex is held.
-fn fireDeferredAction(action: DeferredAction) void {
+fn fireDeferredAction(session: *Session, action: DeferredAction) void {
     switch (action) {
         .none => {},
         .resume_picker => if (g_session_resume_trigger) |t| t(),
-        .model_switch_picker => if (g_model_switch_trigger) |t| t(),
+        // Targets the session that submitted `/model` (copilot sidebar OR a tab),
+        // not the active tab — they can differ.
+        .model_switch_picker => if (g_model_switch_trigger) |t| t(session),
         .export_markdown => |mode| if (g_markdown_export_trigger) |t| t(mode),
     }
 }
@@ -359,7 +361,7 @@ var g_default_working_dir_len: usize = 0;
 var g_session_id_counter = std.atomic.Value(u64).init(1);
 var g_session_resume_trigger: ?*const fn () void = null;
 var g_markdown_export_trigger: ?*const fn (MarkdownExportMode) void = null;
-var g_model_switch_trigger: ?*const fn () void = null;
+var g_model_switch_trigger: ?*const fn (*Session) void = null;
 
 /// Resolved credentials for the `ai-subagent-profile` config key. Owned
 /// strings; freed by ChatRequest.deinit.
@@ -405,7 +407,7 @@ pub fn setSessionResumeTrigger(cb: ?*const fn () void) void {
 
 /// Wire the callback that `/model` fires (after unlock) to either switch by the
 /// pending name or open the profile picker. Lives in the app layer.
-pub fn setModelSwitchTrigger(cb: ?*const fn () void) void {
+pub fn setModelSwitchTrigger(cb: ?*const fn (*Session) void) void {
     g_model_switch_trigger = cb;
 }
 
@@ -1858,7 +1860,7 @@ pub const Session = struct {
             self.clearPendingWeixinReplyContextLocked();
             self.mutex.unlock();
             self.notifyHistoryChange(r.history_change);
-            fireDeferredAction(r.deferred);
+            fireDeferredAction(self, r.deferred);
             return;
         }
         // 2) Custom command, matched by first token.
@@ -1870,7 +1872,7 @@ pub const Session = struct {
                     self.clearPendingWeixinReplyContextLocked();
                     self.mutex.unlock();
                     self.notifyHistoryChange(r.history_change);
-                    fireDeferredAction(r.deferred);
+                    fireDeferredAction(self, r.deferred);
                     return;
                 }
             }
@@ -1884,7 +1886,7 @@ pub const Session = struct {
                 self.clearPendingWeixinReplyContextLocked();
                 self.mutex.unlock();
                 self.notifyHistoryChange(r.history_change);
-                fireDeferredAction(r.deferred);
+                fireDeferredAction(self, r.deferred);
                 return;
             }
         }

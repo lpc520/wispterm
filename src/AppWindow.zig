@@ -149,8 +149,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
     // `/model [name]` switches the active session's profile (and summarizes the
     // prior context with the new model). Empty pending name => open the picker.
     ai_chat.setModelSwitchTrigger(struct {
-        fn cb() void {
-            const chat = activeAiChat() orelse return;
+        fn cb(chat: *ai_chat.Session) void {
             const name = chat.takePendingModelSwitchName();
             if (name.len > 0) {
                 overlays.switchModelByName(chat, name);
