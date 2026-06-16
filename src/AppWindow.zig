@@ -35,6 +35,7 @@ const platform_menu = @import("platform/menu.zig");
 const platform_notifications = @import("platform/notifications.zig");
 const notif_mod = @import("notification.zig");
 const platform_pty_command = @import("platform/pty_command.zig");
+const copilot_hint_gate = @import("copilot_hint_gate.zig");
 const platform_window_state = @import("platform/window_state.zig");
 const platform_wsl = @import("platform/wsl.zig");
 const startup_tabs = @import("startup_tabs.zig");
@@ -4502,6 +4503,7 @@ threadlocal var g_agent_context_surface_id: [16]u8 = undefined;
 threadlocal var g_agent_context_surface_id_len: usize = 0;
 pub threadlocal var g_copy_on_select: bool = false;
 pub threadlocal var g_copilot_hint: bool = true;
+threadlocal var g_copilot_shimmer_checked: bool = false;
 pub threadlocal var g_right_click_action: Config.RightClickAction = .copy;
 pub threadlocal var g_ssh_legacy_algorithms: bool = false;
 pub threadlocal var g_desktop_notifications: bool = true;
@@ -8205,6 +8207,14 @@ fn runMainLoop(self: *AppWindow) !void {
         renderAiCopilotPanel(fb_width, fb_height, titlebar_offset);
         overlays.renderBrowserUrlBar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         if (!aiCopilotVisible() and isActiveTabTerminal() and !anyRightDockPanelVisible() and g_copilot_hint) {
+            if (!g_copilot_shimmer_checked) {
+                g_copilot_shimmer_checked = true;
+                const hint_shown = if (g_allocator) |alloc| platform_window_state.copilotHintShown(alloc) else true;
+                if (copilot_hint_gate.shimmerDecision(true, true, hint_shown) == .shimmer) {
+                    overlays.copilotEdgeHandleStartShimmer();
+                    if (g_allocator) |alloc| platform_window_state.setCopilotHintShown(alloc);
+                }
+            }
             overlays.renderCopilotEdgeHandle(
                 @floatFromInt(fb_width),
                 @floatFromInt(fb_height),
