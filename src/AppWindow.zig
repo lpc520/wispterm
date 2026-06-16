@@ -146,6 +146,19 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
             exportActiveAiChatMarkdown(mode);
         }
     }.cb);
+    // `/model [name]` switches the active session's profile (and summarizes the
+    // prior context with the new model). Empty pending name => open the picker.
+    ai_chat.setModelSwitchTrigger(struct {
+        fn cb() void {
+            const chat = activeAiChat() orelse return;
+            const name = chat.takePendingModelSwitchName();
+            if (name.len > 0) {
+                overlays.switchModelByName(chat, name);
+            } else {
+                overlays.openSwitchModelPicker(chat);
+            }
+        }
+    }.cb);
     app.maybeStartStartupUpdateCheck();
 
     try ensureGlobalAgentHistoryStore(allocator);
