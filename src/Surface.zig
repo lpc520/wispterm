@@ -55,6 +55,10 @@ const OscParseState = enum { ground, esc, osc_num, osc_semi, osc_title };
 const ImageOscParseState = enum {
     ground,
     esc,
+    /// Swallow tmux/screen title sequences: ESC k <title> ST.
+    screen_title,
+    /// Saw ESC inside a screen-title sequence; next byte may be '\' (ST).
+    screen_title_esc,
     osc_prefix,
     image_osc,
     image_osc_esc,
@@ -672,20 +676,19 @@ pub fn setSshConnection(
     password_auth: bool,
     legacy_algorithms: bool,
 ) void {
-    var conn: SshConnection = .{};
-    conn.user_len = @min(user.len, conn.user_buf.len);
-    conn.host_len = @min(host.len, conn.host_buf.len);
-    conn.port_len = @min(port.len, conn.port_buf.len);
-    conn.password_len = @min(password.len, conn.password_buf.len);
-    conn.proxy_jump_len = @min(proxy_jump.len, conn.proxy_jump_buf.len);
-    @memcpy(conn.user_buf[0..conn.user_len], user[0..conn.user_len]);
-    @memcpy(conn.host_buf[0..conn.host_len], host[0..conn.host_len]);
-    @memcpy(conn.port_buf[0..conn.port_len], port[0..conn.port_len]);
-    @memcpy(conn.password_buf[0..conn.password_len], password[0..conn.password_len]);
-    @memcpy(conn.proxy_jump_buf[0..conn.proxy_jump_len], proxy_jump[0..conn.proxy_jump_len]);
-    conn.password_auth = password_auth;
+    var conn = SshConnection.fromParts(.{
+        .user = user,
+        .host = host,
+        .port = port,
+        .password = password,
+        .proxy_jump = proxy_jump,
+        .auth_method = if (password_auth) .password else .credentials,
+    });
     conn.legacy_algorithms = legacy_algorithms;
+    self.setSshConnectionValue(conn);
+}
 
+pub fn setSshConnectionValue(self: *Surface, conn: SshConnection) void {
     self.launch_kind = .ssh;
     self.ssh_connection = conn;
 }
@@ -906,6 +909,14 @@ pub fn getCwd(self: *const Surface) ?[]const u8 {
     return null;
 }
 
+/// True when the alternate screen buffer is active. Used as a cheap, local
+/// signal that a full-screen app (notably an attached `tmux`) is running:
+/// plain tmux consumes OSC 7, so the OSC 7-derived cwd goes stale and a live
+/// remote pane-cwd query is preferred for path resolution.
+pub fn isAltScreenActive(self: *const Surface) bool {
+    return self.terminal.screens.active_key == .alternate;
+}
+
 /// Get the platform launch directory for shells that do not report OSC 7.
 pub fn getInitialCwd(self: *const Surface) ?[]const u8 {
     if (self.initial_cwd_path_len > 0)
@@ -1049,12 +1060,34 @@ pub fn feedVtWithWispTermImageFallback(self: *Surface, data: []const u8) void {
                     self.wispterm_image_osc_buf.clearRetainingCapacity();
                     self.wispterm_image_osc_state = .osc_prefix;
                     passthrough_start = i + 1;
+                } else if (byte == 'k') {
+                    // GNU screen/tmux title sequence: ESC k <title> ESC \.
+                    // ghostty-vt doesn't implement ESC k yet; forwarding it
+                    // lets the title payload (often the running command such
+                    // as "ls" or "cd") render as stray pane text.
+                    self.wispterm_image_osc_state = .screen_title;
+                    passthrough_start = i + 1;
                 } else {
                     self.vt_stream.nextSlice("\x1b");
                     self.vt_stream.nextSlice(data[i .. i + 1]);
                     self.wispterm_image_osc_state = .ground;
                     passthrough_start = i + 1;
                 }
+            },
+            .screen_title => switch (byte) {
+                0x07 => {
+                    self.wispterm_image_osc_state = .ground;
+                    passthrough_start = i + 1;
+                },
+                0x1b => {
+                    self.wispterm_image_osc_state = .screen_title_esc;
+                    passthrough_start = i + 1;
+                },
+                else => passthrough_start = i + 1,
+            },
+            .screen_title_esc => {
+                self.wispterm_image_osc_state = if (byte == '\\') .ground else .screen_title;
+                passthrough_start = i + 1;
             },
             .osc_prefix => {
                 const matched = self.wispterm_image_osc_buf.items.len;
