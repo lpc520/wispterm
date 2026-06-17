@@ -148,6 +148,9 @@ bug reports, open a WispTerm AI Chat tab or Copilot sidebar and ask the bundled
 skill to collect the environment, analyze the issue, and draft a GitHub issue
 body:
 
+If the skill is missing or outdated, open **Skill Center** and download/update
+the latest skills from GitHub first.
+
 ```text
 $wispterm-diagnostics
 Problem type: ssh-disconnect
