@@ -76,6 +76,13 @@ remote-enabled = false
 | `restore-tabs-on-startup` | `false` | 关闭时持久化标签/分屏布局（`session.json`），下次启动重建。SSH 密码永不持久化，重连会再次提示。`--cwd` 覆盖会跳过恢复 |
 | `auto-update-check` | `true` | 启动后检查 GitHub Releases，有新版时提示 |
 | `config-file` | *(无)* | 包含另一个配置文件（前缀 `?` 表示可选） |
+| `ai-default-profile` | *(无)* | New Agent、启动自动打开、远程自动打开和 Copilot 默认使用的已保存 AI profile 名。空值会回退到第一个已保存 profile。`/model` 只改变当前会话，不会改写该键 |
+| `ai-agent-enabled` | `false` | 默认启用 AI Chat profile 的 agent 工具 |
+| `ai-agent-permission` | `ask` | Agent 工具权限模式：`ask`、`auto` 或 `full` |
+| `ai-agent-command-timeout-ms` | `60000` | Agent shell/SSH 命令超时时间 |
+| `ai-agent-output-limit` | `16384` | 单次工具结果最多返回的字节数 |
+| `ai-agent-working-dir` | *(无)* | Agent 本地命令默认工作目录。空值表示不设置 |
+| `copilot-hint` | `true` | 显示右边缘 Copilot 召出握柄和一次性微闪提示。设为 `false` 可隐藏该发现入口 |
 | `remote-enabled` | `false` | 为本实例启动共享出站 RemoteClient —— 见 [[远程访问|Remote-Access-zh]] |
 | `remote-server-url` | *(无)* | Cloudflare relay 地址，例如 `https://remote.example.com` |
 | `remote-server-fingerprint` | *(无)* | 用于服务端身份固定的预期 relay 指纹 |

@@ -291,17 +291,21 @@ For release signing and notarization, set `WISPTERM_MACOS_SIGN_IDENTITY` and
 
 ## GitHub Releases
 
-Two GitHub Actions workflows publish release assets whenever a tag matching
+Several GitHub Actions workflows publish release assets whenever a tag matching
 `vX.Y.Z` is pushed:
 
-- `.github/workflows/windows-release.yml` — Windows packages
-- `.github/workflows/macos-release.yml` — macOS DMG images (signed and notarized)
+- `.github/workflows/windows-release.yml` — Windows packages and the diagnostic build
+- `.github/workflows/macos-release.yml` — Apple Silicon macOS DMG (signed and notarized)
+- `.github/workflows/macos-release-x86_64.yml` — Intel macOS DMG, triggered automatically after the Apple Silicon release workflow succeeds
+- `.github/workflows/linux-release.yml` — experimental Linux x86_64 AppImage
+- `.github/workflows/wisptermctl-release.yml` — standalone `wisptermctl` CLI bundle for all desktop platforms
 
 **Windows assets** (per tagged release):
 
 - `wispterm-windows-portable-vX.Y.Z.zip`
 - `wispterm-windows-portable-compat-vX.Y.Z.zip`
 - `wispterm-windows-portable-no-webview-vX.Y.Z.zip`
+- `wispterm-windows-debug-vX.Y.Z.zip`
 
 When WispTerm detects a newer release on Windows, it downloads the matching
 portable zip to the Downloads folder and reveals it in Explorer; unzip it over
@@ -323,6 +327,17 @@ inbox ConPTY.
 
 Both DMGs are signed with a Developer ID Application certificate and notarized
 by Apple. Open the DMG and drag `WispTerm.app` to Applications to install.
+
+**Linux asset** (per tagged release):
+
+- `WispTerm-X.Y.Z-x86_64.AppImage` — experimental x86_64 Linux build that
+  bundles SDL3. It is published for community testing and is not yet considered
+  stable.
+
+**CLI asset** (per tagged release):
+
+- `wisptermctl-vX.Y.Z.zip` — standalone agent terminal-control CLI builds for
+  Linux x86_64/aarch64, macOS Intel/Apple Silicon, and Windows x86_64.
 
 Release notes are checked in under `release-notes/vX.Y.Z.md` when a release
 needs curated notes. If a matching file is present, the workflow prepends it to

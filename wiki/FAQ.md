@@ -86,6 +86,18 @@ Running on a discrete or external GPU avoids the slow path entirely.
 To opt out manually at any time, set `wispterm-d3d-present = false` — see
 [[Configuration]].
 
+## How do I switch AI models without starting a new chat?
+
+In an AI Chat tab or Copilot sidebar, type `/model` to open the saved-profile
+picker, `/model <name>` to switch directly by profile name, or `/模型` for the
+Chinese alias. You can also click the model label in the chat/Copilot header.
+
+The switch only affects the current session. It does not change your global
+default profile or overwrite the saved profile. WispTerm asks the new model to
+summarize the prior transcript in the background and shows that handoff as a
+collapsible **Conversation summary** card; if the summary fails, the full raw
+history stays available.
+
 ## How do I report a crash or freeze? (Windows debug build)
 
 Every Windows release also ships a **`wispterm-windows-debug-<version>.zip`** on
@@ -114,9 +126,10 @@ changes without a restart. Full details and the key reference are in
 
 ## Is there a Linux build?
 
-WispTerm ships for **Windows** and **macOS** today. The **Linux** port is still
-in progress — track it in
-[`TODO.md`](https://github.com/xuzhougeng/wispterm/blob/main/TODO.md).
+Yes, but it is experimental. Releases include a Linux x86_64 AppImage for
+community testing. It bundles SDL3 and is useful for early feedback, but the
+Linux port is not yet considered stable. Run it from a terminal so startup or
+graphics errors are visible.
 
 ---
 *See also: [[Configuration]] · [[Remote-Access]] · [[Home]]*

@@ -12,7 +12,8 @@ WispTerm 用 Zig 编写，终端模拟由
 ## 平台支持
 
 WispTerm 提供 **Windows** 与 **macOS**（Apple Silicon 与 Intel）版本，**Linux**
-移植仍在进行中，因此下文少数功能目前仅限 Windows 或 macOS —— 相关处都会注明。
+x86_64 AppImage 会作为社区测试版本发布，仍属实验性质；下文少数功能存在平台差异，
+相关处都会注明。
 
 ## 功能一览
 
@@ -29,7 +30,7 @@ WispTerm 提供 **Windows** 与 **macOS**（Apple Silicon 与 Intel）版本，*
 
 ## 从这里开始
 
-1. **[[安装|Installation-zh]]** —— 在 Windows 或 macOS 上下载并运行 WispTerm。
+1. **[[安装|Installation-zh]]** —— 在 Windows、macOS 或实验性 Linux 上下载并运行 WispTerm。
 2. **[[快速上手|Getting-Started-zh]]** —— 首次启动、命令中心、标签与会话。
 3. **[[配置|Configuration-zh]]** —— 配置文件在哪里、可以设置哪些项。
 

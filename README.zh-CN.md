@@ -18,7 +18,7 @@
 
 > [!NOTE]
 > WispTerm 提供 **Windows** 与 **macOS**（Apple Silicon 与 Intel）版本。**Linux**
-> 移植仍在进行中（见 [TODO.md](TODO.md)）。
+> AppImage 会作为社区测试版本发布，仍属实验性质。
 
 ## 功能特性
 
@@ -33,6 +33,7 @@
 - **内嵌浏览器面板** —— 在侧边 WebView2 面板或默认浏览器中打开网址，并为 profile 会话提供持久的 SSH 回环端口转发
 - **SSH 端口转发管理器** —— 在专用标签页中静默管理本地与反向 SSH 转发规则
 - **AI 智能体会话** —— 启动 OpenAI 兼容的智能体标签页，配置 profile、恢复历史，导出完整或精简的 Markdown 对话记录
+- **会话内切换模型** —— 输入 `/model` 或点击模型标签，把当前 AI Chat/Copilot 会话切到另一个已保存 profile，并用摘要交接上下文
 - **AI 历史浏览器** —— 浏览本地、WSL 与 SSH 上的 Codex / Claude Code / Reasonix 历史，并从原始项目目录恢复会话
 - **Kitty 图形协议** —— 通过 `imgcat.py` / `pdfcat.py` 在远程 shell 中内联显示图片和 PDF
 - **可选的远程访问** —— 通过 Cloudflare 托管的中继分享会话密钥（默认关闭）
@@ -246,7 +247,7 @@ MIT
 
 ## 引用
 
-Xu, Z.-G. (2026). *WispTerm* (Version 1.20.0) [Computer software]. Zenodo.
+Xu, Z.-G. (2026). *WispTerm* (Version 1.24.0) [Computer software]. Zenodo.
 https://doi.org/10.5281/zenodo.20660542
 
 可直接复制的致谢模板：
@@ -255,6 +256,6 @@ https://doi.org/10.5281/zenodo.20660542
 我们在生命科学数据分析中使用 WispTerm 作为计算环境的一部分，用于远程计算流程、
 可重复的命令行处理，以及相关文献与分析代码的整理。
 
-Xu, Z.-G. (2026). WispTerm (Version 1.20.0) [Computer software]. Zenodo.
+Xu, Z.-G. (2026). WispTerm (Version 1.24.0) [Computer software]. Zenodo.
 https://doi.org/10.5281/zenodo.20660542
 ```

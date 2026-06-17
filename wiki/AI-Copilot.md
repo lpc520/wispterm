@@ -15,8 +15,9 @@ model, API key, and agent mode before the first launch.
 
 Manage the default AI profile from Settings. Profile data is stored under the
 platform config directory in `ai_profiles/` (`%APPDATA%\wispterm\ai_profiles` on
-Windows, `~/Library/Application Support/wispterm/ai_profiles` on macOS), with
-fields hex-encoded on disk.
+Windows, `~/Library/Application Support/wispterm/ai_profiles` on macOS, or
+`$XDG_CONFIG_HOME/wispterm/ai_profiles` / `~/.config/wispterm/ai_profiles` on
+Linux), with fields hex-encoded on disk.
 
 ## Providers & protocols
 
@@ -110,6 +111,21 @@ an alias for `ask`):
   and dangerous commands.
 - `full` — skip approval guard prompts entirely.
 
+## Switching models in a running session
+
+Use `/model` in an AI Chat tab or Copilot sidebar to open a picker of saved AI
+profiles. Use `/model <name>` to switch directly by profile name; matching is
+case-insensitive. The Chinese alias `/模型` works the same way. You can also
+click the model label in the chat/Copilot header to open the picker.
+
+The switch is local to the current session. It changes the provider/model fields
+used by that chat, but it does not change `ai-default-profile`, the saved
+profile on disk, or the conversation's persona/system prompt. After switching,
+WispTerm asks the new model to summarize the prior transcript in the background
+and collapses the old turns into a **Conversation summary** card. You can keep
+typing while the summary runs; if the summary request fails, WispTerm keeps the
+full raw history instead.
+
 ## Remote approval replies
 
 If WeChat direct control is connected, a pending Copilot approval can also be
@@ -138,6 +154,8 @@ Built-in commands handled in the panel (not sent to the model):
 - `/reload-commands` — rescan the custom `commands/` directory.
 - `/clear` — clear the conversation context (keeps the tab and profile).
 - `/resume` — open the saved-conversation history picker.
+- `/model [name]` — open the saved-profile picker or switch directly by name.
+  `/模型` is the Chinese alias.
 - `/permission [ask|auto|full]` — show or change the tool permission.
 - `/export [full]` — write the conversation to Markdown (clean by default).
 - `/distill [topic]` / `/沉淀 [主题]` — preview a reusable skill from this chat.
@@ -147,8 +165,9 @@ Built-in commands handled in the panel (not sent to the model):
 
 Drop Markdown files in a `commands/` directory under the platform config
 directory (`%APPDATA%\wispterm\commands` on Windows), the current working
-directory, or next to the `wispterm` executable. Each `*.md` file is one
-command, named by its `name:` frontmatter:
+directory, or next to the `wispterm` executable. On macOS/Linux the same
+directory lives under the platform config root. Each `*.md` file is one command,
+named by its `name:` frontmatter:
 
 ```markdown
 ---

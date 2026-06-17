@@ -44,6 +44,12 @@
        submitting to Flathub; omitted here so the file validates without a stale URL. -->
 
   <releases>
+    <release version="1.24.0" date="2026-06-17">
+      <description>
+        <p>Adds in-session AI model switching, improves Copilot discoverability,
+        and fixes tmux/SSH preview paths plus macOS Intel crash paths.</p>
+      </description>
+    </release>
     <release version="1.18.0" date="2026-06-11">
       <description>
         <p>Improves SSH folder upload/download support, adds terminal click

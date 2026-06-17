@@ -2,10 +2,10 @@
 
 *English · [中文](Installation-zh)*
 
-> Download and run WispTerm on Windows or macOS, or build it from source.
+> Download and run WispTerm on Windows, macOS, or experimental Linux, or build it from source.
 
-WispTerm ships for **Windows** and **macOS**. The Linux port is still in
-progress (see [`TODO.md`](https://github.com/xuzhougeng/wispterm/blob/main/TODO.md)).
+WispTerm ships for **Windows** and **macOS**. A **Linux** x86_64 AppImage is
+also published for community testing and remains experimental.
 
 ## Windows
 
@@ -34,6 +34,20 @@ Intel) and move it to `/Applications`.
 
 > Passing command-line options requires the binary path — double-clicking the
 > `.app` cannot take flags.
+
+## Linux (experimental)
+
+Download the `WispTerm-*-x86_64.AppImage` release asset, mark it executable, and
+run it:
+
+```bash
+chmod +x WispTerm-*-x86_64.AppImage
+./WispTerm-*-x86_64.AppImage
+```
+
+On hosts without FUSE support, add `--appimage-extract-and-run`. The Linux build
+bundles SDL3 and is intended for community testing; it is not yet considered
+stable.
 
 ## Build from source
 

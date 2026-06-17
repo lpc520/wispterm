@@ -14,7 +14,9 @@
 
 在设置里管理默认 AI profile。profile 数据保存在平台配置目录的 `ai_profiles/` 下
 （Windows 上 `%APPDATA%\wispterm\ai_profiles`，macOS 上
-`~/Library/Application Support/wispterm/ai_profiles`），各字段在磁盘上以十六进制编码。
+`~/Library/Application Support/wispterm/ai_profiles`，Linux 上
+`$XDG_CONFIG_HOME/wispterm/ai_profiles` 或 `~/.config/wispterm/ai_profiles`），各字段在
+磁盘上以十六进制编码。
 
 ## 提供方与协议
 
@@ -95,6 +97,18 @@ Copilot 支持兼容 OpenAI 的 **Chat Completions**、OpenAI 的 **Responses** 
 - `auto` —— 普通工具自动执行，但受保护路径和危险命令仍需确认。
 - `full` —— 完全跳过审批守卫提示。
 
+## 在运行中的会话切换模型
+
+在 AI Chat 标签或 Copilot 侧栏中输入 `/model` 可打开已保存 AI profile 选择器。输入
+`/model <name>` 可按 profile 名直接切换（大小写不敏感）；中文别名 `/模型` 行为相同。
+也可以点击聊天/Copilot 头部的模型标签打开选择器。
+
+切换只影响当前会话。它会改变该聊天使用的 provider/model 字段，但不会修改
+`ai-default-profile`、磁盘上的已保存 profile，也不会改变该会话的人设/system prompt。
+切换后，WispTerm 会让新模型在后台总结此前对话，并把旧 turn 折叠成 **Conversation
+summary / 上文摘要** 卡片。摘要运行时你可以继续输入；如果摘要请求失败，WispTerm 会保留
+完整原始历史。
+
 ## 远程审批回复
 
 如果已连接微信直连，等待中的 Copilot 审批也可以发送到微信。回复 `Y`/`yes` 表示批准，
@@ -119,6 +133,7 @@ Codex、Claude Code、Reasonix 的对话记录。WispTerm 连接目标，扫描 
 - `/reload-commands` —— 重新扫描自定义 `commands/` 目录。
 - `/clear` —— 清空会话上下文（保留标签与 profile）。
 - `/resume` —— 打开已保存对话的历史选择器。
+- `/model [name]` —— 打开已保存 profile 选择器，或按名称直接切换。`/模型` 是中文别名。
 - `/permission [ask|auto|full]` —— 显示或修改工具权限。
 - `/export [full]` —— 把对话写成 Markdown（默认精简版）。
 - `/distill [topic]` / `/沉淀 [主题]` —— 从本次对话预览一个可复用技能。
@@ -126,9 +141,9 @@ Codex、Claude Code、Reasonix 的对话记录。WispTerm 连接目标，扫描 
 
 ## 自定义斜杠命令
 
-把 Markdown 文件放进平台配置目录（Windows 上 `%APPDATA%\wispterm\commands`）、当前工作
-目录或 `wispterm` 可执行文件旁的 `commands/` 目录。每个 `*.md` 文件是一条命令，以其
-`name:` frontmatter 命名：
+把 Markdown 文件放进平台配置目录（Windows 上 `%APPDATA%\wispterm\commands`，macOS/Linux
+则位于对应平台配置根目录下）、当前工作目录或 `wispterm` 可执行文件旁的 `commands/`
+目录。每个 `*.md` 文件是一条命令，以其 `name:` frontmatter 命名：
 
 ```markdown
 ---

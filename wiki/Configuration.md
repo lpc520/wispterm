@@ -76,6 +76,13 @@ remote-enabled = false
 | `restore-tabs-on-startup` | `false` | Persist tab/split layout (`session.json`) on close and rebuild on next launch. SSH passwords are never persisted; reconnects re-prompt. `--cwd` overrides skip restore |
 | `auto-update-check` | `true` | Check GitHub Releases after startup and prompt when a newer version exists |
 | `config-file` | *(none)* | Include another config file (prefix `?` to make optional) |
+| `ai-default-profile` | *(none)* | Saved AI profile name used by New Agent, startup auto-open, remote auto-open, and Copilot defaults. Empty falls back to the first saved profile. `/model` changes only the current session and does not rewrite this key |
+| `ai-agent-enabled` | `false` | Enable agent tools for AI Chat profiles by default |
+| `ai-agent-permission` | `ask` | Agent tool permission mode: `ask`, `auto`, or `full` |
+| `ai-agent-command-timeout-ms` | `60000` | Timeout budget for agent shell/SSH commands |
+| `ai-agent-output-limit` | `16384` | Maximum bytes returned from a single tool result |
+| `ai-agent-working-dir` | *(none)* | Default working directory for agent local commands. Empty leaves it unset |
+| `copilot-hint` | `true` | Show the right-edge Copilot summon handle and one-time shimmer hint. Set to `false` to hide that discovery affordance |
 | `remote-enabled` | `false` | Start the shared outbound RemoteClient for this instance — see [[Remote-Access]] |
 | `remote-server-url` | *(none)* | Cloudflare relay URL, e.g. `https://remote.example.com` |
 | `remote-server-fingerprint` | *(none)* | Expected relay fingerprint for server identity pinning |

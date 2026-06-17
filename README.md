@@ -17,8 +17,9 @@ English | [简体中文](README.zh-CN.md)
 **WispTerm** is a cross-platform terminal workspace for remote development and AI agent workflows. It is written in Zig and powered by [libghostty-vt](https://github.com/ghostty-org/ghostty) for terminal emulation.
 
 > [!NOTE]
-> WispTerm ships for **Windows** and **macOS** (Apple Silicon and Intel). The
-> **Linux** port is still in progress (see [TODO.md](TODO.md)).
+> WispTerm ships for **Windows** and **macOS** (Apple Silicon and Intel). A
+> **Linux** AppImage is published for community testing and remains
+> experimental.
 
 ## Features
 
@@ -33,6 +34,7 @@ English | [简体中文](README.zh-CN.md)
 - **Embedded browser panel** - open web URLs in a side WebView2 panel or the default browser, with persistent SSH loopback port forwarding for profile sessions
 - **SSH port forwarding manager** - silently manage local and reverse SSH forwarding rules from a dedicated tab
 - **AI Agent sessions** - launch OpenAI-compatible Agent tabs, configure profiles, restore history, export Markdown transcripts, and distill reusable local skills
+- **In-session model switching** - use `/model` or click the model label to move an active AI chat/Copilot session to another saved profile with a context summary handoff
 - **AI history browser** - browse local, WSL, and SSH Codex / Claude Code / Reasonix history and resume sessions from their original project directories
 - **Kitty Graphics protocol** - display inline images and PDFs from remote shells via `imgcat.py` / `pdfcat.py`
 - **Opt-in remote access** - share a session key over a Cloudflare-hosted relay (disabled by default)
@@ -247,7 +249,7 @@ MIT
 
 ## Citation
 
-Xu, Z.-G. (2026). *WispTerm* (Version 1.20.0) [Computer software]. Zenodo.
+Xu, Z.-G. (2026). *WispTerm* (Version 1.24.0) [Computer software]. Zenodo.
 https://doi.org/10.5281/zenodo.20660542
 
 Copyable acknowledgment template:
@@ -257,6 +259,6 @@ We used WispTerm as part of our computational environment for life sciences data
 analysis, remote computing workflows, reproducible command-line processing, and
 the organization of related literature and analysis code.
 
-Xu, Z.-G. (2026). WispTerm (Version 1.20.0) [Computer software]. Zenodo.
+Xu, Z.-G. (2026). WispTerm (Version 1.24.0) [Computer software]. Zenodo.
 https://doi.org/10.5281/zenodo.20660542
 ```

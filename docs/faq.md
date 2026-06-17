@@ -100,6 +100,18 @@ to filter, then run an action — almost every app feature is reachable from her
 so it is the fastest way to discover what WispTerm can do. The command center
 also includes a Copilot history picker for resuming past AI sessions.
 
+## How Do I Switch AI Models Without Starting a New Chat?
+
+In an AI Chat tab or Copilot sidebar, type `/model` to open the saved-profile
+picker, `/model <name>` to switch directly by profile name, or `/模型` for the
+Chinese alias. You can also click the model label in the chat/Copilot header.
+
+The switch only affects the current session. It does not change your global
+default profile or overwrite the saved profile. WispTerm asks the new model to
+summarize the prior transcript in the background and shows that handoff as a
+collapsible **Conversation summary** card; if the summary fails, the full raw
+history stays available.
+
 ## How Do I Update WispTerm?
 
 By default WispTerm checks GitHub Releases shortly after startup and shows a
@@ -114,6 +126,13 @@ command center:
 
 After upgrading, run **What's New** from the command center (it also pops up
 automatically the first time you launch a new version) to see what changed.
+
+## Is There a Linux Build?
+
+Yes, but it is experimental. Releases include a Linux x86_64 AppImage for
+community testing. It bundles SDL3 and is useful for early feedback, but the
+Linux port is not yet considered stable. Run it from a terminal so startup or
+graphics errors are visible.
 
 ## How Do I Update the Built-in AI Skills?
 

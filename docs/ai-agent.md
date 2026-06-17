@@ -7,8 +7,9 @@ model, API key, and agent mode before the first launch.
 
 Manage the default AI profile from Settings. Profile data is stored under the
 platform config directory (`ai_profiles/`) — `%APPDATA%\wispterm\ai_profiles` on
-Windows, `~/Library/Application Support/wispterm/ai_profiles` on macOS — with
-fields hex encoded on disk.
+Windows, `~/Library/Application Support/wispterm/ai_profiles` on macOS, or
+`$XDG_CONFIG_HOME/wispterm/ai_profiles` (fallback `~/.config/wispterm/ai_profiles`)
+on Linux — with fields hex encoded on disk.
 
 Copilot can speak OpenAI-compatible Chat Completions, the OpenAI Responses API,
 or the Anthropic Messages API. Set the profile Protocol field to
@@ -45,6 +46,21 @@ the assistant reply. This follows DeepSeek's
 [thinking mode guide](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode).
 Completed requests show elapsed time in the Copilot status area, and token usage
 when the provider returns OpenAI-compatible `usage` fields.
+
+## Switching models in a running session
+
+Use `/model` in an AI Chat tab or Copilot sidebar to open a picker of saved AI
+profiles. Use `/model <name>` to switch directly by profile name; matching is
+case-insensitive. The Chinese alias `/模型` works the same way. You can also
+click the model label in the chat/Copilot header to open the picker.
+
+The switch is local to the current session. It changes the provider/model fields
+used by that chat, but it does not change `ai-default-profile`, the saved
+profile on disk, or the conversation's persona/system prompt. After switching,
+WispTerm asks the new model to summarize the prior transcript in the background
+and collapses the old turns into a `Conversation summary` card. You can keep
+typing while the summary runs; if the summary request fails, WispTerm keeps the
+full raw history instead.
 
 ## Sessions
 
@@ -150,8 +166,9 @@ local PowerShell/cmd tool calls do not flash a separate console window.
 Agent chats can load local skills from `skills/<skill-name>/SKILL.md` or
 `plugins/skills/<skill-name>/SKILL.md` under the platform config directory
 (`%APPDATA%\wispterm` on Windows, `~/Library/Application Support/wispterm` on
-macOS), the current working directory, or the directory containing the
-`wispterm` executable.
+macOS, `$XDG_CONFIG_HOME/wispterm` or `~/.config/wispterm` on Linux), the
+current working directory, or the directory containing the `wispterm`
+executable.
 Use `$skill-name your request` to explicitly load a skill for the next request.
 The loaded skill is stored as a replayable tool result in the chat history, so
 existing conversations stay reproducible even if the skill file changes later.
@@ -164,6 +181,8 @@ Local slash commands (handled in the panel, without calling the model):
 - `/reload-commands` rescans the custom `commands/` directory.
 - `/clear` clears the current conversation context (keeps the tab and profile).
 - `/resume` opens the saved-conversation history picker.
+- `/model` opens the saved-profile picker; `/model <name>` switches directly.
+  `/模型` is the Chinese alias.
 - `/permission` shows the agent tool permission; `/permission ask`,
   `/permission auto`, or `/permission full` changes it at runtime.
   `ask` prompts for normal tool use, `auto` runs ordinary tools automatically
@@ -214,9 +233,10 @@ instead of being saved.
 
 Add your own slash commands by dropping Markdown files in a `commands/`
 directory under the platform config directory (`%APPDATA%\wispterm\commands` on
-Windows, `~/Library/Application Support/wispterm/commands` on macOS), the current
-working directory, or next to the `wispterm` executable. Each `*.md` file is one
-command, named by its `name:` frontmatter field:
+Windows, `~/Library/Application Support/wispterm/commands` on macOS, or
+`$XDG_CONFIG_HOME/wispterm/commands` / `~/.config/wispterm/commands` on Linux),
+the current working directory, or next to the `wispterm` executable. Each
+`*.md` file is one command, named by its `name:` frontmatter field:
 
 ```markdown
 ---

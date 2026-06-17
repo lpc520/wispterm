@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>WispTerm — 由 Ghostty 驱动的 Windows &amp; macOS 终端</title>
-  <meta name="description" content="WispTerm 是一款用 Zig 编写、由 libghostty-vt 驱动的现代终端模拟器，支持 Windows 与 macOS。支持分屏、标签、AI Agent 工具、主题、背景图等。">
-  <meta property="og:title" content="WispTerm — 由 Ghostty 驱动的 Windows &amp; macOS 终端">
-  <meta property="og:description" content="一款用 Zig 编写、由 libghostty-vt 驱动的现代终端，支持 Windows 与 macOS。">
+  <title>WispTerm — 由 Ghostty 驱动的 Windows、macOS 与实验性 Linux 终端</title>
+  <meta name="description" content="WispTerm 是一款用 Zig 编写、由 libghostty-vt 驱动的现代终端模拟器，支持 Windows、macOS 与实验性 Linux。支持分屏、标签、AI Agent 工具、主题、背景图等。">
+  <meta property="og:title" content="WispTerm — 由 Ghostty 驱动的 Windows、macOS 与实验性 Linux 终端">
+  <meta property="og:description" content="一款用 Zig 编写、由 libghostty-vt 驱动的现代终端，支持 Windows、macOS 与实验性 Linux。">
   <meta property="og:image" content="assets/wispterm.png">
   <meta property="og:type" content="website">
   <meta name="theme-color" content="#1b1e28">
@@ -47,12 +47,12 @@
       <div class="container hero-inner">
         <img class="hero-logo" src="assets/wispterm.png" alt="WispTerm Logo" width="128" height="128">
         <h1>WispTerm</h1>
-        <p class="tagline">一款用 Zig 编写、由 <a href="https://github.com/ghostty-org/ghostty" target="_blank" rel="noopener">libghostty-vt</a> 驱动的<strong>现代 Windows &amp; macOS 终端</strong>。</p>
+        <p class="tagline">一款用 Zig 编写、由 <a href="https://github.com/ghostty-org/ghostty" target="_blank" rel="noopener">libghostty-vt</a> 驱动的<strong>现代 Windows、macOS 与实验性 Linux 终端</strong>。</p>
         <div class="cta-row">
           <a class="cta primary" href="https://github.com/xuzhougeng/wispterm/releases/latest" target="_blank" rel="noopener">下载最新版本</a>
           <a class="cta secondary" href="https://github.com/xuzhougeng/wispterm" target="_blank" rel="noopener">在 GitHub 查看</a>
         </div>
-        <p class="platform-note">支持 <strong>Windows</strong> 与 <strong>macOS</strong>（Apple Silicon &amp; Intel）。Linux 版本正在开发中。</p>
+        <p class="platform-note">支持 <strong>Windows</strong>、<strong>macOS</strong>（Apple Silicon &amp; Intel），并发布<strong>实验性 Linux AppImage</strong>。</p>
       </div>
 
       <div class="container preview-wrap">
@@ -96,7 +96,7 @@
           </div>
           <div class="feature">
             <h3>2 · 配置 LLM 服务商</h3>
-            <p>用 <kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>T</kbd> 打开会话启动器，选择 <code>AI Agent</code>，填入 Base URL、API Key 和模型——默认是 DeepSeek V4。<a href="./ai.zh.html#setup">配置 LLM 服务商 →</a></p>
+            <p>用 <kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>T</kbd> 打开会话启动器，选择 <code>AI Agent</code>，填入 Base URL、API Key 和模型——默认是 DeepSeek V4。之后可用 <code>/model</code> 或模型标签切换。<a href="./ai.zh.html#setup">配置 LLM 服务商 →</a></p>
           </div>
           <div class="feature">
             <h3>3 · 配置 SSH 服务器</h3>
@@ -125,7 +125,11 @@
           </div>
           <div class="feature">
             <h3>AI Agent 标签</h3>
-            <p>AI Chat 可以变成桌面 Agent：读取终端快照、运行本地 Shell 命令（Windows 用 PowerShell，macOS 用 shell）、配合 WSL/SSH 会话、加载本地 Skills，在 WispTerm 内完成工具确认，并导出完整或 clean Markdown 记录。<a href="./ai.zh.html">查看 AI 工作流</a>，或看 <a href="./use-cases.zh.html">使用案例</a>。</p>
+            <p>AI Chat 可以变成桌面 Agent：读取终端快照、运行本地 Shell 命令（Windows 用 PowerShell，macOS/Linux 用 shell）、配合 WSL/SSH 会话、加载本地 Skills，用 <code>/model</code> 在会话内切换模型，在 WispTerm 内完成工具确认，并导出完整或 clean Markdown 记录。<a href="./ai.zh.html">查看 AI 工作流</a>，或看 <a href="./use-cases.zh.html">使用案例</a>。</p>
+          </div>
+          <div class="feature">
+            <h3>工作现场里的 Copilot</h3>
+            <p>使用 <kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>A</kbd>、命令中心，或终端右边缘的 Copilot 握柄，为当前聚焦终端打开随上下文的侧栏。</p>
           </div>
           <div class="feature">
             <h3>内置 453 款主题</h3>
@@ -170,7 +174,7 @@
     <section id="install" class="section alt">
       <div class="container">
         <h2>安装</h2>
-        <p class="section-lead">每个版本提供 Windows 与 macOS 预构建包，按平台和需求选择。</p>
+        <p class="section-lead">每个版本提供 Windows、macOS 与实验性 Linux 预构建包，按平台和需求选择。</p>
         <div class="install-grid">
           <div class="install-card">
             <span class="badge">Windows · 推荐</span>
@@ -188,6 +192,12 @@
             <span class="badge">macOS · Beta</span>
             <h3>macOS DMG</h3>
             <p>经过签名与公证的 <code>.dmg</code>，支持 Apple Silicon 与 Intel，需要 macOS 13+。打开 DMG，将 <code>WispTerm.app</code> 拖入"应用程序"即可。</p>
+            <a class="cta primary small" href="https://github.com/xuzhougeng/wispterm/releases/latest" target="_blank" rel="noopener">最新版本 →</a>
+          </div>
+          <div class="install-card">
+            <span class="badge">Linux · 实验性</span>
+            <h3>AppImage</h3>
+            <p>用于社区测试的 x86_64 便携 AppImage，内置 SDL3。Linux 移植仍在打磨阶段，可能存在边角问题。</p>
             <a class="cta primary small" href="https://github.com/xuzhougeng/wispterm/releases/latest" target="_blank" rel="noopener">最新版本 →</a>
           </div>
           <div class="install-card">
@@ -291,6 +301,7 @@ __wispterm_report_cwd</code></pre>
           <div><span class="label">新建窗口</span><span class="keys"><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>N</kbd></span></div>
           <div><span class="label">切换标签侧栏</span><span class="keys"><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>B</kbd></span></div>
           <div><span class="label">切换文件浏览器</span><span class="keys"><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>Alt/Opt</kbd><kbd>E</kbd></span></div>
+          <div><span class="label">切换 AI Copilot 侧栏</span><span class="keys"><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>A</kbd></span></div>
           <div><span class="label">向右分屏</span><span class="keys"><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>+</kbd></span></div>
           <div><span class="label">向下分屏</span><span class="keys"><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>-</kbd></span></div>
           <div><span class="label">均分分屏尺寸</span><span class="keys"><kbd>Ctrl/Cmd</kbd><kbd>Shift</kbd><kbd>Z</kbd></span></div>
@@ -332,6 +343,10 @@ __wispterm_report_cwd</code></pre>
           <div class="feature">
             <h3>如何兼容老堡垒机或老 SSH 服务器？</h3>
             <p>在配置文件中设置 <code>ssh-legacy-algorithms = true</code>。它会为仍依赖 <code>ssh-rsa</code>、<code>ssh-dss</code>、旧版 Diffie-Hellman KEX 或 CBC cipher 的主机补上兼容选项。</p>
+          </div>
+          <div class="feature">
+            <h3>可以不中断会话切换 AI 模型吗？</h3>
+            <p>可以。在 AI Chat 标签或 Copilot 侧栏里输入 <code>/model</code> 打开已保存 profile 选择器，输入 <code>/model &lt;name&gt;</code> 直接切换，或点击头部模型标签。WispTerm 会为新模型总结此前对话，并且切换只影响当前会话。</p>
           </div>
           <div class="feature" id="ssh-current-directory">
             <h3>为什么 SSH 相对路径下载或拖拽上传找不到当前目录？</h3>
