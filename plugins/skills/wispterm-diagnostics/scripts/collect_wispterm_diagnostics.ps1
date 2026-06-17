@@ -401,6 +401,11 @@ function Get-RenderDiagnosticLogPath {
     return Join-Path $env:APPDATA "wispterm\render-diagnostic.log"
 }
 
+function Get-WispTermDebugLogPath {
+    if (-not $env:APPDATA) { return $null }
+    return Join-Path $env:APPDATA "wispterm\wispterm-debug.log"
+}
+
 function Get-OpenGlFromRenderDiagnosticLog {
     $path = Get-RenderDiagnosticLogPath
     if (-not (Test-PathSafe $path)) { return "unavailable" }
@@ -429,6 +434,31 @@ function Get-RenderDiagnosticLogExcerpt {
         }
     } catch {
         Add-FailedCommand "read render-diagnostic.log" $_.Exception.Message
+        return [pscustomobject]@{
+            Summary = "unavailable"
+            Lines = @()
+        }
+    }
+}
+
+function Get-WispTermDebugLogExcerpt {
+    $path = Get-WispTermDebugLogPath
+    if (-not (Test-PathSafe $path)) {
+        return [pscustomobject]@{
+            Summary = "not found"
+            Lines = @()
+        }
+    }
+
+    try {
+        $item = Get-Item -LiteralPath $path -ErrorAction Stop
+        $lines = @(Get-Content -LiteralPath $path -Tail 120 -ErrorAction Stop | ForEach-Object { Redact-Text $_ })
+        return [pscustomobject]@{
+            Summary = "present ($($item.Length) bytes, updated $($item.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")))"
+            Lines = $lines
+        }
+    } catch {
+        Add-FailedCommand "read wispterm-debug.log" $_.Exception.Message
         return [pscustomobject]@{
             Summary = "unavailable"
             Lines = @()
@@ -476,6 +506,8 @@ function Get-WispTermInfo {
     }
 
     $loader = if ($exeDir) { Join-Path $exeDir "WebView2Loader.dll" } else { $null }
+    $conpty = if ($exeDir) { Join-Path $exeDir "conpty.dll" } else { $null }
+    $openConsole = if ($exeDir) { Join-Path $exeDir "OpenConsole.exe" } else { $null }
     $portableConfig = if ($exeDir) { Join-Path $exeDir "wispterm.conf" } else { $null }
     $package = "unknown"
     if ($exeDir) {
@@ -499,6 +531,8 @@ function Get-WispTermInfo {
         ConfigPath = Format-Value $configPath
         PortableConfig = Get-FileSummary $portableConfig
         WebView2Loader = Get-FileSummary $loader
+        ConptyDll = Get-FileSummary $conpty
+        OpenConsoleExe = Get-FileSummary $openConsole
         AppDataConfig = Get-FileSummary $appDataConfig
         SessionJson = Get-FileSummary $session
         Logs = if (Test-PathSafe $logs) { "present" } else { "not found" }
@@ -731,6 +765,32 @@ function Get-ConfigExcerpt {
 function Get-IssueHints {
     param([string]$Type)
     switch -Regex ($Type) {
+        "(?i)ssh.image|image.preview|preview.image|remote.image" {
+            return @(
+                "- SSH image preview: confirm the session was opened from WispTerm's built-in SSH profile launcher. Remote previews do not work in tabs where `ssh user@host` was typed manually inside a local shell.",
+                "- SSH image preview: include whether Markdown/text preview works in the same SSH session, the image extension, approximate file size, and whether both Ctrl-click and File Explorer double-click fail.",
+                "- SSH image preview: test Ctrl+Shift-click download for the same file. If download also fails, this is likely SSH/SCP/path metadata; if download works but preview fails, this is likely image decode/rendering.",
+                "- SSH image preview: do not paste SSH passwords, private keys, or full private paths."
+            )
+        }
+        "(?i)html.preview|preview.html|html|static.server" {
+            return @(
+                "- HTML preview: state whether the HTML file is local, WSL, or SSH. SSH HTML preview requires a WispTerm SSH profile session, not a manually typed `ssh user@host` tab.",
+                "- HTML preview: WispTerm serves the file's directory over HTTP so relative CSS/JS/images work. In the target environment, run `command -v python3 python node npx; python3 --version; python --version; node --version; npx --version` and paste the non-secret output.",
+                "- HTML preview: for SSH paths, include whether normal loopback URLs such as `http://localhost:<port>` open through WispTerm's SSH tunnel.",
+                "- HTML preview: include the visible WispTerm toast/error text, for example `HTML server not reachable` or `HTML SSH tunnel failed`."
+            )
+        }
+        "(?i)ssh.disconnect|disconnect|eother|ssh_packet_write_poll|connection.*closed" {
+            return @(
+                "- SSH disconnect: `client_loop: ssh_packet_write_poll ... eother` is emitted by Windows OpenSSH while writing a network packet. Do not treat unrelated `CSI t` / `mode 9001` stream warnings as the primary cause.",
+                "- SSH disconnect: if the session drops only after 5-10 minutes of idle time with `client_loop: send disconnect: Connection reset`, test it as an idle-timeout/keepalive case. WispTerm SSH profile sessions are expected to use `ServerAliveInterval=60` and `ServerAliveCountMax=3`; the report must include the exact WispTerm version/package.",
+                "- SSH disconnect: compare `ssh.exe -tt user@host` without keepalive against `ssh.exe -tt -o ServerAliveInterval=60 -o ServerAliveCountMax=3 user@host` outside WispTerm. If only the no-keepalive command drops, focus on keepalive/version; if both drop, focus on network/server/Win32-OpenSSH.",
+                "- SSH disconnect: reproduce outside WispTerm with `ssh.exe -vvv -tt -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 -o ServerAliveCountMax=3 user@host` and paste only the last 80-120 lines before disconnect.",
+                "- SSH disconnect: set `windows-conpty = system`, fully restart WispTerm, and note whether the disconnect still happens.",
+                "- SSH disconnect: compare Git Bash or WSL `ssh -vvv -tt user@host`. If only Windows `ssh.exe` fails, the likely layer is Win32-OpenSSH/network/server rather than WispTerm's VT parser."
+            )
+        }
         "(?i)startup|crash" {
             return @(
                 "- Startup/crash: describe whether a window appears before exit.",
@@ -753,7 +813,8 @@ function Get-IssueHints {
         "(?i)ssh|scp" {
             return @(
                 "- SSH/SCP: include whether password auth or key auth is used, but do not paste the password or private key.",
-                "- SSH/SCP: include the exact OpenSSH error text if an operation fails."
+                "- SSH/SCP: include the exact OpenSSH error text if an operation fails.",
+                "- SSH/SCP: state whether the session was launched from WispTerm's built-in SSH profile launcher or by typing `ssh user@host` in a local shell."
             )
         }
         "(?i)file explorer" {
@@ -811,6 +872,7 @@ function New-MarkdownReport {
     $crashEvents = Get-WispTermCrashEvents $CrashEventDays
     $wer = Get-WerDumpInfo
     $renderLog = Get-RenderDiagnosticLogExcerpt
+    $debugLog = Get-WispTermDebugLogExcerpt
 
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("## WispTerm Diagnostic Report") | Out-Null
@@ -829,6 +891,8 @@ function New-MarkdownReport {
     $lines.Add("- Config path: $($wispterm.ConfigPath)") | Out-Null
     $lines.Add("- Portable config: $($wispterm.PortableConfig)") | Out-Null
     $lines.Add("- WebView2Loader.dll: $($wispterm.WebView2Loader)") | Out-Null
+    $lines.Add("- conpty.dll: $($wispterm.ConptyDll)") | Out-Null
+    $lines.Add("- OpenConsole.exe: $($wispterm.OpenConsoleExe)") | Out-Null
     $lines.Add("") | Out-Null
     $lines.Add("### Windows") | Out-Null
     $lines.Add("- Edition/version/build: $($windows.Edition)") | Out-Null
@@ -863,6 +927,7 @@ function New-MarkdownReport {
     $lines.Add("- WER dump folder: $($wer.DumpFolder)") | Out-Null
     $lines.Add("- WER dump type/count: type=$($wer.DumpType), count=$($wer.DumpCount)") | Out-Null
     $lines.Add("- WER dump files: $($wer.DumpFiles)") | Out-Null
+    $lines.Add("- WispTerm debug log: $($debugLog.Summary)") | Out-Null
     $lines.Add("- Render diagnostic log: $($renderLog.Summary)") | Out-Null
     $lines.Add("") | Out-Null
     $lines.Add("#### Recent Windows Crash Events") | Out-Null
@@ -882,9 +947,17 @@ function New-MarkdownReport {
         $lines.Add('```') | Out-Null
         $lines.Add("") | Out-Null
     }
+    if ($debugLog.Lines.Count -gt 0) {
+        $lines.Add("#### WispTerm Debug Log Excerpt") | Out-Null
+        $lines.Add('```text') | Out-Null
+        foreach ($line in $debugLog.Lines) { $lines.Add($line) | Out-Null }
+        $lines.Add('```') | Out-Null
+        $lines.Add("") | Out-Null
+    }
     $lines.Add("### Relevant Files") | Out-Null
     $lines.Add("- `%APPDATA%\wispterm\config`: $($wispterm.AppDataConfig)") | Out-Null
     $lines.Add("- `%APPDATA%\wispterm\session.json`: $($wispterm.SessionJson)") | Out-Null
+    $lines.Add("- `%APPDATA%\wispterm\wispterm-debug.log`: $($debugLog.Summary)") | Out-Null
     $lines.Add("- `%APPDATA%\wispterm\logs`: $($wispterm.Logs)") | Out-Null
     $lines.Add("- portable `wispterm.conf`: $($wispterm.PortableConfig)") | Out-Null
     $lines.Add("") | Out-Null
@@ -935,6 +1008,19 @@ function Invoke-SelfTest {
 
     $hints = Get-IssueHints "SSH/SCP"
     if ($hints.Count -lt 1) { throw "SSH/SCP hints missing" }
+
+    $sshImageHints = Get-IssueHints "ssh-image-preview"
+    if ($sshImageHints.Count -lt 3) { throw "ssh-image-preview hints missing" }
+    if (($sshImageHints -join "`n") -notmatch "built-in SSH profile") { throw "ssh-image-preview profile guidance missing" }
+
+    $htmlHints = Get-IssueHints "html-preview"
+    if ($htmlHints.Count -lt 3) { throw "html-preview hints missing" }
+    if (($htmlHints -join "`n") -notmatch "python3") { throw "html-preview dependency probe guidance missing" }
+
+    $disconnectHints = Get-IssueHints "ssh-disconnect"
+    if ($disconnectHints.Count -lt 3) { throw "ssh-disconnect hints missing" }
+    if (($disconnectHints -join "`n") -notmatch "ssh_packet_write_poll") { throw "ssh-disconnect OpenSSH error guidance missing" }
+    if (($disconnectHints -join "`n") -notmatch "ServerAliveInterval") { throw "ssh-disconnect keepalive guidance missing" }
 
     $crashHints = Get-IssueHints "startup/crash"
     if ($crashHints.Count -lt 2) { throw "startup/crash hints missing" }

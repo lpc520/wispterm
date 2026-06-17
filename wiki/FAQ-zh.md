@@ -76,6 +76,30 @@ Copilot 头部的模型标签。
 WispTerm 会让新模型在后台总结此前对话，并把交接内容显示为可折叠的 **Conversation
 summary / 上文摘要** 卡片；如果摘要失败，则保留完整原始历史。
 
+## 怎么生成诊断报告？
+
+反馈 Windows 问题时，请在 WispTerm 源码目录，或任何包含
+`plugins\skills\wispterm-diagnostics` 的目录里运行诊断脚本：
+
+```powershell
+cd C:\path\to\wispterm
+powershell -NoProfile -ExecutionPolicy Bypass -File .\plugins\skills\wispterm-diagnostics\scripts\collect_wispterm_diagnostics.ps1 -ProblemType "other"
+```
+
+如果问题类型明确，请把 `-ProblemType` 换成更具体的值：
+
+- `ssh-image-preview`：SSH 图片预览失败，但 Markdown/文本预览正常。
+- `html-preview`：本地、WSL 或 SSH 环境里的 `.html` 预览 / 浏览器面板失败。
+- `ssh-disconnect`：SSH 掉线，并出现 `ssh_packet_write_poll`、`eother`
+  或空闲后的 `Connection reset` 等错误。
+- `startup/crash`、`rendering/DPI`、`high-cpu`、`keyboard/input`、
+  `selection/copy/scrolling`、`SSH/SCP`、`file explorer`、
+  `WebView2/browser panel`、`updater` 或 `remote console`。
+
+脚本会输出 Markdown 报告，包含 WispTerm 版本、发布包文件、Windows/OpenSSH/WebView2/GPU
+信息、脱敏后的配置、相关日志和针对该问题的下一步排查建议。公开发布前请先检查内容；
+不要在公开 issue 中包含密码、私钥、token 或 crash dump。
+
 ## 怎么反馈崩溃或卡死？（Windows 调试版本）
 
 每个 Windows 版本在 [Releases](https://github.com/xuzhougeng/wispterm/releases) 页面都会附带一个

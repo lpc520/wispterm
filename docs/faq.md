@@ -141,6 +141,31 @@ your Claude Code / Codex skills across servers — including installing the late
 skills from a GitHub repository. Existing conversations keep the skill version
 they originally loaded, so updating does not change past chats.
 
+## How Do I Generate a Diagnostic Report?
+
+When reporting a Windows issue, run the diagnostic collector from a WispTerm
+source checkout or any folder that contains `plugins\skills\wispterm-diagnostics`:
+
+```powershell
+cd C:\path\to\wispterm
+powershell -NoProfile -ExecutionPolicy Bypass -File .\plugins\skills\wispterm-diagnostics\scripts\collect_wispterm_diagnostics.ps1 -ProblemType "other"
+```
+
+Use a more specific `-ProblemType` when it matches your issue:
+
+- `ssh-image-preview` — SSH image preview fails while Markdown/text preview works.
+- `html-preview` — local/WSL/SSH `.html` preview or the browser panel fails.
+- `ssh-disconnect` — SSH drops with errors such as `ssh_packet_write_poll`,
+  `eother`, or idle-time `Connection reset`.
+- `startup/crash`, `rendering/DPI`, `high-cpu`, `keyboard/input`,
+  `selection/copy/scrolling`, `SSH/SCP`, `file explorer`,
+  `WebView2/browser panel`, `updater`, or `remote console`.
+
+The script prints a Markdown report with WispTerm version, package files,
+Windows/OpenSSH/WebView2/GPU details, sanitized config, relevant logs, and
+issue-specific next steps. Review it before posting publicly; do not include
+passwords, private keys, tokens, or crash dumps in a public issue.
+
 ## How Do I Report a Crash or Freeze? (Windows Debug Build)
 
 Every Windows release also ships a **`wispterm-windows-debug-<version>.zip`** on

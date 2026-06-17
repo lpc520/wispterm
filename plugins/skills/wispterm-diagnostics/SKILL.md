@@ -1,6 +1,6 @@
 ---
 name: wispterm-diagnostics
-description: Use when a user (Windows or macOS) wants to report, troubleshoot, or collect context for a WispTerm issue, including startup failures, crashes, rendering/DPI/multi-monitor glitches, high CPU usage, keyboard input bugs, selection/copy/scrolling issues, SSH/SCP problems, file explorer behavior, WebView2/browser panel issues (Windows), updater failures, or remote console behavior.
+description: Use when a user wants to report, troubleshoot, or collect context for a WispTerm issue, including crashes, rendering/DPI glitches, high CPU, keyboard/input bugs, selection/copy/scrolling, SSH/SCP failures, SSH image preview failures, HTML preview/browser panel failures, SSH disconnects such as ssh_packet_write_poll/eother, file explorer behavior, updater failures, or remote console behavior.
 ---
 
 # WispTerm Diagnostics
@@ -9,9 +9,9 @@ description: Use when a user (Windows or macOS) wants to report, troubleshoot, o
 
 Generate a safe, copyable Markdown diagnostic report for users filing WispTerm
 issues. On **Windows**, use the bundled PowerShell script instead of asking the
-user to manually discover WispTerm, Windows, OpenSSH, WebView2, GPU, and config
-details. For startup crashes on Windows, prefer the automated crash workflow so
-users do not have to manually copy Event Viewer XML.
+user to manually discover WispTerm, Windows, OpenSSH, WebView2, bundled ConPTY,
+GPU, logs, and config details. For startup crashes on Windows, prefer the
+automated crash workflow so users do not have to manually copy Event Viewer XML.
 
 On **macOS**, there is no equivalent script yet — use the manual bash workflow
 in the macOS section below.
@@ -35,7 +35,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\collect_wispterm_d
 ```
 
 Recommended labels: `startup/crash`, `rendering/DPI`, `high-cpu`,
-`keyboard/input`, `selection/copy/scrolling`, `SSH/SCP`, `file explorer`,
+`keyboard/input`, `selection/copy/scrolling`, `SSH/SCP`,
+`ssh-image-preview`, `html-preview`, `ssh-disconnect`, `file explorer`,
 `WebView2/browser panel`, `updater`, `remote console`, `other`.
 
 4. For **rendering/DPI/multi-monitor glitch** reports, first check whether
@@ -70,6 +71,94 @@ terminal text, environment fragments, tokens, paths, or other process memory.
 7. Paste the generated Markdown report back to the user. Ask them to review it
    before posting and to fill in blank human-only fields such as the exact
    description and reproduction steps.
+
+## High-Signal Issue Workflows
+
+Use these on top of the Windows report. The script intentionally avoids logging
+into remote hosts; ask the user to run the remote commands manually and paste
+only non-secret output.
+
+### SSH image preview fails, Markdown preview works
+
+1. Run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\collect_wispterm_diagnostics.ps1 -ProblemType "ssh-image-preview"
+```
+
+2. Ask the user to confirm the SSH tab was opened from WispTerm's built-in SSH
+   profile launcher. Remote previews require WispTerm SSH metadata; a tab where
+   the user typed `ssh user@host` inside a local shell is treated as local and
+   cannot use remote preview helpers.
+3. Ask for the file extension, approximate size, path shape (absolute,
+   relative, contains spaces/CJK), and whether both Ctrl-click and File Explorer
+   double-click fail.
+4. Ask them to Ctrl+Shift-click the same remote image to download it. If
+   download also fails, investigate SSH/SCP/path metadata. If download works but
+   preview fails, investigate image decode/rendering.
+
+### HTML preview fails
+
+1. Run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\collect_wispterm_diagnostics.ps1 -ProblemType "html-preview"
+```
+
+2. Identify the environment: local Windows, WSL, or SSH. For SSH, confirm it is
+   a WispTerm SSH profile session, not a manually typed SSH tab.
+3. HTML preview serves the file's directory over HTTP so relative CSS/JS/images
+   work. Ask the user to run this in the target environment:
+
+```bash
+command -v python3 python node npx
+python3 --version 2>/dev/null || true
+python --version 2>/dev/null || true
+node --version 2>/dev/null || true
+npx --version 2>/dev/null || true
+```
+
+4. Ask for the visible toast/error text, especially `HTML server not reachable`
+   or `HTML SSH tunnel failed`. For SSH HTML, also ask whether normal loopback
+   URLs printed by the remote host open through WispTerm.
+
+### SSH disconnects (`ssh_packet_write_poll`, `eother`, idle reset)
+
+1. Run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\collect_wispterm_diagnostics.ps1 -ProblemType "ssh-disconnect"
+```
+
+2. Treat `client_loop: ssh_packet_write_poll ... eother` as a Windows OpenSSH
+   network-write failure until evidence says otherwise. Do not anchor on
+   unrelated VT warnings such as `CSI t` or `mode 9001`.
+3. If the disconnect happens only after 5-10 minutes idle with
+   `client_loop: send disconnect: Connection reset`, test it as an
+   idle-timeout/keepalive case. WispTerm SSH profile sessions are expected to
+   launch OpenSSH with `ServerAliveInterval=60` and `ServerAliveCountMax=3`;
+   collect the exact WispTerm version/package and compare external OpenSSH
+   with and without those options.
+4. Ask for these comparisons:
+
+```powershell
+# Outside WispTerm, without keepalive:
+ssh.exe -tt user@host
+
+# Outside WispTerm, from Windows Terminal / cmd / PowerShell:
+ssh.exe -vvv -tt -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 -o ServerAliveCountMax=3 user@host
+
+# In WispTerm config, then fully restart and retest:
+windows-conpty = system
+
+# If available:
+wsl -- ssh -vvv -tt user@host
+```
+
+If Windows `ssh.exe` fails outside WispTerm, focus on Win32-OpenSSH, network,
+or server logs. If only bundled ConPTY fails, compare `windows-conpty = system`.
+If WispTerm fails with both ConPTY modes but external `ssh.exe` does not, then
+investigate WispTerm PTY input/output.
 
 ## macOS Workflow
 
@@ -124,7 +213,8 @@ keys, SSH passwords, tokens, or other sensitive values the config may contain.
 ## What The Report Covers (Windows script)
 
 - WispTerm version, executable path, package flavor, `version.txt`, config path,
-  and portable config presence.
+  portable config presence, WebView2Loader.dll, bundled `conpty.dll`, and
+  bundled `OpenConsole.exe`.
 - Windows edition, display version, build, architecture, locale, PowerShell, and
   current shell process.
 - `ssh.exe` / `scp.exe` path and version, plus whether WispTerm's `ssh_hosts`
@@ -136,8 +226,8 @@ keys, SSH passwords, tokens, or other sensitive values the config may contain.
   Reporting entries for `wispterm.exe`, sanitized module/exception/offset fields,
   optional startup probe result, WER local dump configuration, and whether dump
   files exist.
-- `%APPDATA%\wispterm\render-diagnostic.log` presence and a sanitized tail
-  excerpt when available.
+- `%APPDATA%\wispterm\wispterm-debug.log` and `render-diagnostic.log` presence
+  and sanitized tail excerpts when available.
 - Relevant WispTerm files under `%APPDATA%\wispterm`.
 - A sanitized WispTerm config excerpt.
 - Failed diagnostic commands.
