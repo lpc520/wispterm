@@ -5,6 +5,61 @@ const types = @import("types.zig");
 
 pub const Surface = struct { id: [16]u8, title: []const u8 };
 
+/// A single AI conversation as seen by the WeChat bridge: a dedicated AI-chat
+/// tab or a terminal tab's Copilot sidebar. Uses fixed inline buffers so the
+/// whole struct is a POD value that marshals across the UI-thread boundary with
+/// no allocation (mirrors ai_chat.Session's title_buf style).
+pub const Conversation = struct {
+    title_buf: [128]u8 = undefined,
+    title_len: usize = 0,
+    model_buf: [64]u8 = undefined,
+    model_len: usize = 0,
+    cwd_buf: [256]u8 = undefined,
+    cwd_len: usize = 0,
+    busy: bool = false,
+    is_copilot: bool = false,
+    is_current: bool = false,
+
+    pub fn title(self: *const Conversation) []const u8 {
+        return self.title_buf[0..self.title_len];
+    }
+    pub fn model(self: *const Conversation) []const u8 {
+        return self.model_buf[0..self.model_len];
+    }
+    pub fn cwd(self: *const Conversation) []const u8 {
+        return self.cwd_buf[0..self.cwd_len];
+    }
+    pub fn setTitle(self: *Conversation, s: []const u8) void {
+        self.title_len = copyClamp(&self.title_buf, s);
+    }
+    pub fn setModel(self: *Conversation, s: []const u8) void {
+        self.model_len = copyClamp(&self.model_buf, s);
+    }
+    pub fn setCwd(self: *Conversation, s: []const u8) void {
+        self.cwd_len = copyClamp(&self.cwd_buf, s);
+    }
+};
+
+/// A bounded list of conversations (one per tab; tabs are capped at 32).
+pub const ConversationList = struct {
+    items: [32]Conversation = [_]Conversation{.{}} ** 32,
+    count: usize = 0,
+
+    pub fn slice(self: *const ConversationList) []const Conversation {
+        return self.items[0..self.count];
+    }
+};
+
+/// Copy `s` into `buf`, clamped to fit and never splitting a UTF-8 sequence.
+/// Returns the number of bytes written.
+fn copyClamp(buf: []u8, s: []const u8) usize {
+    var n = @min(buf.len, s.len);
+    // s[n] is read only when n < s.len (second clause), so this never goes OOB.
+    while (n > 0 and n < s.len and (s[n] & 0xC0) == 0x80) : (n -= 1) {}
+    @memcpy(buf[0..n], s[0..n]);
+    return n;
+}
+
 pub const OpenResult = enum { opened, no_profile, failed, offline, timeout };
 
 /// Outcome of sendInput. `busy` is AI-surface only: a chat request is already
@@ -109,4 +164,37 @@ test "inboundFileDir forwards to the vtable and copies into the caller buffer" {
 
     var buf: [512]u8 = undefined;
     try t.expectEqualStrings("/tmp/proj", Fake.iface().inboundFileDir(&buf));
+}
+
+test "Conversation setters clamp on UTF-8 boundaries" {
+    var c: Conversation = .{};
+    try t.expectEqualStrings("", c.title());
+
+    c.setTitle("Claude");
+    try t.expectEqualStrings("Claude", c.title());
+
+    c.setModel("glm-5.2");
+    try t.expectEqualStrings("glm-5.2", c.model());
+
+    // A 3-byte CJK char must never be split when it overflows the buffer.
+    var big: [400]u8 = undefined;
+    var i: usize = 0;
+    while (i + 3 <= big.len) : (i += 3) {
+        big[i] = 0xE4;
+        big[i + 1] = 0xBD;
+        big[i + 2] = 0xA0; // "你"
+    }
+    c.setTitle(big[0..i]);
+    try t.expect(c.title().len <= 128);
+    try t.expect(std.unicode.utf8ValidateSlice(c.title()));
+}
+
+test "ConversationList slice reflects count" {
+    var list: ConversationList = .{};
+    try t.expectEqual(@as(usize, 0), list.slice().len);
+    list.items[0].setTitle("A");
+    list.items[1].setTitle("B");
+    list.count = 2;
+    try t.expectEqual(@as(usize, 2), list.slice().len);
+    try t.expectEqualStrings("B", list.slice()[1].title());
 }
