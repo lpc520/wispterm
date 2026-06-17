@@ -5902,6 +5902,16 @@ fn wxInboundFileDir(_: *anyopaque, buf: []u8) []const u8 {
     return buf[0..n];
 }
 
+fn wxListAiConversations(_: *anyopaque, out: *weixin_control.ConversationList) void {
+    // Real UI-thread enumeration is added in the pin/resolver task.
+    out.count = 0;
+}
+
+fn wxPinAiConversationByIndex(_: *anyopaque, _: usize, _: *weixin_control.Conversation) bool {
+    // Real UI-thread pinning is added in the pin/resolver task.
+    return false;
+}
+
 fn wxAiApprovalPending(_: *anyopaque) bool {
     var req = WeixinRequest{ .op = .ai_approval_pending };
     if (!weixinDispatch(&req)) return false;
@@ -5924,6 +5934,8 @@ const weixin_vtable = weixin_control.Control.VTable{
     .ai_approval_pending = wxAiApprovalPending,
     .resolve_ai_approval = wxResolveAiApproval,
     .inbound_file_dir = wxInboundFileDir,
+    .list_ai_conversations = wxListAiConversations,
+    .pin_ai_conversation_by_index = wxPinAiConversationByIndex,
 };
 
 /// The Control the weixin controller drives. Backed by process-global state, so

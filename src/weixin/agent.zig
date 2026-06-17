@@ -187,6 +187,13 @@ const FakeControl = struct {
     approval_pending: bool = false,
     resolved_calls: u8 = 0,
     last_resolve_approve: bool = false,
+    // Conversation fixture for /list and /switch tests.
+    conv_titles: []const []const u8 = &.{},
+    conv_models: []const []const u8 = &.{},
+    conv_busy: []const bool = &.{},
+    conv_copilot: []const bool = &.{},
+    conv_current: ?usize = null,
+    pin_called_index: ?usize = null,
 
     /// Bytes captured from the last send_input. send_input borrows its argument
     /// (production consumes it synchronously), so the fake copies for inspection.
@@ -234,6 +241,33 @@ const FakeControl = struct {
     fn inbound_file_dir(_: *anyopaque, _: []u8) []const u8 {
         return "";
     }
+    fn list_ai_conversations(ctx: *anyopaque, out: *control.ConversationList) void {
+        const self = cast(ctx);
+        var n: usize = 0;
+        for (self.conv_titles, 0..) |title_v, i| {
+            if (n >= out.items.len) break;
+            var c = &out.items[n];
+            c.* = .{};
+            c.setTitle(title_v);
+            if (i < self.conv_models.len) c.setModel(self.conv_models[i]);
+            if (i < self.conv_busy.len) c.busy = self.conv_busy[i];
+            if (i < self.conv_copilot.len) c.is_copilot = self.conv_copilot[i];
+            c.is_current = (self.conv_current != null and self.conv_current.? == i);
+            n += 1;
+        }
+        out.count = n;
+    }
+    fn pin_ai_conversation_by_index(ctx: *anyopaque, idx0: usize, out: *control.Conversation) bool {
+        const self = cast(ctx);
+        if (idx0 >= self.conv_titles.len) return false;
+        self.pin_called_index = idx0;
+        out.* = .{};
+        out.setTitle(self.conv_titles[idx0]);
+        if (idx0 < self.conv_models.len) out.setModel(self.conv_models[idx0]);
+        if (idx0 < self.conv_copilot.len) out.is_copilot = self.conv_copilot[idx0];
+        out.is_current = true;
+        return true;
+    }
     fn cast(ctx: *anyopaque) *FakeControl {
         return @ptrCast(@alignCast(ctx));
     }
@@ -254,6 +288,8 @@ const FakeControl = struct {
             .ai_approval_pending = ai_approval_pending,
             .resolve_ai_approval = resolve_ai_approval,
             .inbound_file_dir = inbound_file_dir,
+            .list_ai_conversations = list_ai_conversations,
+            .pin_ai_conversation_by_index = pin_ai_conversation_by_index,
         } };
     }
 };

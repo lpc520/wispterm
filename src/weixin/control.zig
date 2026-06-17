@@ -82,6 +82,12 @@ pub const Control = struct {
         /// Writes the effective agent working directory into `buf` and returns
         /// the slice; empty when no working dir is configured. UI-thread backed.
         inbound_file_dir: *const fn (ctx: *anyopaque, buf: []u8) []const u8,
+        /// Fill `out` with every open AI conversation (dedicated AI-chat tabs and
+        /// terminal-tab Copilot sidebars), in tab order. UI-thread backed.
+        list_ai_conversations: *const fn (ctx: *anyopaque, out: *ConversationList) void,
+        /// Pin the Nth conversation (0-based, same order as list_ai_conversations).
+        /// On success fills `out` and returns true; false if out of range.
+        pin_ai_conversation_by_index: *const fn (ctx: *anyopaque, idx0: usize, out: *Conversation) bool,
     };
 
     pub fn isConnected(self: Control) bool {
@@ -110,6 +116,12 @@ pub const Control = struct {
     }
     pub fn inboundFileDir(self: Control, buf: []u8) []const u8 {
         return self.vtable.inbound_file_dir(self.ctx, buf);
+    }
+    pub fn listAiConversations(self: Control, out: *ConversationList) void {
+        self.vtable.list_ai_conversations(self.ctx, out);
+    }
+    pub fn pinAiConversationByIndex(self: Control, idx0: usize, out: *Conversation) bool {
+        return self.vtable.pin_ai_conversation_by_index(self.ctx, idx0, out);
     }
 };
 
@@ -146,6 +158,12 @@ test "inboundFileDir forwards to the vtable and copies into the caller buffer" {
             @memcpy(buf[0..dir.len], dir);
             return buf[0..dir.len];
         }
+        fn list_ai_conversations(_: *anyopaque, out: *ConversationList) void {
+            out.count = 0;
+        }
+        fn pin_ai_conversation_by_index(_: *anyopaque, _: usize, _: *Conversation) bool {
+            return false;
+        }
         var dummy: u8 = 0;
         fn iface() Control {
             return .{ .ctx = &dummy, .vtable = &.{
@@ -158,6 +176,8 @@ test "inboundFileDir forwards to the vtable and copies into the caller buffer" {
                 .ai_approval_pending = ai_approval_pending,
                 .resolve_ai_approval = resolve_ai_approval,
                 .inbound_file_dir = inbound_file_dir,
+                .list_ai_conversations = list_ai_conversations,
+                .pin_ai_conversation_by_index = pin_ai_conversation_by_index,
             } };
         }
     };
