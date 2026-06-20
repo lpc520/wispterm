@@ -4412,6 +4412,11 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                                     AppWindow.g_force_rebuild = true;
                                     AppWindow.g_cells_valid = false;
                                 },
+                                .question_option => |idx| {
+                                    _ = chat.resolveQuestionOption(idx);
+                                    AppWindow.g_force_rebuild = true;
+                                    AppWindow.g_cells_valid = false;
+                                },
                             }
                             return;
                         }
@@ -4544,6 +4549,11 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                         },
                         .toggle_reasoning => |message_index| {
                             chat.toggleReasoningCollapsed(message_index);
+                            AppWindow.g_force_rebuild = true;
+                            AppWindow.g_cells_valid = false;
+                        },
+                        .question_option => |idx| {
+                            _ = chat.resolveQuestionOption(idx);
                             AppWindow.g_force_rebuild = true;
                             AppWindow.g_cells_valid = false;
                         },
