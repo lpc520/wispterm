@@ -345,6 +345,10 @@ __wispterm_report_cwd</code></pre>
             <p>Set <code>ssh-legacy-algorithms = true</code> in your config file. This enables compatibility options for older hosts that still require <code>ssh-rsa</code>, <code>ssh-dss</code>, legacy Diffie-Hellman key exchange, or CBC ciphers.</p>
           </div>
           <div class="feature">
+            <h3>First launch opens a black window?</h3>
+            <p>On weak integrated-GPU machines, close all WispTerm windows and start it again; the next launch should use the recorded GDI fallback. If it still opens black, add <code>wispterm-d3d-present = false</code> to <code>%APPDATA%\wispterm\config</code> and reopen WispTerm.</p>
+          </div>
+          <div class="feature">
             <h3>Can I switch AI models without starting over?</h3>
             <p>Yes. In an AI Chat tab or Copilot sidebar, type <code>/model</code> to open the saved-profile picker, <code>/model &lt;name&gt;</code> to switch directly, or click the model label in the header. WispTerm summarizes the prior transcript for the new model and keeps the switch local to that session.</p>
           </div>
