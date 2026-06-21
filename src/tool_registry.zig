@@ -1,4 +1,6 @@
 const std = @import("std");
+const ai_chat_protocol = @import("ai_chat_protocol.zig");
+const ai_chat_types = @import("ai_chat_types.zig");
 
 pub const MAX_SKILL_MD_BYTES: usize = 256 * 1024;
 pub const MAX_TOOL_DESCRIPTION_BYTES: usize = 4096;
@@ -301,6 +303,80 @@ pub fn freeEnabledSnapshot(allocator: std.mem.Allocator, tools: []InstalledTool)
     freeInstalledTools(allocator, tools);
 }
 
+pub fn dynamicSpecsFromInstalled(allocator: std.mem.Allocator, tools: []const InstalledTool) ![]ai_chat_protocol.DynamicToolSpec {
+    var list: std.ArrayListUnmanaged(ai_chat_protocol.DynamicToolSpec) = .empty;
+    errdefer {
+        for (list.items) |spec| {
+            allocator.free(spec.name);
+            allocator.free(spec.description);
+        }
+        list.deinit(allocator);
+    }
+
+    for (tools) |tool| {
+        if (!tool.enabled) continue;
+        const name = try allocator.dupe(u8, tool.function_name);
+        errdefer allocator.free(name);
+        const description = try dupToolDescription(allocator, tool);
+        errdefer allocator.free(description);
+        try list.append(allocator, .{ .name = name, .description = description });
+    }
+
+    return list.toOwnedSlice(allocator);
+}
+
+pub fn dynamicRuntimeFromInstalled(allocator: std.mem.Allocator, tools: []const InstalledTool) ![]ai_chat_types.DynamicBinaryTool {
+    var list: std.ArrayListUnmanaged(ai_chat_types.DynamicBinaryTool) = .empty;
+    errdefer {
+        for (list.items) |tool| {
+            allocator.free(tool.function_name);
+            allocator.free(tool.executable_abs);
+            allocator.free(tool.description);
+        }
+        list.deinit(allocator);
+    }
+
+    for (tools) |tool| {
+        if (!tool.enabled) continue;
+        const function_name = try allocator.dupe(u8, tool.function_name);
+        errdefer allocator.free(function_name);
+        const executable_abs = try allocator.dupe(u8, tool.executable_abs);
+        errdefer allocator.free(executable_abs);
+        const description = try dupToolDescription(allocator, tool);
+        errdefer allocator.free(description);
+        try list.append(allocator, .{
+            .function_name = function_name,
+            .executable_abs = executable_abs,
+            .description = description,
+        });
+    }
+
+    return list.toOwnedSlice(allocator);
+}
+
+pub fn freeDynamicSpecs(allocator: std.mem.Allocator, specs: []ai_chat_protocol.DynamicToolSpec) void {
+    for (specs) |spec| {
+        allocator.free(spec.name);
+        allocator.free(spec.description);
+    }
+    allocator.free(specs);
+}
+
+pub fn freeDynamicRuntime(allocator: std.mem.Allocator, tools: []ai_chat_types.DynamicBinaryTool) void {
+    for (tools) |tool| {
+        allocator.free(tool.function_name);
+        allocator.free(tool.executable_abs);
+        allocator.free(tool.description);
+    }
+    allocator.free(tools);
+}
+
+fn dupToolDescription(allocator: std.mem.Allocator, tool: InstalledTool) ![]u8 {
+    if (tool.description.len != 0) return allocator.dupe(u8, tool.description);
+    const fallback_len = @min(tool.skill_md.len, MAX_TOOL_DESCRIPTION_BYTES);
+    return allocator.dupe(u8, tool.skill_md[0..fallback_len]);
+}
+
 fn stripExeSuffix(raw: []const u8) []const u8 {
     if (raw.len >= 4 and std.ascii.eqlIgnoreCase(raw[raw.len - 4 ..], ".exe")) {
         return raw[0 .. raw.len - 4];
@@ -558,6 +634,41 @@ test "tool_registry: enabledToolSchemas skips disabled tools" {
     defer freeEnabledSnapshot(a, snapshot);
     try std.testing.expectEqual(@as(usize, 1), snapshot.len);
     try std.testing.expectEqualStrings("docx", snapshot[0].function_name);
+}
+
+test "tool_registry: dynamic snapshots include specs and runtime paths for enabled tools" {
+    const a = std.testing.allocator;
+    const enabled = InstalledTool{
+        .id = try a.dupe(u8, "docx"),
+        .function_name = try a.dupe(u8, "docx"),
+        .enabled = true,
+        .executable_abs = try a.dupe(u8, "/tmp/tools/docx/bin/docx"),
+        .skill_md = try a.dupe(u8, "Use for DOCX review."),
+        .description = try a.dupe(u8, ""),
+    };
+    defer enabled.deinit(a);
+    const disabled = InstalledTool{
+        .id = try a.dupe(u8, "off"),
+        .function_name = try a.dupe(u8, "off"),
+        .enabled = false,
+        .executable_abs = try a.dupe(u8, "/tmp/tools/off/bin/off"),
+        .skill_md = try a.dupe(u8, "Off skill."),
+        .description = try a.dupe(u8, "Off"),
+    };
+    defer disabled.deinit(a);
+    const list = [_]InstalledTool{ enabled, disabled };
+
+    const specs = try dynamicSpecsFromInstalled(a, list[0..]);
+    defer freeDynamicSpecs(a, specs);
+    try std.testing.expectEqual(@as(usize, 1), specs.len);
+    try std.testing.expectEqualStrings("docx", specs[0].name);
+    try std.testing.expect(std.mem.indexOf(u8, specs[0].description, "DOCX review") != null);
+
+    const runtime = try dynamicRuntimeFromInstalled(a, list[0..]);
+    defer freeDynamicRuntime(a, runtime);
+    try std.testing.expectEqual(@as(usize, 1), runtime.len);
+    try std.testing.expectEqualStrings("docx", runtime[0].function_name);
+    try std.testing.expectEqualStrings("/tmp/tools/docx/bin/docx", runtime[0].executable_abs);
 }
 
 fn writeInstalledToolFixture(

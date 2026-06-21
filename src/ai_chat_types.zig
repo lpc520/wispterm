@@ -30,6 +30,13 @@ pub const AgentSettings = struct {
     /// after tool-heavy turns (config `ai-distill-suggest`). Off by default.
     distill_suggest_enabled: bool = false,
     dynamic_tools: []const ai_chat_protocol.DynamicToolSpec = &.{},
+    dynamic_binary_tools: []const DynamicBinaryTool = &.{},
+};
+
+pub const DynamicBinaryTool = struct {
+    function_name: []const u8,
+    executable_abs: []const u8,
+    description: []const u8,
 };
 
 // AgentPermission lives in ai_agent_config.zig (extracted on main so config.zig
