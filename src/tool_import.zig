@@ -290,7 +290,7 @@ fn runArgvProbe(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
         allocator.free(stderr_data);
         return allocator.dupe(u8, "");
     }
-    if (!output_capped and exit_code != 0) {
+    if (exit_code != 0) {
         allocator.free(stdout_data);
         allocator.free(stderr_data);
         return allocator.dupe(u8, "");
@@ -346,6 +346,14 @@ fn closeChildResourcesNoWait(child: *std.process.Child) void {
 
 fn dupeCapped(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return allocator.dupe(u8, bytes[0..@min(bytes.len, PROBE_OUTPUT_LIMIT)]);
+}
+
+fn setProcessUmask(mode: std.posix.mode_t) std.posix.mode_t {
+    return switch (builtin.os.tag) {
+        .windows => unreachable,
+        .linux => @intCast(std.os.linux.syscall1(.umask, mode)),
+        else => std.c.umask(mode),
+    };
 }
 
 fn trimAscii(bytes: []const u8) []const u8 {
@@ -426,7 +434,7 @@ fn writeFileAbsolute(path: []const u8, data: []const u8) !void {
 fn copyFilePreserveMode(src_path: []const u8, dst_path: []const u8) !void {
     var src = try openFileAny(src_path);
     defer src.close();
-    const src_mode = if (builtin.os.tag == .windows) std.fs.File.default_mode else (try src.stat()).mode;
+    const src_mode = if (builtin.os.tag == .windows) std.fs.File.default_mode else (try src.stat()).mode & 0o7777;
     var dst = try createFileAbsolute(dst_path, src_mode);
     defer dst.close();
 
@@ -436,6 +444,7 @@ fn copyFilePreserveMode(src_path: []const u8, dst_path: []const u8) !void {
         if (n == 0) break;
         try dst.writeAll(buf[0..n]);
     }
+    if (builtin.os.tag != .windows) try dst.chmod(src_mode);
 }
 
 test "tool_import: resolveDocs prefers --skill over sibling skill and help" {
@@ -611,4 +620,67 @@ test "tool_import: runArgvProbe is bounded when child leaves inherited pipes ope
 
     try std.testing.expectEqualStrings("help text\n", output);
     try std.testing.expect(elapsed < 1000);
+}
+
+test "tool_import: probeBinary treats capped nonzero help output as empty" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const script =
+        "#!/bin/sh\n" ++
+        "if [ \"$1\" = \"--help\" ]; then\n" ++
+        "  i=0\n" ++
+        "  while [ \"$i\" -lt 70000 ]; do printf x; i=$((i + 1)); done\n" ++
+        "  exit 7\n" ++
+        "fi\n" ++
+        "exit 1\n";
+    try tmp.dir.writeFile(.{ .sub_path = "probe-big.sh", .data = script });
+    var file = try tmp.dir.openFile("probe-big.sh", .{});
+    defer file.close();
+    try file.chmod(0o755);
+    const script_path = try tmp.dir.realpathAlloc(a, "probe-big.sh");
+    defer a.free(script_path);
+
+    var probe = try probeBinary(a, script_path);
+    defer probe.deinit(a);
+    try std.testing.expectEqual(@as(usize, 0), probe.help.len);
+}
+
+test "tool_import: installToolPackage preserves executable bits through restrictive umask" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("src");
+    try tmp.dir.makePath("tools");
+    try tmp.dir.writeFile(.{ .sub_path = "src/runme", .data = "#!/bin/sh\nexit 0\n" });
+    var source_file = try tmp.dir.openFile("src/runme", .{});
+    defer source_file.close();
+    try source_file.chmod(0o755);
+    const source_path = try tmp.dir.realpathAlloc(a, "src/runme");
+    defer a.free(source_path);
+    const tools_root = try tmp.dir.realpathAlloc(a, "tools");
+    defer a.free(tools_root);
+
+    const old_umask = setProcessUmask(0o077);
+    defer _ = setProcessUmask(old_umask);
+    const installed = try installToolPackage(
+        a,
+        tools_root,
+        source_path,
+        "runme",
+        "---\nname: runme\n---\nUse runme.\n",
+        true,
+    );
+    defer a.free(installed);
+
+    const copied_path = try std.fs.path.join(a, &.{ installed, "bin", "runme" });
+    defer a.free(copied_path);
+    var copied = try std.fs.openFileAbsolute(copied_path, .{});
+    defer copied.close();
+    const mode = (try copied.stat()).mode;
+    try std.testing.expectEqual(@as(std.fs.File.Mode, 0o755), mode & 0o777);
 }
