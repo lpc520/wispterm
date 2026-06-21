@@ -194,6 +194,8 @@ pub fn readInstalledTool(
     tools_root: []const u8,
     id: []const u8,
 ) !?InstalledTool {
+    try validateToolId(id);
+
     var root = std.fs.openDirAbsolute(tools_root, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
@@ -206,13 +208,19 @@ pub fn readInstalledTool(
     };
     defer tool_dir.close();
 
-    const manifest_bytes = try tool_dir.readFileAlloc(allocator, "manifest.json", MAX_MANIFEST_BYTES);
+    const manifest_bytes = tool_dir.readFileAlloc(allocator, "manifest.json", MAX_MANIFEST_BYTES) catch |err| switch (err) {
+        error.FileNotFound, error.IsDir => return error.MissingToolFile,
+        else => return err,
+    };
     defer allocator.free(manifest_bytes);
     var manifest = try parseManifestJson(allocator, manifest_bytes);
     defer manifest.deinit(allocator);
     try validateInstalledManifest(id, manifest);
 
-    const skill_md = try tool_dir.readFileAlloc(allocator, "SKILL.md", MAX_SKILL_MD_BYTES);
+    const skill_md = tool_dir.readFileAlloc(allocator, "SKILL.md", MAX_SKILL_MD_BYTES) catch |err| switch (err) {
+        error.FileNotFound, error.IsDir => return error.MissingToolFile,
+        else => return err,
+    };
     errdefer allocator.free(skill_md);
     const executable_abs = try std.fs.path.join(allocator, &.{ tools_root, id, manifest.executable });
     errdefer allocator.free(executable_abs);
@@ -246,7 +254,16 @@ pub fn scanInstalledTools(allocator: std.mem.Allocator, tools_root: []const u8) 
     var it = root.iterate();
     while (try it.next()) |entry| {
         if (entry.kind != .directory) continue;
-        const tool = readInstalledTool(allocator, tools_root, entry.name) catch continue;
+        const tool = readInstalledTool(allocator, tools_root, entry.name) catch |err| switch (err) {
+            error.FileNotFound,
+            error.NotDir,
+            error.InvalidToolManifest,
+            error.UnsafeToolPath,
+            error.ToolIdMismatch,
+            error.MissingToolFile,
+            => continue,
+            else => return err,
+        };
         if (tool) |installed| {
             list.append(allocator, installed) catch |err| {
                 installed.deinit(allocator);
@@ -322,22 +339,31 @@ fn jsonI64(root: std.json.Value, name: []const u8) ?i64 {
     };
 }
 
+fn validateToolId(id: []const u8) !void {
+    if (id.len == 0) return error.UnsafeToolPath;
+    if (std.mem.eql(u8, id, ".") or std.mem.eql(u8, id, "..")) return error.UnsafeToolPath;
+    if (id[0] == '/') return error.UnsafeToolPath;
+    if (hasWindowsDrivePrefix(id)) return error.UnsafeToolPath;
+    if (std.mem.indexOfScalar(u8, id, '/') != null) return error.UnsafeToolPath;
+    if (std.mem.indexOfScalar(u8, id, '\\') != null) return error.UnsafeToolPath;
+}
+
 fn validateInstalledManifest(dir_id: []const u8, manifest: OwnedManifest) !void {
-    if (!std.mem.eql(u8, dir_id, manifest.id)) return error.InvalidToolManifest;
+    if (!std.mem.eql(u8, dir_id, manifest.id)) return error.ToolIdMismatch;
     try validateExecutablePath(manifest.executable);
 }
 
 fn validateExecutablePath(path: []const u8) !void {
-    if (path.len <= "bin/".len) return error.InvalidToolManifest;
-    if (path[0] == '/') return error.InvalidToolManifest;
-    if (hasWindowsDrivePrefix(path)) return error.InvalidToolManifest;
-    if (std.mem.indexOfScalar(u8, path, '\\') != null) return error.InvalidToolManifest;
-    if (!std.mem.startsWith(u8, path, "bin/")) return error.InvalidToolManifest;
+    if (path.len <= "bin/".len) return error.UnsafeToolPath;
+    if (path[0] == '/') return error.UnsafeToolPath;
+    if (hasWindowsDrivePrefix(path)) return error.UnsafeToolPath;
+    if (std.mem.indexOfScalar(u8, path, '\\') != null) return error.UnsafeToolPath;
+    if (!std.mem.startsWith(u8, path, "bin/")) return error.UnsafeToolPath;
 
     var segments = std.mem.splitScalar(u8, path, '/');
     while (segments.next()) |segment| {
-        if (segment.len == 0) return error.InvalidToolManifest;
-        if (std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return error.InvalidToolManifest;
+        if (segment.len == 0) return error.UnsafeToolPath;
+        if (std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return error.UnsafeToolPath;
     }
 }
 
@@ -453,7 +479,25 @@ test "tool_registry: readInstalledTool rejects executable paths outside bin" {
         defer a.free(id);
 
         try writeInstalledToolFixture(a, tmp.dir, id, id, executable);
-        try std.testing.expectError(error.InvalidToolManifest, readInstalledTool(a, tools_root, id));
+        try std.testing.expectError(error.UnsafeToolPath, readInstalledTool(a, tools_root, id));
+    }
+}
+
+test "tool_registry: readInstalledTool rejects unsafe ids before opening" {
+    const a = std.testing.allocator;
+    const cases = [_][]const u8{
+        "",
+        ".",
+        "..",
+        "a/b",
+        "a\\b",
+        "/abs",
+        "C:\\tool",
+        "\\\\server\\share",
+    };
+
+    for (cases) |id| {
+        try std.testing.expectError(error.UnsafeToolPath, readInstalledTool(a, "/path/that/should/not/be/opened", id));
     }
 }
 
@@ -473,6 +517,20 @@ test "tool_registry: scanInstalledTools ignores malformed executable paths and i
     try std.testing.expectEqual(@as(usize, 1), tools.len);
     try std.testing.expectEqualStrings("ok", tools[0].id);
     try std.testing.expectEqualStrings("ok", tools[0].function_name);
+}
+
+test "tool_registry: scanInstalledTools propagates OutOfMemory from tool reads" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tools_root = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(tools_root);
+
+    try writeInstalledToolFixture(a, tmp.dir, "oom", "oom", "bin/oom.exe");
+
+    var failing_allocator = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, scanInstalledTools(failing_allocator.allocator(), tools_root));
+    try std.testing.expect(failing_allocator.has_induced_failure);
 }
 
 test "tool_registry: enabledToolSchemas skips disabled tools" {
