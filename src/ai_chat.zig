@@ -193,6 +193,7 @@ pub const ChatRequest = struct {
         self.allocator.free(self.reasoning_effort);
         for (self.messages) |msg| msg.deinit(self.allocator);
         self.allocator.free(self.messages);
+        freeOwnedDynamicToolSpecs(self.allocator, self.dynamic_tools);
         if (self.tool_snapshot) |snapshot| snapshot.deinit(self.allocator);
         if (self.weixin_reply_context) |*ctx| ctx.deinit(self.allocator);
         if (self.subagent_profile) |profile| profile.deinit(self.allocator);
@@ -433,11 +434,37 @@ pub fn setDynamicToolSpecsForTest(specs: []ai_chat_protocol.DynamicToolSpec) voi
 }
 
 fn freeDynamicToolSpecsSlice(allocator: std.mem.Allocator, specs: []ai_chat_protocol.DynamicToolSpec) void {
+    freeOwnedDynamicToolSpecs(allocator, specs);
+}
+
+fn freeOwnedDynamicToolSpecs(allocator: std.mem.Allocator, specs: []const ai_chat_protocol.DynamicToolSpec) void {
+    if (specs.len == 0) return;
     for (specs) |spec| {
         allocator.free(spec.name);
         allocator.free(spec.description);
     }
     allocator.free(specs);
+}
+
+fn cloneDynamicToolSpecs(allocator: std.mem.Allocator, specs: []const ai_chat_protocol.DynamicToolSpec) ![]ai_chat_protocol.DynamicToolSpec {
+    if (specs.len == 0) return &.{};
+    const out = try allocator.alloc(ai_chat_protocol.DynamicToolSpec, specs.len);
+    var written: usize = 0;
+    errdefer {
+        for (out[0..written]) |spec| {
+            allocator.free(spec.name);
+            allocator.free(spec.description);
+        }
+        allocator.free(out);
+    }
+    for (specs) |spec| {
+        const name = try allocator.dupe(u8, spec.name);
+        errdefer allocator.free(name);
+        const description = try allocator.dupe(u8, spec.description);
+        out[written] = .{ .name = name, .description = description };
+        written += 1;
+    }
+    return out;
 }
 
 fn freeDynamicToolSpecs(allocator: std.mem.Allocator) void {
@@ -472,6 +499,7 @@ fn loadDynamicToolSpecs(allocator: std.mem.Allocator) ![]ai_chat_protocol.Dynami
         try list.append(allocator, .{ .name = name, .description = description });
     }
 
+    if (list.items.len == 0) return &.{};
     return list.toOwnedSlice(allocator);
 }
 
@@ -3850,6 +3878,9 @@ pub const Session = struct {
 
         var subagent_profile = resolveSubagentProfileForRequest(self.allocator, agent_enabled);
         errdefer if (subagent_profile) |profile| profile.deinit(self.allocator);
+        const dynamic_tools = try cloneDynamicToolSpecs(self.allocator, settings.dynamic_tools);
+        var dynamic_tools_owned = true;
+        errdefer if (dynamic_tools_owned) freeOwnedDynamicToolSpecs(self.allocator, dynamic_tools);
 
         req.* = .{
             .allocator = self.allocator,
@@ -3866,7 +3897,7 @@ pub const Session = struct {
             .max_tokens = self.max_tokens,
             .agent_enabled = agent_enabled,
             .memory_enabled = settings.memory_enabled,
-            .dynamic_tools = settings.dynamic_tools,
+            .dynamic_tools = dynamic_tools,
             .copilot = self.copilot,
             .tool_host = tool_host,
             .tool_snapshot = tool_snapshot,
@@ -3881,6 +3912,7 @@ pub const Session = struct {
         reasoning_effort_owned = false;
         weixin_ctx = null;
         subagent_profile = null;
+        dynamic_tools_owned = false;
         if (self.copilot and self.bound_surface_id_len > 0) {
             // Inline the write-context seed directly on ChatRequest (the field
             // layout is identical to ToolContext; setWriteContext in
@@ -7478,6 +7510,58 @@ test "ai chat agent request json includes stable skill_info tool schema" {
     try std.testing.expect(std.mem.indexOf(u8, json, "skill_name") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "pdf") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\\u0070df") == null);
+}
+
+test "ai chat session request owns dynamic tool specs snapshot" {
+    const allocator = std.testing.allocator;
+    const saved_settings = currentAgentSettings();
+    const saved_dynamic_specs = g_dynamic_tool_specs;
+    const saved_dynamic_specs_owned = g_dynamic_tool_specs_owned;
+    defer {
+        configureAgent(saved_settings);
+        g_dynamic_tool_specs = saved_dynamic_specs;
+        g_dynamic_tool_specs_owned = saved_dynamic_specs_owned;
+    }
+
+    const name = try allocator.dupe(u8, "agent_docx_review");
+    defer allocator.free(name);
+    const description = try allocator.dupe(u8, "Use for DOCX tracked-change review.");
+    defer allocator.free(description);
+    var specs = [_]ai_chat_protocol.DynamicToolSpec{.{
+        .name = name,
+        .description = description,
+    }};
+    setDynamicToolSpecsForTest(specs[0..]);
+    configureAgent(.{ .enabled = true });
+
+    const session = try Session.init(
+        allocator,
+        "Test",
+        DEFAULT_BASE_URL,
+        "test-key",
+        DEFAULT_MODEL,
+        DEFAULT_SYSTEM_PROMPT,
+        "enabled",
+        "high",
+        "false",
+        "true",
+    );
+    defer session.deinit();
+
+    session.mutex.lock();
+    try session.messages.append(allocator, .{ .role = .user, .content = try allocator.dupe(u8, "hello") });
+    const request = try session.buildRequestLocked();
+    session.mutex.unlock();
+    defer request.deinit();
+
+    @memcpy(name, "agent_xlsx_review");
+    setDynamicToolSpecsForTest(&.{});
+
+    const json = try ai_chat_request.buildRequestJson(allocator, request);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"agent_docx_review\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"agent_xlsx_review\"") == null);
 }
 
 const CopilotBoundSnapshotTestHost = struct {
