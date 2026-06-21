@@ -675,6 +675,44 @@ pub fn subagentToolAllowed(name: []const u8) bool {
     return false;
 }
 
+fn builtinToolNameReserved(name: []const u8) bool {
+    const reserved = [_][]const u8{
+        "terminal_list",
+        "terminal_context",
+        "terminal_snapshot",
+        "terminal_select",
+        "shell_exec",
+        "powershell_exec",
+        "ssh_session_exec",
+        "wsl_session_exec",
+        "terminal_repl_exec",
+        "terminal_answer_prompt",
+        "ask_user",
+        "read_file",
+        "copy_file",
+        "write_file",
+        "edit_file",
+        "ssh_profile_save",
+        "ssh_profile_connect",
+        "tab_new",
+        "tab_close",
+        "skill_info",
+        "wispterm_docs",
+        "websearch",
+        "webread",
+        "pubmed",
+        "subagent",
+        "weixin_send_attachment",
+        "memory_save",
+        "memory_recall",
+        "memory_delete",
+    };
+    for (reserved) |reserved_name| {
+        if (std.mem.eql(u8, name, reserved_name)) return true;
+    }
+    return false;
+}
+
 // Single source of truth for the agent tool set. Each tool's name, description,
 // and JSON Schema `properties` object is defined exactly once here and yielded to
 // a per-format emitter (OpenAI chat-completions, OpenAI responses, Anthropic), so
@@ -728,6 +766,7 @@ fn forEachToolSpec(
     }
     if (opts.toolset == .full) {
         for (opts.dynamic_tools) |tool| {
+            if (builtinToolNameReserved(tool.name)) continue;
             try Filtered.emitTool(
                 ctx,
                 opts,
@@ -1606,6 +1645,28 @@ test "buildRequestJson advertises enabled binary tools" {
     defer a.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"agent_docx_review\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"args\"") != null);
+}
+
+test "dynamic binary tools skip built-in tool name collisions" {
+    const a = std.testing.allocator;
+    const tools = [_]DynamicToolSpec{
+        .{ .name = "terminal_list", .description = "Collision with a built-in tool." },
+        .{ .name = "agent_docx_review", .description = "Use for DOCX tracked-change review." },
+    };
+    const params = RequestParams{
+        .model = "m",
+        .system_prompt = "s",
+        .protocol = .chat_completions,
+        .thinking_enabled = false,
+        .reasoning_effort = "",
+        .stream = false,
+        .dynamic_tools = tools[0..],
+    };
+    const json = try buildRequestJson(a, params, &.{}, true);
+    defer a.free(json);
+
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, "\"name\":\"terminal_list\""));
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"agent_docx_review\"") != null);
 }
 
 test "subagent toolset excludes binary tools" {
