@@ -157,8 +157,9 @@ pub fn parseManifestJson(allocator: std.mem.Allocator, bytes: []const u8) !Owned
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidToolManifest;
 
-    if (jsonString(parsed.value, "kind")) |kind| {
-        if (!std.mem.eql(u8, kind, "binary_tool")) return error.InvalidToolManifest;
+    if (parsed.value.object.get("kind")) |kind_value| {
+        if (kind_value != .string) return error.InvalidToolManifest;
+        if (!std.mem.eql(u8, kind_value.string, "binary_tool")) return error.InvalidToolManifest;
     }
 
     const id = jsonString(parsed.value, "id") orelse return error.InvalidToolManifest;
@@ -397,6 +398,14 @@ test "tool_registry: manifest json round trips enabled tool metadata" {
     try std.testing.expectEqualStrings(manifest.function_name, parsed.function_name);
     try std.testing.expect(parsed.enabled);
     try std.testing.expectEqualStrings(manifest.executable, parsed.executable);
+}
+
+test "tool_registry: manifest rejects non-string kind" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(
+        error.InvalidToolManifest,
+        parseManifestJson(a, "{\"kind\":123,\"id\":\"x\",\"function_name\":\"x\",\"executable\":\"bin/x\"}"),
+    );
 }
 
 test "tool_registry: enabledToolSchemas skips disabled tools" {
