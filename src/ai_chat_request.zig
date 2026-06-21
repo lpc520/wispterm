@@ -766,6 +766,7 @@ fn toolAsk(ctx: *anyopaque, question: []const u8, options: []const ai_chat_types
 
 fn toolContextFromRequest(request: *ChatRequest) ai_chat_types.ToolContext {
     var settings = ai_chat.currentAgentSettings();
+    settings.dynamic_tools = request.dynamic_tools;
     // Per-conversation override beats the global default.
     if (request.session.workingDirOverride()) |override| settings.working_dir = override;
     return .{

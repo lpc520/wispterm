@@ -4,6 +4,7 @@
 const std = @import("std");
 const weixin_types = @import("weixin/types.zig");
 const agent_detector = @import("agent_detector.zig");
+const ai_chat_protocol = @import("ai_chat_protocol.zig");
 const ai_agent_access = @import("ai_agent_access.zig");
 const ssh_connection = @import("ssh_connection.zig");
 pub const SshConnection = ssh_connection.SshConnection;
@@ -28,6 +29,7 @@ pub const AgentSettings = struct {
     /// When true, the Copilot may append a "distill this into a skill?" prompt
     /// after tool-heavy turns (config `ai-distill-suggest`). Off by default.
     distill_suggest_enabled: bool = false,
+    dynamic_tools: []const ai_chat_protocol.DynamicToolSpec = &.{},
 };
 
 // AgentPermission lives in ai_agent_config.zig (extracted on main so config.zig

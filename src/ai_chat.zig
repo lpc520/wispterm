@@ -14,6 +14,7 @@ const platform_pty_command = @import("platform/pty_command.zig");
 const agent_history = @import("agent_history.zig");
 const skill_registry = @import("skill_registry.zig");
 const command_registry = @import("command_registry.zig");
+const tool_registry = @import("tool_registry.zig");
 const markdown_text = @import("markdown_text.zig");
 const ai_chat_protocol = @import("ai_chat_protocol.zig");
 const ai_chat_composer = @import("ai_chat_composer.zig");
@@ -169,6 +170,7 @@ pub const ChatRequest = struct {
     max_tokens: u32 = 8192,
     agent_enabled: bool,
     memory_enabled: bool = false,
+    dynamic_tools: []const ai_chat_protocol.DynamicToolSpec = &.{},
     copilot: bool = false,
     tool_host: ?ToolHost,
     tool_snapshot: ?ToolSnapshot,
@@ -207,6 +209,7 @@ pub const ChatRequest = struct {
             .stream = self.stream,
             .max_tokens = self.max_tokens,
             .memory_enabled = self.memory_enabled,
+            .dynamic_tools = self.dynamic_tools,
             .toolset = self.toolset,
         };
     }
@@ -365,6 +368,8 @@ var g_session_id_counter = std.atomic.Value(u64).init(1);
 var g_session_resume_trigger: ?*const fn () void = null;
 var g_markdown_export_trigger: ?*const fn (MarkdownExportMode) void = null;
 var g_model_switch_trigger: ?*const fn (*Session) void = null;
+threadlocal var g_dynamic_tool_specs: []ai_chat_protocol.DynamicToolSpec = &.{};
+threadlocal var g_dynamic_tool_specs_owned: bool = false;
 
 /// Resolved credentials for the `ai-subagent-profile` config key. Owned
 /// strings; freed by ChatRequest.deinit.
@@ -421,6 +426,60 @@ pub fn setMarkdownExportTrigger(cb: ?*const fn (MarkdownExportMode) void) void {
     g_markdown_export_trigger = cb;
 }
 threadlocal var g_tool_host: ?ToolHost = null;
+
+pub fn setDynamicToolSpecsForTest(specs: []ai_chat_protocol.DynamicToolSpec) void {
+    g_dynamic_tool_specs = specs;
+    g_dynamic_tool_specs_owned = false;
+}
+
+fn freeDynamicToolSpecsSlice(allocator: std.mem.Allocator, specs: []ai_chat_protocol.DynamicToolSpec) void {
+    for (specs) |spec| {
+        allocator.free(spec.name);
+        allocator.free(spec.description);
+    }
+    allocator.free(specs);
+}
+
+fn freeDynamicToolSpecs(allocator: std.mem.Allocator) void {
+    if (!g_dynamic_tool_specs_owned) return;
+    freeDynamicToolSpecsSlice(allocator, g_dynamic_tool_specs);
+    g_dynamic_tool_specs = &.{};
+    g_dynamic_tool_specs_owned = false;
+}
+
+fn loadDynamicToolSpecs(allocator: std.mem.Allocator) ![]ai_chat_protocol.DynamicToolSpec {
+    const tools_root = try platform_dirs.toolsDir(allocator);
+    defer allocator.free(tools_root);
+
+    const installed = try tool_registry.scanInstalledTools(allocator, tools_root);
+    defer tool_registry.freeInstalledTools(allocator, installed);
+
+    var list: std.ArrayListUnmanaged(ai_chat_protocol.DynamicToolSpec) = .empty;
+    errdefer {
+        for (list.items) |spec| {
+            allocator.free(spec.name);
+            allocator.free(spec.description);
+        }
+        list.deinit(allocator);
+    }
+
+    for (installed) |tool| {
+        if (!tool.enabled) continue;
+        const name = try allocator.dupe(u8, tool.function_name);
+        errdefer allocator.free(name);
+        const description = try allocator.dupe(u8, tool.description);
+        errdefer allocator.free(description);
+        try list.append(allocator, .{ .name = name, .description = description });
+    }
+
+    return list.toOwnedSlice(allocator);
+}
+
+pub fn reloadDynamicToolSpecs(allocator: std.mem.Allocator) void {
+    freeDynamicToolSpecs(allocator);
+    g_dynamic_tool_specs = loadDynamicToolSpecs(allocator) catch &.{};
+    g_dynamic_tool_specs_owned = g_dynamic_tool_specs.len != 0;
+}
 
 pub fn configureAgent(settings: AgentSettings) void {
     g_agent_mutex.lock();
@@ -512,6 +571,7 @@ pub fn currentAgentSettings() AgentSettings {
     var s = g_agent_settings;
     s.access_rules = g_access_rules;
     if (g_default_working_dir_len > 0) s.working_dir = g_default_working_dir_buf[0..g_default_working_dir_len];
+    s.dynamic_tools = g_dynamic_tool_specs;
     return s;
 }
 
@@ -3806,6 +3866,7 @@ pub const Session = struct {
             .max_tokens = self.max_tokens,
             .agent_enabled = agent_enabled,
             .memory_enabled = settings.memory_enabled,
+            .dynamic_tools = settings.dynamic_tools,
             .copilot = self.copilot,
             .tool_host = tool_host,
             .tool_snapshot = tool_snapshot,
