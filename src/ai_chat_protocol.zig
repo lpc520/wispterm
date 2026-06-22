@@ -3,6 +3,7 @@
 //! data + an allocator. (Imports the platform tool-description facades that the
 //! tool-schema builders already used.)
 const std = @import("std");
+const first_party_tools = @import("first_party_tools.zig");
 const platform_process = @import("platform/process.zig");
 const platform_pty_command = @import("platform/pty_command.zig");
 
@@ -231,6 +232,7 @@ pub const RequestParams = struct {
     memory_enabled: bool = false,
     toolset: Toolset = .full,
     dynamic_tools: []const DynamicToolSpec = &.{},
+    disabled_first_party_tools: []const []const u8 = &.{},
 };
 
 pub fn buildRequestJson(allocator: std.mem.Allocator, params: RequestParams, messages: []const RequestMessage, include_tools: bool) ![]u8 {
@@ -399,7 +401,7 @@ fn buildChatCompletionsRequestJsonForMessages(
         try out.appendSlice(allocator, ",\"stream_options\":{\"include_usage\":true}");
     }
     if (include_tools) {
-        try appendToolSchemas(allocator, &out, .{ .include_memory = params.memory_enabled, .toolset = params.toolset, .dynamic_tools = params.dynamic_tools });
+        try appendToolSchemas(allocator, &out, .{ .include_memory = params.memory_enabled, .toolset = params.toolset, .dynamic_tools = params.dynamic_tools, .disabled_first_party_tools = params.disabled_first_party_tools });
     }
     try out.append(allocator, '}');
 
@@ -462,7 +464,7 @@ fn buildResponsesRequestJsonForMessages(
     try out.appendSlice(allocator, ",\"stream\":");
     try out.appendSlice(allocator, if (params.stream) "true" else "false");
     if (include_tools) {
-        try appendResponseToolSchemas(allocator, &out, .{ .include_memory = params.memory_enabled, .toolset = params.toolset, .dynamic_tools = params.dynamic_tools });
+        try appendResponseToolSchemas(allocator, &out, .{ .include_memory = params.memory_enabled, .toolset = params.toolset, .dynamic_tools = params.dynamic_tools, .disabled_first_party_tools = params.disabled_first_party_tools });
     }
     try out.append(allocator, '}');
 
@@ -488,7 +490,7 @@ fn buildAnthropicRequestJsonForMessages(
     try out.appendSlice(allocator, ",\"messages\":[");
     try appendAnthropicMessages(allocator, &out, messages);
     try out.append(allocator, ']');
-    if (include_tools) try appendAnthropicTools(allocator, &out, .{ .include_memory = params.memory_enabled, .toolset = params.toolset, .dynamic_tools = params.dynamic_tools });
+    if (include_tools) try appendAnthropicTools(allocator, &out, .{ .include_memory = params.memory_enabled, .toolset = params.toolset, .dynamic_tools = params.dynamic_tools, .disabled_first_party_tools = params.disabled_first_party_tools });
     try out.append(allocator, '}');
     return out.toOwnedSlice(allocator);
 }
@@ -658,6 +660,7 @@ pub const ToolSpecOpts = struct {
     include_memory: bool,
     toolset: Toolset = .full,
     dynamic_tools: []const DynamicToolSpec = &.{},
+    disabled_first_party_tools: []const []const u8 = &.{},
 };
 
 /// Single source of truth for what a subagent may call. Every listed tool is
@@ -737,6 +740,7 @@ fn forEachToolSpec(
     const Filtered = struct {
         fn emitTool(c: Ctx, o: ToolSpecOpts, name: []const u8, description: []const u8, properties: []const u8) anyerror!void {
             if (o.toolset == .subagent and !subagentToolAllowed(name)) return;
+            if (first_party_tools.isDisabledName(o.disabled_first_party_tools, name)) return;
             try emit(c, name, description, properties);
         }
     };
@@ -785,6 +789,28 @@ fn forEachToolSpec(
             );
         }
     }
+}
+
+const ToolNameCollectorForTesting = struct {
+    allocator: std.mem.Allocator,
+    names: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    fn emit(self: *ToolNameCollectorForTesting, name: []const u8, description: []const u8, properties: []const u8) !void {
+        _ = description;
+        _ = properties;
+        try self.names.append(self.allocator, name);
+    }
+};
+
+pub fn collectBuiltinToolNamesForTesting(allocator: std.mem.Allocator, opts: ToolSpecOpts) ![]const []const u8 {
+    var ctx = ToolNameCollectorForTesting{ .allocator = allocator };
+    errdefer ctx.names.deinit(allocator);
+    try forEachToolSpec(*ToolNameCollectorForTesting, &ctx, opts, ToolNameCollectorForTesting.emit);
+    return ctx.names.toOwnedSlice(allocator);
+}
+
+pub fn freeCollectedToolNamesForTesting(allocator: std.mem.Allocator, names: []const []const u8) void {
+    allocator.free(names);
 }
 
 const ToolSchemaEmitter = struct {
@@ -1609,6 +1635,97 @@ test "agent tool set includes webread" {
     const json = try buildRequestJson(a, params, &msgs, true);
     defer a.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"webread\"") != null);
+}
+
+fn requestParamsWithDisabledToolsForTesting(protocol: ApiProtocol, disabled_tools: []const []const u8) RequestParams {
+    return .{
+        .model = "m",
+        .system_prompt = "",
+        .protocol = protocol,
+        .thinking_enabled = false,
+        .reasoning_effort = "",
+        .stream = false,
+        .max_tokens = 8192,
+        .memory_enabled = true,
+        .disabled_first_party_tools = disabled_tools,
+    };
+}
+
+fn expectToolSchemaNameForTesting(json: []const u8, name: []const u8, present: bool) !void {
+    var buf: [128]u8 = undefined;
+    const needle = try std.fmt.bufPrint(&buf, "\"name\":\"{s}\"", .{name});
+    if (present) {
+        try std.testing.expect(std.mem.indexOf(u8, json, needle) != null);
+    } else {
+        try std.testing.expect(std.mem.indexOf(u8, json, needle) == null);
+    }
+}
+
+test "disabled webread is omitted from chat_completions tool schemas" {
+    const a = std.testing.allocator;
+    const disabled = [_][]const u8{"webread"};
+    const params = requestParamsWithDisabledToolsForTesting(.chat_completions, disabled[0..]);
+    const json = try buildRequestJson(a, params, &.{}, true);
+    defer a.free(json);
+
+    try expectToolSchemaNameForTesting(json, "webread", false);
+    try expectToolSchemaNameForTesting(json, "websearch", true);
+}
+
+test "disabled webread is omitted from responses tool schemas" {
+    const a = std.testing.allocator;
+    const disabled = [_][]const u8{"webread"};
+    const params = requestParamsWithDisabledToolsForTesting(.responses, disabled[0..]);
+    const json = try buildRequestJson(a, params, &.{}, true);
+    defer a.free(json);
+
+    try expectToolSchemaNameForTesting(json, "webread", false);
+    try expectToolSchemaNameForTesting(json, "websearch", true);
+}
+
+test "disabled webread is omitted from anthropic tool schemas" {
+    const a = std.testing.allocator;
+    const disabled = [_][]const u8{"webread"};
+    const params = requestParamsWithDisabledToolsForTesting(.anthropic, disabled[0..]);
+    const json = try buildRequestJson(a, params, &.{}, true);
+    defer a.free(json);
+
+    try expectToolSchemaNameForTesting(json, "webread", false);
+    try expectToolSchemaNameForTesting(json, "websearch", true);
+}
+
+test "subagent tool schemas inherit disabled first-party tools" {
+    const a = std.testing.allocator;
+    const disabled = [_][]const u8{"webread"};
+    const names = try collectBuiltinToolNamesForTesting(a, .{
+        .include_memory = true,
+        .toolset = .subagent,
+        .disabled_first_party_tools = disabled[0..],
+    });
+    defer freeCollectedToolNamesForTesting(a, names);
+
+    try std.testing.expect(indexOfToolNameForTesting(names, "webread") == null);
+    try std.testing.expect(indexOfToolNameForTesting(names, "websearch") != null);
+}
+
+fn indexOfToolNameForTesting(names: []const []const u8, target: []const u8) ?usize {
+    for (names, 0..) |name, i| {
+        if (std.mem.eql(u8, name, target)) return i;
+    }
+    return null;
+}
+
+test "collectBuiltinToolNamesForTesting names all active first-party catalog tools" {
+    const a = std.testing.allocator;
+    const definitions = try first_party_tools.activeDefinitions(a);
+    defer first_party_tools.freeDefinitions(a, definitions);
+
+    const names = try collectBuiltinToolNamesForTesting(a, .{ .include_memory = true });
+    defer freeCollectedToolNamesForTesting(a, names);
+
+    for (definitions) |definition| {
+        try std.testing.expect(indexOfToolNameForTesting(names, definition.name) != null);
+    }
 }
 
 test "agent tool set includes pubmed" {
