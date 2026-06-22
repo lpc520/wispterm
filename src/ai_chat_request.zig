@@ -512,7 +512,7 @@ pub fn runOneShotPrompt(allocator: std.mem.Allocator, profile: OneShotProfile, s
         .base_url = base_url,
         .api_key = api_key,
         .model = model,
-        .protocol = profile.protocol,
+        .protocol = oneShotRequestProtocol(session),
         .system_prompt = system_prompt_copy,
         .messages = messages,
         .thinking_enabled = profile.thinking_enabled,
@@ -528,6 +528,10 @@ pub fn runOneShotPrompt(allocator: std.mem.Allocator, profile: OneShotProfile, s
     const result = try runChatRequestForMessages(&request, messages, false);
     defer result.deinit(allocator);
     return allocator.dupe(u8, result.content);
+}
+
+fn oneShotRequestProtocol(session: *const Session) ApiProtocol {
+    return session.protocol;
 }
 
 fn runChatRequestForMessages(request: *const ChatRequest, messages: []const RequestMessage, include_tools: bool) !ApiResult {
@@ -883,6 +887,36 @@ test "ai chat network failure result includes endpoint and underlying error" {
         "HTTP request failed before response: UnknownHostName (https://api.example.test/v1/responses)",
         result.content,
     );
+}
+
+test "one-shot request protocol uses normalized session protocol" {
+    const allocator = std.testing.allocator;
+    const profile = OneShotProfile{
+        .base_url = "https://api.anthropic.com",
+        .api_key = "",
+        .model = "claude-sonnet",
+        .protocol = .chat_completions,
+        .thinking_enabled = false,
+        .reasoning_effort = "",
+        .max_tokens = 8192,
+    };
+    const session = try Session.initWithVision(
+        allocator,
+        "One shot",
+        profile.base_url,
+        profile.api_key,
+        profile.model,
+        profile.protocol.name(),
+        "",
+        "disabled",
+        profile.reasoning_effort,
+        "false",
+        "false",
+        ai_chat.DEFAULT_VISION,
+    );
+    defer session.deinit();
+
+    try std.testing.expectEqual(ApiProtocol.anthropic, oneShotRequestProtocol(session));
 }
 
 test "ai chat request json includes deepseek thinking mode" {
