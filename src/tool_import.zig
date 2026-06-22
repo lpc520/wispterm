@@ -229,7 +229,7 @@ fn runArgvProbe(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
     var timed_out = false;
     var output_capped = false;
     var child_done = false;
-    var exit_code: i32 = -1;
+    var exit_code: i64 = -1;
     var poll_error: ?anyerror = null;
 
     while (true) {
@@ -344,18 +344,30 @@ fn runArgvProbe(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
     return stderr_data;
 }
 
-fn pollChildExited(child: *std.process.Child, timeout_ms: u32) ?i32 {
-    switch (platform_process.childExited(child.id, timeout_ms)) {
-        .running => return null,
-        .exited => |code| {
-            if (builtin.os.tag != .windows) child.term = .{ .Exited = @intCast(code) };
-            return @intCast(code);
-        },
-        .gone => {
-            if (builtin.os.tag != .windows) child.term = .{ .Unknown = 0 };
-            return -1;
-        },
+fn pollChildExited(child: *std.process.Child, timeout_ms: u32) ?i64 {
+    const result = platform_process.childExited(child.id, timeout_ms);
+    if (builtin.os.tag != .windows) {
+        switch (result) {
+            // POSIX exit status is masked to 0-255, so the u8 narrowing is safe.
+            .exited => |code| child.term = .{ .Exited = @intCast(code) },
+            .gone => child.term = .{ .Unknown = 0 },
+            .running => {},
+        }
     }
+    return childExitCode(result);
+}
+
+/// Map a child-poll result to a probe exit code. Windows exit codes span the
+/// full u32 (DWORD) range — e.g. 0xC0000005 for a faulting probe, or 0xFFFFFFFF
+/// from a C `main` returning -1 — so the code must widen to i64; narrowing to
+/// i32 trips a safety panic. Only `!= 0` is ever inspected downstream, so -1
+/// stands in for "gone / killed by signal".
+fn childExitCode(result: platform_process.ChildExit) ?i64 {
+    return switch (result) {
+        .running => null,
+        .exited => |code| @intCast(code),
+        .gone => -1,
+    };
 }
 
 fn terminateChildRaw(id: std.process.Child.Id) void {
@@ -726,6 +738,18 @@ test "tool_import: probe poller must not use the caller allocator for stream buf
     const source = @embedFile("tool_import.zig");
     const pattern = "std.Io." ++ "poll(allocator";
     try std.testing.expect(std.mem.indexOf(u8, source, pattern) == null);
+}
+
+test "tool_import: childExitCode widens full-range Windows exit codes without narrowing" {
+    // Windows GetExitCodeProcess returns a u32; probing an arbitrary binary with
+    // --skill yields codes above i32 max (e.g. 0xFFFFFFFF from `return -1`, or
+    // 0xC0000005 for an access violation). These must not panic on i32 narrowing.
+    try std.testing.expectEqual(@as(?i64, 0xC0000005), childExitCode(.{ .exited = 0xC0000005 }));
+    try std.testing.expectEqual(@as(?i64, 0xFFFFFFFF), childExitCode(.{ .exited = 0xFFFFFFFF }));
+    try std.testing.expectEqual(@as(?i64, 0), childExitCode(.{ .exited = 0 }));
+    try std.testing.expectEqual(@as(?i64, 7), childExitCode(.{ .exited = 7 }));
+    try std.testing.expectEqual(@as(?i64, null), childExitCode(.running));
+    try std.testing.expectEqual(@as(?i64, -1), childExitCode(.gone));
 }
 
 test "tool_import: probeBinary treats capped nonzero help output as empty" {
