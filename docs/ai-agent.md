@@ -173,6 +173,13 @@ Use `$skill-name your request` to explicitly load a skill for the next request.
 The loaded skill is stored as a replayable tool result in the chat history, so
 existing conversations stay reproducible even if the skill file changes later.
 
+Open **Skill Center** to inspect prompt skills, imported executable tools, and
+first-party WispTerm Agent tools such as web, terminal, file, docs, and memory
+tools. Imported executable tools keep their existing enable/disable state.
+First-party tool state is stored separately in `agent_tools.json`. Turning a
+built-in tool off hides it from newly built AI request schemas/tool lists, and
+runtime execution rejects stale or hallucinated calls for that disabled tool.
+
 Local slash commands (handled in the panel, without calling the model):
 
 - `/skills` lists discovered local skills.

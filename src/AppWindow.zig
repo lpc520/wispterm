@@ -68,6 +68,7 @@ const skill_transfer_cmd = @import("skill_transfer_cmd.zig");
 const tool_import = @import("tool_import.zig");
 const tool_registry = @import("tool_registry.zig");
 const tool_skill_draft = @import("tool_skill_draft.zig");
+const first_party_tools = @import("first_party_tools.zig");
 const ai_chat_request = @import("ai_chat_request.zig");
 const remote_file = @import("platform/remote_file.zig");
 const ssh_connection = @import("ssh_connection.zig");
@@ -216,6 +217,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
         .memory_enabled = app.ai_memory_enabled,
         .distill_suggest_enabled = app.ai_distill_suggest,
     });
+    ai_chat.reloadFirstPartyToolState(allocator);
     ai_chat.setDefaultWorkingDir(app.ai_agent_working_dir);
     overlays.setSubagentProfileName(app.ai_subagent_profile);
     ai_chat.setSubagentProfileResolver(overlays.resolveSubagentProfileOverride);
@@ -460,24 +462,68 @@ test "AppWindow: skill center tool enabled update matches manifest path" {
 
     const manifest_b = switch (entries[1]) {
         .tool => |tool| skillCenterToolManifestPath(std.testing.allocator, tool) orelse return error.ExpectedManifestPath,
-        .prompt => return error.ExpectedSkillCenterTool,
+        else => return error.ExpectedSkillCenterTool,
     };
     defer std.testing.allocator.free(manifest_b);
 
     try std.testing.expect(skillCenterApplyToolEnabledByManifestPath(std.testing.allocator, entries[0..], manifest_b, true));
     switch (entries[0]) {
         .tool => |tool| try std.testing.expect(!tool.enabled),
-        .prompt => return error.ExpectedSkillCenterTool,
+        else => return error.ExpectedSkillCenterTool,
     }
     switch (entries[1]) {
         .tool => |tool| try std.testing.expect(tool.enabled),
-        .prompt => return error.ExpectedSkillCenterTool,
+        else => return error.ExpectedSkillCenterTool,
     }
 
     try std.testing.expect(!skillCenterApplyToolEnabledByManifestPath(std.testing.allocator, entries[0..], "/tmp/tools/missing/manifest.json", false));
     switch (entries[1]) {
         .tool => |tool| try std.testing.expect(tool.enabled),
-        .prompt => return error.ExpectedSkillCenterTool,
+        else => return error.ExpectedSkillCenterTool,
+    }
+}
+
+test "AppWindow: skill center first-party enabled update matches name only" {
+    var entries = [_]skill_center.LibraryEntry{
+        .{ .first_party_tool = .{
+            .name = @constCast("webread"),
+            .description = @constCast("Read web pages."),
+            .enabled = false,
+            .disableable = true,
+        } },
+        .{ .first_party_tool = .{
+            .name = @constCast("pubmed"),
+            .description = @constCast("Search PubMed."),
+            .enabled = false,
+            .disableable = true,
+        } },
+        .{ .tool = .{
+            .name = @constCast("webread"),
+            .executable_path = @constCast("/tmp/tools/webread/bin/webread"),
+            .skill_path = @constCast("/tmp/tools/webread/SKILL.md"),
+            .enabled = false,
+            .approval = .ask,
+        } },
+    };
+
+    try std.testing.expect(skillCenterApplyFirstPartyEnabledByName(entries[0..], "pubmed", true));
+    switch (entries[0]) {
+        .first_party_tool => |tool| try std.testing.expect(!tool.enabled),
+        else => return error.ExpectedFirstPartyTool,
+    }
+    switch (entries[1]) {
+        .first_party_tool => |tool| try std.testing.expect(tool.enabled),
+        else => return error.ExpectedFirstPartyTool,
+    }
+    switch (entries[2]) {
+        .tool => |tool| try std.testing.expect(!tool.enabled),
+        else => return error.ExpectedSkillCenterTool,
+    }
+
+    try std.testing.expect(!skillCenterApplyFirstPartyEnabledByName(entries[0..], "missing", false));
+    switch (entries[1]) {
+        .first_party_tool => |tool| try std.testing.expect(tool.enabled),
+        else => return error.ExpectedFirstPartyTool,
     }
 }
 
@@ -1751,6 +1797,13 @@ fn scEntryItemAt(ctx: *anyopaque, i: usize) skill_center_renderer.ListItem {
             .enabled = if (t.enabled) "on" else "off",
             .marker_color = if (t.enabled) .{ 0.3, 0.85, 0.45 } else .{ 0.85, 0.45, 0.35 },
         },
+        .first_party_tool => |t| .{
+            .label = t.name,
+            .marker = "",
+            .kind = "built-in",
+            .enabled = if (t.enabled) "on" else "off",
+            .marker_color = if (t.enabled) .{ 0.3, 0.85, 0.45 } else .{ 0.85, 0.45, 0.35 },
+        },
     };
 }
 fn scPickerItemAt(ctx: *anyopaque, i: usize) skill_center_renderer.ListItem {
@@ -2682,7 +2735,7 @@ fn skillCenterMarkerFor(model: *const skill_center.PanelModel, name: []const u8,
                     return if (std.mem.eql(u8, lh, th)) .same else .differ;
                 }
             },
-            .tool => {},
+            .tool, .first_party_tool => {},
         }
     }
     return .new_;
@@ -2794,7 +2847,7 @@ fn skillCenterOpenPicker(purpose: skill_center.Purpose) bool {
             const entry = session.model.selectedEntry() orelse return false;
             switch (entry) {
                 .prompt => break :blk "",
-                .tool => return false,
+                .tool, .first_party_tool => return false,
             }
         },
     };
@@ -2850,11 +2903,30 @@ fn skillCenterApplyToolEnabledByManifestPath(
 ) bool {
     for (entries) |*entry| {
         switch (entry.*) {
-            .prompt => {},
+            .prompt, .first_party_tool => {},
             .tool => |*tool| {
                 const path = skillCenterToolManifestPath(allocator, tool.*) orelse continue;
                 defer allocator.free(path);
                 if (std.mem.eql(u8, path, manifest_path)) {
+                    tool.enabled = enabled;
+                    return true;
+                }
+            },
+        }
+    }
+    return false;
+}
+
+fn skillCenterApplyFirstPartyEnabledByName(
+    entries: []skill_center.LibraryEntry,
+    name: []const u8,
+    enabled: bool,
+) bool {
+    for (entries) |*entry| {
+        switch (entry.*) {
+            .prompt, .tool => {},
+            .first_party_tool => |*tool| {
+                if (std.mem.eql(u8, tool.name, name)) {
                     tool.enabled = enabled;
                     return true;
                 }
@@ -3279,10 +3351,52 @@ pub fn skillCenterImportTool() bool {
     return true;
 }
 
+fn skillCenterToolToggleFailed(session: *skill_center.Session) bool {
+    session.mutex.lock();
+    skillCenterSetStatusLocked(session, i18n.s().sc_tool_toggle_failed);
+    session.mutex.unlock();
+    markUiDirty();
+    return true;
+}
+
+fn skillCenterToggleFirstPartyToolEnabled(
+    session: *skill_center.Session,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+) bool {
+    var disabled = first_party_tools.loadDisabledTools(allocator) catch {
+        return skillCenterToolToggleFailed(session);
+    };
+    defer disabled.deinit(allocator);
+
+    const new_enabled = disabled.contains(name);
+    var next = first_party_tools.toggledDisabledTools(allocator, disabled, name) catch {
+        return skillCenterToolToggleFailed(session);
+    };
+    defer next.deinit(allocator);
+
+    first_party_tools.writeDisabledTools(allocator, next) catch {
+        return skillCenterToolToggleFailed(session);
+    };
+
+    ai_chat.reloadFirstPartyToolState(allocator);
+    session.mutex.lock();
+    if (session.model.entries) |entries| {
+        _ = skillCenterApplyFirstPartyEnabledByName(entries, name, new_enabled);
+    }
+    skillCenterSetStatusLocked(session, if (new_enabled) i18n.s().sc_tool_enabled else i18n.s().sc_tool_disabled);
+    session.mutex.unlock();
+    markUiDirty();
+    return true;
+}
+
 pub fn skillCenterToggleToolEnabled() bool {
     const session = activeSkillCenter() orelse return false;
     const allocator = g_allocator orelse return false;
     var manifest_path: ?[]u8 = null;
+    var first_party_name: ?[]u8 = null;
+    var first_party_seen = false;
+    var first_party_disableable = false;
     {
         session.mutex.lock();
         defer session.mutex.unlock();
@@ -3292,49 +3406,43 @@ pub fn skillCenterToggleToolEnabled() bool {
             .tool => |tool| {
                 manifest_path = skillCenterToolManifestPath(allocator, tool);
             },
+            .first_party_tool => |tool| {
+                first_party_seen = true;
+                first_party_disableable = tool.disableable;
+                if (tool.disableable) {
+                    first_party_name = allocator.dupe(u8, tool.name) catch null;
+                }
+            },
         }
     }
+    if (first_party_seen) {
+        if (!first_party_disableable) return skillCenterToolToggleFailed(session);
+        const name = first_party_name orelse return skillCenterToolToggleFailed(session);
+        defer allocator.free(name);
+        return skillCenterToggleFirstPartyToolEnabled(session, allocator, name);
+    }
+
     const path = manifest_path orelse {
-        session.mutex.lock();
-        skillCenterSetStatusLocked(session, i18n.s().sc_tool_toggle_failed);
-        session.mutex.unlock();
-        markUiDirty();
-        return true;
+        return skillCenterToolToggleFailed(session);
     };
     defer allocator.free(path);
 
     const bytes = skill_local_fs.readFileAllocAbsolute(allocator, path, 64 * 1024) catch {
-        session.mutex.lock();
-        skillCenterSetStatusLocked(session, i18n.s().sc_tool_toggle_failed);
-        session.mutex.unlock();
-        markUiDirty();
-        return true;
+        return skillCenterToolToggleFailed(session);
     };
     defer allocator.free(bytes);
     var manifest = tool_registry.parseManifestJson(allocator, bytes) catch {
-        session.mutex.lock();
-        skillCenterSetStatusLocked(session, i18n.s().sc_tool_toggle_failed);
-        session.mutex.unlock();
-        markUiDirty();
-        return true;
+        return skillCenterToolToggleFailed(session);
     };
     defer manifest.deinit(allocator);
 
     const new_enabled = !manifest.enabled;
     const json = skillCenterManifestJsonWithEnabled(allocator, bytes, new_enabled) catch {
-        session.mutex.lock();
-        skillCenterSetStatusLocked(session, i18n.s().sc_tool_toggle_failed);
-        session.mutex.unlock();
-        markUiDirty();
-        return true;
+        return skillCenterToolToggleFailed(session);
     };
     defer allocator.free(json);
     platform_atomic_file.writeFileReplaceSafe(path, json) catch {
-        session.mutex.lock();
-        skillCenterSetStatusLocked(session, i18n.s().sc_tool_toggle_failed);
-        session.mutex.unlock();
-        markUiDirty();
-        return true;
+        return skillCenterToolToggleFailed(session);
     };
 
     ai_chat.reloadDynamicToolSpecs(allocator);
@@ -3675,7 +3783,7 @@ pub fn skillCenterOverlaySelect() bool {
                                             if (s.agg_hash) |h| src_hash_owned = allocator.dupe(u8, h) catch null;
                                         }
                                     },
-                                    .tool => {},
+                                    .tool, .first_party_tool => {},
                                 }
                             }
                         }
@@ -3769,6 +3877,7 @@ pub fn skillCenterPreviewSelected() bool {
                 @memcpy(name_buf[0..name_len], tool.name[0..name_len]);
                 path_owned = allocator.dupe(u8, skill_path) catch null;
             },
+            .first_party_tool => return true,
         }
     }
     const abs = path_owned orelse return true;
@@ -4218,7 +4327,12 @@ const SkillLibraryScanJob = struct {
         const tools = try tool_registry.scanInstalledTools(allocator, job.tools_root);
         defer tool_registry.freeInstalledTools(allocator, tools);
 
-        const entries = try allocator.alloc(skill_center.LibraryEntry, prompt_entries.len + tools.len);
+        const first_party_defs = try first_party_tools.activeDefinitions(allocator);
+        defer first_party_tools.freeDefinitions(allocator, first_party_defs);
+        var disabled_first_party = try first_party_tools.loadDisabledTools(allocator);
+        defer disabled_first_party.deinit(allocator);
+
+        const entries = try allocator.alloc(skill_center.LibraryEntry, prompt_entries.len + tools.len + first_party_defs.len);
         var filled: usize = 0;
         errdefer {
             for (entries[0..filled]) |*entry| entry.deinit(allocator);
@@ -4234,6 +4348,15 @@ const SkillLibraryScanJob = struct {
 
         for (tools) |tool| {
             entries[filled] = try skillCenterEntryFromInstalledTool(allocator, job.tools_root, tool);
+            filled += 1;
+        }
+
+        for (first_party_defs) |definition| {
+            entries[filled] = try skillCenterEntryFromFirstPartyDefinition(
+                allocator,
+                definition,
+                !(definition.disableable and disabled_first_party.contains(definition.name)),
+            );
             filled += 1;
         }
 
@@ -4270,6 +4393,22 @@ fn skillCenterEntryFromInstalledTool(
         .skill_path = skill_path,
         .enabled = tool.enabled,
         .approval = .ask,
+    } };
+}
+
+fn skillCenterEntryFromFirstPartyDefinition(
+    allocator: std.mem.Allocator,
+    definition: first_party_tools.Definition,
+    enabled: bool,
+) !skill_center.LibraryEntry {
+    const name = try allocator.dupe(u8, definition.name);
+    errdefer allocator.free(name);
+    const description = try allocator.dupe(u8, definition.description);
+    return .{ .first_party_tool = .{
+        .name = name,
+        .description = description,
+        .enabled = enabled,
+        .disableable = definition.disableable,
     } };
 }
 
@@ -6355,6 +6494,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
         .memory_enabled = cfg.@"ai-memory-enabled",
         .distill_suggest_enabled = cfg.@"ai-distill-suggest",
     });
+    ai_chat.reloadFirstPartyToolState(allocator);
     ai_chat.setDefaultWorkingDir(cfg.@"ai-agent-working-dir");
     overlays.setSubagentProfileName(cfg.@"ai-subagent-profile");
     @import("web_search.zig").setJinaApiKey(cfg.@"jina-api-key");

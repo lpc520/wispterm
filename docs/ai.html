@@ -188,7 +188,7 @@ ai-agent-output-limit       = 16384</code></pre>
           <div class="feature">
             <h3>Skill locations</h3>
             <p>WispTerm discovers <code>SKILL.md</code> files under the platform config directory (<code>%APPDATA%\wispterm</code> on Windows, <code>~/Library/Application Support/wispterm</code> on macOS) in <code>skills/</code> and <code>plugins/skills/</code>, plus the same two sub-paths next to the executable and in the current working directory.</p>
-            <p>Skill Center also manages local executable tools. Imported tools are stored under the WispTerm config directory, documented by <code>SKILL.md</code>, and only enabled tools are advertised to AI Agent sessions. A tool can provide <code>--skill</code>, ship a sibling <code>SKILL.md</code>, or let WispTerm draft one with the configured AI profile when no documentation exists.</p>
+            <p>Skill Center also manages Agent tools. Imported executable tools are stored under the WispTerm config directory with a canonical <code>SKILL.md</code> and keep their own enable state. First-party WispTerm tools, including web, terminal, file, docs, and memory tools, appear in the same inventory; their state is stored separately in <code>agent_tools.json</code>. Turning a built-in tool off hides it from newly built AI request tool lists and blocks stale or hallucinated calls at runtime.</p>
           </div>
           <div class="feature">
             <h3>Load a skill</h3>
