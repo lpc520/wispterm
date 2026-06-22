@@ -216,6 +216,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
         .memory_enabled = app.ai_memory_enabled,
         .distill_suggest_enabled = app.ai_distill_suggest,
     });
+    ai_chat.reloadFirstPartyToolState(allocator);
     ai_chat.setDefaultWorkingDir(app.ai_agent_working_dir);
     overlays.setSubagentProfileName(app.ai_subagent_profile);
     ai_chat.setSubagentProfileResolver(overlays.resolveSubagentProfileOverride);
@@ -6355,6 +6356,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
         .memory_enabled = cfg.@"ai-memory-enabled",
         .distill_suggest_enabled = cfg.@"ai-distill-suggest",
     });
+    ai_chat.reloadFirstPartyToolState(allocator);
     ai_chat.setDefaultWorkingDir(cfg.@"ai-agent-working-dir");
     overlays.setSubagentProfileName(cfg.@"ai-subagent-profile");
     @import("web_search.zig").setJinaApiKey(cfg.@"jina-api-key");

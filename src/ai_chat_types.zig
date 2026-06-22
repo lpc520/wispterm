@@ -31,6 +31,7 @@ pub const AgentSettings = struct {
     distill_suggest_enabled: bool = false,
     dynamic_tools: []const ai_chat_protocol.DynamicToolSpec = &.{},
     dynamic_binary_tools: []const DynamicBinaryTool = &.{},
+    disabled_first_party_tools: []const []const u8 = &.{},
 };
 
 pub const DynamicBinaryTool = struct {
