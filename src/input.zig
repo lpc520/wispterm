@@ -488,6 +488,98 @@ test "input: skill center tool toggle requests a repaint" {
     _ = AppWindow.skillCenterToggleToolEnabled();
 }
 
+test "input: skill center first-party tool toggle writes state and requests a repaint" {
+    const allocator = std.testing.allocator;
+    const previous_allocator = AppWindow.g_allocator;
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    const previous_force_rebuild = AppWindow.g_force_rebuild;
+    const previous_cells_valid = AppWindow.g_cells_valid;
+    defer {
+        AppWindow.g_allocator = previous_allocator;
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+        AppWindow.g_force_rebuild = previous_force_rebuild;
+        AppWindow.g_cells_valid = previous_cells_valid;
+        platform_dirs.clearTestConfigDirForCurrentThread();
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    platform_dirs.setTestConfigDirForCurrentThread(root);
+
+    AppWindow.g_allocator = allocator;
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tab_count = 0;
+    active_tab_state.g_active_tab = 0;
+    if (!tab.spawnSkillCenterTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > 0) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+    }
+
+    const session = AppWindow.activeSkillCenter() orelse return error.ExpectedSkillCenterTab;
+    const name = try allocator.dupe(u8, "webread");
+    var name_owned = true;
+    errdefer if (name_owned) allocator.free(name);
+    const description = try allocator.dupe(u8, "Read web pages.");
+    var description_owned = true;
+    errdefer if (description_owned) allocator.free(description);
+    const entries = try allocator.alloc(AppWindow.skill_center.LibraryEntry, 1);
+    var entries_owned = true;
+    errdefer if (entries_owned) allocator.free(entries);
+    entries[0] = .{ .first_party_tool = .{
+        .name = name,
+        .description = description,
+        .enabled = true,
+        .disableable = true,
+    } };
+    session.mutex.lock();
+    session.model.setEntries(entries);
+    entries_owned = false;
+    name_owned = false;
+    description_owned = false;
+    session.mutex.unlock();
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(.{ .key_code = 0x45, .ctrl = false, .shift = false, .alt = false, .super = false });
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+
+    const state = try tmp.dir.readFileAlloc(allocator, "agent_tools.json", 4096);
+    defer allocator.free(state);
+    try std.testing.expect(std.mem.indexOf(u8, state, "\"webread\"") != null);
+
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        const entry = session.model.selectedEntry() orelse return error.ExpectedFirstPartyTool;
+        switch (entry) {
+            .first_party_tool => |tool| try std.testing.expect(!tool.enabled),
+            else => return error.ExpectedFirstPartyTool,
+        }
+    }
+
+    const settings = AppWindow.ai_chat.currentAgentSettings();
+    try std.testing.expectEqual(@as(usize, 1), settings.disabled_first_party_tools.len);
+    try std.testing.expectEqualStrings("webread", settings.disabled_first_party_tools[0]);
+
+    try std.testing.expect(AppWindow.skillCenterToggleToolEnabled());
+}
+
 test "input: skill center tool toggle is blocked while selection overlay is active" {
     const allocator = std.testing.allocator;
     const previous_allocator = AppWindow.g_allocator;
@@ -615,7 +707,7 @@ test "input: skill center tool toggle is blocked while selection overlay is acti
     const entry = session.model.selectedEntry() orelse return error.ExpectedSkillCenterTool;
     switch (entry) {
         .tool => |tool| try std.testing.expect(tool.enabled),
-        .prompt => return error.ExpectedSkillCenterTool,
+        else => return error.ExpectedSkillCenterTool,
     }
 }
 

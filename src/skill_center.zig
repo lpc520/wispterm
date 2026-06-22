@@ -126,14 +126,41 @@ pub const ToolSkill = struct {
     }
 };
 
+pub const FirstPartyToolSkill = struct {
+    name: []u8,
+    description: []u8,
+    enabled: bool,
+    disableable: bool,
+
+    pub fn clone(self: FirstPartyToolSkill, allocator: std.mem.Allocator) !FirstPartyToolSkill {
+        const name = try allocator.dupe(u8, self.name);
+        errdefer allocator.free(name);
+        const description = try allocator.dupe(u8, self.description);
+        return .{
+            .name = name,
+            .description = description,
+            .enabled = self.enabled,
+            .disableable = self.disableable,
+        };
+    }
+
+    pub fn deinit(self: *FirstPartyToolSkill, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.description);
+        self.* = undefined;
+    }
+};
+
 pub const LibraryEntry = union(enum) {
     prompt: LibrarySkill,
     tool: ToolSkill,
+    first_party_tool: FirstPartyToolSkill,
 
     pub fn deinit(self: *LibraryEntry, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .prompt => |*s| s.deinit(allocator),
             .tool => |*t| t.deinit(allocator),
+            .first_party_tool => |*t| t.deinit(allocator),
         }
         self.* = undefined;
     }
@@ -142,6 +169,7 @@ pub const LibraryEntry = union(enum) {
         return switch (self) {
             .prompt => |s| .{ .prompt = try s.clone(allocator) },
             .tool => |t| .{ .tool = try t.clone(allocator) },
+            .first_party_tool => |t| .{ .first_party_tool = try t.clone(allocator) },
         };
     }
 
@@ -149,6 +177,7 @@ pub const LibraryEntry = union(enum) {
         return switch (self) {
             .prompt => |s| s.name,
             .tool => |t| t.name,
+            .first_party_tool => |t| t.name,
         };
     }
 };
@@ -479,6 +508,7 @@ pub const PanelModel = struct {
         return switch (entry) {
             .prompt => |skill| skill,
             .tool => null,
+            .first_party_tool => null,
         };
     }
 
@@ -491,6 +521,7 @@ pub const PanelModel = struct {
                 tool.enabled = !tool.enabled;
                 return true;
             },
+            .first_party_tool => return false,
         }
     }
 
@@ -931,6 +962,27 @@ test "skill_center: PanelModel holds mixed prompt and tool entries" {
     m.sel_row = 1;
     try std.testing.expectEqualStrings("docx_review", m.selectedEntry().?.name());
     try std.testing.expectEqual(@as(?LibrarySkill, null), m.selected());
+}
+
+test "skill_center: first-party tool entry clones, deinitializes, and reports name" {
+    const a = std.testing.allocator;
+    var entry = LibraryEntry{ .first_party_tool = .{
+        .name = try a.dupe(u8, "webread"),
+        .description = try a.dupe(u8, "Read a web page into markdown."),
+        .enabled = true,
+        .disableable = true,
+    } };
+    defer entry.deinit(a);
+
+    var cloned = try entry.clone(a);
+    defer cloned.deinit(a);
+
+    try std.testing.expectEqualStrings("webread", entry.name());
+    try std.testing.expectEqualStrings("webread", cloned.name());
+    try std.testing.expect(cloned.first_party_tool.enabled);
+    try std.testing.expect(cloned.first_party_tool.disableable);
+    try std.testing.expect(cloned.first_party_tool.name.ptr != entry.first_party_tool.name.ptr);
+    try std.testing.expect(cloned.first_party_tool.description.ptr != entry.first_party_tool.description.ptr);
 }
 
 test "skill_center: toggleSelectedTool flips only selected tool entries" {

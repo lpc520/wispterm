@@ -296,7 +296,7 @@ const en = Strings{
     .sc_overwrite_download = "Overwrite download of",
     .sc_confirm_suffix = "— content differs. [⏎] confirm  [esc] cancel",
 
-    .sc_legend_v2 = "[space] preview   [↵] deploy   [i] import   [t] import tool   [e] enable   [g] get   [r] rescan",
+    .sc_legend_v2 = "[space] preview   [↵] deploy   [i] import   [t] import tool   [e] toggle   [g] get   [r] rescan",
     .sc_legend_import = "[space] preview   [↵] import   [esc] back",
     .sc_busy_loading = "Loading…",
     .sc_tool_import_failed = "Tool import is not available yet",
@@ -500,7 +500,7 @@ const zh_CN = Strings{
     .sc_overwrite_download = "下载覆盖",
     .sc_confirm_suffix = "（内容不同）。 [⏎] 确认  [esc] 取消",
 
-    .sc_legend_v2 = "[space] 预览   [↵] 部署   [i] 导入   [t] 导入工具   [e] 启用   [g] 获取   [r] 重新扫描",
+    .sc_legend_v2 = "[space] 预览   [↵] 部署   [i] 导入   [t] 导入工具   [e] 开关   [g] 获取   [r] 重新扫描",
     .sc_legend_import = "[space] 预览   [↵] 导入   [esc] 返回",
     .sc_busy_loading = "加载中…",
     .sc_tool_import_failed = "工具导入暂不可用",
