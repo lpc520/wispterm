@@ -64,6 +64,7 @@ const ssh_profile_store = @import("ssh_profile_store.zig");
 const skill_scan = @import("skill_scan.zig");
 const skill_local_fs = @import("skill_local_fs.zig");
 const skill_transfer_cmd = @import("skill_transfer_cmd.zig");
+const tool_registry = @import("tool_registry.zig");
 const remote_file = @import("platform/remote_file.zig");
 const ssh_connection = @import("ssh_connection.zig");
 const skill_transfer = @import("skill_transfer.zig");
@@ -912,7 +913,7 @@ fn renderSkillCenterFrame(active_tab: *TabState, fb_width: c_int, fb_height: c_i
         session.mutex.lock();
         defer session.mutex.unlock();
         const m = &session.model;
-        const lib_len = if (m.library) |l| l.len else 0;
+        const lib_len = m.entryCount();
         const overlay: skill_center_renderer.Overlay = switch (m.overlay) {
             .none, .busy => .none,
             .picker => |*p| .{ .list = .{
@@ -1071,8 +1072,8 @@ fn renderPortForwardingFrame(active_tab: *TabState, fb_width: c_int, fb_height: 
 /// Renderer accessor: library skill name at index i (read under the session lock).
 fn scNameAt(ctx: *anyopaque, i: usize) []const u8 {
     const m: *const skill_center.PanelModel = @ptrCast(@alignCast(ctx));
-    const lib = m.library orelse return "";
-    return if (i < lib.len) lib[i].name else "";
+    const entries = m.entries orelse return "";
+    return if (i < entries.len) entries[i].name() else "";
 }
 fn scPickerItemAt(ctx: *anyopaque, i: usize) skill_center_renderer.ListItem {
     const p: *const skill_center.PickerState = @ptrCast(@alignCast(ctx));
@@ -1517,7 +1518,7 @@ pub fn skillCenterMove(delta: isize) bool {
         .install_pick => |*p| scMoveSel(&p.sel, p.entries.len, delta),
         .url_input => {},
         else => {
-            const n = if (session.model.library) |l| l.len else 0;
+            const n = session.model.entryCount();
             scMoveSel(&session.model.sel_row, n, delta);
         },
     }
@@ -1988,13 +1989,18 @@ const SkillTransferCtx = struct {
 };
 
 /// Marker for a target skill vs the library (by name + hash).
-fn skillCenterMarkerFor(library: ?[]skill_center.LibrarySkill, name: []const u8, target_hash: ?[]const u8) skill_center.Marker {
-    const lib = library orelse return .new_;
-    for (lib) |s| {
-        if (std.mem.eql(u8, s.name, name)) {
-            const lh = s.agg_hash orelse return .differ;
-            const th = target_hash orelse return .differ;
-            return if (std.mem.eql(u8, lh, th)) .same else .differ;
+fn skillCenterMarkerFor(model: *const skill_center.PanelModel, name: []const u8, target_hash: ?[]const u8) skill_center.Marker {
+    const entries = model.entries orelse return .new_;
+    for (entries) |entry| {
+        switch (entry) {
+            .prompt => |s| {
+                if (std.mem.eql(u8, s.name, name)) {
+                    const lh = s.agg_hash orelse return .differ;
+                    const th = target_hash orelse return .differ;
+                    return if (std.mem.eql(u8, lh, th)) .same else .differ;
+                }
+            },
+            .tool => {},
         }
     }
     return .new_;
@@ -2010,7 +2016,7 @@ fn skillCenterMakeImportState(allocator: std.mem.Allocator, model: *const skill_
     var markers: std.ArrayListUnmanaged(skill_center.Marker) = .empty;
     errdefer markers.deinit(allocator);
     for (rows) |r| {
-        const marker = skillCenterMarkerFor(model.library, r.name, r.agg_hash);
+        const marker = skillCenterMarkerFor(model, r.name, r.agg_hash);
         const n = try allocator.dupe(u8, r.name);
         // Explicit cleanup: once `n` is in `names`, the function-level errdefer
         // owns it — a per-item errdefer here would double-free on a later error.
@@ -2380,10 +2386,15 @@ pub fn skillCenterOverlaySelect() bool {
                     target = p.targets[p.sel].clone(allocator) catch null;
                     if (p.purpose == .deploy) {
                         name_owned = allocator.dupe(u8, p.skill_name) catch null;
-                        if (session.model.library) |lib| {
-                            for (lib) |s| {
-                                if (std.mem.eql(u8, s.name, p.skill_name)) {
-                                    if (s.agg_hash) |h| src_hash_owned = allocator.dupe(u8, h) catch null;
+                        if (session.model.entries) |entries| {
+                            for (entries) |entry| {
+                                switch (entry) {
+                                    .prompt => |s| {
+                                        if (std.mem.eql(u8, s.name, p.skill_name)) {
+                                            if (s.agg_hash) |h| src_hash_owned = allocator.dupe(u8, h) catch null;
+                                        }
+                                    },
+                                    .tool => {},
                                 }
                             }
                         }
@@ -2882,21 +2893,75 @@ fn startAiHistoryScan(allocator: std.mem.Allocator, session: *ai_history_session
 const SkillLibraryScanJob = struct {
     root_expr: []u8, // owned shell expression for the library root (POSIX path)
     local_path: []u8, // owned raw absolute library root (native path)
+    tools_root: []const u8, // owned raw absolute installed binary tools root
 
-    fn run(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]skill_center.LibrarySkill {
+    fn run(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]skill_center.LibraryEntry {
         const job: *SkillLibraryScanJob = @ptrCast(@alignCast(ctx));
         const outcome = skillCenterScanOutcome(allocator, job.root_expr, job.local_path, null, false);
-        // Move the scanned rows into the library list (frees the rows slice).
-        return skill_center.libraryFromRows(allocator, outcome.rows);
+        const prompt_entries = if (outcome.reachable) entries: {
+            const prompt_lib = try skill_center.libraryFromRows(allocator, outcome.rows);
+            break :entries try skill_center.entriesFromLibrary(allocator, prompt_lib);
+        } else try allocator.alloc(skill_center.LibraryEntry, 0);
+        var prompt_entries_owned = true;
+        errdefer if (prompt_entries_owned) skill_center.freeEntries(allocator, prompt_entries);
+
+        const tools = try tool_registry.scanInstalledTools(allocator, job.tools_root);
+        defer tool_registry.freeInstalledTools(allocator, tools);
+
+        const entries = try allocator.alloc(skill_center.LibraryEntry, prompt_entries.len + tools.len);
+        var filled: usize = 0;
+        errdefer {
+            for (entries[0..filled]) |*entry| entry.deinit(allocator);
+            allocator.free(entries);
+        }
+
+        for (prompt_entries) |entry| {
+            entries[filled] = entry;
+            filled += 1;
+        }
+        allocator.free(prompt_entries);
+        prompt_entries_owned = false;
+
+        for (tools) |tool| {
+            entries[filled] = try skillCenterEntryFromInstalledTool(allocator, job.tools_root, tool);
+            filled += 1;
+        }
+
+        std.sort.insertion(skill_center.LibraryEntry, entries, {}, skillCenterEntryLessThan);
+        return entries;
     }
 
     fn destroy(ctx: *anyopaque, allocator: std.mem.Allocator) void {
         const job: *SkillLibraryScanJob = @ptrCast(@alignCast(ctx));
         allocator.free(job.root_expr);
         allocator.free(job.local_path);
+        allocator.free(job.tools_root);
         allocator.destroy(job);
     }
 };
+
+fn skillCenterEntryLessThan(_: void, a: skill_center.LibraryEntry, b: skill_center.LibraryEntry) bool {
+    return std.mem.lessThan(u8, a.name(), b.name());
+}
+
+fn skillCenterEntryFromInstalledTool(
+    allocator: std.mem.Allocator,
+    tools_root: []const u8,
+    tool: tool_registry.InstalledTool,
+) !skill_center.LibraryEntry {
+    const name = try allocator.dupe(u8, tool.function_name);
+    errdefer allocator.free(name);
+    const executable_path = try allocator.dupe(u8, tool.executable_abs);
+    errdefer allocator.free(executable_path);
+    const skill_path = try std.fs.path.join(allocator, &.{ tools_root, tool.id, "SKILL.md" });
+    return .{ .tool = .{
+        .name = name,
+        .executable_path = executable_path,
+        .skill_path = skill_path,
+        .enabled = tool.enabled,
+        .approval = .ask,
+    } };
+}
 
 /// Background op: scan a target, return rows for the UI to build an import list.
 const SkillImportScanJob = struct {
@@ -3297,13 +3362,20 @@ fn startSkillCenterScan(allocator: std.mem.Allocator, session: *skill_center.Ses
         session.publishScanFailure(session.scan_generation);
         return;
     };
-    const job = allocator.create(SkillLibraryScanJob) catch {
+    const tools_root = platform_dirs.toolsDir(allocator) catch {
         allocator.free(root_expr);
         allocator.free(local_path);
         session.publishScanFailure(session.scan_generation);
         return;
     };
-    job.* = .{ .root_expr = root_expr, .local_path = local_path };
+    const job = allocator.create(SkillLibraryScanJob) catch {
+        allocator.free(root_expr);
+        allocator.free(local_path);
+        allocator.free(tools_root);
+        session.publishScanFailure(session.scan_generation);
+        return;
+    };
+    job.* = .{ .root_expr = root_expr, .local_path = local_path, .tools_root = tools_root };
     session.scanAsync(.{ .ctx = job, .run = SkillLibraryScanJob.run, .destroy = SkillLibraryScanJob.destroy });
 }
 
