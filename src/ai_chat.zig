@@ -1406,6 +1406,18 @@ pub const Session = struct {
         return self.toHistoryRecordLocked(allocator);
     }
 
+    /// True iff this session has at least one message that would be written to the
+    /// history store. Used to skip persisting/snapshotting never-chatted Copilot
+    /// sidebars.
+    pub fn shouldPersistCopilot(self: *Session) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.messages.items) |msg| {
+            if (msg.persist_to_history) return true;
+        }
+        return false;
+    }
+
     pub fn allocMarkdownExport(self: *Session, allocator: std.mem.Allocator, mode: MarkdownExportMode) ![]u8 {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -8348,4 +8360,24 @@ test "copilot flag survives toHistoryRecord -> initFromHistoryRecord round-trip"
     const restored = try Session.initFromHistoryRecord(allocator, record);
     defer restored.deinit();
     try std.testing.expect(restored.copilot);
+}
+
+test "shouldPersistCopilot is false for empty session, true after a real message" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator, "Copilot", "https://x", "k", "m",
+        "sys", "disabled", "low", "true", "true",
+    );
+    defer session.deinit();
+    try std.testing.expect(!session.shouldPersistCopilot());
+
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        try session.messages.append(allocator, .{
+            .role = .user,
+            .content = try allocator.dupe(u8, "hello"),
+        });
+    }
+    try std.testing.expect(session.shouldPersistCopilot());
 }
