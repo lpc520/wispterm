@@ -902,7 +902,7 @@ test "agent_history: buildRows returns owned rows that survive store cleanup" {
     try std.testing.expectEqualStrings("m1", rows[0].model);
 }
 
-test "SessionRecord copilot flag round-trips through JSON" {
+test "agent_history: SessionRecord copilot flag round-trips through JSON" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator);
     defer store.deinit();
@@ -933,7 +933,7 @@ test "SessionRecord copilot flag round-trips through JSON" {
     try std.testing.expect(reloaded.records.items[0].copilot);
 }
 
-test "old record without copilot field defaults to false" {
+test "agent_history: old record without copilot field defaults to false" {
     const allocator = std.testing.allocator;
     const json =
         \\{"records":[{"session_id":"old","title":"T","base_url":"u","api_key":"k",
