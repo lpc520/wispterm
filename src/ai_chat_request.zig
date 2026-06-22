@@ -22,6 +22,17 @@ const ImageBlock = ai_chat_protocol.ImageBlock;
 const ApiResult = ai_chat_protocol.ApiResult;
 const ApiUsage = ai_chat_protocol.ApiUsage;
 const Role = ai_chat_protocol.Role;
+pub const ApiProtocol = ai_chat.ApiProtocol;
+
+pub const OneShotProfile = struct {
+    base_url: []const u8,
+    api_key: []const u8,
+    model: []const u8,
+    protocol: ApiProtocol,
+    thinking_enabled: bool,
+    reasoning_effort: []const u8,
+    max_tokens: u32,
+};
 
 // ---------------------------------------------------------------------------
 // MOVE: worker-thread entry points
@@ -456,6 +467,67 @@ fn applySubagentUsage(request: *const ChatRequest, total_usage: *ApiUsage, has_u
 
 fn runChatRequest(request: *const ChatRequest) !ApiResult {
     return runChatRequestForMessages(request, request.messages, request.agent_enabled);
+}
+
+pub fn runOneShotPrompt(allocator: std.mem.Allocator, profile: OneShotProfile, system_prompt: []const u8, user_prompt: []const u8) ![]u8 {
+    const thinking = if (profile.thinking_enabled) ai_chat.DEFAULT_THINKING else "disabled";
+    const session = try Session.initWithVision(
+        allocator,
+        "One shot",
+        profile.base_url,
+        profile.api_key,
+        profile.model,
+        profile.protocol.name(),
+        system_prompt,
+        thinking,
+        profile.reasoning_effort,
+        "false",
+        "false",
+        ai_chat.DEFAULT_VISION,
+    );
+    defer session.deinit();
+
+    const base_url = try allocator.dupe(u8, profile.base_url);
+    defer allocator.free(base_url);
+    const api_key = try allocator.dupe(u8, profile.api_key);
+    defer allocator.free(api_key);
+    const model = try allocator.dupe(u8, profile.model);
+    defer allocator.free(model);
+    const system_prompt_copy = try allocator.dupe(u8, system_prompt);
+    defer allocator.free(system_prompt_copy);
+    const reasoning_effort = try allocator.dupe(u8, profile.reasoning_effort);
+    defer allocator.free(reasoning_effort);
+
+    const messages = try allocator.alloc(RequestMessage, 1);
+    errdefer allocator.free(messages);
+    messages[0] = try requestMessageWithClonedFields(allocator, .user, user_prompt, null, null, null, null);
+    defer {
+        messages[0].deinit(allocator);
+        allocator.free(messages);
+    }
+
+    const request = ChatRequest{
+        .allocator = allocator,
+        .session = session,
+        .base_url = base_url,
+        .api_key = api_key,
+        .model = model,
+        .protocol = profile.protocol,
+        .system_prompt = system_prompt_copy,
+        .messages = messages,
+        .thinking_enabled = profile.thinking_enabled,
+        .reasoning_effort = reasoning_effort,
+        .stream = false,
+        .max_tokens = profile.max_tokens,
+        .agent_enabled = false,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .started_ms = std.time.milliTimestamp(),
+    };
+
+    const result = try runChatRequestForMessages(&request, messages, false);
+    defer result.deinit(allocator);
+    return allocator.dupe(u8, result.content);
 }
 
 fn runChatRequestForMessages(request: *const ChatRequest, messages: []const RequestMessage, include_tools: bool) !ApiResult {
