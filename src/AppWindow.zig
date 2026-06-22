@@ -1223,6 +1223,46 @@ test "AppWindow: terminal tab copilot sessions are persisted to agent history be
     try std.testing.expect(restored.copilot);
 }
 
+test "AppWindow: copilot restore hook rehydrates a copilot session by id" {
+    const allocator = std.testing.allocator;
+    const previous_store = g_agent_history;
+    const previous_hook = tab.g_copilot_restore_hook;
+    const previous_alloc = g_allocator;
+    defer {
+        g_agent_history = previous_store;
+        tab.g_copilot_restore_hook = previous_hook;
+        g_allocator = previous_alloc;
+    }
+
+    var store = agent_history.Store.init(allocator);
+    defer store.deinit();
+    g_agent_history = &store;
+    g_allocator = allocator;
+
+    try store.upsertRecord(.{
+        .session_id = "cp-restore",
+        .title = "T",
+        .base_url = "https://x",
+        .api_key = "k",
+        .model = "m",
+        .system_prompt = "s",
+        .thinking_enabled = false,
+        .reasoning_effort = "low",
+        .stream = true,
+        .agent_enabled = true,
+        .created_at = 1,
+        .updated_at = 2,
+        .copilot = true,
+        .messages = &[_]agent_history.MessageRecord{},
+    });
+
+    tab.g_copilot_restore_hook = reopenCopilotSessionFromHistorySessionId;
+    const session = tab.g_copilot_restore_hook.?("cp-restore") orelse return error.RestoreFailed;
+    defer session.deinit();
+    try std.testing.expect(session.copilot);
+    try std.testing.expectEqualStrings("cp-restore", session.sessionId());
+}
+
 // ============================================================================
 // Module-level state (will be moved into AppWindow struct in future)
 // ============================================================================
@@ -5268,6 +5308,9 @@ fn installSessionRestoreHooks() void {
     // tab.zig routes persisted AI snapshots back through these hooks.
     tab.g_ai_restore_hook = reopenAiChatTabFromHistorySessionId;
     tab.g_ai_history_restore_hook = reopenAiHistoryTabFromSnapshot;
+    // Copilot sidebar conversations are stored in the same agent-history store;
+    // rehydrate them in place when restoring their owning terminal tab.
+    tab.g_copilot_restore_hook = reopenCopilotSessionFromHistorySessionId;
     // tmux session persistence (#4c): save the active tmux profile names; on
     // restore, re-attach each via the launcher's tmux connect path.
     tab.g_tmux_active_profiles_hook = tmux_controller.activeProfileNames;
@@ -5598,6 +5641,25 @@ pub fn reopenAiChatTabFromHistorySessionId(session_id: []const u8) bool {
     if (!tab.spawnAiChatTabFromHistoryRecord(allocator, owned_record)) return false;
     clearUiStateOnTabChange();
     return true;
+}
+
+fn reopenCopilotSessionFromHistorySessionId(session_id: []const u8) ?*ai_chat.Session {
+    const allocator = g_allocator orelse return null;
+
+    const maybe_record: ?agent_history.SessionRecord = blk: {
+        g_agent_history_mutex.lock();
+        defer g_agent_history_mutex.unlock();
+        const store = g_agent_history orelse break :blk null;
+        break :blk store.cloneRecordBySessionId(allocator, session_id) catch null;
+    };
+    var record = maybe_record orelse return null;
+    defer agent_history.freeOwnedRecord(allocator, &record);
+
+    const session = ai_chat.Session.initFromHistoryRecord(allocator, record) catch return null;
+    // initFromHistoryRecord set session.copilot from the record marker; wire the
+    // same incremental-save hook AI-chat tabs use so future turns keep persisting.
+    session.setHistoryChangeHook(saveAiHistoryChangeEvent);
+    return session;
 }
 
 fn aiHistorySourceFromSnap(snap: session_persist.AiHistorySnap) ?ai_history_source.Source {

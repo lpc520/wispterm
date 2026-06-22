@@ -185,6 +185,11 @@ pub threadlocal var g_ai_restore_hook: ?*const fn (session_id: []const u8) bool 
 // keep after returning. Returns true if the tab was reopened.
 pub threadlocal var g_ai_history_restore_hook: ?*const fn (session_persist.AiHistorySnap) bool = null;
 
+/// Rehydrates a Copilot sidebar conversation from the agent-history store by id,
+/// returning an owned `*ai_chat.Session` (with the history hook installed) or
+/// null if the record is gone. AppWindow installs this (it owns the store).
+pub threadlocal var g_copilot_restore_hook: ?*const fn (session_id: []const u8) ?*ai_chat.Session = null;
+
 // tmux session persistence (Phase 3d #4c). The save hook returns the SSH profile
 // names of active tmux controllers (arena-allocated); the restore hook re-attaches
 // a profile by name. Registered by AppWindow so tab.zig stays free of the
@@ -1748,6 +1753,17 @@ pub fn restoreTab(
     t.tmux_owner = null;
     t.tmux_name_len = 0;
     t.copilot_visible = false;
+
+    // Restore the Copilot sidebar conversation in place, if any. Missing record
+    // (deleted / corrupt store) → silent fallback to an empty sidebar.
+    if (snap.copilot_session_id) |sid| {
+        if (g_copilot_restore_hook) |hook| {
+            if (hook(sid)) |session| {
+                t.copilot_session = session;
+                t.copilot_visible = snap.copilot_visible;
+            }
+        }
+    }
     applyRestoredTabMetadata(t, snap);
 
     g_tabs[g_tab_count] = t;
