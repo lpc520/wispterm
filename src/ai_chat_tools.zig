@@ -2840,13 +2840,16 @@ test "isDangerousCommand flags destructive verbs without a Session" {
 }
 
 test "executeToolCall dispatches enabled binary tool by argv" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     const a = std.testing.allocator;
     var dummy: u8 = 0;
+    const executable = if (builtin.os.tag == .windows) "cmd.exe" else "/bin/echo";
+    const arguments = if (builtin.os.tag == .windows)
+        "{\"args\":[\"/C\",\"echo\",\"hello\",\"world\"]}"
+    else
+        "{\"args\":[\"hello\",\"world\"]}";
     const tools = [_]types.DynamicBinaryTool{.{
         .function_name = "fake_tool",
-        .executable_abs = "/bin/echo",
+        .executable_abs = executable,
         .description = "Echo test",
     }};
     var ctx = ToolContext{
@@ -2865,10 +2868,12 @@ test "executeToolCall dispatches enabled binary tool by argv" {
     const out = try executeToolCall(&ctx, .{
         .id = @constCast("1"),
         .name = @constCast("fake_tool"),
-        .arguments = @constCast("{\"args\":[\"hello\",\"world\"]}"),
+        .arguments = @constCast(arguments),
     });
     defer a.free(out);
-    try std.testing.expect(std.mem.indexOf(u8, out, "hello world") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Unknown tool") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "hello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "world") != null);
 }
 
 test "executeToolCall asks before binary tool in auto mode" {

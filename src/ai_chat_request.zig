@@ -1185,12 +1185,16 @@ test "subagent tool call requires a task argument" {
 }
 
 test "request-owned dynamic binary tool dispatches through executeToolCall" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
-
     const a = std.testing.allocator;
     const saved_settings = ai_chat.currentAgentSettings();
     defer ai_chat.configureAgent(saved_settings);
     ai_chat.configureAgent(.{ .enabled = true, .permission = .full });
+    const builtin = @import("builtin");
+    const executable = if (builtin.os.tag == .windows) "cmd.exe" else "/bin/echo";
+    const arguments = if (builtin.os.tag == .windows)
+        "{\"args\":[\"/C\",\"echo\",\"hello\",\"runtime\"]}"
+    else
+        "{\"args\":[\"hello\",\"runtime\"]}";
 
     const env = try testSessionAndRequest(a);
     defer env.session.deinit();
@@ -1198,7 +1202,7 @@ test "request-owned dynamic binary tool dispatches through executeToolCall" {
     const runtime = try a.alloc(ai_chat_types.DynamicBinaryTool, 1);
     runtime[0] = .{
         .function_name = try a.dupe(u8, "fake_tool"),
-        .executable_abs = try a.dupe(u8, "/bin/echo"),
+        .executable_abs = try a.dupe(u8, executable),
         .description = try a.dupe(u8, "Echo test"),
     };
     env.request.dynamic_binary_tools = runtime;
@@ -1206,12 +1210,13 @@ test "request-owned dynamic binary tool dispatches through executeToolCall" {
     const out = try executeToolCall(env.request, .{
         .id = @constCast("1"),
         .name = @constCast("fake_tool"),
-        .arguments = @constCast("{\"args\":[\"hello\",\"runtime\"]}"),
+        .arguments = @constCast(arguments),
     });
     defer a.free(out);
 
     try std.testing.expect(std.mem.indexOf(u8, out, "Unknown tool") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "hello runtime") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "hello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "runtime") != null);
 }
 
 test "applySubagentUsage merges into the loop total" {

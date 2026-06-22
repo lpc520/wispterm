@@ -7624,8 +7624,6 @@ test "ai chat session request owns dynamic tool specs snapshot" {
 }
 
 test "ai chat session request owns dynamic binary runtime snapshot" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     const allocator = std.testing.allocator;
     const saved_settings = currentAgentSettings();
     const saved_dynamic_runtime = g_dynamic_binary_tools;
@@ -7638,7 +7636,8 @@ test "ai chat session request owns dynamic binary runtime snapshot" {
 
     const function_name = try allocator.dupe(u8, "fake_tool");
     defer allocator.free(function_name);
-    const executable_abs = try allocator.dupe(u8, "/bin/echo");
+    const executable_text = if (builtin.os.tag == .windows) "cmd.exe" else "/bin/echo";
+    const executable_abs = try allocator.dupe(u8, executable_text);
     defer allocator.free(executable_abs);
     const description = try allocator.dupe(u8, "Echo test");
     defer allocator.free(description);
@@ -7675,7 +7674,7 @@ test "ai chat session request owns dynamic binary runtime snapshot" {
 
     try std.testing.expectEqual(@as(usize, 1), request.dynamic_binary_tools.len);
     try std.testing.expectEqualStrings("fake_tool", request.dynamic_binary_tools[0].function_name);
-    try std.testing.expectEqualStrings("/bin/echo", request.dynamic_binary_tools[0].executable_abs);
+    try std.testing.expectEqualStrings(executable_text, request.dynamic_binary_tools[0].executable_abs);
 }
 
 const CopilotBoundSnapshotTestHost = struct {
