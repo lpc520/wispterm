@@ -26,8 +26,10 @@
   1. **真实输入路径**(键盘/快捷键/菜单/焦点/点击)
   2. **终端正文输出**(命令执行后面板内的文本)
   3. **窗口/菜单状态**(标题栏、菜单项 enabled/checked、窗口尺寸等)
-- 全程使用 **macOS 自带能力**,**零额外安装**(`/usr/bin/python3` 自带 PyObjC/Quartz)。
+- 输入/AX 用 **macOS 系统能力**(CGEvent、AppleScript),正文用项目自带 `wisptermctl`。
 - 架构上将**抽象接口 / 平台后端**分离,为 Windows 复用预留接缝。
+
+> **依赖现实(修正早期"零安装"说法)**:`/usr/bin/python3`(Xcode/CLT,3.9)**不自带 PyObjC**——本机的 `Quartz`/`ApplicationServices` 是 `pip install --user` 装的(位于 `~/Library/Python/3.9/.../site-packages`)。`pytest` 也未预装。因此真实依赖 = **PyObjC 框架(本机已有)+ pytest(需一次 `pip install --user pytest`)**。harness 在缺失时给出清晰的安装指引而非静默失败。
 
 ### 非目标
 - **不做视觉渲染截图 diff**(基准维护成本高,本期明确排除)。
@@ -37,7 +39,7 @@
 
 ## 3. 关键决策
 
-- **编排方案 = Python harness(pytest)**。理由:真测试框架(fixture 管生命周期、清晰断言、重试/等待 helper);键鼠与断言同一语言;`/usr/bin/python3` 自带 Quartz/PyObjC,零安装、全程系统自带。
+- **编排方案 = Python harness(pytest)**。理由:真测试框架(fixture 管生命周期、清晰断言、重试/等待 helper);键鼠与断言同一语言。运行解释器固定用 `/usr/bin/python3`(它的 user-site 同时挂着 PyObjC 与 pytest);`make` 入口在 pytest 缺失时自动 `pip install --user pytest`。
 - **三层底层原语**:
   - 真实输入(键鼠)→ CGEvent(Quartz)
   - 菜单动作 + 窗口/菜单状态读取 → AppleScript System Events / AX(`osascript`)
@@ -159,7 +161,7 @@ def test_edit_menu_copy_enabled_on_selection(app):
 - 新增 `driver/windows.py`:`key/text/click` 用 stdlib `ctypes` 调 `SendInput`(免装);`menu_* / window_attr` 用 UI Automation(需 `comtypes` / `pywinauto`)。
 - **正文层(`get_text/wait_for/primary_pane/launch/quit`)一行不改**,复用 `wisptermctl`。
 - `conftest` 按 `sys.platform` 选后端;菜单/标题栏专属用例用 `@macos_only` 跳过(两平台菜单模型不同)。
-- 诚实代价:Windows 失去"零安装"优点(需安装 Python;UIA 需额外包)。
+- 安装面对比:macOS 需 PyObjC + pytest(均 pip);Windows 还需安装 Python 本体 + UIA 包(`comtypes`/`pywinauto`),`SendInput` 用 stdlib `ctypes` 免装。
 
 ## 12. 已确认的决策点(评审中可改)
 
