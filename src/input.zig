@@ -811,6 +811,194 @@ test "input: skill center deploy and import keys are blocked while picker overla
     }
 }
 
+test "input: skill center main actions are blocked while import list overlay is active" {
+    const allocator = std.testing.allocator;
+    const previous_allocator = AppWindow.g_allocator;
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    const previous_force_rebuild = AppWindow.g_force_rebuild;
+    const previous_cells_valid = AppWindow.g_cells_valid;
+    defer {
+        AppWindow.g_allocator = previous_allocator;
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+        AppWindow.g_force_rebuild = previous_force_rebuild;
+        AppWindow.g_cells_valid = previous_cells_valid;
+        platform_dirs.clearTestConfigDirForCurrentThread();
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("tools/fake_tool/bin");
+    try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/SKILL.md", .data = "---\nname: fake_tool\n---\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/bin/fake_tool", .data = "" });
+    try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/manifest.json", .data =
+        \\{
+        \\  "kind": "binary_tool",
+        \\  "id": "fake_tool",
+        \\  "function_name": "fake_tool",
+        \\  "enabled": true,
+        \\  "executable": "bin/fake_tool",
+        \\  "source_path": "/tmp/fake_tool",
+        \\  "sha256": "abc123",
+        \\  "imported_at_ms": 1,
+        \\  "description": "fake"
+        \\}
+    });
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    platform_dirs.setTestConfigDirForCurrentThread(root);
+
+    AppWindow.g_allocator = allocator;
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tab_count = 0;
+    active_tab_state.g_active_tab = 0;
+    if (!tab.spawnSkillCenterTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > 0) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+    }
+
+    const session = AppWindow.activeSkillCenter() orelse return error.ExpectedSkillCenterTab;
+    const prompt_name = try allocator.dupe(u8, "main_prompt");
+    var prompt_name_owned = true;
+    errdefer if (prompt_name_owned) allocator.free(prompt_name);
+    const prompt_rel_path = try allocator.dupe(u8, "main_prompt/SKILL.md");
+    var prompt_rel_path_owned = true;
+    errdefer if (prompt_rel_path_owned) allocator.free(prompt_rel_path);
+    const executable_path = try std.fs.path.join(allocator, &.{ root, "tools", "fake_tool", "bin", "fake_tool" });
+    var executable_path_owned = true;
+    errdefer if (executable_path_owned) allocator.free(executable_path);
+    const skill_path = try std.fs.path.join(allocator, &.{ root, "tools", "fake_tool", "SKILL.md" });
+    var skill_path_owned = true;
+    errdefer if (skill_path_owned) allocator.free(skill_path);
+    const name = try allocator.dupe(u8, "fake_tool");
+    var name_owned = true;
+    errdefer if (name_owned) allocator.free(name);
+    const entries = try allocator.alloc(AppWindow.skill_center.LibraryEntry, 2);
+    var entries_owned = true;
+    errdefer if (entries_owned) allocator.free(entries);
+    entries[0] = .{ .prompt = .{
+        .name = prompt_name,
+        .rel_path = prompt_rel_path,
+        .agg_hash = null,
+    } };
+    entries[1] = .{ .tool = .{
+        .name = name,
+        .executable_path = executable_path,
+        .skill_path = skill_path,
+        .enabled = true,
+        .approval = .ask,
+    } };
+
+    var import_target = try AppWindow.skill_center.Target.dupe(allocator, "local", "Local", .claude, true);
+    var import_target_owned = true;
+    errdefer if (import_target_owned) import_target.deinit(allocator);
+    const import_names = try allocator.alloc([]u8, 1);
+    var import_names_owned = true;
+    errdefer if (import_names_owned) allocator.free(import_names);
+    import_names[0] = try allocator.dupe(u8, "remote_prompt");
+    var import_name_0_owned = true;
+    errdefer if (import_name_0_owned) allocator.free(import_names[0]);
+    const import_markers = try allocator.alloc(AppWindow.skill_center.Marker, 1);
+    var import_markers_owned = true;
+    errdefer if (import_markers_owned) allocator.free(import_markers);
+    import_markers[0] = .new_;
+
+    session.mutex.lock();
+    session.model.setEntries(entries);
+    entries_owned = false;
+    prompt_name_owned = false;
+    prompt_rel_path_owned = false;
+    name_owned = false;
+    executable_path_owned = false;
+    skill_path_owned = false;
+    session.model.setOverlay(.{ .import_list = .{
+        .target = import_target,
+        .names = import_names,
+        .markers = import_markers,
+        .sel = 0,
+    } });
+    import_target_owned = false;
+    import_names_owned = false;
+    import_name_0_owned = false;
+    import_markers_owned = false;
+    session.mutex.unlock();
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(.{ .key_code = 0x44, .ctrl = false, .shift = false, .alt = false, .super = false });
+    try std.testing.expect(!AppWindow.g_force_rebuild);
+    try std.testing.expect(AppWindow.g_cells_valid);
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        switch (session.model.overlay) {
+            .import_list => |import_list| try std.testing.expectEqualStrings("remote_prompt", import_list.names[0]),
+            else => return error.ExpectedSkillCenterImportList,
+        }
+    }
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(.{ .key_code = 0x49, .ctrl = false, .shift = false, .alt = false, .super = false });
+    try std.testing.expect(!AppWindow.g_force_rebuild);
+    try std.testing.expect(AppWindow.g_cells_valid);
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        switch (session.model.overlay) {
+            .import_list => |import_list| try std.testing.expectEqualStrings("remote_prompt", import_list.names[0]),
+            else => return error.ExpectedSkillCenterImportList,
+        }
+        session.model.sel_row = 1;
+    }
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(.{ .key_code = 0x54, .ctrl = false, .shift = false, .alt = false, .super = false });
+    try std.testing.expect(!AppWindow.g_force_rebuild);
+    try std.testing.expect(AppWindow.g_cells_valid);
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        try std.testing.expectEqualStrings("", session.status);
+        switch (session.model.overlay) {
+            .import_list => |import_list| {
+                try std.testing.expectEqual(@as(usize, 1), import_list.names.len);
+                try std.testing.expectEqualStrings("remote_prompt", import_list.names[0]);
+            },
+            else => return error.ExpectedSkillCenterImportList,
+        }
+    }
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(.{ .key_code = 0x45, .ctrl = false, .shift = false, .alt = false, .super = false });
+    try std.testing.expect(!AppWindow.g_force_rebuild);
+    try std.testing.expect(AppWindow.g_cells_valid);
+    const manifest = try tmp.dir.readFileAlloc(allocator, "tools/fake_tool/manifest.json", 4096);
+    defer allocator.free(manifest);
+    try std.testing.expect(std.mem.indexOf(u8, manifest, "\"enabled\": true") != null);
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        switch (session.model.overlay) {
+            .import_list => |import_list| try std.testing.expectEqualStrings("remote_prompt", import_list.names[0]),
+            else => return error.ExpectedSkillCenterImportList,
+        }
+    }
+}
+
 test "input: terminal viewport mouse wheel scroll requests a repaint" {
     const allocator = std.testing.allocator;
     const ghostty_vt = @import("ghostty-vt");

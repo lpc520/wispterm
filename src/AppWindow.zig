@@ -507,6 +507,142 @@ test "AppWindow: skill center tool manifest toggle preserves extra fields" {
     try std.testing.expect(enabled_value.bool);
 }
 
+test "AppWindow: skill center import picker requires current prompt selection" {
+    const allocator = std.testing.allocator;
+    const previous_allocator = g_allocator;
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    const previous_force_rebuild = g_force_rebuild;
+    const previous_cells_valid = g_cells_valid;
+    defer {
+        g_allocator = previous_allocator;
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+        g_force_rebuild = previous_force_rebuild;
+        g_cells_valid = previous_cells_valid;
+    }
+
+    g_allocator = allocator;
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tab_count = 0;
+    active_tab_state.g_active_tab = 0;
+    if (!tab.spawnSkillCenterTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > 0) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+    }
+
+    const session = activeSkillCenter() orelse return error.ExpectedSkillCenterTab;
+    const name = try allocator.dupe(u8, "fake_tool");
+    var name_owned = true;
+    errdefer if (name_owned) allocator.free(name);
+    const executable_path = try allocator.dupe(u8, "/tmp/tools/fake_tool/bin/fake_tool");
+    var executable_path_owned = true;
+    errdefer if (executable_path_owned) allocator.free(executable_path);
+    const skill_path = try allocator.dupe(u8, "/tmp/tools/fake_tool/SKILL.md");
+    var skill_path_owned = true;
+    errdefer if (skill_path_owned) allocator.free(skill_path);
+    const entries = try allocator.alloc(skill_center.LibraryEntry, 1);
+    var entries_owned = true;
+    errdefer if (entries_owned) allocator.free(entries);
+    entries[0] = .{ .tool = .{
+        .name = name,
+        .executable_path = executable_path,
+        .skill_path = skill_path,
+        .enabled = false,
+        .approval = .ask,
+    } };
+
+    session.mutex.lock();
+    session.model.setEntries(entries);
+    entries_owned = false;
+    name_owned = false;
+    executable_path_owned = false;
+    skill_path_owned = false;
+    session.mutex.unlock();
+
+    g_force_rebuild = false;
+    g_cells_valid = true;
+    try std.testing.expect(!skillCenterOpenPicker(.import_));
+    try std.testing.expect(!g_force_rebuild);
+    try std.testing.expect(g_cells_valid);
+    try std.testing.expect(!skillCenterOverlayActive());
+}
+
+test "AppWindow: skill center tool toggle failure uses toggle status" {
+    const allocator = std.testing.allocator;
+    const previous_allocator = g_allocator;
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    const previous_force_rebuild = g_force_rebuild;
+    const previous_cells_valid = g_cells_valid;
+    defer {
+        g_allocator = previous_allocator;
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+        g_force_rebuild = previous_force_rebuild;
+        g_cells_valid = previous_cells_valid;
+    }
+
+    g_allocator = allocator;
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tab_count = 0;
+    active_tab_state.g_active_tab = 0;
+    if (!tab.spawnSkillCenterTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > 0) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+    }
+
+    const session = activeSkillCenter() orelse return error.ExpectedSkillCenterTab;
+    const name = try allocator.dupe(u8, "bad_tool");
+    var name_owned = true;
+    errdefer if (name_owned) allocator.free(name);
+    const executable_path = try allocator.dupe(u8, "/tmp/tools/bad_tool/bad_tool");
+    var executable_path_owned = true;
+    errdefer if (executable_path_owned) allocator.free(executable_path);
+    const entries = try allocator.alloc(skill_center.LibraryEntry, 1);
+    var entries_owned = true;
+    errdefer if (entries_owned) allocator.free(entries);
+    entries[0] = .{ .tool = .{
+        .name = name,
+        .executable_path = executable_path,
+        .skill_path = null,
+        .enabled = false,
+        .approval = .ask,
+    } };
+
+    session.mutex.lock();
+    session.model.setEntries(entries);
+    entries_owned = false;
+    name_owned = false;
+    executable_path_owned = false;
+    session.mutex.unlock();
+
+    try std.testing.expect(skillCenterToggleToolEnabled());
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    try std.testing.expectEqualStrings(i18n.s().sc_tool_toggle_failed, session.status);
+}
+
 test "AppWindow: open AI chat tabs are persisted to agent history before session dump" {
     const allocator = std.testing.allocator;
 
@@ -2186,11 +2322,8 @@ fn skillCenterOpenPicker(purpose: skill_center.Purpose) bool {
     const allocator = g_allocator orelse return false;
     session.mutex.lock();
     defer session.mutex.unlock();
-    var name: []const u8 = "";
-    if (purpose == .deploy) {
-        const sk = session.model.selected() orelse return false;
-        name = sk.name;
-    }
+    const sk = session.model.selected() orelse return false;
+    const name = if (purpose == .deploy) sk.name else "";
     const picker = skillCenterBuildPicker(allocator, purpose, name) catch return true;
     session.model.setOverlay(.{ .picker = picker });
     markUiDirty();
@@ -2201,11 +2334,6 @@ pub fn skillCenterDeploy() bool {
     return skillCenterOpenPicker(.deploy);
 }
 pub fn skillCenterImport() bool {
-    const session = activeSkillCenter() orelse return false;
-    session.mutex.lock();
-    const prompt_selected = session.model.selected() != null;
-    session.mutex.unlock();
-    if (!prompt_selected) return false;
     return skillCenterOpenPicker(.import_);
 }
 
@@ -2311,7 +2439,7 @@ pub fn skillCenterToggleToolEnabled() bool {
     }
     const path = manifest_path orelse {
         session.mutex.lock();
-        skillCenterSetStatusLocked(session, i18n.s().sc_tool_import_failed);
+        skillCenterSetStatusLocked(session, i18n.s().sc_tool_toggle_failed);
         session.mutex.unlock();
         markUiDirty();
         return true;
@@ -2320,7 +2448,7 @@ pub fn skillCenterToggleToolEnabled() bool {
 
     const bytes = skill_local_fs.readFileAllocAbsolute(allocator, path, 64 * 1024) catch {
         session.mutex.lock();
-        skillCenterSetStatusLocked(session, i18n.s().sc_tool_import_failed);
+        skillCenterSetStatusLocked(session, i18n.s().sc_tool_toggle_failed);
         session.mutex.unlock();
         markUiDirty();
         return true;
@@ -2328,7 +2456,7 @@ pub fn skillCenterToggleToolEnabled() bool {
     defer allocator.free(bytes);
     var manifest = tool_registry.parseManifestJson(allocator, bytes) catch {
         session.mutex.lock();
-        skillCenterSetStatusLocked(session, i18n.s().sc_tool_import_failed);
+        skillCenterSetStatusLocked(session, i18n.s().sc_tool_toggle_failed);
         session.mutex.unlock();
         markUiDirty();
         return true;
@@ -2338,7 +2466,7 @@ pub fn skillCenterToggleToolEnabled() bool {
     const new_enabled = !manifest.enabled;
     const json = skillCenterManifestJsonWithEnabled(allocator, bytes, new_enabled) catch {
         session.mutex.lock();
-        skillCenterSetStatusLocked(session, i18n.s().sc_tool_import_failed);
+        skillCenterSetStatusLocked(session, i18n.s().sc_tool_toggle_failed);
         session.mutex.unlock();
         markUiDirty();
         return true;
@@ -2346,7 +2474,7 @@ pub fn skillCenterToggleToolEnabled() bool {
     defer allocator.free(json);
     platform_atomic_file.writeFileReplaceSafe(path, json) catch {
         session.mutex.lock();
-        skillCenterSetStatusLocked(session, i18n.s().sc_tool_import_failed);
+        skillCenterSetStatusLocked(session, i18n.s().sc_tool_toggle_failed);
         session.mutex.unlock();
         markUiDirty();
         return true;
