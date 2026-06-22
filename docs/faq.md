@@ -168,6 +168,12 @@ WispTerm stores the binary, keeps a canonical `SKILL.md`, and exposes enabled
 tools as AI Agent function tools. If a binary has neither `--skill` nor a
 packaged `SKILL.md`, WispTerm can draft one from limited metadata with your
 configured AI profile and asks you to review it before enabling the tool.
+Imported executable tools keep their existing enable/disable state.
+First-party WispTerm Agent tools, including web, terminal, file, docs, and
+memory tools, appear in the same inventory with separate state in
+`agent_tools.json`. Turning a built-in tool off hides it from newly built AI
+request schemas/tool lists, and runtime execution rejects stale or hallucinated
+calls for that disabled tool.
 
 ## How Do I Generate a Diagnostic Report?
 
