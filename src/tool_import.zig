@@ -199,6 +199,11 @@ pub fn installToolPackageWithSource(
     return target;
 }
 
+pub fn cleanupStagedBinaryPath(staged_binary_path: []const u8) void {
+    const stage_root = stageRootFromStagedBinaryPath(staged_binary_path) orelse return;
+    std.fs.deleteTreeAbsolute(stage_root) catch {};
+}
+
 const PROBE_POLL_STEP_MS: i64 = 25;
 const PROBE_TERMINATE_WAIT_MS: u32 = 1000;
 
@@ -480,6 +485,12 @@ pub fn copyFilePreserveMode(src_path: []const u8, dst_path: []const u8) !void {
     if (builtin.os.tag != .windows) try dst.chmod(src_mode);
 }
 
+fn stageRootFromStagedBinaryPath(staged_binary_path: []const u8) ?[]const u8 {
+    const bin_dir = std.fs.path.dirname(staged_binary_path) orelse return null;
+    if (!std.mem.eql(u8, std.fs.path.basename(bin_dir), "bin")) return null;
+    return std.fs.path.dirname(bin_dir);
+}
+
 test "tool_import: resolveDocs prefers --skill over sibling skill and help" {
     const a = std.testing.allocator;
     const docs = try resolveDocs(a, .{
@@ -623,6 +634,52 @@ test "tool_import: installToolPackage stages package with manifest and binary" {
         "---\nname: docx\n---\nUse docs.\n",
         false,
     ));
+}
+
+test "tool_import: installToolPackageWithSource keeps original source metadata while installing staged bytes" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("src");
+    try tmp.dir.makePath("stage/bin");
+    try tmp.dir.makePath("tools");
+    try tmp.dir.writeFile(.{ .sub_path = "src/docx", .data = "original bytes" });
+    try tmp.dir.writeFile(.{ .sub_path = "stage/bin/docx", .data = "staged bytes" });
+    const original_path = try tmp.dir.realpathAlloc(a, "src/docx");
+    defer a.free(original_path);
+    const staged_path = try tmp.dir.realpathAlloc(a, "stage/bin/docx");
+    defer a.free(staged_path);
+    const tools_root = try tmp.dir.realpathAlloc(a, "tools");
+    defer a.free(tools_root);
+
+    const installed = try installToolPackageWithSource(
+        a,
+        tools_root,
+        staged_path,
+        original_path,
+        "docx",
+        "---\nname: docx\ndescription: DOCX helper\n---\nUse docs.\n",
+        false,
+    );
+    defer a.free(installed);
+
+    const copied_path = try std.fs.path.join(a, &.{ installed, "bin", "docx" });
+    defer a.free(copied_path);
+    const copied = try std.fs.cwd().readFileAlloc(a, copied_path, 1024);
+    defer a.free(copied);
+    try std.testing.expectEqualStrings("staged bytes", copied);
+
+    const manifest_path = try std.fs.path.join(a, &.{ installed, "manifest.json" });
+    defer a.free(manifest_path);
+    const manifest_json = try std.fs.cwd().readFileAlloc(a, manifest_path, 16 * 1024);
+    defer a.free(manifest_json);
+    var manifest = try tool_registry.parseManifestJson(a, manifest_json);
+    defer manifest.deinit(a);
+    try std.testing.expectEqualStrings(original_path, manifest.source_path);
+
+    const staged_sha = try sha256FileHex(a, staged_path);
+    defer a.free(staged_sha);
+    try std.testing.expectEqualStrings(staged_sha, manifest.sha256);
 }
 
 test "tool_import: runArgvProbe is bounded when child leaves inherited pipes open" {

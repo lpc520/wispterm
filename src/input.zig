@@ -811,6 +811,114 @@ test "input: skill center tool import shortcut is a no-op when no file is select
     try std.testing.expectEqualStrings("", session.status);
 }
 
+test "input: skill center tool import preview keys import-scroll-cancel while text preview still closes on Enter" {
+    const allocator = std.testing.allocator;
+    const previous_allocator = AppWindow.g_allocator;
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    const previous_force_rebuild = AppWindow.g_force_rebuild;
+    const previous_cells_valid = AppWindow.g_cells_valid;
+    defer {
+        AppWindow.g_allocator = previous_allocator;
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+        AppWindow.g_force_rebuild = previous_force_rebuild;
+        AppWindow.g_cells_valid = previous_cells_valid;
+        platform_dirs.clearTestConfigDirForCurrentThread();
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("tools/docx");
+    try tmp.dir.makePath("tools/.import-stage-docx/bin");
+    try tmp.dir.makePath("source");
+    try tmp.dir.writeFile(.{ .sub_path = "tools/.import-stage-docx/bin/docx", .data = "staged bytes" });
+    try tmp.dir.writeFile(.{ .sub_path = "source/docx", .data = "original bytes" });
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    platform_dirs.setTestConfigDirForCurrentThread(root);
+    const staged_path = try tmp.dir.realpathAlloc(allocator, "tools/.import-stage-docx/bin/docx");
+    defer allocator.free(staged_path);
+    const stage_root = try tmp.dir.realpathAlloc(allocator, "tools/.import-stage-docx");
+    defer allocator.free(stage_root);
+    const source_path = try tmp.dir.realpathAlloc(allocator, "source/docx");
+    defer allocator.free(source_path);
+
+    AppWindow.g_allocator = allocator;
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tab_count = 0;
+    active_tab_state.g_active_tab = 0;
+    if (!tab.spawnSkillCenterTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > 0) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+    }
+
+    const session = AppWindow.activeSkillCenter() orelse return error.ExpectedSkillCenterTab;
+    session.mutex.lock();
+    try session.model.openToolImportPreview(.{
+        .tool_id = "docx",
+        .function_name = "docx",
+        .source_path = source_path,
+        .staged_binary_path = staged_path,
+        .skill_md = "---\nname: docx\n---\nUse docs.\n",
+        .doc_source = .skill_flag,
+        .ai_review_required = false,
+    });
+    session.mutex.unlock();
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(.{ .key_code = platform_input.key_down, .ctrl = false, .shift = false, .alt = false, .super = false });
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+    session.mutex.lock();
+    try std.testing.expectEqual(@as(usize, 1), session.model.overlay.tool_import_preview.scroll);
+    session.mutex.unlock();
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(.{ .key_code = platform_input.key_enter, .ctrl = false, .shift = false, .alt = false, .super = false });
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+    session.mutex.lock();
+    try std.testing.expect(session.model.overlay == .tool_import_preview);
+    try std.testing.expect(std.mem.indexOf(u8, session.status, "Tool import failed:") != null);
+    session.mutex.unlock();
+    try std.fs.accessAbsolute(stage_root, .{});
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(.{ .key_code = platform_input.key_escape, .ctrl = false, .shift = false, .alt = false, .super = false });
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+    session.mutex.lock();
+    try std.testing.expect(session.model.overlay == .none);
+    session.mutex.unlock();
+    try std.testing.expectError(error.FileNotFound, std.fs.accessAbsolute(stage_root, .{}));
+
+    session.mutex.lock();
+    try session.model.openTextPreview("docx / SKILL.md", "preview");
+    session.mutex.unlock();
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(.{ .key_code = platform_input.key_enter, .ctrl = false, .shift = false, .alt = false, .super = false });
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    try std.testing.expect(session.model.overlay == .none);
+}
+
 test "input: skill center deploy and import keys are blocked while picker overlay is active" {
     const allocator = std.testing.allocator;
     const previous_allocator = AppWindow.g_allocator;

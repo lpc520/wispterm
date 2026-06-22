@@ -337,9 +337,11 @@ pub const ToolImportPreviewState = struct {
     skill_md: []u8,
     doc_source: tool_import.DocSource,
     ai_review_required: bool,
+    owns_staging_dir: bool = true,
     scroll: usize = 0,
 
     pub fn deinit(self: *ToolImportPreviewState, allocator: std.mem.Allocator) void {
+        if (self.owns_staging_dir) tool_import.cleanupStagedBinaryPath(self.staged_binary_path);
         allocator.free(self.tool_id);
         allocator.free(self.function_name);
         allocator.free(self.source_path);
@@ -561,6 +563,7 @@ pub const OpResult = union(enum) {
     /// install-download finished: report counts via toast.
     install_done: struct { installed: usize, overwritten: usize, failed: usize },
     tool_import_preview: ToolImportPreviewState,
+    tool_import_failed: []u8,
     /// generic failure before work could run (e.g. lost connection).
     failed,
 
@@ -589,6 +592,7 @@ pub const OpResult = union(enum) {
             },
             .install_done => {},
             .tool_import_preview => |*v| v.deinit(allocator),
+            .tool_import_failed => |s| allocator.free(s),
             .failed => {},
         }
         self.* = .failed;
@@ -1041,6 +1045,69 @@ test "skill_center: tool import preview overlay stores staged import" {
         .ai_review_required = false,
     });
     try std.testing.expect(model.overlay == .tool_import_preview);
+}
+
+const ToolImportStagePaths = struct {
+    stage_root: []u8,
+    staged_binary_path: []u8,
+};
+
+fn createToolImportStageForTest(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir, name: []const u8) !ToolImportStagePaths {
+    try tmp.dir.makePath("stage/bin");
+    const rel = try std.fmt.allocPrint(allocator, "stage/bin/{s}", .{name});
+    defer allocator.free(rel);
+    try tmp.dir.writeFile(.{ .sub_path = rel, .data = "staged-bytes" });
+    return .{
+        .stage_root = try tmp.dir.realpathAlloc(allocator, "stage"),
+        .staged_binary_path = try tmp.dir.realpathAlloc(allocator, rel),
+    };
+}
+
+test "skill_center: tool import preview clearOverlay removes staged dir" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const stage = try createToolImportStageForTest(a, &tmp, "agent_docx_review");
+    defer a.free(stage.stage_root);
+    defer a.free(stage.staged_binary_path);
+
+    var model = PanelModel.init(a);
+    defer model.deinit();
+    try model.openToolImportPreview(.{
+        .tool_id = "agent_docx_review",
+        .function_name = "agent_docx_review",
+        .source_path = "/tmp/original/agent_docx_review",
+        .staged_binary_path = stage.staged_binary_path,
+        .skill_md = "---\nname: agent_docx_review\n---\nDocx.",
+        .doc_source = .skill_flag,
+        .ai_review_required = false,
+    });
+    model.clearOverlay();
+    try std.testing.expectError(error.FileNotFound, std.fs.accessAbsolute(stage.stage_root, .{}));
+}
+
+test "skill_center: tool import preview deinit removes staged dir" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const stage = try createToolImportStageForTest(a, &tmp, "agent_docx_review");
+    defer a.free(stage.stage_root);
+    defer a.free(stage.staged_binary_path);
+
+    {
+        var model = PanelModel.init(a);
+        defer model.deinit();
+        try model.openToolImportPreview(.{
+            .tool_id = "agent_docx_review",
+            .function_name = "agent_docx_review",
+            .source_path = "/tmp/original/agent_docx_review",
+            .staged_binary_path = stage.staged_binary_path,
+            .skill_md = "---\nname: agent_docx_review\n---\nDocx.",
+            .doc_source = .skill_flag,
+            .ai_review_required = false,
+        });
+    }
+    try std.testing.expectError(error.FileNotFound, std.fs.accessAbsolute(stage.stage_root, .{}));
 }
 
 test "skill_center: Session.finishScan publishes then discards stale (no leak)" {
