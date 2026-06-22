@@ -139,6 +139,10 @@ class MacDriver:
     def get_text(self, pane: str, recent=None) -> str:
         return self.ctl.get_text(pane, recent)
 
+    def send_text(self, data: str, pane: str = None) -> None:
+        # Control-channel text injection (bypasses the OS input path; see #279).
+        self.ctl.send_text(pane or self.primary_pane(), data)
+
     def wait_for(self, pane: str, pattern: str, timeout: float = 5.0) -> None:
         self.ctl.wait_for(pane, pattern, timeout=timeout)
 

@@ -33,6 +33,12 @@ class Ctl:
             args += ["--recent", str(recent)]
         return self._run(args)
 
+    def send_text(self, pane: str, data: str) -> None:
+        # Injects bytes straight into the surface via the control server,
+        # bypassing the OS input path (see issue #279). `data` may contain a
+        # literal newline to submit a command.
+        self._run(["send-text", "-t", pane, data])
+
     def wait_for(self, pane: str, pattern: str, timeout: float = 5.0,
                  interval: float = 0.2, clock=wait._RealClock) -> None:
         wait.wait_until(

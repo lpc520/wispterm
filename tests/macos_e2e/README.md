@@ -1,7 +1,7 @@
 # macOS UI E2E 测试
 
-本地运行的端到端 GUI 测试:启动隔离的真实 `WispTerm.app`,用真实 OS 输入驱动,
-断言终端正文与窗口/菜单状态。
+本地运行的端到端 GUI 测试:启动隔离的真实 `WispTerm.app`,断言终端正文(经控制通道)
+与窗口/菜单状态(经 Accessibility)。
 
 ## 运行
 
@@ -38,32 +38,26 @@ make test-macos-e2e
 ## 结构
 
 - `driver/base.py` — 跨平台抽象接口(用例只依赖它)
-- `driver/macos.py` — MacDriver:CGEvent(键鼠)+ osascript(菜单/AX)+ wisptermctl(正文)
+- `driver/macos.py` — MacDriver:`open` 隔离启动 + CGEvent(键鼠,真实路径)+ osascript(菜单/AX)
+  + wisptermctl(`send_text`/`get_text`,控制通道)
 - 纯逻辑模块(`panes`/`keycodes`/`wait`/`osascript` 构造/`ctl` 装配)有单元测试,无需 GUI
-- `test_smoke.py` / `test_keybinds.py` / `test_menu.py` — 标 `@pytest.mark.e2e`
+- `test_smoke.py` — 控制通道 echo 往返(启动 + 配置 + 控制服务 + shell + get-text)
+- `test_menu.py` — `Edit ▸ Copy` 菜单状态读取(osascript→AX,真实)
+- `test_keybinds.py` — 真实 Cmd+C 复制,**当前 `skip`**(见下方已知限制)
 
-## 已知问题(调试中)
+## 已知限制(见 issue #279)
 
-纯逻辑单测全部通过。但 **3 个 e2e 冒烟用例在开发机上当前会失败**:合成的键盘输入
-没有送达到运行中的 `WispTerm` 窗口。已排查并确认的事实(用于继续定位,勿重复走):
+合成的输入**动作**(键盘、菜单点击)在"程序化启动"的测试实例里**不被处理**:事件能
+到达 `-keyDown:`、`interpretKeyEvents:`→`insertText:` 也能触发,但字符/动作始终到不了
+PTY;`File ▸ New Tab` 菜单点击也不改变标签数。仅**读取**(AX 菜单/窗口状态、`get-text`、
+`panes`)和**控制通道写入**(`send-text`)可用。已排除环境因素:同样的 CGEvent 在本机能
+正常打字进 TextEdit,`AXIsProcessTrusted()` 为真,Secure Input 关闭,实例为真实前台、窗口
+为 key。疑似与"隔离实例启动即开 2 个 tab、`activeTab` 上报为 0"同源。
 
-- ✅ 控制通道 `wisptermctl send-text` 能正常写入 surface 并被 `get-text` 读到 —— 说明
-  surface / shell / get-text 链路完好,问题只在 **OS 级输入注入**。
-- ✅ CGEvent **鼠标移动**注入有效(光标会移动)—— 说明本进程能向会话注入事件。
-- ✅ 测试实例确实是真实前台 app(`NSWorkspace.frontmostApplication` = 测试 PID,
-  `activationPolicy = Regular`),且其窗口是 key/main(`AXFocusedWindow` 存在、
-  `AXMain`/`AXFocused` = true)。
-- ✅ `IsSecureEventInputEnabled()` 全程为 0 —— **不是** Secure Keyboard Entry。
-- ✅ `osascript ... keystroke` 返回 exit 0(无 TCC 拒绝报错),但文本仍不落地。
-- ❌ CGEvent 键盘(HID tap / session tap)、System Events `keystroke`、`key code`、
-  以及"点击窗口中心后再输入"均无法让文本进入终端;`Cmd+T` 也不触发新建标签
-  (即键盘连 app 的菜单/keybind 都没收到)。
-
-即:app 前台、窗口 key、鼠标可注入、控制通道可用,但**键盘事件就是不被该 app 接收**。
-下一步可探查方向:① 该 app 自定义窗口/输入处理是否对合成 keyDown 有特殊过滤;
-② 运行环境(经 Claude 桌面端派生的进程链)对"键盘事件投递到其它 app"的 TCC 归属
-是否与 `AXIsProcessTrusted()` 报告的不一致(鼠标可注入但键盘投递被静默丢弃);
-③ 改用真正的物理终端(iTerm/Terminal)直接 `make test-macos-e2e` 复测以隔离环境因素。
+因此本期 harness 用**控制通道**做文本输入、用 **AX** 读菜单/窗口状态;真实键盘/菜单动作
+路径待 [#279](https://github.com/xuzhougeng/wispterm/issues/279) 修复后,用 `driver/macos.py`
+里保留的 `text()`/`key()`/`menu_click()`(CGEvent/osascript)直接接通,并取消
+`test_keybinds.py` 的 skip。
 
 ## 扩展 / Windows
 
