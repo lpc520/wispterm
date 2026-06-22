@@ -115,6 +115,30 @@ fn mixColor(a: [3]f32, b: [3]f32, t: f32) [3]f32 {
     return .{ a[0] + (b[0] - a[0]) * c, a[1] + (b[1] - a[1]) * c, a[2] + (b[2] - a[2]) * c };
 }
 
+/// Right-aligned geometry for the kind/enabled metadata columns. Scaled to the
+/// font's glyph advance so the longest labels ("skill" / "tool" kind, "off" /
+/// "on" state) never clip at large font sizes — fixed-pixel budgets fit only a
+/// couple of glyphs once cells grow.
+const MetaLayout = struct {
+    band_w: f32, // total width reserved at the row's right edge for both columns
+    kind_w: f32, // max width for the kind label, from the band's left edge
+    enabled_dx: f32, // x offset of the enabled label from the band's left edge
+    enabled_w: f32, // max width for the enabled label
+};
+
+fn metaLayout(advance_in: f32) MetaLayout {
+    const a = @max(1.0, advance_in);
+    const kind_w = a * 5.5; // "skill" (5) + margin
+    const enabled_w = a * 3.5; // "off" (3) + margin
+    const gap = a; // one-glyph gutter between the columns
+    return .{
+        .band_w = @max(160.0, kind_w + gap + enabled_w),
+        .kind_w = kind_w,
+        .enabled_dx = kind_w + gap,
+        .enabled_w = enabled_w,
+    };
+}
+
 fn renderListMetadata(
     draw: DrawContext,
     item: ListItem,
@@ -123,12 +147,13 @@ fn renderListMetadata(
     text_y: f32,
     muted: [3]f32,
 ) void {
-    const meta_w: f32 = 160;
+    const ml = metaLayout(draw.glyphAdvance('M'));
+    const band_left = content_x + content_w - PAD_X - ml.band_w;
     if (item.kind.len > 0) {
-        _ = draw.renderTextLimited(item.kind, content_x + content_w - PAD_X - meta_w, text_y, muted, 54);
+        _ = draw.renderTextLimited(item.kind, band_left, text_y, muted, ml.kind_w);
     }
     if (item.enabled.len > 0) {
-        _ = draw.renderTextLimited(item.enabled, content_x + content_w - PAD_X - meta_w + 62, text_y, item.marker_color, 54);
+        _ = draw.renderTextLimited(item.enabled, band_left + ml.enabled_dx, text_y, item.marker_color, ml.enabled_w);
     }
 }
 
@@ -246,7 +271,7 @@ fn renderSkillList(
         draw.fillQuadAlpha(content_x, row_y, content_w, 1, line, 0.4);
         const text_y = yTextFromTop(draw, window_height, row_top_px + (row_h - draw.cell_h) / 2);
         const item = view.itemAt(view.ctx, ri);
-        const meta_w: f32 = if (item.kind.len > 0 or item.enabled.len > 0) 160 else 0;
+        const meta_w: f32 = if (item.kind.len > 0 or item.enabled.len > 0) metaLayout(draw.glyphAdvance('M')).band_w else 0;
         _ = draw.renderTextLimited(item.label, content_x + PAD_X, text_y, fg, @max(0, content_w - PAD_X * 2 - meta_w));
         renderListMetadata(draw, item, content_x, content_w, text_y, muted);
         rendered += 1;
@@ -279,7 +304,7 @@ fn renderList(
     const scroll = firstVisibleForSelection(lv.sel, cap, lv.len);
 
     const marker_w: f32 = 110;
-    const meta_w: f32 = 160;
+    const meta_w: f32 = metaLayout(draw.glyphAdvance('M')).band_w;
     var rendered: usize = 0;
     var i: usize = scroll;
     while (i < lv.len and rendered < cap) : (i += 1) {
@@ -456,6 +481,22 @@ test "skill_center_renderer: list item carries kind and enabled marker" {
     const item = ListItem{ .label = "agent_docx_review", .kind = "tool", .enabled = "on", .marker = "" };
     try std.testing.expectEqualStrings("tool", item.kind);
     try std.testing.expectEqualStrings("on", item.enabled);
+}
+
+test "skill_center_renderer: metaLayout scales kind/enabled columns so labels never clip" {
+    // At a large font (~24px glyph advance), the longest kind label "skill" (5
+    // glyphs) and state label "off" (3 glyphs) must still fit their columns —
+    // the previous fixed 54px budget showed only "sk" / "of".
+    const a: f32 = 24;
+    const ml = metaLayout(a);
+    try std.testing.expect(ml.kind_w >= a * 5);
+    try std.testing.expect(ml.enabled_w >= a * 3);
+    // Columns sit side by side inside the reserved band without overlapping.
+    try std.testing.expect(ml.enabled_dx >= ml.kind_w);
+    try std.testing.expect(ml.band_w >= ml.enabled_dx + ml.enabled_w);
+    // The band scales up with the font from its original floor.
+    try std.testing.expect(metaLayout(24).band_w > metaLayout(6).band_w);
+    try std.testing.expect(metaLayout(6).band_w >= 160);
 }
 
 test "skill_center_renderer: input overlay variant is constructible" {
