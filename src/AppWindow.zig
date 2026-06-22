@@ -1150,6 +1150,79 @@ test "AppWindow: open AI chat tabs are persisted to agent history before session
     try std.testing.expect(restored.agent_enabled);
 }
 
+test "AppWindow: terminal tab copilot sessions are persisted to agent history before session dump" {
+    const allocator = std.testing.allocator;
+
+    const previous_store = g_agent_history;
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    defer {
+        g_agent_history = previous_store;
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+    }
+
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tab_count = 0;
+    active_tab_state.g_active_tab = 0;
+
+    var store = agent_history.Store.init(allocator);
+    defer store.deinit();
+    g_agent_history = &store;
+
+    const session = try ai_chat.Session.init(
+        allocator,
+        "Copilot",
+        "https://api.example.test",
+        "key",
+        "model",
+        "system",
+        "enabled",
+        "",
+        "false",
+        "true",
+    );
+    session.copilot = true;
+
+    // Append one message so shouldPersistCopilot() returns true (persist_to_history defaults to true)
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        try session.messages.append(allocator, .{
+            .role = .user,
+            .content = try allocator.dupe(u8, "hello from copilot"),
+        });
+    }
+
+    const tab_state = try allocator.create(tab.TabState);
+    tab_state.* = .{
+        .kind = .terminal,
+        .tree = .empty,
+        .focused = .root,
+        .ai_chat_session = null,
+        .ai_history_session = null,
+        .copilot_session = session,
+    };
+    defer {
+        tab_state.deinit(allocator);
+        allocator.destroy(tab_state);
+        tab.g_tabs[0] = null;
+        tab.g_tab_count = 0;
+    }
+
+    tab.g_tabs[0] = tab_state;
+    tab.g_tab_count = 1;
+
+    persistOpenAiChatTabsToHistoryStore(allocator);
+
+    var restored = try store.cloneRecordBySessionId(allocator, session.sessionId()) orelse return error.ExpectedHistoryRecord;
+    defer agent_history.freeOwnedRecord(allocator, &restored);
+
+    try std.testing.expect(restored.copilot);
+}
+
 // ============================================================================
 // Module-level state (will be moved into AppWindow struct in future)
 // ============================================================================
@@ -5234,8 +5307,15 @@ fn saveAiHistoryChangeEvent(event: ai_chat.HistoryChangeEvent) void {
 fn persistOpenAiChatTabsToHistoryStore(allocator: std.mem.Allocator) void {
     for (0..tab.g_tab_count) |idx| {
         const tab_state = tab.g_tabs[idx] orelse continue;
-        if (tab_state.kind != .ai_chat) continue;
-        const session = tab_state.ai_chat_session orelse continue;
+        const session: *ai_chat.Session = switch (tab_state.kind) {
+            .ai_chat => tab_state.ai_chat_session orelse continue,
+            .terminal => blk: {
+                const cs = tab_state.copilot_session orelse continue;
+                if (!cs.shouldPersistCopilot()) continue;
+                break :blk cs;
+            },
+            else => continue,
+        };
 
         var record = session.toHistoryRecord(allocator) catch |err| {
             log.warn("failed to snapshot open AI tab for session restore: {}", .{err});
