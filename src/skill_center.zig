@@ -503,6 +503,13 @@ pub const PanelModel = struct {
         self.overlay.deinit(self.allocator);
     }
 
+    pub fn takeToolImportConfirm(self: *PanelModel) ?ToolImportConfirmState {
+        if (self.overlay != .tool_import_confirm) return null;
+        const confirm = self.overlay.tool_import_confirm;
+        self.overlay = .none;
+        return confirm;
+    }
+
     /// Open the scrollable SKILL.md preview overlay (owns copies of the strings).
     pub fn openTextPreview(self: *PanelModel, title: []const u8, content: []const u8) !void {
         const t = try self.allocator.dupe(u8, title);
@@ -1175,6 +1182,32 @@ test "skill_center: tool import confirm clearOverlay removes staged dir" {
         .warning_text = "Inspect this executable.",
     });
     model.clearOverlay();
+    try std.testing.expectError(error.FileNotFound, std.fs.accessAbsolute(stage.stage_root, .{}));
+}
+
+test "skill_center: taking tool import confirm preserves staged dir for caller" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const stage = try createToolImportStageForTest(a, &tmp, "agent_docx_review");
+    defer a.free(stage.stage_root);
+    defer a.free(stage.staged_binary_path);
+
+    var model = PanelModel.init(a);
+    defer model.deinit();
+    try model.openToolImportConfirm(.{
+        .tool_id = "agent_docx_review",
+        .function_name = "agent_docx_review",
+        .source_path = "/tmp/original/agent_docx_review",
+        .staged_binary_path = stage.staged_binary_path,
+        .warning_text = "Inspect this executable.",
+    });
+
+    var confirm = model.takeToolImportConfirm() orelse return error.ExpectedToolImportConfirm;
+    try std.testing.expect(model.overlay == .none);
+    try std.fs.accessAbsolute(stage.stage_root, .{});
+
+    confirm.deinit(a);
     try std.testing.expectError(error.FileNotFound, std.fs.accessAbsolute(stage.stage_root, .{}));
 }
 

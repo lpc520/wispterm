@@ -811,6 +811,92 @@ test "AppWindow: skill center tool import stages file behind explicit confirmati
     try std.testing.expectEqualStrings("", session.status);
 }
 
+test "AppWindow: skill center tool import confirmation opens preview for launchable binary" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const previous_allocator = g_allocator;
+    const previous_open_file = g_skill_center_open_file_override;
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    defer {
+        g_allocator = previous_allocator;
+        g_skill_center_open_file_override = previous_open_file;
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+        platform_dirs.clearTestConfigDirForCurrentThread();
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("source");
+    const script =
+        "#!/bin/sh\n" ++
+        "if [ \"$1\" = \"--skill\" ]; then\n" ++
+        "  printf '%s\\n' '---' 'name: docx_tool' 'description: Import docx files' '---' 'Use docx files.'\n" ++
+        "  exit 0\n" ++
+        "fi\n" ++
+        "if [ \"$1\" = \"--help\" ]; then\n" ++
+        "  printf 'docx tool help\\n'\n" ++
+        "  exit 0\n" ++
+        "fi\n" ++
+        "exit 0\n";
+    try tmp.dir.writeFile(.{ .sub_path = "source/docx-tool", .data = script });
+    var file = try tmp.dir.openFile("source/docx-tool", .{});
+    defer file.close();
+    try file.chmod(0o755);
+    const source_path = try tmp.dir.realpathAlloc(allocator, "source/docx-tool");
+    defer allocator.free(source_path);
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    platform_dirs.setTestConfigDirForCurrentThread(root);
+    const tools_root = try platform_dirs.toolsDir(allocator);
+    defer allocator.free(tools_root);
+
+    g_allocator = allocator;
+    const open_file = struct {
+        var path: []const u8 = "";
+        fn open(a: std.mem.Allocator, _: platform_file_dialog.OpenRequest) ?[]u8 {
+            return a.dupe(u8, path) catch null;
+        }
+    };
+    open_file.path = source_path;
+    g_skill_center_open_file_override = open_file.open;
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tab_count = 0;
+    active_tab_state.g_active_tab = 0;
+    if (!tab.spawnSkillCenterTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > 0) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+    }
+
+    const session = activeSkillCenter() orelse return error.ExpectedSkillCenterTab;
+    try std.testing.expect(skillCenterImportTool());
+    try std.testing.expect(skillCenterOverlayActive());
+    try std.testing.expectEqual(@as(usize, 1), try countMatchingToolDirs(tools_root, ".import-staging-"));
+
+    try std.testing.expect(skillCenterOverlaySelect());
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    try std.testing.expect(session.model.overlay == .tool_import_preview);
+    try std.testing.expectEqualStrings("", session.status);
+    const preview = session.model.overlay.tool_import_preview;
+    try std.testing.expectEqualStrings("docx_tool", preview.function_name);
+    try std.testing.expect(std.mem.indexOf(u8, preview.skill_md, "Use docx files.") != null);
+    try std.fs.accessAbsolute(preview.staged_binary_path, .{});
+}
+
 test "AppWindow: skill center tool import probe spawn failure aborts without fallback docs" {
     const allocator = std.testing.allocator;
     const previous_allocator = g_allocator;
@@ -2814,27 +2900,6 @@ fn skillCenterImportErrorSummary(allocator: std.mem.Allocator, err: anyerror) []
     return std.fmt.allocPrint(allocator, "Tool import failed: {}", .{err}) catch allocator.dupe(u8, "Tool import failed") catch return &.{};
 }
 
-fn skillCenterCloneToolImportConfirm(
-    allocator: std.mem.Allocator,
-    confirm: skill_center.ToolImportConfirmState,
-) !skill_center.ToolImportConfirmState {
-    var clone: skill_center.ToolImportConfirmState = .{
-        .tool_id = try allocator.dupe(u8, confirm.tool_id),
-        .function_name = &.{},
-        .source_path = &.{},
-        .staged_binary_path = &.{},
-        .warning_text = &.{},
-        .owns_staging_dir = false,
-        .scroll = confirm.scroll,
-    };
-    errdefer clone.deinit(allocator);
-    clone.function_name = try allocator.dupe(u8, confirm.function_name);
-    clone.source_path = try allocator.dupe(u8, confirm.source_path);
-    clone.staged_binary_path = try allocator.dupe(u8, confirm.staged_binary_path);
-    clone.warning_text = try allocator.dupe(u8, confirm.warning_text);
-    return clone;
-}
-
 fn skillCenterCloneToolImportPreview(
     allocator: std.mem.Allocator,
     preview: skill_center.ToolImportPreviewState,
@@ -3538,8 +3603,7 @@ pub fn skillCenterOverlaySelect() bool {
         session.mutex.lock();
         defer session.mutex.unlock();
         if (session.model.overlay == .tool_import_confirm) {
-            tool_confirm_owned = skillCenterCloneToolImportConfirm(allocator, session.model.overlay.tool_import_confirm) catch return false;
-            session.model.clearOverlay();
+            tool_confirm_owned = session.model.takeToolImportConfirm() orelse return false;
         }
         if (session.model.overlay == .tool_import_preview) {
             tool_preview_owned = skillCenterCloneToolImportPreview(allocator, session.model.overlay.tool_import_preview) catch return false;
