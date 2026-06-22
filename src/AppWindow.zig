@@ -5086,6 +5086,7 @@ pub fn refreshCopilotPickerRows() void {
 /// live Session with the same id would corrupt the store).
 pub fn loadCopilotConversationById(session_id: []const u8) void {
     if (tab.switchToCopilotTabBySessionId(session_id)) {
+        browser_panel.close(); // exclusive right slot, mirror toggleAiCopilot
         _ = tab.setActiveCopilotVisible(true);
         input.focusAiCopilot();
         g_force_rebuild = true;
