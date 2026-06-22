@@ -4355,7 +4355,7 @@ const SkillLibraryScanJob = struct {
             entries[filled] = try skillCenterEntryFromFirstPartyDefinition(
                 allocator,
                 definition,
-                !disabled_first_party.contains(definition.name),
+                !(definition.disableable and disabled_first_party.contains(definition.name)),
             );
             filled += 1;
         }

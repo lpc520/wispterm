@@ -55,6 +55,18 @@ const static_definitions = [_]Definition{
     .{ .name = "memory_delete", .label = "memory_delete", .description = "Delete a durable long-term memory.", .category = .memory },
 };
 
+const DefinitionLookup = union(enum) {
+    catalog,
+    definitions: []const Definition,
+
+    fn disableable(self: DefinitionLookup, name: []const u8) ?bool {
+        return switch (self) {
+            .catalog => catalogDisableable(name),
+            .definitions => |definitions| definitionDisableable(definitions, name),
+        };
+    }
+};
+
 pub const DisabledTools = struct {
     names: [][]u8,
 
@@ -109,12 +121,24 @@ pub fn freeDefinitions(allocator: std.mem.Allocator, defs: []Definition) void {
 }
 
 pub fn isKnown(name: []const u8) bool {
+    return catalogDisableable(name) != null;
+}
+
+pub fn isDisableable(name: []const u8) bool {
+    return catalogDisableable(name) orelse false;
+}
+
+fn catalogDisableable(name: []const u8) ?bool {
     if (std.mem.eql(u8, name, platform_process.localCommandToolName())) return true;
     if (platform_pty_command.wslSessionToolsEnabled() and std.mem.eql(u8, name, platform_pty_command.wslSessionToolName())) return true;
-    for (static_definitions) |definition| {
-        if (std.mem.eql(u8, definition.name, name)) return true;
+    return definitionDisableable(&static_definitions, name);
+}
+
+fn definitionDisableable(definitions: []const Definition, name: []const u8) ?bool {
+    for (definitions) |definition| {
+        if (std.mem.eql(u8, definition.name, name)) return definition.disableable;
     }
-    return false;
+    return null;
 }
 
 pub fn isKnownActive(defs: []const Definition, name: []const u8) bool {
@@ -132,6 +156,10 @@ pub fn isDisabledName(disabled_names: []const []const u8, name: []const u8) bool
 }
 
 pub fn parseDisabledToolsJson(allocator: std.mem.Allocator, bytes: []const u8) !DisabledTools {
+    return parseDisabledToolsJsonWithLookup(allocator, bytes, .catalog);
+}
+
+fn parseDisabledToolsJsonWithLookup(allocator: std.mem.Allocator, bytes: []const u8, lookup: DefinitionLookup) !DisabledTools {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidAgentToolsState;
@@ -147,7 +175,8 @@ pub fn parseDisabledToolsJson(allocator: std.mem.Allocator, bytes: []const u8) !
 
     for (disabled_value.array.items) |item| {
         if (item != .string) continue;
-        if (!isKnown(item.string)) continue;
+        const disableable = lookup.disableable(item.string) orelse continue;
+        if (!disableable) continue;
         if (isDisabledName(list.items, item.string)) continue;
         const owned = try allocator.dupe(u8, item.string);
         list.append(allocator, owned) catch |err| {
@@ -200,7 +229,12 @@ pub fn writeDisabledTools(allocator: std.mem.Allocator, disabled: DisabledTools)
 }
 
 pub fn toggledDisabledTools(allocator: std.mem.Allocator, current: DisabledTools, name: []const u8) !DisabledTools {
-    if (!isKnown(name)) return error.UnknownFirstPartyTool;
+    return toggledDisabledToolsWithLookup(allocator, current, name, .catalog);
+}
+
+fn toggledDisabledToolsWithLookup(allocator: std.mem.Allocator, current: DisabledTools, name: []const u8, lookup: DefinitionLookup) !DisabledTools {
+    const disableable = lookup.disableable(name) orelse return error.UnknownFirstPartyTool;
+    if (!disableable) return error.FirstPartyToolNotDisableable;
     var list: std.ArrayListUnmanaged([]u8) = .empty;
     errdefer {
         for (list.items) |owned| allocator.free(owned);
@@ -237,6 +271,8 @@ test "first_party_tools: active definitions include webread and the local comman
 
     try std.testing.expect(isKnownActive(defs, "webread"));
     try std.testing.expect(isKnownActive(defs, platformLocalCommandNameForTest()));
+    try std.testing.expect(isDisableable("webread"));
+    try std.testing.expect(isDisableable(platformLocalCommandNameForTest()));
 }
 
 test "first_party_tools: disabled state json filters unknown and duplicate names" {
@@ -250,6 +286,23 @@ test "first_party_tools: disabled state json filters unknown and duplicate names
     try std.testing.expect(disabled.contains("pubmed"));
     try std.testing.expect(!disabled.contains("missing_tool"));
     try std.testing.expectEqual(@as(usize, 2), disabled.names.len);
+}
+
+test "first_party_tools: disabled state json filters non-disableable definitions" {
+    const a = std.testing.allocator;
+    const defs = [_]Definition{
+        .{ .name = "sticky_tool", .label = "sticky_tool", .description = "Always on.", .category = .agent, .disableable = false },
+        .{ .name = "switchable_tool", .label = "switchable_tool", .description = "User controlled.", .category = .agent, .disableable = true },
+    };
+    const json =
+        \\{"disabled":["sticky_tool","switchable_tool"]}
+    ;
+    var disabled = try parseDisabledToolsJsonWithLookup(a, json, .{ .definitions = defs[0..] });
+    defer disabled.deinit(a);
+
+    try std.testing.expect(!disabled.contains("sticky_tool"));
+    try std.testing.expect(disabled.contains("switchable_tool"));
+    try std.testing.expectEqual(@as(usize, 1), disabled.names.len);
 }
 
 test "first_party_tools: malformed state falls back to empty when loaded from path" {
@@ -337,6 +390,16 @@ test "first_party_tools: toggled state frees duplicated name when append fails" 
 
     try std.testing.expectError(error.OutOfMemory, toggledDisabledTools(failing_existing.allocator(), current_with_existing, "webread"));
     try std.testing.expect(failing_existing.has_induced_failure);
+}
+
+test "first_party_tools: toggled state rejects non-disableable definitions" {
+    const defs = [_]Definition{
+        .{ .name = "sticky_tool", .label = "sticky_tool", .description = "Always on.", .category = .agent, .disableable = false },
+    };
+    try std.testing.expectError(
+        error.FirstPartyToolNotDisableable,
+        toggledDisabledToolsWithLookup(std.testing.allocator, DisabledTools.empty(), "sticky_tool", .{ .definitions = defs[0..] }),
+    );
 }
 
 test "first_party_tools: toggled state writes and reads atomically" {

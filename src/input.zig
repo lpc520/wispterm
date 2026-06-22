@@ -3100,8 +3100,8 @@ fn handleKey(ev: platform_input.KeyEvent) void {
     }
 
     // Skill Center: ↑/↓ move, space preview/toggle, ⏎ confirm, esc cancel,
-    // d deploy, i import, g get-from-GitHub, r rescan. The URL-input overlay
-    // captures text; the checklist captures space + 'a'.
+    // d deploy, i import, t import tool, e toggle, g get-from-GitHub, r rescan.
+    // The URL-input overlay captures text; the checklist captures space + 'a'.
     if (AppWindow.activeSkillCenter() != null) {
         switch (AppWindow.skillCenterPreviewKind()) {
             .text => {
