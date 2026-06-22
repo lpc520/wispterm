@@ -127,6 +127,8 @@ test "formatRelativeTime buckets" {
     try std.testing.expectEqualStrings("5m ago", formatRelativeTime(5 * 60_000, 0, &buf));
     try std.testing.expectEqualStrings("3h ago", formatRelativeTime(3 * 3_600_000, 0, &buf));
     try std.testing.expectEqualStrings("2d ago", formatRelativeTime(2 * 86_400_000, 0, &buf));
+    try std.testing.expectEqualStrings("2mo ago", formatRelativeTime(60 * 86_400_000, 0, &buf));
+    try std.testing.expectEqualStrings("1y ago", formatRelativeTime(400 * 86_400_000, 0, &buf));
 }
 
 test "show then rowCount includes the trailing new row" {
