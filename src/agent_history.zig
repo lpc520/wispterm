@@ -117,6 +117,29 @@ pub const Store = struct {
         return rows;
     }
 
+    /// Like `buildRows` but only `copilot == true` records (the Copilot conversation
+    /// picker). Owned slices; call `freeRows()` when done. Sorted newest-first.
+    pub fn buildCopilotRows(self: *const Store, allocator: std.mem.Allocator) ![]Row {
+        var list: std.ArrayListUnmanaged(Row) = .empty;
+        errdefer {
+            for (list.items) |*r| freeOwnedRow(allocator, r);
+            list.deinit(allocator);
+        }
+        for (self.records.items) |record| {
+            if (!record.copilot) continue;
+            const row = try cloneRow(allocator, .{
+                .session_id = record.session_id,
+                .title = record.title,
+                .model = record.model,
+                .updated_at = record.updated_at,
+            });
+            try list.append(allocator, row);
+        }
+        const rows = try list.toOwnedSlice(allocator);
+        sortRows(rows);
+        return rows;
+    }
+
     pub fn toJsonString(self: *const Store, allocator: std.mem.Allocator) ![]u8 {
         return std.json.Stringify.valueAlloc(allocator, PersistedStore{
             .records = self.records.items,
@@ -650,6 +673,30 @@ test "agent_history: json round trip preserves max_tokens" {
 
     try std.testing.expectEqual(@as(usize, 1), parsed.records.items.len);
     try std.testing.expectEqual(@as(u32, 2048), parsed.records.items[0].max_tokens);
+}
+
+test "agent_history: buildCopilotRows lists only copilot records, newest first" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator);
+    defer store.deinit();
+    const base = SessionRecord{
+        .session_id = "", .title = "", .base_url = "u", .api_key = "k", .model = "m",
+        .system_prompt = "s", .thinking_enabled = false, .reasoning_effort = "low",
+        .stream = true, .agent_enabled = true, .created_at = 0, .updated_at = 0,
+        .messages = &[_]MessageRecord{},
+    };
+    var a = base; a.session_id = "a"; a.title = "A"; a.updated_at = 10; a.copilot = true;
+    var b = base; b.session_id = "b"; b.title = "B"; b.updated_at = 20; b.copilot = true;
+    var c = base; c.session_id = "c"; c.title = "C"; c.updated_at = 99; c.copilot = false;
+    try store.upsertRecord(a);
+    try store.upsertRecord(b);
+    try store.upsertRecord(c);
+
+    const rows = try store.buildCopilotRows(allocator);
+    defer freeRows(allocator, rows);
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    try std.testing.expectEqualStrings("b", rows[0].session_id); // newest (20) first
+    try std.testing.expectEqualStrings("a", rows[1].session_id);
 }
 
 test "agent_history: missing vision_enabled defaults to false" {
