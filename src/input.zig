@@ -619,7 +619,60 @@ test "input: skill center tool toggle is blocked while selection overlay is acti
     }
 }
 
-test "input: skill center deploy keys ignore selected tool rows" {
+test "input: empty skill center library import shortcut opens picker" {
+    const allocator = std.testing.allocator;
+    const previous_allocator = AppWindow.g_allocator;
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    const previous_force_rebuild = AppWindow.g_force_rebuild;
+    const previous_cells_valid = AppWindow.g_cells_valid;
+    defer {
+        AppWindow.g_allocator = previous_allocator;
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+        AppWindow.g_force_rebuild = previous_force_rebuild;
+        AppWindow.g_cells_valid = previous_cells_valid;
+    }
+
+    AppWindow.g_allocator = allocator;
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tab_count = 0;
+    active_tab_state.g_active_tab = 0;
+    if (!tab.spawnSkillCenterTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > 0) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+    }
+
+    const session = AppWindow.activeSkillCenter() orelse return error.ExpectedSkillCenterTab;
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(.{ .key_code = 0x49, .ctrl = false, .shift = false, .alt = false, .super = false });
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    switch (session.model.overlay) {
+        .picker => |picker| {
+            try std.testing.expectEqual(AppWindow.skill_center.Purpose.import_, picker.purpose);
+            try std.testing.expectEqualStrings("", picker.skill_name);
+        },
+        else => return error.ExpectedSkillCenterPicker,
+    }
+}
+
+test "input: skill center deploy and import keys ignore selected tool rows" {
     const allocator = std.testing.allocator;
     const previous_allocator = AppWindow.g_allocator;
     const previous_tabs = tab.g_tabs;
@@ -691,10 +744,64 @@ test "input: skill center deploy keys ignore selected tool rows" {
 
     AppWindow.g_force_rebuild = false;
     AppWindow.g_cells_valid = true;
+    handleKey(.{ .key_code = 0x49, .ctrl = false, .shift = false, .alt = false, .super = false });
+    try std.testing.expect(!AppWindow.g_force_rebuild);
+    try std.testing.expect(AppWindow.g_cells_valid);
+    try std.testing.expect(!AppWindow.skillCenterOverlayActive());
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
     handleKey(.{ .key_code = platform_input.key_enter, .ctrl = false, .shift = false, .alt = false, .super = false });
     try std.testing.expect(!AppWindow.g_force_rebuild);
     try std.testing.expect(AppWindow.g_cells_valid);
     try std.testing.expect(!AppWindow.skillCenterOverlayActive());
+}
+
+test "input: skill center tool import shortcut sets placeholder status and requests a repaint" {
+    const allocator = std.testing.allocator;
+    const previous_allocator = AppWindow.g_allocator;
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    const previous_force_rebuild = AppWindow.g_force_rebuild;
+    const previous_cells_valid = AppWindow.g_cells_valid;
+    defer {
+        AppWindow.g_allocator = previous_allocator;
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+        AppWindow.g_force_rebuild = previous_force_rebuild;
+        AppWindow.g_cells_valid = previous_cells_valid;
+    }
+
+    AppWindow.g_allocator = allocator;
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tab_count = 0;
+    active_tab_state.g_active_tab = 0;
+    if (!tab.spawnSkillCenterTab(allocator)) return error.SkipZigTest;
+    defer {
+        while (tab.g_tab_count > 0) {
+            const idx = tab.g_tab_count - 1;
+            if (tab.g_tabs[idx]) |t| {
+                t.deinit(allocator);
+                allocator.destroy(t);
+                tab.g_tabs[idx] = null;
+            }
+            tab.g_tab_count -= 1;
+        }
+    }
+
+    const session = AppWindow.activeSkillCenter() orelse return error.ExpectedSkillCenterTab;
+
+    AppWindow.g_force_rebuild = false;
+    AppWindow.g_cells_valid = true;
+    handleKey(.{ .key_code = 0x54, .ctrl = false, .shift = false, .alt = false, .super = false });
+
+    try std.testing.expect(AppWindow.g_force_rebuild);
+    try std.testing.expect(!AppWindow.g_cells_valid);
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    try std.testing.expectEqualStrings(@import("i18n.zig").s().sc_tool_import_failed, session.status);
 }
 
 test "input: skill center deploy and import keys are blocked while picker overlay is active" {

@@ -507,7 +507,7 @@ test "AppWindow: skill center tool manifest toggle preserves extra fields" {
     try std.testing.expect(enabled_value.bool);
 }
 
-test "AppWindow: skill center import picker requires current prompt selection" {
+test "AppWindow: skill center import picker allows empty library and blocks tool rows" {
     const allocator = std.testing.allocator;
     const previous_allocator = g_allocator;
     const previous_tabs = tab.g_tabs;
@@ -542,6 +542,24 @@ test "AppWindow: skill center import picker requires current prompt selection" {
     }
 
     const session = activeSkillCenter() orelse return error.ExpectedSkillCenterTab;
+    g_force_rebuild = false;
+    g_cells_valid = true;
+    try std.testing.expect(skillCenterImport());
+    try std.testing.expect(g_force_rebuild);
+    try std.testing.expect(!g_cells_valid);
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        switch (session.model.overlay) {
+            .picker => |picker| {
+                try std.testing.expectEqual(skill_center.Purpose.import_, picker.purpose);
+                try std.testing.expectEqualStrings("", picker.skill_name);
+            },
+            else => return error.ExpectedSkillCenterPicker,
+        }
+        session.model.clearOverlay();
+    }
+
     const name = try allocator.dupe(u8, "fake_tool");
     var name_owned = true;
     errdefer if (name_owned) allocator.free(name);
@@ -2322,8 +2340,20 @@ fn skillCenterOpenPicker(purpose: skill_center.Purpose) bool {
     const allocator = g_allocator orelse return false;
     session.mutex.lock();
     defer session.mutex.unlock();
-    const sk = session.model.selected() orelse return false;
-    const name = if (purpose == .deploy) sk.name else "";
+    const name = switch (purpose) {
+        .deploy => blk: {
+            const sk = session.model.selected() orelse return false;
+            break :blk sk.name;
+        },
+        .import_ => blk: {
+            if (session.model.entryCount() == 0) break :blk "";
+            const entry = session.model.selectedEntry() orelse return false;
+            switch (entry) {
+                .prompt => break :blk "",
+                .tool => return false,
+            }
+        },
+    };
     const picker = skillCenterBuildPicker(allocator, purpose, name) catch return true;
     session.model.setOverlay(.{ .picker = picker });
     markUiDirty();
