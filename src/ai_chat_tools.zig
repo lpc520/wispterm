@@ -279,7 +279,10 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
     if (findDynamicBinaryTool(ctx.settings.dynamic_binary_tools, call.name)) |tool| {
         const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const argv_args = try jsonStringArrayArg(ctx.allocator, args.value, "args");
+        const argv_args = jsonStringArrayArg(ctx.allocator, args.value, "args") catch |err| switch (err) {
+            error.InvalidToolArguments => return ctx.allocator.dupe(u8, "Invalid tool arguments"),
+            else => return err,
+        };
         defer freeStringArray(ctx.allocator, argv_args);
         const cwd = jsonStringArg(args.value, "cwd") orelse ctx.settings.working_dir;
         const timeout_ms = jsonIntArg(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
@@ -2895,6 +2898,35 @@ test "executeToolCall asks before binary tool in auto mode" {
     defer std.testing.allocator.free(out);
     try std.testing.expect(asker.called);
     try std.testing.expect(std.mem.indexOf(u8, out, "denied") != null);
+}
+
+test "executeToolCall reports invalid dynamic binary tool args as a tool result" {
+    const a = std.testing.allocator;
+    var dummy: u8 = 0;
+    const tools = [_]types.DynamicBinaryTool{.{
+        .function_name = "fake_tool",
+        .executable_abs = "/bin/echo",
+        .description = "Echo test",
+    }};
+    var ctx = ToolContext{
+        .allocator = a,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .settings = .{
+            .permission = .full,
+            .dynamic_binary_tools = tools[0..],
+        },
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    const out = try executeToolCall(&ctx, .{
+        .id = @constCast("1"),
+        .name = @constCast("fake_tool"),
+        .arguments = @constCast("{\"args\":\"not-array\"}"),
+    });
+    defer a.free(out);
+    try std.testing.expectEqualStrings("Invalid tool arguments", out);
 }
 
 // ---------------------------------------------------------------------------
