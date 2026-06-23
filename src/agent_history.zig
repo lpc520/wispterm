@@ -427,6 +427,33 @@ pub fn freeOwnedIndexEntry(allocator: std.mem.Allocator, entry: *IndexEntry) voi
     entry.* = undefined;
 }
 
+fn isSafeFileChar(c: u8) bool {
+    return (c >= 'A' and c <= 'Z') or
+        (c >= 'a' and c <= 'z') or
+        (c >= '0' and c <= '9') or
+        c == '.' or c == '_' or c == '-';
+}
+
+pub fn sanitizeSessionFileName(allocator: std.mem.Allocator, session_id: []const u8) ![]u8 {
+    var all_safe = session_id.len > 0;
+    for (session_id) |c| {
+        if (!isSafeFileChar(c)) {
+            all_safe = false;
+            break;
+        }
+    }
+    if (all_safe) {
+        return std.fmt.allocPrint(allocator, "{s}.json", .{session_id});
+    }
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    for (session_id) |c| {
+        try buf.append(allocator, if (isSafeFileChar(c)) c else '_');
+    }
+    const h = std.hash.Wyhash.hash(0, session_id);
+    return std.fmt.allocPrint(allocator, "{s}-{x}.json", .{ buf.items, h });
+}
+
 fn dupeOptionalString(allocator: std.mem.Allocator, value: ?[]const u8) !?[]const u8 {
     if (value) |slice| return try allocator.dupe(u8, slice);
     return null;
@@ -1095,6 +1122,20 @@ test "agent_history: index file round-trips" {
     try std.testing.expectEqualStrings("s2", parsed.value.entries[1].session_id);
     try std.testing.expect(parsed.value.entries[1].copilot);
     try std.testing.expectEqual(@as(u32, 3), parsed.value.entries[0].message_count);
+}
+
+test "agent_history: sanitizeSessionFileName keeps safe ids and hashes unsafe ones" {
+    const allocator = std.testing.allocator;
+    const safe = try sanitizeSessionFileName(allocator, "session-1719000000000-3");
+    defer allocator.free(safe);
+    try std.testing.expectEqualStrings("session-1719000000000-3.json", safe);
+    const unsafe1 = try sanitizeSessionFileName(allocator, "会話/x");
+    defer allocator.free(unsafe1);
+    const unsafe2 = try sanitizeSessionFileName(allocator, "会話/x");
+    defer allocator.free(unsafe2);
+    try std.testing.expect(std.mem.endsWith(u8, unsafe1, ".json"));
+    try std.testing.expect(std.mem.indexOfScalar(u8, unsafe1, '/') == null);
+    try std.testing.expectEqualStrings(unsafe1, unsafe2);
 }
 
 fn expectLenientParseOutOfMemory(json: []const u8) !void {
