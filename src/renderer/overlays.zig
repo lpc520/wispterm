@@ -23,6 +23,7 @@ const ssh_prompt = @import("../ssh_prompt.zig");
 const ssh_connection = @import("../ssh_connection.zig");
 const app_metadata = @import("../app_metadata.zig");
 const command_center_state = @import("../command_center_state.zig");
+const command_palette_history_view = @import("../command_palette_history_view.zig");
 const command_palette_model = @import("../command_palette_model.zig");
 const agent_history = @import("../agent_history.zig");
 const platform_dirs = @import("../platform/dirs.zig");
@@ -37,6 +38,7 @@ const weixin_types = @import("../weixin/types.zig");
 const i18n = @import("../i18n.zig");
 const ai_model_switch = @import("../ai_model_switch.zig");
 const agent_integration_prompt = @import("../agent_integration_prompt.zig");
+const ai_history_time = @import("../ai_history_time.zig");
 
 const ui_pipeline = @import("ui_pipeline.zig");
 
@@ -227,6 +229,8 @@ threadlocal var g_command_palette_filter: [COMMAND_PALETTE_FILTER_MAX]u8 = undef
 threadlocal var g_command_palette_filter_len: usize = 0;
 threadlocal var g_command_palette_mode: CommandPaletteMode = .commands;
 threadlocal var g_command_palette_history_selected: usize = 0;
+threadlocal var g_command_palette_history_source: command_palette_history_view.SourceFilter = .all;
+threadlocal var g_command_palette_history_item_count: usize = 0;
 
 const CommandPaletteLayout = struct {
     box_x: f32,
@@ -321,17 +325,33 @@ pub fn commandPaletteAgentHistoryVisible() bool {
 
 pub fn commandPaletteMoveAgentHistory(delta: i32) void {
     commandPaletteSyncAgentHistoryRows();
+    var view = buildHistoryView() orelse {
+        var state0 = commandCenterStateSnapshot();
+        state0.commandPaletteMoveAgentHistory(delta, g_command_palette_history_rows.len);
+        commandCenterStateCommit(state0);
+        return;
+    };
+    defer view.deinit(AppWindow.g_allocator.?);
     var state = commandCenterStateSnapshot();
-    state.commandPaletteMoveAgentHistory(delta, g_command_palette_history_rows.len);
+    state.commandPaletteMoveAgentHistory(delta, view.rowCount());
+    commandCenterStateCommit(state);
+}
+
+pub fn commandPaletteCycleHistorySource() void {
+    var state = commandCenterStateSnapshot();
+    state.commandPaletteCycleHistorySource();
     commandCenterStateCommit(state);
 }
 
 pub fn commandPaletteDeleteSelectedAgentHistory() bool {
     if (!commandPaletteIsHistoryMode()) return false;
     commandPaletteSyncAgentHistoryRows();
+    var view = buildHistoryView() orelse return false;
+    defer view.deinit(AppWindow.g_allocator.?);
     const state = commandCenterStateSnapshot();
-    const row_idx = state.commandPaletteSelectedAgentHistoryIndex(g_command_palette_history_rows.len) orelse return false;
-    return commandPaletteDeleteAgentHistoryIndex(row_idx);
+    const ord = state.commandPaletteSelectedAgentHistoryIndex(view.rowCount()) orelse return false;
+    const orig = view.filtered[ord];
+    return commandPaletteDeleteAgentHistoryIndex(orig);
 }
 
 pub fn commandPaletteLeaveAgentHistory() void {
@@ -342,13 +362,15 @@ pub fn commandPaletteLeaveAgentHistory() void {
 }
 
 pub fn commandPaletteBackspace() void {
-    if (commandPaletteIsHistoryMode()) return;
     if (g_command_palette_filter_len == 0) return;
-    // Remove a whole UTF-8 codepoint: walk back over continuation bytes (0b10xxxxxx).
     var n = g_command_palette_filter_len - 1;
     while (n > 0 and (g_command_palette_filter[n] & 0xC0) == 0x80) n -= 1;
     g_command_palette_filter_len = n;
-    commandPaletteClampSelection();
+    if (commandPaletteIsHistoryMode()) {
+        g_command_palette_history_selected = 0;
+    } else {
+        commandPaletteClampSelection();
+    }
 }
 
 pub fn commandPaletteClearFilter() void {
@@ -358,17 +380,17 @@ pub fn commandPaletteClearFilter() void {
 }
 
 pub fn commandPaletteInsertChar(codepoint: u21) void {
-    if (commandPaletteIsHistoryMode()) return;
     if (codepoint < 0x20 or codepoint == 0x7f) return;
-
-    // UTF-8-encode the codepoint so CJK (e.g. IME-committed 中文) is accepted,
-    // not just ASCII. Mirrors the terminal char path's utf8Encode.
     var buf: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(codepoint, &buf) catch return;
     if (g_command_palette_filter_len + len > g_command_palette_filter.len) return;
     @memcpy(g_command_palette_filter[g_command_palette_filter_len..][0..len], buf[0..len]);
     g_command_palette_filter_len += len;
-    commandPaletteClampSelection();
+    if (commandPaletteIsHistoryMode()) {
+        g_command_palette_history_selected = 0;
+    } else {
+        commandPaletteClampSelection();
+    }
 }
 
 pub fn commandPaletteExecuteSelected() void {
@@ -1118,6 +1140,22 @@ fn commandPaletteSyncAgentHistoryRows() void {
     commandPaletteRefreshAgentHistoryRows();
 }
 
+/// Build the current filtered/grouped view from the loaded history rows + live
+/// filter/source. Caller owns the View and must `deinit` it. Null on no allocator.
+fn buildHistoryView() ?command_palette_history_view.View {
+    const allocator = AppWindow.g_allocator orelse return null;
+    const now_ms = std.time.milliTimestamp();
+    const tz = ai_history_time.localOffsetSeconds();
+    return command_palette_history_view.build(
+        allocator,
+        g_command_palette_history_rows,
+        commandPaletteFilter(),
+        g_command_palette_history_source,
+        now_ms,
+        tz,
+    ) catch null;
+}
+
 fn applyEmbeddedThemeFromPalette(theme_index: usize) void {
     const allocator = AppWindow.g_allocator orelse return;
     if (theme_index >= themes_embed.entries.len) return;
@@ -1132,8 +1170,44 @@ fn commandPaletteVisibleCount() usize {
 }
 
 fn commandPaletteResultCount() usize {
-    if (commandPaletteIsHistoryMode()) return g_command_palette_history_rows.len;
+    if (commandPaletteIsHistoryMode()) return g_command_palette_history_item_count;
     return commandPaletteVisibleCount();
+}
+
+fn historyBucketLabel(b: command_palette_history_view.Bucket) []const u8 {
+    return switch (b) {
+        .today => i18n.s().cmd_palette_group_today,
+        .yesterday => i18n.s().cmd_palette_group_yesterday,
+        .past_week => i18n.s().cmd_palette_group_past_week,
+        .earlier => i18n.s().cmd_palette_group_earlier,
+    };
+}
+
+fn historySourceLabel(src: command_palette_history_view.SourceFilter) []const u8 {
+    return switch (src) {
+        .all => i18n.s().cmd_palette_source_all,
+        .sidebar => i18n.s().cmd_palette_source_sidebar,
+        .tab => i18n.s().cmd_palette_source_tab,
+    };
+}
+
+/// First visible item index that keeps `focus_item` inside a window of `rendered`
+/// items out of `count`.
+fn historyWindowStart(count: usize, rendered: usize, focus_item: usize) usize {
+    if (rendered == 0 or count <= rendered) return 0;
+    if (focus_item < rendered) return 0;
+    return @min(focus_item - rendered + 1, count - rendered);
+}
+
+/// The items-index of the row whose ordinal == selected_ord (0 if not found).
+fn historySelectedItemIndex(view: command_palette_history_view.View, selected_ord: usize) usize {
+    for (view.items, 0..) |it, i| {
+        switch (it) {
+            .row => |ord| if (ord == selected_ord) return i,
+            .header => {},
+        }
+    }
+    return 0;
 }
 
 fn commandPaletteClampSelection() void {
@@ -1277,17 +1351,30 @@ fn commandPaletteHistoryHitTestIndex(xpos: f64, ypos: f64, window_width: f32, wi
     const row: usize = @intFromFloat(@floor(row_f));
     if (row >= layout.rendered_rows) return null;
 
-    const item_idx = commandPaletteFirstVisibleIndex(layout.rendered_rows) + row;
-    if (item_idx >= g_command_palette_history_rows.len) return null;
-    return item_idx;
+    var view = buildHistoryView() orelse return null;
+    defer view.deinit(AppWindow.g_allocator.?);
+    const selectable = view.rowCount();
+    if (selectable == 0) return null;
+    const selected_ord = @min(g_command_palette_history_selected, selectable - 1);
+    const focus_item = historySelectedItemIndex(view, selected_ord);
+    const first_item = historyWindowStart(view.items.len, layout.rendered_rows, focus_item);
+    const item_idx = first_item + row;
+    if (item_idx >= view.items.len) return null;
+    return switch (view.items[item_idx]) {
+        .header => null, // clicking a group header is a no-op
+        .row => |ord| view.filtered[ord], // raw index into g_command_palette_history_rows
+    };
 }
 
 fn commandPaletteActivateSelectedAgentHistory() bool {
     if (!commandPaletteIsHistoryMode()) return false;
     commandPaletteSyncAgentHistoryRows();
+    var view = buildHistoryView() orelse return false;
+    defer view.deinit(AppWindow.g_allocator.?);
     const state = commandCenterStateSnapshot();
-    const row_idx = state.commandPaletteActivateSelected(g_command_palette_history_rows.len) orelse return false;
-    return commandPaletteActivateAgentHistoryIndex(row_idx);
+    const ord = state.commandPaletteActivateSelected(view.rowCount()) orelse return false;
+    const orig = view.filtered[ord];
+    return commandPaletteActivateAgentHistoryIndex(orig);
 }
 
 fn commandPaletteActivateAgentHistoryRow(row_idx: usize) bool {
@@ -1807,6 +1894,17 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     if (!g_command_palette_visible) return;
     commandPaletteSyncAgentHistoryRows();
 
+    var history_view: ?command_palette_history_view.View = null;
+    const hist_alloc = AppWindow.g_allocator;
+    defer if (history_view) |*v| {
+        if (hist_alloc) |a| v.deinit(a);
+    };
+    const hist_now_ms = std.time.milliTimestamp();
+    if (commandPaletteIsHistoryMode()) {
+        history_view = buildHistoryView();
+        g_command_palette_history_item_count = if (history_view) |v| v.items.len else 0;
+    }
+
     const layout = commandPaletteLayout(window_width, window_height, top_offset);
     const box_y = @round(window_height - layout.box_top_px - layout.box_h);
 
@@ -1832,6 +1930,12 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     renderTitlebarText(if (commandPaletteIsHistoryMode()) i18n.s().cmd_palette_history_title else i18n.s().cmd_palette_title, layout.box_x + pad_x, title_y, title_color);
     const esc_hint = if (commandPaletteIsHistoryMode()) i18n.s().cmd_palette_esc_returns else i18n.s().cmd_palette_esc_closes;
     renderTitlebarText(esc_hint, layout.box_x + layout.box_w - pad_x - measureTitlebarText(esc_hint), title_y, muted);
+    if (commandPaletteIsHistoryMode()) {
+        const chip = historySourceLabel(g_command_palette_history_source);
+        const chip_w = measureTitlebarText(chip);
+        const chip_x = layout.box_x + layout.box_w - pad_x - measureTitlebarText(esc_hint) - 16 - chip_w;
+        renderTitlebarText(chip, chip_x, title_y, mixColor(fg, accent, 0.20));
+    }
 
     const filter_x = @round(layout.box_x + pad_x);
     const filter_box_y = @round(window_height - (layout.box_top_px + layout.header_h + layout.filter_h));
@@ -1841,11 +1945,12 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
 
     const filter_text_y = rowTextY(filter_box_y, layout.filter_h);
     if (commandPaletteIsHistoryMode()) {
-        const history_hint = if (g_command_palette_history_rows.len == 0)
-            i18n.s().cmd_palette_no_sessions_yet
-        else
-            i18n.s().cmd_palette_recent_sessions;
-        renderTitlebarTextLimited(history_hint, filter_x + 12, filter_text_y, dim, filter_w - 24);
+        const filter = commandPaletteFilter();
+        if (filter.len > 0) {
+            renderTitlebarTextLimited(filter, filter_x + 12, filter_text_y, fg, filter_w - 24);
+        } else {
+            renderTitlebarTextLimited(i18n.s().cmd_palette_history_search_placeholder, filter_x + 12, filter_text_y, dim, filter_w - 24);
+        }
     } else {
         const filter = commandPaletteFilter();
         if (filter.len > 0) {
@@ -1856,40 +1961,55 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     }
 
     if (commandPaletteIsHistoryMode()) {
-        if (g_command_palette_history_rows.len == 0) {
+        const selectable = if (history_view) |v| v.rowCount() else 0;
+        if (history_view == null or selectable == 0) {
             const empty_text = i18n.s().cmd_palette_no_sessions;
             const empty_y = @round(window_height - layout.row_top_px - layout.row_h + (layout.row_h - overlayTextHeight()) / 2);
             renderTitlebarText(empty_text, layout.box_x + (layout.box_w - measureTitlebarText(empty_text)) / 2, empty_y, muted);
         } else {
-            const first_row = commandPaletteFirstVisibleIndex(layout.rendered_rows);
+            const view = history_view.?;
+            const selected_ord = @min(g_command_palette_history_selected, selectable - 1);
+            const focus_item = historySelectedItemIndex(view, selected_ord);
+            const first_item = historyWindowStart(view.items.len, layout.rendered_rows, focus_item);
+
             var display_row: usize = 0;
             while (display_row < layout.rendered_rows) : (display_row += 1) {
-                const item_idx = first_row + display_row;
-                if (item_idx >= g_command_palette_history_rows.len) break;
-                const row = g_command_palette_history_rows[item_idx];
-                const selected = item_idx == g_command_palette_history_selected;
-
+                const item_idx = first_item + display_row;
+                if (item_idx >= view.items.len) break;
                 const row_top = @round(layout.row_top_px + @as(f32, @floatFromInt(display_row)) * layout.row_h);
                 const row_y = @round(window_height - row_top - layout.row_h);
-                if (selected) {
-                    renderRoundedQuadAlpha(layout.box_x + 12, row_y + 4, layout.box_w - 24, layout.row_h - 8, 5, selected_border, 0.38);
-                    renderRoundedQuadAlpha(layout.box_x + 13, row_y + 5, layout.box_w - 26, layout.row_h - 10, 4, selected_bg, 0.78);
-                }
-
-                const row_title_color = if (selected) fg else mixColor(bg, fg, 0.86);
-                const meta_color = if (selected) mixColor(fg, accent, 0.08) else mixColor(bg, fg, 0.54);
                 const text_y = rowTextY(row_y, layout.row_h);
-                const title_x = @round(layout.box_x + pad_x + 2);
-                const meta_right = layout.box_x + layout.box_w - pad_x;
-                // Sidebar-origin conversations show a "Sidebar" tag where tab
-                // conversations show their model name.
-                const right_label = if (row.copilot) i18n.s().cmd_palette_sidebar_tag else row.model;
-                if (right_label.len > 0) {
-                    const meta_w = measureTitlebarText(right_label);
-                    renderTitlebarText(right_label, meta_right - meta_w, text_y, meta_color);
-                    renderTitlebarTextLimited(row.title, title_x, text_y, row_title_color, (meta_right - meta_w) - title_x - 18);
-                } else {
-                    renderTitlebarTextLimited(row.title, title_x, text_y, row_title_color, meta_right - title_x);
+                switch (view.items[item_idx]) {
+                    .header => |b| {
+                        const label = historyBucketLabel(b);
+                        renderTitlebarText(label, @round(layout.box_x + pad_x + 2), text_y, mixColor(bg, fg, 0.40));
+                    },
+                    .row => |ord| {
+                        const row = g_command_palette_history_rows[view.filtered[ord]];
+                        const selected = ord == selected_ord;
+                        if (selected) {
+                            renderRoundedQuadAlpha(layout.box_x + 12, row_y + 4, layout.box_w - 24, layout.row_h - 8, 5, selected_border, 0.38);
+                            renderRoundedQuadAlpha(layout.box_x + 13, row_y + 5, layout.box_w - 26, layout.row_h - 10, 4, selected_bg, 0.78);
+                        }
+                        const row_title_color = if (selected) fg else mixColor(bg, fg, 0.86);
+                        const meta_color = if (selected) mixColor(fg, accent, 0.08) else mixColor(bg, fg, 0.54);
+                        const title_x = @round(layout.box_x + pad_x + 2);
+                        const meta_right = layout.box_x + layout.box_w - pad_x;
+
+                        var tbuf: [32]u8 = undefined;
+                        const rel = copilot_picker.formatRelativeTime(hist_now_ms, row.updated_at, &tbuf);
+                        const rel_w = measureTitlebarText(rel);
+                        renderTitlebarText(rel, meta_right - rel_w, text_y, meta_color);
+
+                        const tag = if (row.copilot) i18n.s().cmd_palette_sidebar_tag else row.model;
+                        var title_limit_right = meta_right - rel_w - 14;
+                        if (tag.len > 0) {
+                            const tag_w = measureTitlebarText(tag);
+                            renderTitlebarText(tag, title_limit_right - tag_w, text_y, meta_color);
+                            title_limit_right = title_limit_right - tag_w - 14;
+                        }
+                        renderTitlebarTextLimited(row.title, title_x, text_y, row_title_color, title_limit_right - title_x);
+                    },
                 }
             }
         }
@@ -2003,7 +2123,15 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
         const track_gl_y = @round(window_height - track_top_px - track_h);
         ui_pipeline.fillQuadAlpha(sb_x, track_gl_y, sb_w, track_h, mixColor(bg, fg, 0.25), 0.30);
 
-        const first_row = commandPaletteFirstVisibleIndex(layout.rendered_rows);
+        // History mode windows over display items (rows + group headers), so the
+        // thumb must track the same item-index window the list render uses, not the
+        // raw-ordinal window commandPaletteFirstVisibleIndex assumes.
+        const first_row = if (commandPaletteIsHistoryMode()) blk: {
+            const v = history_view orelse break :blk 0;
+            const selectable = v.rowCount();
+            const selected_ord = if (selectable == 0) 0 else @min(g_command_palette_history_selected, selectable - 1);
+            break :blk historyWindowStart(v.items.len, layout.rendered_rows, historySelectedItemIndex(v, selected_ord));
+        } else commandPaletteFirstVisibleIndex(layout.rendered_rows);
         const thumb_h = @max(24.0, @round(track_h * vis_f / total_f));
         const max_scroll_f: f32 = @floatFromInt(total_results - layout.rendered_rows);
         const scroll_f: f32 = @floatFromInt(first_row);
@@ -2184,6 +2312,7 @@ fn commandCenterStateSnapshot() command_center_state.State {
         .command_palette_filter_len = g_command_palette_filter_len,
         .command_palette_mode = g_command_palette_mode,
         .command_palette_history_selected = g_command_palette_history_selected,
+        .command_palette_history_source = g_command_palette_history_source,
         .startup_shortcuts_visible = startup_shortcuts.g_startup_shortcuts_visible,
         .session_launcher_visible = g_session_launcher_visible,
         .session_launcher_selected = g_session_launcher_selected,
@@ -2211,6 +2340,7 @@ fn commandCenterStateApply(state: command_center_state.State) void {
     g_command_palette_filter_len = state.command_palette_filter_len;
     g_command_palette_mode = state.command_palette_mode;
     g_command_palette_history_selected = state.command_palette_history_selected;
+    g_command_palette_history_source = state.command_palette_history_source;
     startup_shortcuts.g_startup_shortcuts_visible = state.startup_shortcuts_visible;
     g_session_launcher_visible = state.session_launcher_visible;
     g_session_launcher_selected = state.session_launcher_selected;

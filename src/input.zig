@@ -2934,6 +2934,8 @@ fn handleKey(ev: platform_input.KeyEvent) void {
                 platform_input.key_down => overlays.commandPaletteMoveAgentHistory(1),
                 platform_input.key_enter => overlays.commandPaletteExecuteSelected(),
                 platform_input.key_delete => _ = overlays.commandPaletteDeleteSelectedAgentHistory(),
+                platform_input.key_backspace => overlays.commandPaletteBackspace(),
+                platform_input.key_tab => overlays.commandPaletteCycleHistorySource(),
                 else => {},
             }
         } else {

@@ -192,6 +192,14 @@ pub const Strings = struct {
     cmd_palette_footer: []const u8,
     cmd_palette_footer_history: []const u8,
     cmd_palette_sidebar_tag: []const u8,
+    cmd_palette_group_today: []const u8,
+    cmd_palette_group_yesterday: []const u8,
+    cmd_palette_group_past_week: []const u8,
+    cmd_palette_group_earlier: []const u8,
+    cmd_palette_source_all: []const u8,
+    cmd_palette_source_sidebar: []const u8,
+    cmd_palette_source_tab: []const u8,
+    cmd_palette_history_search_placeholder: []const u8,
     copilot_picker_title: []const u8,
     copilot_picker_new: []const u8,
     copilot_picker_empty: []const u8,
@@ -403,8 +411,16 @@ const en = Strings{
     .cmd_palette_recent_sessions = "Recent Copilot sessions",
     .cmd_palette_no_sessions = "No saved Copilot sessions",
     .cmd_palette_footer = "Up/Down + Enter applies",
-    .cmd_palette_footer_history = "Up/Down selects, Enter reopens, Delete removes, Esc returns",
+    .cmd_palette_footer_history = "Type to filter, Tab source, Up/Down, Enter reopens, Delete removes, Esc returns",
     .cmd_palette_sidebar_tag = "Sidebar",
+    .cmd_palette_group_today = "Today",
+    .cmd_palette_group_yesterday = "Yesterday",
+    .cmd_palette_group_past_week = "Past 7 days",
+    .cmd_palette_group_earlier = "Earlier",
+    .cmd_palette_source_all = "All",
+    .cmd_palette_source_sidebar = "Sidebar",
+    .cmd_palette_source_tab = "Tab",
+    .cmd_palette_history_search_placeholder = "Search Copilot history",
     .copilot_picker_title = "Copilot conversations (Up/Down, Enter, Delete, Esc)",
     .copilot_picker_new = "+ New conversation",
     .copilot_picker_empty = "No saved Copilot conversations",
@@ -613,8 +629,16 @@ const zh_CN = Strings{
     .cmd_palette_recent_sessions = "最近的副驾会话",
     .cmd_palette_no_sessions = "没有已保存的副驾会话",
     .cmd_palette_footer = "上下选择，回车执行",
-    .cmd_palette_footer_history = "上下选择，回车重开，Delete 删除，Esc 返回",
+    .cmd_palette_footer_history = "输入筛选，Tab 来源，上下选择，回车重开，Delete 删除，Esc 返回",
     .cmd_palette_sidebar_tag = "侧栏",
+    .cmd_palette_group_today = "今天",
+    .cmd_palette_group_yesterday = "昨天",
+    .cmd_palette_group_past_week = "过去7天",
+    .cmd_palette_group_earlier = "更早",
+    .cmd_palette_source_all = "全部",
+    .cmd_palette_source_sidebar = "侧栏",
+    .cmd_palette_source_tab = "标签页",
+    .cmd_palette_history_search_placeholder = "搜索副驾历史",
     .copilot_picker_title = "副驾对话（上下选择，回车打开，Delete 删除，Esc 关闭）",
     .copilot_picker_new = "+ 新建对话",
     .copilot_picker_empty = "没有已保存的副驾对话",
@@ -930,4 +954,15 @@ test "settings strings: en source and zh translation present" {
     try std.testing.expectEqualStrings("语言", s().settings_language);
     try std.testing.expectEqualStrings("重启生效", s().settings_hint_restart);
     try std.testing.expect(s().settings_close.len > 0);
+}
+
+test "i18n: history panel strings present in both locales" {
+    defer setLang(.en);
+    setLang(.en);
+    try std.testing.expectEqualStrings("Today", s().cmd_palette_group_today);
+    try std.testing.expectEqualStrings("Sidebar", s().cmd_palette_source_sidebar);
+    setLang(.zh_CN);
+    try std.testing.expectEqualStrings("今天", s().cmd_palette_group_today);
+    try std.testing.expectEqualStrings("过去7天", s().cmd_palette_group_past_week);
+    try std.testing.expectEqualStrings("侧栏", s().cmd_palette_source_sidebar);
 }
