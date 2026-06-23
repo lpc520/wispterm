@@ -2886,6 +2886,12 @@ fn handleKey(ev: platform_input.KeyEvent) void {
         AppWindow.g_cells_valid = false;
         return;
     }
+    if (overlays.integrationPromptVisible()) {
+        overlays.integrationPromptHandleKey(key_event);
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
+        return;
+    }
     if (overlays.windowCloseConfirmVisible()) {
         overlays.windowCloseConfirmHandleKey(key_event);
         AppWindow.g_force_rebuild = true;
@@ -5185,6 +5191,18 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
         }
         return;
     }
+    if (overlays.integrationPromptVisible()) {
+        if (ev.button == .left and ev.action == .press) {
+            const win = AppWindow.g_window orelse return;
+            const fb = window_backend.framebufferSize(win);
+            const xpos: f64 = @floatFromInt(ev.x);
+            const ypos: f64 = @floatFromInt(ev.y);
+            _ = overlays.integrationPromptExecuteAt(xpos, ypos, @floatFromInt(fb.width), @floatFromInt(fb.height));
+            AppWindow.g_force_rebuild = true;
+            AppWindow.g_cells_valid = false;
+        }
+        return;
+    }
     if (overlays.windowCloseConfirmVisible()) {
         if (ev.button == .left and ev.action == .press) {
             const win = AppWindow.g_window orelse return;
@@ -6696,6 +6714,12 @@ fn handleMouseWheel(ev: platform_input.MouseWheelEvent) void {
     if (overlays.whatsNewVisible()) {
         overlays.whatsNewHandleScroll(@floatFromInt(ev.delta));
         AppWindow.g_force_rebuild = true;
+        return;
+    }
+    if (overlays.integrationPromptVisible()) {
+        overlays.integrationPromptHandleScroll(@floatFromInt(ev.delta));
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
         return;
     }
     if (overlays.settingsPageVisible()) {
