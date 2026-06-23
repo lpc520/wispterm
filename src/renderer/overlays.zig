@@ -2123,7 +2123,15 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
         const track_gl_y = @round(window_height - track_top_px - track_h);
         ui_pipeline.fillQuadAlpha(sb_x, track_gl_y, sb_w, track_h, mixColor(bg, fg, 0.25), 0.30);
 
-        const first_row = commandPaletteFirstVisibleIndex(layout.rendered_rows);
+        // History mode windows over display items (rows + group headers), so the
+        // thumb must track the same item-index window the list render uses, not the
+        // raw-ordinal window commandPaletteFirstVisibleIndex assumes.
+        const first_row = if (commandPaletteIsHistoryMode()) blk: {
+            const v = history_view orelse break :blk 0;
+            const selectable = v.rowCount();
+            const selected_ord = if (selectable == 0) 0 else @min(g_command_palette_history_selected, selectable - 1);
+            break :blk historyWindowStart(v.items.len, layout.rendered_rows, historySelectedItemIndex(v, selected_ord));
+        } else commandPaletteFirstVisibleIndex(layout.rendered_rows);
         const thumb_h = @max(24.0, @round(track_h * vis_f / total_f));
         const max_scroll_f: f32 = @floatFromInt(total_results - layout.rendered_rows);
         const scroll_f: f32 = @floatFromInt(first_row);
