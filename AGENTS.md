@@ -2,9 +2,9 @@
 
 ## Overview
 
-WispTerm is a terminal emulator written in Zig, currently shipping on Windows. It uses [libghostty-vt](https://github.com/ghostty-org/ghostty) (Ghostty's VT parser and terminal state machine) for terminal emulation, with its own rendering pipeline (OpenGL + FreeType, plus DirectWrite for font discovery on Windows).
+WispTerm is a terminal emulator written in Zig, shipping desktop builds for Windows and macOS, plus an experimental Linux AppImage. It uses [libghostty-vt](https://github.com/ghostty-org/ghostty) (Ghostty's VT parser and terminal state machine) for terminal emulation, with its own rendering pipeline (OpenGL/Metal + FreeType, plus DirectWrite/CoreText/fontconfig for font discovery by platform).
 
-Windows is the **primary and default development target** (`x86_64-windows-gnu`), and day-to-day development happens on Windows in PowerShell. Platform-specific code lives behind narrow interfaces in `src/platform/` (per-platform implementations plus `_unsupported`/`_posix` stubs) so that macOS and Linux ports become possible without rewriting the terminal core. Those native ports are not yet implemented; see `TODO.md` for the portability roadmap.
+Windows is the **primary and default development target** (`x86_64-windows-gnu`), and day-to-day development happens on Windows in PowerShell. Platform-specific code lives behind narrow interfaces in `src/platform/` (per-platform implementations plus `_unsupported`/`_posix` stubs) so macOS and Linux can share the terminal core. macOS is an active supported desktop build that is still stabilizing; Linux is experimental. See `ROADMAP.md` for future work and `KNOWN_ISSUES.md` for current platform limitations.
 
 ## Architecture
 
@@ -61,7 +61,7 @@ This repository must remain safe to check out and develop on Windows. Before fin
 ## Project Structure
 
 ```
-src/                         # Windows desktop terminal application
+src/                         # Desktop terminal application
 ├── main.zig                 # Entry point, GLFW window, OpenGL setup, main loop
 ├── App.zig                  # Application-level state, config reload, remote client lifecycle
 ├── AppWindow.zig            # Window-level tabs, splits, rendering and input routing

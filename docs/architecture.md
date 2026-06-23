@@ -3,12 +3,14 @@
 WispTerm is split into a platform-agnostic **core** and a per-platform **host**.
 This document names that seam as an explicit contract so it stays a deliberate
 boundary rather than an implicit convention. It is the reference for the
-portability work tracked in [`TODO.md`](../TODO.md).
+portability work tracked in [`ROADMAP.md`](../ROADMAP.md) and current platform
+limitations tracked in [`KNOWN_ISSUES.md`](../KNOWN_ISSUES.md).
 
 WispTerm follows Ghostty's core/host split: Ghostty keeps terminal behavior in a
 platform-agnostic core and drives it from native hosts (AppKit on macOS, GTK on
 Linux) that own their own event loops and supply platform services. WispTerm's
-core is the same idea with a Win32 host today and macOS/Linux hosts planned.
+core follows the same idea with a primary Win32 host, an AppKit macOS host, and
+an experimental Linux host.
 
 ## The three layers
 
@@ -27,8 +29,8 @@ core is the same idea with a Win32 host today and macOS/Linux hosts planned.
      routing that drives surfaces. Platform-neutral; calls the host interface.
    - `src/platform/window_backend.zig` — **the host interface** (see below).
    - `src/apprt/win32.zig` — the concrete Win32 host runtime behind the
-     `window_backend` facade. A macOS host adds an AppKit runtime here; a Linux
-     host adds a GTK (or other toolkit) runtime.
+     `window_backend` facade. The macOS host uses AppKit, and the experimental
+     Linux host uses SDL3.
 
 3. **Platform services** — narrow capability interfaces the host/core use for
    OS facilities. Each lives in `src/platform/` as `<cap>.zig` (the interface)
@@ -39,14 +41,15 @@ core is the same idea with a Win32 host today and macOS/Linux hosts planned.
 
 `window_backend.zig` is the named surface/window contract a host implements. It
 exposes an opaque `Window` type and forwards a narrow set of operations to the
-backend selected for the target OS (`window_backend_windows.zig` today,
-`window_backend_unsupported.zig` otherwise). A new host implements a
+backend selected for the target OS (`window_backend_windows.zig`,
+`window_backend_macos.zig`, or `window_backend_linux.zig` where available, with
+unsupported stubs only for missing capabilities). A new host implements a
 `window_backend_<platform>.zig` whose `Window` satisfies these operation groups:
 
 - **Lifecycle** — `create`, `destroy`, `setEventHandlers`, `showVisible` /
   `showHidden`, `closeRequested` / `clearCloseRequested`.
 - **Event loop** — `pollEvents` pumps the OS event loop once; the host owns the
-  loop (Win32 message loop today; AppKit/GTK own their own). The core calls
+  loop (Win32 message loop, AppKit run loop, SDL3 event pump). The core calls
   `pollEvents` each frame and drains the input queue.
 - **Input event queue** — `popKeyEvent`, `popCharEvent`, `popMouseButtonEvent`,
   and related drains return platform-neutral events typed by
@@ -109,7 +112,7 @@ out of scope.
 
 ## Implementing a new host
 
-To bring up a platform (see Phase 2 in [`TODO.md`](../TODO.md)):
+To bring up a platform (see [`ROADMAP.md`](../ROADMAP.md)):
 
 1. Add the native host runtime under `src/apprt/` and a
    `window_backend_<platform>.zig` that satisfies the host interface above

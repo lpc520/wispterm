@@ -1,5 +1,17 @@
 # Development, Architecture, Packaging, and Releases
 
+## Version Sources
+
+The desktop app version has one source of truth: `build.zig.zon`. Build options
+export that value as `build_options.app_version`, and it drives
+`wispterm --version`, package `version.txt` output, release notes, and the
+command center `Version` entry.
+
+The WispTerm Remote web console/relay under `remote/` is a separate package with
+its own version surfaces (`remote/package.json`, `remote/package-lock.json`,
+`remote/src/client/version.ts`, and the rendered web label). Do not bump Remote
+versions for a desktop-only release.
+
 ## Building
 
 ### Windows (PowerShell)

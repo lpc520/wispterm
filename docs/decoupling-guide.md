@@ -5,7 +5,7 @@ from its **UI/platform layer**, so the macOS (and later Linux) port reuses the
 terminal core and only swaps the host + GPU backend.
 
 It builds on [`architecture.md`](architecture.md) (the named core ↔ host
-contract) and drives the roadmap in [`../TODO.md`](../TODO.md). Where
+contract) and drives the roadmap in [`../ROADMAP.md`](../ROADMAP.md). Where
 `architecture.md` describes the *target* boundary, this guide audits the
 *current* boundary, names what is still coupled, and sequences the work.
 
@@ -81,7 +81,7 @@ is Metal-only on Darwin). Evidence:
 - Shaders are **GLSL-only** (`shaders/glitchy.glsl` + embedded GLSL strings in
   `gl_init.zig`). Metal needs MSL.
 
-**Correction to `TODO.md`.** The Phase 1 item *"keep the terminal rendering
+**Correction to the historical portability plan.** The Phase 1 item *"keep the terminal rendering
 core independent from the presentation backend … support multiple GPU backends
 behind one interface"* was marked done. That checkbox is only half true: the
 renderer has **no platform-runtime leakage** (no win32/DirectWrite/WebView2 —
@@ -277,7 +277,7 @@ with **A**. **D** is deferred until a macOS SDK environment exists.
 - **C3** Linux unit tests for spawn/resize/teardown.
 
 ### Phase D — macOS native host (deferred; needs macOS SDK)
-*Gated on Phase A. Mirrors `TODO.md` Phase 2; not verifiable on the
+*Gated on Phase A. Mirrors the roadmap's native-port track; not verifiable on the
 Windows-default toolchain.*
 
 - **D1** Metal backend `src/renderer/gpu/metal/` — second backend behind the
@@ -336,4 +336,4 @@ that gets real runtime coverage on Linux.
 | `src/platform/font_backend_macos.zig` | `src/font/discovery.zig` | CoreText discovery + fallback |
 
 > `remote/` is out of scope for the Ghostty comparison and for these
-> platform-leakage checks (per `AGENTS.md` and `TODO.md`).
+> platform-leakage checks (per `AGENTS.md`, `ROADMAP.md`, and `KNOWN_ISSUES.md`).

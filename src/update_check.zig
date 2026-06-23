@@ -494,26 +494,26 @@ test "update_check: selects portable asset for runtime flavor" {
 test "update_check: selects macOS DMG asset for macOS package" {
     const package = ReleasePackage{ .platform = .macos };
     var asset_name_buf: [asset_name_buffer_len]u8 = undefined;
-    const asset_name = try platform_update_package.assetName("v0.32.0", package, &asset_name_buf);
+    const asset_name = try platform_update_package.assetName("v1.28.0", package, &asset_name_buf);
 
     const release = ReleaseInfo{
-        .tag_name = "v0.32.0",
-        .html_url = "https://github.com/xuzhougeng/wispterm/releases/tag/v0.32.0",
+        .tag_name = "v1.28.0",
+        .html_url = "https://github.com/xuzhougeng/wispterm/releases/tag/v1.28.0",
         .draft = false,
         .prerelease = false,
         .assets = &.{
             .{
                 .name = asset_name,
-                .download_url = "https://example.test/wispterm-macos-v0.32.0.dmg",
+                .download_url = "https://example.test/wispterm-macos-v1.28.0.dmg",
                 .size = 1234,
             },
         },
         .owned = false,
     };
 
-    const result = evaluateReleaseForPackage("0.31.0", release, package);
+    const result = evaluateReleaseForPackage("1.27.0", release, package);
     try std.testing.expectEqual(State.update_available, result.state);
-    try std.testing.expectEqualStrings("wispterm-macos-v0.32.0.dmg", result.asset_name);
+    try std.testing.expectEqualStrings("wispterm-macos-v1.28.0.dmg", result.asset_name);
 }
 
 test "update_check: update result includes selected asset fields" {

@@ -72,7 +72,7 @@ remote-enabled = false
 | `keybind` | 默认值 | 配置应用级快捷键（可重复）。语法 `[global:]modifier+key=action`；`keybind = clear` 清空全部默认 |
 | `scrollback-limit` | `10000000` | 回滚缓冲上限（字节） |
 | `focus-follows-mouse` | `false` | 焦点跟随鼠标所在面板，无需点击 |
-| `url-open-mode` | `embedded` | 网址在哪打开：`embedded` 在可用时使用右侧浏览器面板（仅 Windows）；`system-browser` 始终用系统默认浏览器。两种方式下 SSH loopback 网址都会保持本地端口转发存活 |
+| `url-open-mode` | `embedded` | 网址在哪打开：`embedded` 在可用时使用右侧浏览器面板（Windows 为 WebView2，macOS 为 WKWebView）；`system-browser` 始终用系统默认浏览器。两种方式下 SSH loopback 网址都会保持本地端口转发存活 |
 | `restore-tabs-on-startup` | `false` | 关闭时持久化标签/分屏布局（`session.json`），下次启动重建。SSH 密码永不持久化，重连会再次提示。`--cwd` 覆盖会跳过恢复 |
 | `auto-update-check` | `true` | 启动后检查 GitHub Releases，有新版时提示 |
 | `config-file` | *(无)* | 包含另一个配置文件（前缀 `?` 表示可选） |

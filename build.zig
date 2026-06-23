@@ -105,7 +105,7 @@ const PlatformFeatures = struct {
             .embedded_browser_backend = embedded_browser_backend,
             .supports_resource_manifest = uses_windows_backend,
             .supports_gui_subsystem = uses_windows_backend,
-            .supports_remote_transport = uses_windows_backend,
+            .supports_remote_transport = uses_windows_backend or uses_macos_backend,
             .supports_app_bundle = has_app_bundle,
             .system_libraries = if (uses_windows_backend) &windows_system_libraries else if (uses_linux_backend) &linux_system_libraries else &.{},
             .app_frameworks = if (has_app_bundle) &macos_app_frameworks else &.{},
@@ -313,17 +313,19 @@ test "platform feature gates enable implemented desktop artifacts" {
     try std.testing.expectEqual(EmbeddedBrowserBackend.webkit, macos.embedded_browser_backend);
     try std.testing.expect(!macos.supports_resource_manifest);
     try std.testing.expect(!macos.supports_gui_subsystem);
-    try std.testing.expect(!macos.supports_remote_transport);
+    try std.testing.expect(macos.supports_remote_transport);
     try std.testing.expect(macos.supports_app_bundle);
     try std.testing.expect(macos.opengl_system_library == null);
 }
 
 test "windows system libraries are gated by platform" {
     const windows = PlatformFeatures.forOs(.windows);
-    try std.testing.expectEqual(@as(usize, 13), systemLibrariesFor(windows).len);
+    try std.testing.expectEqual(@as(usize, windows_system_libraries.len), systemLibrariesFor(windows).len);
     try std.testing.expectEqualStrings("user32", systemLibrariesFor(windows)[0]);
-    try std.testing.expectEqualStrings("psapi", systemLibrariesFor(windows)[11]);
-    try std.testing.expectEqualStrings("shcore", systemLibrariesFor(windows)[12]);
+    try expectContainsString(systemLibrariesFor(windows), "winhttp");
+    try expectContainsString(systemLibrariesFor(windows), "ole32");
+    try expectContainsString(systemLibrariesFor(windows), "psapi");
+    try expectContainsString(systemLibrariesFor(windows), "shcore");
 
     const linux = PlatformFeatures.forOs(.linux);
     try std.testing.expectEqual(@as(usize, 2), systemLibrariesFor(linux).len);

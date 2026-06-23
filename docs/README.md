@@ -14,6 +14,8 @@ This folder is the source for the WispTerm GitHub Pages site.
 - `media.md` — background images, shaders, and Kitty Graphics helper scripts.
 - `development.md` — build, architecture, packaging, and GitHub release notes.
 - `faq.md` — desktop and remote FAQ entries that are too detailed for the root README.
+- `../ROADMAP.md` — future desktop/platform work.
+- `../KNOWN_ISSUES.md` — current defects and platform limitations.
 - `style.css` — Poimandres-inspired dark styling.
 - `assets/wispterm.png` — logo (mirrored from repo `assets/wispterm.png`).
 - `assets/favicon.ico` — favicon (mirrored from repo `assets/wispterm.ico`).

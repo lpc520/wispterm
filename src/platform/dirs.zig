@@ -41,7 +41,7 @@ pub fn configDirFromEnvForOs(
         },
         .macos => {
             if (nonEmpty(env.home)) |home| {
-                return std.fs.path.join(allocator, &.{ home, "Library", "Application Support", app_dir_name });
+                return joinPathForOs(allocator, os_tag, &.{ home, "Library", "Application Support", app_dir_name });
             }
             return error.NoConfigPath;
         },
@@ -85,7 +85,7 @@ pub fn pathInConfigDirFromEnvForOs(
 ) ![]const u8 {
     const dir = try configDirFromEnvForOs(allocator, os_tag, env);
     defer allocator.free(dir);
-    return std.fs.path.join(allocator, &.{ dir, basename });
+    return joinPathForOs(allocator, os_tag, &.{ dir, basename });
 }
 
 pub fn configFilePath(allocator: std.mem.Allocator) ![]const u8 {
@@ -171,7 +171,7 @@ pub fn openSshConfigPathFromEnvForOs(
         .windows => nonEmpty(env.userprofile) orelse nonEmpty(env.home) orelse return error.NoOpenSshConfigPath,
         else => nonEmpty(env.home) orelse return error.NoOpenSshConfigPath,
     };
-    return std.fs.path.join(allocator, &.{ base, ".ssh", "config" });
+    return joinPathForOs(allocator, os_tag, &.{ base, ".ssh", "config" });
 }
 
 /// The user's home directory (`$HOME`, or `%USERPROFILE%` on Windows). Used to
@@ -285,7 +285,7 @@ pub fn pluginSkillsDirFromEnvForOs(
 ) ![]const u8 {
     const dir = try configDirFromEnvForOs(allocator, os_tag, env);
     defer allocator.free(dir);
-    return std.fs.path.join(allocator, &.{ dir, "plugins", "skills" });
+    return joinPathForOs(allocator, os_tag, &.{ dir, "plugins", "skills" });
 }
 
 pub fn downloadsDir(allocator: std.mem.Allocator) ![]const u8 {
@@ -314,7 +314,7 @@ pub fn downloadsDirFromEnvForOs(
         },
         else => {
             if (nonEmpty(env.home)) |home| {
-                return std.fs.path.join(allocator, &.{ home, "Downloads" });
+                return joinPathForOs(allocator, os_tag, &.{ home, "Downloads" });
             }
             return error.NoDownloadsPath;
         },
@@ -393,6 +393,69 @@ fn nonEmpty(value: ?[]const u8) ?[]const u8 {
     return actual;
 }
 
+fn joinPathForOs(
+    allocator: std.mem.Allocator,
+    os_tag: std.Target.Os.Tag,
+    paths: []const []const u8,
+) ![]u8 {
+    if (os_tag != .macos) {
+        return std.fs.path.join(allocator, paths);
+    }
+
+    return joinPosixPath(allocator, paths);
+}
+
+fn joinPosixPath(allocator: std.mem.Allocator, paths: []const []const u8) ![]u8 {
+    if (paths.len == 0) return allocator.dupe(u8, "");
+
+    const first_path_index = blk: {
+        for (paths, 0..) |path, index| {
+            if (path.len != 0) break :blk index;
+        }
+        return allocator.dupe(u8, "");
+    };
+
+    var total_len: usize = paths[first_path_index].len;
+    var prev_path = paths[first_path_index];
+    var i: usize = first_path_index + 1;
+    while (i < paths.len) : (i += 1) {
+        const this_path = paths[i];
+        if (this_path.len == 0) continue;
+
+        const prev_sep = prev_path[prev_path.len - 1] == '/';
+        const this_sep = this_path[0] == '/';
+        total_len += @intFromBool(!prev_sep and !this_sep);
+        total_len += if (prev_sep and this_sep) this_path.len - 1 else this_path.len;
+        prev_path = this_path;
+    }
+
+    const out = try allocator.alloc(u8, total_len);
+    errdefer allocator.free(out);
+
+    @memcpy(out[0..paths[first_path_index].len], paths[first_path_index]);
+    var out_index = paths[first_path_index].len;
+    prev_path = paths[first_path_index];
+    i = first_path_index + 1;
+    while (i < paths.len) : (i += 1) {
+        const this_path = paths[i];
+        if (this_path.len == 0) continue;
+
+        const prev_sep = prev_path[prev_path.len - 1] == '/';
+        const this_sep = this_path[0] == '/';
+        if (!prev_sep and !this_sep) {
+            out[out_index] = '/';
+            out_index += 1;
+        }
+
+        const adjusted_path = if (prev_sep and this_sep) this_path[1..] else this_path;
+        @memcpy(out[out_index..][0..adjusted_path.len], adjusted_path);
+        out_index += adjusted_path.len;
+        prev_path = this_path;
+    }
+
+    return out;
+}
+
 test "configDir uses test override in Zig test processes" {
     const allocator = std.testing.allocator;
     const override = "/tmp/wispterm-test-config";
@@ -445,9 +508,7 @@ test "platform dirs resolve app config root per OS" {
             .home = "/Users/alice",
         });
         defer allocator.free(dir);
-        const expected = try std.fs.path.join(allocator, &.{ "/Users/alice", "Library", "Application Support", app_dir_name });
-        defer allocator.free(expected);
-        try std.testing.expectEqualStrings(expected, dir);
+        try std.testing.expectEqualStrings("/Users/alice/Library/Application Support/wispterm", dir);
     }
 }
 
@@ -486,9 +547,7 @@ test "platform dirs build window state path" {
     });
     defer allocator.free(state_path);
 
-    const expected = try std.fs.path.join(allocator, &.{ "/Users/alice", "Library", "Application Support", app_dir_name, "state" });
-    defer allocator.free(expected);
-    try std.testing.expectEqualStrings(expected, state_path);
+    try std.testing.expectEqualStrings("/Users/alice/Library/Application Support/wispterm/state", state_path);
 }
 
 test "platform dirs ignore empty env values" {

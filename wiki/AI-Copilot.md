@@ -136,6 +136,14 @@ paths still use the normal access gate before an approval prompt is emitted.
 
 ## Sessions browser & resume
 
+Open the command center (`Ctrl+Shift+P`) and run **Copilot History** to reopen
+WispTerm's own saved AI Chat tabs and Copilot sidebar conversations. The picker
+is grouped by local date (**Today**, **Yesterday**, **Past Week**, **Earlier**),
+shows relative update times, and searches conversation titles plus model names.
+Press `Tab` to cycle the source chip between **All**, **Sidebar**, and **Tab**;
+use Up/Down to move, `Enter` to reopen, `Delete` to remove the selected saved
+conversation, and `Esc` to return to the normal command center.
+
 Open the session launcher (`Ctrl+Shift+T`) and choose **Sessions** to browse
 Codex, Claude Code, and Reasonix transcripts on a Local, WSL, or SSH target.
 WispTerm connects to the target, scans `$HOME/.codex`, `$HOME/.claude`, and

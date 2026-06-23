@@ -64,6 +64,14 @@ full raw history instead.
 
 ## Sessions
 
+Open the command center with `Ctrl+Shift+P` and run `Copilot History` to reopen
+WispTerm's own saved AI Chat tabs and Copilot sidebar conversations. The picker
+groups rows by local date (`Today`, `Yesterday`, `Past Week`, `Earlier`), shows
+relative update times, and keeps the list searchable by conversation title or
+model. Press `Tab` to cycle the source filter between `All`, `Sidebar`, and
+`Tab`; use Up/Down to move, `Enter` to reopen the selected row, `Delete` to
+remove it, and `Esc` to return to the normal command center.
+
 Open the session launcher with `Ctrl+Shift+T` and choose `Sessions` to browse
 Codex, Claude Code, and Reasonix transcripts stored on a Local, WSL, or SSH
 target. WispTerm connects to the selected target, scans `$HOME/.codex`,

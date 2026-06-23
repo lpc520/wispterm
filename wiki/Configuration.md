@@ -72,7 +72,7 @@ remote-enabled = false
 | `keybind` | defaults | Configure an app-level shortcut (repeatable). Syntax `[global:]modifier+key=action`; `keybind = clear` removes all defaults |
 | `scrollback-limit` | `10000000` | Scrollback buffer limit in bytes |
 | `focus-follows-mouse` | `false` | Focus the panel under the mouse without clicking |
-| `url-open-mode` | `embedded` | Where web URLs open: `embedded` uses the right-side browser panel when available (Windows only); `system-browser` always uses the system default browser. SSH loopback URLs keep local port forwards alive either way |
+| `url-open-mode` | `embedded` | Where web URLs open: `embedded` uses the right-side browser panel when available (WebView2 on Windows, WKWebView on macOS); `system-browser` always uses the system default browser. SSH loopback URLs keep local port forwards alive either way |
 | `restore-tabs-on-startup` | `false` | Persist tab/split layout (`session.json`) on close and rebuild on next launch. SSH passwords are never persisted; reconnects re-prompt. `--cwd` overrides skip restore |
 | `auto-update-check` | `true` | Check GitHub Releases after startup and prompt when a newer version exists |
 | `config-file` | *(none)* | Include another config file (prefix `?` to make optional) |
