@@ -1,5 +1,6 @@
 const std = @import("std");
 const agent_history = @import("agent_history.zig");
+const platform_dirs = @import("platform/dirs.zig");
 
 pub const MAX_INDEX_BYTES = 32 * 1024 * 1024;
 const MIGRATION_MAX_BYTES = 1 << 30;
@@ -24,7 +25,10 @@ pub const MetaStore = struct {
         if (self.entries.items.len > 0) {
             self.index_dirty = true;
             try self.flush();
+            return self;
         }
+
+        _ = try self.migrateLegacy();
         return self;
     }
 
@@ -209,6 +213,35 @@ pub const MetaStore = struct {
             };
         }
     }
+
+    fn migrateLegacy(self: *MetaStore) !bool {
+        const legacy = try agent_history.defaultPath(self.allocator);
+        defer self.allocator.free(legacy);
+        const bytes = std.fs.cwd().readFileAlloc(self.allocator, legacy, MIGRATION_MAX_BYTES) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        defer self.allocator.free(bytes);
+        var store = agent_history.Store.fromJsonStringLenient(self.allocator, bytes) catch return false;
+        defer store.deinit();
+        for (store.records.items) |record| {
+            try self.writeSessionFile(record);
+            const entry = try agent_history.recordToIndexEntry(self.allocator, record);
+            self.entries.append(self.allocator, entry) catch |err| {
+                var owned = entry;
+                agent_history.freeOwnedIndexEntry(self.allocator, &owned);
+                return err;
+            };
+        }
+        self.index_dirty = true;
+        try self.flush();
+        const bak = try std.fmt.allocPrint(self.allocator, "{s}.bak", .{legacy});
+        defer self.allocator.free(bak);
+        std.fs.cwd().rename(legacy, bak) catch |err| {
+            std.log.scoped(.agent_history).warn("legacy history rename to .bak failed: {}", .{err});
+        };
+        return true;
+    }
 };
 
 test "MetaStore: open empty dir yields no rows" {
@@ -328,4 +361,54 @@ test "MetaStore: rebuilds index from session files when index missing/corrupt; s
     const rows = try rebuilt.buildRows(allocator);
     defer agent_history.freeRows(allocator, rows);
     try std.testing.expectEqual(@as(usize, 2), rows.len);
+}
+
+test "MetaStore: migrates legacy single file to dir layout, idempotently, keeps .bak" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    platform_dirs.setTestConfigDirForCurrentThread(root);
+    defer platform_dirs.clearTestConfigDirForCurrentThread();
+    {
+        var legacy = agent_history.Store.init(allocator);
+        defer legacy.deinit();
+        try legacy.upsertRecord(.{
+            .session_id = "old-1", .title = "Old1", .base_url = "u", .api_key = "k", .model = "m",
+            .system_prompt = "s", .thinking_enabled = false, .reasoning_effort = "low",
+            .stream = true, .agent_enabled = true, .created_at = 1, .updated_at = 2, .copilot = true,
+            .messages = &[_]agent_history.MessageRecord{.{ .role = .user, .content = "hey" }},
+        });
+        try legacy.upsertRecord(.{
+            .session_id = "old-2", .title = "Old2", .base_url = "u", .api_key = "k", .model = "m",
+            .system_prompt = "s", .thinking_enabled = false, .reasoning_effort = "low",
+            .stream = true, .agent_enabled = true, .created_at = 3, .updated_at = 4,
+            .messages = &[_]agent_history.MessageRecord{},
+        });
+        try legacy.saveDefault();
+    }
+    const dir = try platform_dirs.agentHistoryDir(allocator);
+    defer allocator.free(dir);
+    var store = try MetaStore.open(allocator, dir);
+    defer store.deinit();
+    const rows = try store.buildRows(allocator);
+    defer agent_history.freeRows(allocator, rows);
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    const legacy_path = try agent_history.defaultPath(allocator);
+    defer allocator.free(legacy_path);
+    const legacy_exists = if (std.fs.cwd().access(legacy_path, .{})) |_| true else |_| false;
+    try std.testing.expect(!legacy_exists);
+    const bak_path = try std.fmt.allocPrint(allocator, "{s}.bak", .{legacy_path});
+    defer allocator.free(bak_path);
+    const bak_exists = if (std.fs.cwd().access(bak_path, .{})) |_| true else |_| false;
+    try std.testing.expect(bak_exists);
+    var rec = (try store.cloneRecordBySessionId(allocator, "old-1")) orelse return error.Missing;
+    defer agent_history.freeOwnedRecord(allocator, &rec);
+    try std.testing.expect(rec.copilot);
+    var store2 = try MetaStore.open(allocator, dir);
+    defer store2.deinit();
+    const rows2 = try store2.buildRows(allocator);
+    defer agent_history.freeRows(allocator, rows2);
+    try std.testing.expectEqual(@as(usize, 2), rows2.len);
 }
