@@ -458,6 +458,56 @@ pub fn buildSearchPreview(allocator: std.mem.Allocator, record: SessionRecord) !
     return buf.toOwnedSlice(allocator);
 }
 
+pub fn buildRowsFromEntries(allocator: std.mem.Allocator, entries: []const IndexEntry) ![]Row {
+    const rows = try allocator.alloc(Row, entries.len);
+    var initialized: usize = 0;
+    errdefer {
+        while (initialized > 0) {
+            initialized -= 1;
+            freeOwnedRow(allocator, &rows[initialized]);
+        }
+        allocator.free(rows);
+    }
+    for (entries, 0..) |e, i| {
+        rows[i] = try cloneRow(allocator, .{
+            .session_id = e.session_id,
+            .title = e.title,
+            .model = e.model,
+            .updated_at = e.updated_at,
+            .copilot = e.copilot,
+        });
+        initialized += 1;
+    }
+    sortRows(rows);
+    return rows;
+}
+
+pub fn buildCopilotRowsFromEntries(allocator: std.mem.Allocator, entries: []const IndexEntry) ![]Row {
+    var list: std.ArrayListUnmanaged(Row) = .empty;
+    errdefer {
+        for (list.items) |*r| freeOwnedRow(allocator, r);
+        list.deinit(allocator);
+    }
+    for (entries) |e| {
+        if (!e.copilot) continue;
+        const row = try cloneRow(allocator, .{
+            .session_id = e.session_id,
+            .title = e.title,
+            .model = e.model,
+            .updated_at = e.updated_at,
+            .copilot = e.copilot,
+        });
+        list.append(allocator, row) catch |err| {
+            var owned = row;
+            freeOwnedRow(allocator, &owned);
+            return err;
+        };
+    }
+    const rows = try list.toOwnedSlice(allocator);
+    sortRows(rows);
+    return rows;
+}
+
 pub fn recordToJson(allocator: std.mem.Allocator, record: SessionRecord) ![]u8 {
     return std.json.Stringify.valueAlloc(allocator, record, .{});
 }
@@ -1234,6 +1284,24 @@ test "agent_history: single record JSON round-trips" {
     try std.testing.expect(rec.copilot);
     try std.testing.expectEqual(@as(usize, 2), rec.messages.len);
     try std.testing.expectEqualStrings("yo", rec.messages[1].content);
+}
+
+test "agent_history: buildRowsFromEntries sorts desc and filters copilot" {
+    const allocator = std.testing.allocator;
+    var entries = [_]IndexEntry{
+        .{ .session_id = "a", .title = "A", .model = "m", .created_at = 1, .updated_at = 1, .copilot = false },
+        .{ .session_id = "b", .title = "B", .model = "m", .created_at = 2, .updated_at = 3, .copilot = true },
+        .{ .session_id = "c", .title = "C", .model = "m", .created_at = 2, .updated_at = 2, .copilot = false },
+    };
+    const rows = try buildRowsFromEntries(allocator, &entries);
+    defer freeRows(allocator, rows);
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    try std.testing.expectEqualStrings("b", rows[0].session_id);
+    try std.testing.expectEqualStrings("c", rows[1].session_id);
+    const co = try buildCopilotRowsFromEntries(allocator, &entries);
+    defer freeRows(allocator, co);
+    try std.testing.expectEqual(@as(usize, 1), co.len);
+    try std.testing.expectEqualStrings("b", co[0].session_id);
 }
 
 fn expectLenientParseOutOfMemory(json: []const u8) !void {
