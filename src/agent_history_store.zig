@@ -162,6 +162,22 @@ pub const MetaStore = struct {
         }
         return true;
     }
+
+    pub fn deleteBySessionId(self: *MetaStore, session_id: []const u8) bool {
+        const idx = self.entryIndex(session_id) orelse return false;
+        if (self.sessionFilePath(self.allocator, session_id)) |path| {
+            defer self.allocator.free(path);
+            std.fs.cwd().deleteFile(path) catch {};
+        } else |_| {}
+        var removed = self.entries.orderedRemove(idx);
+        agent_history.freeOwnedIndexEntry(self.allocator, &removed);
+        if (self.pendingIndex(session_id)) |pi| {
+            var r = self.pending.orderedRemove(pi);
+            agent_history.freeOwnedRecord(self.allocator, &r);
+        }
+        self.index_dirty = true;
+        return true;
+    }
 };
 
 test "MetaStore: open empty dir yields no rows" {
@@ -227,4 +243,30 @@ test "MetaStore: flush writes files and index, reopen reads cold from disk" {
     var rec = (try store2.cloneRecordBySessionId(allocator, "s1")) orelse return error.Missing;
     defer agent_history.freeOwnedRecord(allocator, &rec);
     try std.testing.expectEqualStrings("hi", rec.messages[0].content);
+}
+
+test "MetaStore: delete removes entry, pending and on-disk file" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    var store = try MetaStore.open(allocator, root);
+    defer store.deinit();
+    try store.upsertRecord(.{
+        .session_id = "s1", .title = "T", .base_url = "u", .api_key = "k", .model = "m",
+        .system_prompt = "s", .thinking_enabled = false, .reasoning_effort = "low",
+        .stream = true, .agent_enabled = true, .created_at = 1, .updated_at = 2,
+        .messages = &[_]agent_history.MessageRecord{},
+    });
+    try store.flush();
+    try std.testing.expect(store.deleteBySessionId("s1"));
+    try std.testing.expect(!store.deleteBySessionId("s1"));
+    try store.flush();
+    const rows = try store.buildRows(allocator);
+    defer agent_history.freeRows(allocator, rows);
+    try std.testing.expectEqual(@as(usize, 0), rows.len);
+    var reopened = try MetaStore.open(allocator, root);
+    defer reopened.deinit();
+    try std.testing.expect((try reopened.cloneRecordBySessionId(allocator, "s1")) == null);
 }
