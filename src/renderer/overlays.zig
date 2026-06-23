@@ -362,13 +362,15 @@ pub fn commandPaletteLeaveAgentHistory() void {
 }
 
 pub fn commandPaletteBackspace() void {
-    if (commandPaletteIsHistoryMode()) return;
     if (g_command_palette_filter_len == 0) return;
-    // Remove a whole UTF-8 codepoint: walk back over continuation bytes (0b10xxxxxx).
     var n = g_command_palette_filter_len - 1;
     while (n > 0 and (g_command_palette_filter[n] & 0xC0) == 0x80) n -= 1;
     g_command_palette_filter_len = n;
-    commandPaletteClampSelection();
+    if (commandPaletteIsHistoryMode()) {
+        g_command_palette_history_selected = 0;
+    } else {
+        commandPaletteClampSelection();
+    }
 }
 
 pub fn commandPaletteClearFilter() void {
@@ -378,17 +380,17 @@ pub fn commandPaletteClearFilter() void {
 }
 
 pub fn commandPaletteInsertChar(codepoint: u21) void {
-    if (commandPaletteIsHistoryMode()) return;
     if (codepoint < 0x20 or codepoint == 0x7f) return;
-
-    // UTF-8-encode the codepoint so CJK (e.g. IME-committed 中文) is accepted,
-    // not just ASCII. Mirrors the terminal char path's utf8Encode.
     var buf: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(codepoint, &buf) catch return;
     if (g_command_palette_filter_len + len > g_command_palette_filter.len) return;
     @memcpy(g_command_palette_filter[g_command_palette_filter_len..][0..len], buf[0..len]);
     g_command_palette_filter_len += len;
-    commandPaletteClampSelection();
+    if (commandPaletteIsHistoryMode()) {
+        g_command_palette_history_selected = 0;
+    } else {
+        commandPaletteClampSelection();
+    }
 }
 
 pub fn commandPaletteExecuteSelected() void {
