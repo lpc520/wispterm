@@ -5466,6 +5466,11 @@ fn settingsHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, 
 }
 
 fn executeSettingsAction(action: SettingsAction) void {
+    if (action == .close) {
+        settingsPageClose();
+        return;
+    }
+
     const allocator = AppWindow.g_allocator orelse return;
     var cfg = Config.load(allocator) catch Config{};
     defer cfg.deinit(allocator);
@@ -6059,6 +6064,22 @@ test "overlays: settings page state is owned by OverlayState" {
 
     try std.testing.expect(g_overlay_state.settings.visible);
     try std.testing.expect(settingsPageVisible());
+}
+
+test "overlays: settings page escape closes without allocator" {
+    const previous_allocator = AppWindow.g_allocator;
+    defer settingsPageClose();
+    defer AppWindow.g_allocator = previous_allocator;
+
+    AppWindow.g_allocator = null;
+    settingsPageOpen();
+
+    const effect = settingsPageHandleKey(.{ .key = .escape });
+
+    try std.testing.expect(effect.consumed);
+    try std.testing.expect(effect.needs_rebuild);
+    try std.testing.expect(effect.cells_invalid);
+    try std.testing.expect(!settingsPageVisible());
 }
 
 test "macOS UI smoke: command center opens settings and settings writes config" {
