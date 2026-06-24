@@ -193,6 +193,63 @@ P3.1 is complete when:
 - Windows checkout-safety checks pass.
 - A P3.1 handoff records final line counts and names the next P3 target.
 
+## P3.1 Final Handoff - 2026-06-24
+
+P3.1 and the user-approved P3.1b follow-up are complete. P3.1 extracted the
+Remote sync, control API, Weixin bridge, surface snapshot, and agent request
+boundaries. P3.1b extracted Skill Center action glue into
+`src/appwindow/skill_center_actions.zig`, which was needed to reach the
+AppWindow line target without touching the render loop, tab/split semantics,
+PTY behavior, shortcut bindings, overlay behavior, `remote/`, or version
+surfaces.
+
+Final measured line counts:
+
+```text
+   7089 src/AppWindow.zig
+      5 src/appwindow/active_tab.zig
+    333 src/appwindow/agent_requests.zig
+    267 src/appwindow/control_api.zig
+    105 src/appwindow/flush_scheduler.zig
+    131 src/appwindow/frame_latency.zig
+     59 src/appwindow/p3_1_guard.zig
+     73 src/appwindow/remote_state.zig
+    390 src/appwindow/remote_sync.zig
+    127 src/appwindow/render_gate.zig
+     69 src/appwindow/resize_throttle.zig
+   2325 src/appwindow/skill_center_actions.zig
+    397 src/appwindow/split_layout.zig
+     22 src/appwindow/state.zig
+     20 src/appwindow/state_guard.zig
+    207 src/appwindow/surface_snapshots.zig
+   3157 src/appwindow/tab.zig
+     89 src/appwindow/thread_message.zig
+    530 src/appwindow/tmux_bridge.zig
+     44 src/appwindow/tmux_controller.zig
+    496 src/appwindow/tmux_controller_posix.zig
+    765 src/appwindow/tmux_controller_windows.zig
+     45 src/appwindow/ui_effect.zig
+    462 src/appwindow/weixin_bridge.zig
+     85 src/appwindow/window_state.zig
+   7665 src/renderer/overlays.zig
+   7101 src/input.zig
+  32058 total
+```
+
+Final verification:
+
+- New source guard: `src/appwindow/p3_1_guard.zig`, imported by
+  `src/test_fast.zig`. The guard embeds `src/AppWindow.zig` and fails if P3.1
+  bridge/request or P3.1b Skill Center implementation symbols return to
+  AppWindow.
+- Guard red check: `zig build test` failed before cleanup on
+  `fn remoteAiAgentOpen` and `fn skillCenterToolManifestPath`, proving the
+  guard caught boundary violations.
+- Fast gate: `zig build test` passed after cleanup.
+- Windows checkout safety: checked 1553 paths including the new guard file;
+  name violations 0, case-fold collisions 0, symlinks 0, max path length 90.
+- Full gate: `zig build test-full` passed once.
+
 ## Risks
 
 | Risk | Mitigation |

@@ -472,12 +472,12 @@ test "AppWindow: skill center tool enabled update matches manifest path" {
     };
 
     const manifest_b = switch (entries[1]) {
-        .tool => |tool| skillCenterToolManifestPath(std.testing.allocator, tool) orelse return error.ExpectedManifestPath,
+        .tool => |tool| skill_center_actions.toolManifestPath(std.testing.allocator, tool) orelse return error.ExpectedManifestPath,
         else => return error.ExpectedSkillCenterTool,
     };
     defer std.testing.allocator.free(manifest_b);
 
-    try std.testing.expect(skillCenterApplyToolEnabledByManifestPath(std.testing.allocator, entries[0..], manifest_b, true));
+    try std.testing.expect(skill_center_actions.applyToolEnabledByManifestPath(std.testing.allocator, entries[0..], manifest_b, true));
     switch (entries[0]) {
         .tool => |tool| try std.testing.expect(!tool.enabled),
         else => return error.ExpectedSkillCenterTool,
@@ -487,7 +487,7 @@ test "AppWindow: skill center tool enabled update matches manifest path" {
         else => return error.ExpectedSkillCenterTool,
     }
 
-    try std.testing.expect(!skillCenterApplyToolEnabledByManifestPath(std.testing.allocator, entries[0..], "/tmp/tools/missing/manifest.json", false));
+    try std.testing.expect(!skill_center_actions.applyToolEnabledByManifestPath(std.testing.allocator, entries[0..], "/tmp/tools/missing/manifest.json", false));
     switch (entries[1]) {
         .tool => |tool| try std.testing.expect(tool.enabled),
         else => return error.ExpectedSkillCenterTool,
@@ -517,7 +517,7 @@ test "AppWindow: skill center first-party enabled update matches name only" {
         } },
     };
 
-    try std.testing.expect(skillCenterApplyFirstPartyEnabledByName(entries[0..], "pubmed", true));
+    try std.testing.expect(skill_center_actions.applyFirstPartyEnabledByName(entries[0..], "pubmed", true));
     switch (entries[0]) {
         .first_party_tool => |tool| try std.testing.expect(!tool.enabled),
         else => return error.ExpectedFirstPartyTool,
@@ -531,7 +531,7 @@ test "AppWindow: skill center first-party enabled update matches name only" {
         else => return error.ExpectedSkillCenterTool,
     }
 
-    try std.testing.expect(!skillCenterApplyFirstPartyEnabledByName(entries[0..], "missing", false));
+    try std.testing.expect(!skill_center_actions.applyFirstPartyEnabledByName(entries[0..], "missing", false));
     switch (entries[1]) {
         .first_party_tool => |tool| try std.testing.expect(tool.enabled),
         else => return error.ExpectedFirstPartyTool,
@@ -556,7 +556,7 @@ test "AppWindow: skill center tool manifest toggle preserves extra fields" {
         \\}
     ;
 
-    const updated = try skillCenterManifestJsonWithEnabled(std.testing.allocator, manifest_json, true);
+    const updated = try skill_center_actions.manifestJsonWithEnabled(std.testing.allocator, manifest_json, true);
     defer std.testing.allocator.free(updated);
 
     try std.testing.expect(std.mem.indexOf(u8, updated, "\"custom_meta\"") != null);
@@ -2482,35 +2482,6 @@ pub fn skillCenterImport() bool {
     return skill_center_actions.skillCenterImport(skillCenterHost());
 }
 
-fn skillCenterToolManifestPath(allocator: std.mem.Allocator, tool: skill_center.ToolSkill) ?[]u8 {
-    return skill_center_actions.toolManifestPath(allocator, tool);
-}
-
-fn skillCenterApplyToolEnabledByManifestPath(
-    allocator: std.mem.Allocator,
-    entries: []skill_center.LibraryEntry,
-    manifest_path: []const u8,
-    enabled: bool,
-) bool {
-    return skill_center_actions.applyToolEnabledByManifestPath(allocator, entries, manifest_path, enabled);
-}
-
-fn skillCenterApplyFirstPartyEnabledByName(
-    entries: []skill_center.LibraryEntry,
-    name: []const u8,
-    enabled: bool,
-) bool {
-    return skill_center_actions.applyFirstPartyEnabledByName(entries, name, enabled);
-}
-
-fn skillCenterManifestJsonWithEnabled(
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
-    enabled: bool,
-) ![]u8 {
-    return skill_center_actions.manifestJsonWithEnabled(allocator, bytes, enabled);
-}
-
 fn skillCenterSetStatusLocked(session: *skill_center.Session, text: []const u8) void {
     skill_center_actions.setStatusLocked(session, text);
 }
@@ -2521,10 +2492,6 @@ pub fn skillCenterImportTool() bool {
 
 pub fn skillCenterToggleToolEnabled() bool {
     return skill_center_actions.skillCenterToggleToolEnabled(skillCenterHost());
-}
-
-fn skillCenterRunTransfer(allocator: std.mem.Allocator, is_import: bool, target: skill_center.Target, name: []const u8) void {
-    skill_center_actions.runTransfer(allocator, is_import, target, name);
 }
 
 fn skillCenterArmConfirm(allocator: std.mem.Allocator, is_import: bool, target: skill_center.Target, name: []const u8) void {
@@ -4549,7 +4516,7 @@ fn pollSkillCenterOp(session: *skill_center.Session) void {
             }
             switch (skill_center.overwriteDecision(present, target_hash, v.src_hash)) {
                 .noop => overlays.showStatusToast(i18n.s().sc_toast_in_sync),
-                .direct => skillCenterRunTransfer(allocator, false, v.target, v.name),
+                .direct => skill_center_actions.runTransfer(allocator, false, v.target, v.name),
                 .confirm => skillCenterArmConfirm(allocator, false, v.target, v.name),
             }
         },
@@ -4985,7 +4952,7 @@ fn remoteSyncHost() remote_sync.Host {
     };
 }
 
-fn remoteAiAgentOpen(ctx: *anyopaque, request_id: []const u8) void {
+fn openRemoteAiAgentForClient(ctx: *anyopaque, request_id: []const u8) void {
     const app: *App = @ptrCast(@alignCast(ctx));
     const client = app.remote_client orelse return;
 
@@ -5293,7 +5260,7 @@ fn installAgentToolHost(self: *AppWindow) void {
 
 fn installRemoteControlHandlers(self: *AppWindow) void {
     if (self.app.remote_client) |client| {
-        client.registerAiAgentOpener(self.app, remoteAiAgentOpen);
+        client.registerAiAgentOpener(self.app, openRemoteAiAgentForClient);
     }
 }
 
