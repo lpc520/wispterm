@@ -90,6 +90,7 @@ test {
     _ = @import("appwindow/frame_latency.zig");
     _ = @import("appwindow/render_gate.zig");
     _ = @import("appwindow/ui_effect.zig");
+    _ = @import("appwindow/window_state.zig");
     _ = @import("scp.zig");
     _ = @import("surface_registry.zig");
     _ = @import("ctl/protocol.zig");
