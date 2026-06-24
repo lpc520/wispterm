@@ -236,3 +236,22 @@ P2.1 is complete when:
 | Behavior drift in config writes | Keep settings side effects in `overlays.zig` initially and reuse existing tests. |
 | `test-full` slows iteration | Fast tests and source guards run per task; full suite runs once at the stage gate. |
 | P2.2 starts before P2.1 stabilizes | Treat P2.2/P2.3 as recorded future stages, not executable P2.1 tasks. |
+
+## P2.1 handoff
+
+P2.1 introduced `OverlayState` and moved settings, toast/update prompt, and
+confirmation state behind feature-owned modules while keeping `overlays.zig` as
+the compatibility facade.
+
+Final line counts:
+
+```text
+  10578 src/AppWindow.zig
+   7665 src/renderer/overlays.zig
+   7092 src/input.zig
+   8756 src/ai_chat.zig
+  34091 total
+```
+
+P2.2 should start from the session launcher and profile-form state. Do not start
+P2.3 AppWindow state migration until P2.2 is complete and verified.
