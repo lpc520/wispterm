@@ -96,22 +96,6 @@ fn toastState() *toasts.State {
     return &g_overlay_state.toasts;
 }
 
-fn copyToastDurationMs() i64 {
-    return @field(toasts, "COPY_TOAST" ++ "_DURATION_MS");
-}
-
-fn transferToastDurationMs() i64 {
-    return @field(toasts, "TRANSFER_TOAST" ++ "_DURATION_MS");
-}
-
-fn updatePromptDurationMs() i64 {
-    return @field(toasts, "UPDATE_PROMPT" ++ "_DURATION_MS");
-}
-
-fn updateStatusDurationMs() i64 {
-    return @field(toasts, "UPDATE_STATUS" ++ "_DURATION_MS");
-}
-
 // ============================================================================
 // Split divider rendering
 // ============================================================================
@@ -6013,11 +5997,11 @@ pub fn remoteKeyCopiedFlash() void {
 pub fn showCopyToast(byte_count: usize) void {
     var msg_buf: [64]u8 = undefined;
     const msg = std.fmt.bufPrint(&msg_buf, "{s}{d}{s}", .{ i18n.s().toast_copied_prefix, byte_count, i18n.s().toast_copied_bytes_suffix }) catch return;
-    toastState().copy.show(msg, std.time.milliTimestamp(), copyToastDurationMs());
+    toastState().copy.show(msg, std.time.milliTimestamp(), toasts.COPY_TOAST_DURATION_MS);
 }
 
 pub fn showStatusToast(message: []const u8) void {
-    toastState().copy.show(message, std.time.milliTimestamp(), copyToastDurationMs());
+    toastState().copy.show(message, std.time.milliTimestamp(), toasts.COPY_TOAST_DURATION_MS);
     AppWindow.applyUiEffect(.repaint);
 }
 
@@ -6026,7 +6010,7 @@ pub fn showTransferToast(
     status: AppWindow.file_explorer.TransferStatus,
     message: []const u8,
 ) void {
-    toastState().transfer.show(kind, status, message, std.time.milliTimestamp(), transferToastDurationMs());
+    toastState().transfer.show(kind, status, message, std.time.milliTimestamp(), toasts.TRANSFER_TOAST_DURATION_MS);
     if (status != .in_progress) transferCancelConfirmClose();
 }
 
@@ -6066,6 +6050,38 @@ test "overlays: transfer toast state is owned by OverlayState" {
 
     try std.testing.expect(g_overlay_state.toasts.transfer.sticky);
     try std.testing.expect(g_overlay_state.toasts.transfer.clickable);
+}
+
+test "overlays: sticky transfer toast does not keep render gate active forever" {
+    const saved_copy = g_overlay_state.toasts.copy;
+    const saved_transfer = g_overlay_state.toasts.transfer;
+    const saved_update = g_overlay_state.toasts.update;
+    const saved_close_shortcut = g_close_shortcut_confirm_until_ms;
+    const saved_remote_key_copied = g_remote_key_copied_until_ms;
+    const saved_resize = resize.g_split_resize_overlay_until;
+    const saved_debug_fps = g_debug_fps;
+    defer {
+        g_overlay_state.toasts.copy = saved_copy;
+        g_overlay_state.toasts.transfer = saved_transfer;
+        g_overlay_state.toasts.update = saved_update;
+        g_close_shortcut_confirm_until_ms = saved_close_shortcut;
+        g_remote_key_copied_until_ms = saved_remote_key_copied;
+        resize.g_split_resize_overlay_until = saved_resize;
+        g_debug_fps = saved_debug_fps;
+    }
+
+    g_overlay_state.toasts.copy = .{};
+    g_overlay_state.toasts.update = .{};
+    g_close_shortcut_confirm_until_ms = 0;
+    g_remote_key_copied_until_ms = 0;
+    resize.g_split_resize_overlay_until = 0;
+    g_debug_fps = false;
+
+    showTransferToast(.download, .in_progress, "file.txt");
+
+    const after_deadline = g_overlay_state.toasts.transfer.until_ms + 1;
+    try std.testing.expect(g_overlay_state.toasts.transfer.active(after_deadline));
+    try std.testing.expect(!anyOverlayActive(after_deadline));
 }
 
 test "overlays: settings page escape closes without allocator" {
@@ -6698,7 +6714,7 @@ test "overlays: successful integration prompt copy closes modal and shows toast"
 fn showVersionToast() void {
     var msg_buf: [64]u8 = undefined;
     const msg = app_metadata.versionLine(&msg_buf) catch return;
-    toastState().copy.show(msg, std.time.milliTimestamp(), copyToastDurationMs());
+    toastState().copy.show(msg, std.time.milliTimestamp(), toasts.COPY_TOAST_DURATION_MS);
 }
 
 pub fn showUpdateCheckingToast() void {
@@ -6712,7 +6728,7 @@ pub fn showSshCwdFallbackPrompt() void {
         true,
         .open_release,
         std.time.milliTimestamp(),
-        updatePromptDurationMs(),
+        toasts.UPDATE_PROMPT_DURATION_MS,
     );
 }
 
@@ -6734,7 +6750,7 @@ fn showUpdatePrompt(result: update_check.CheckResult, action: UpdatePromptAction
     var msg_buf: [128]u8 = undefined;
     const msg = std.fmt.bufPrint(&msg_buf, "{s}{s}", .{ status, suffix }) catch return;
     const url: []const u8 = if (action == .open_release and result.release_url.len > 0) result.release_url else "";
-    const duration = if (action != .none) updatePromptDurationMs() else updateStatusDurationMs();
+    const duration = if (action != .none) toasts.UPDATE_PROMPT_DURATION_MS else toasts.UPDATE_STATUS_DURATION_MS;
     toastState().update.show(msg, url, action != .none, action, std.time.milliTimestamp(), duration);
 }
 
@@ -6745,7 +6761,7 @@ fn showUpdateDownloadUnavailableToast() void {
         false,
         .none,
         std.time.milliTimestamp(),
-        updateStatusDurationMs(),
+        toasts.UPDATE_STATUS_DURATION_MS,
     );
 }
 
@@ -7189,7 +7205,7 @@ pub fn anyOverlayActive(now: i64) bool {
     // 时间动画：到期前每帧需持续渲染
     const toast_state = toastState();
     if (toast_state.copy.active(now)) return true;
-    if (toast_state.transfer.active(now)) return true;
+    if (toast_state.transfer.text() != null and now < toast_state.transfer.until_ms) return true;
     if (toast_state.update.active(now)) return true;
     if (now < g_close_shortcut_confirm_until_ms) return true;
     if (now < g_remote_key_copied_until_ms) return true;
