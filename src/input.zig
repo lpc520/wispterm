@@ -1943,10 +1943,11 @@ fn syncGridFromWindowSize(width: i32, height: i32) void {
                 AppWindow.term_rows,
             },
         );
-        AppWindow.g_pending_resize = true;
-        AppWindow.g_pending_cols = new_cols;
-        AppWindow.g_pending_rows = new_rows;
-        AppWindow.g_last_resize_time = std.time.milliTimestamp();
+        AppWindow.requestGridResize(
+            new_cols,
+            new_rows,
+            std.time.milliTimestamp(),
+        );
     }
 }
 

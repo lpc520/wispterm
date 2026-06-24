@@ -6301,11 +6301,6 @@ pub threadlocal var term_rows: u16 = 24;
 // Dirty tracking — skip rebuildCells when nothing changed
 pub threadlocal var g_cells_valid: bool = false;
 pub threadlocal var g_force_rebuild: bool = true;
-/// One-shot per window thread: the first present that returns settles the
-/// D3D bring-up crash fuse (the process survived presenter bring-up, so the
-/// "probing" state-file marker can be removed). No-op off-Windows and when
-/// no marker exists.
-threadlocal var g_present_bringup_settled: bool = false;
 
 pub threadlocal var window_focused: bool = true; // Track window focus state
 
@@ -6317,24 +6312,30 @@ const saveQuakeFrame = platform_window_state.saveQuakeFrame;
 
 // Pending resize state (resize is deferred to main loop to avoid PageList integrity issues)
 // Ghostty coalesces resize events with a 25ms timer to batch rapid resizes
-pub threadlocal var g_pending_resize: bool = false;
-pub threadlocal var g_pending_cols: u16 = 0;
-pub threadlocal var g_pending_rows: u16 = 0;
-pub threadlocal var g_last_resize_time: i64 = 0;
 const RESIZE_COALESCE_MS: i64 = 25; // Same as Ghostty
 
-// One-shot layout changes such as opening a browser panel or creating a split
-// should not wait for the drag/window-resize coalescing timer.
-pub threadlocal var g_layout_resize_immediate: bool = false;
+pub fn requestGridResize(cols: u16, rows: u16, now_ms: i64) void {
+    windowState().queueResize(cols, rows, now_ms);
+}
+
+fn pendingResizeActive() bool {
+    return windowState().pending_resize.pending;
+}
+
+fn clearPendingResize() void {
+    windowState().clearPendingResize();
+}
+
+fn consumePendingGridResize(now_ms: i64) ?@import("appwindow/window_state.zig").GridSize {
+    return windowState().consumeCoalescedResize(now_ms, RESIZE_COALESCE_MS, term_cols, term_rows);
+}
 
 pub fn requestImmediateLayoutResize() void {
-    g_layout_resize_immediate = true;
+    windowState().requestImmediateLayoutResize();
 }
 
 pub fn consumeImmediateLayoutResize() bool {
-    const immediate = g_layout_resize_immediate;
-    g_layout_resize_immediate = false;
-    return immediate;
+    return windowState().consumeImmediateLayoutResize();
 }
 
 pub threadlocal var g_cursor_style: CursorStyle = .block; // Default cursor style
@@ -6433,7 +6434,7 @@ fn renderResizeFrame(width: i32, height: i32) void {
                 font.cell_height,
                 term_cols,
                 term_rows,
-                g_pending_resize,
+                pendingResizeActive(),
                 window_backend.isMaximized(w),
                 window_backend.isFullscreen(w),
             },
@@ -6441,7 +6442,7 @@ fn renderResizeFrame(width: i32, height: i32) void {
     } else {
         render_diagnostics.log(
             "platform-resize begin arg={}x{} no-window font_dpi={} cell={d:.2}x{d:.2} term={}x{} pending={}",
-            .{ width, height, font.g_dpi, font.cell_width, font.cell_height, term_cols, term_rows, g_pending_resize },
+            .{ width, height, font.g_dpi, font.cell_width, font.cell_height, term_cols, term_rows, pendingResizeActive() },
         );
     }
 
@@ -6479,7 +6480,7 @@ fn renderResizeFrame(width: i32, height: i32) void {
         term_cols = new_cols;
         term_rows = new_rows;
         // Clear any pending coalesced resize — we're handling it now
-        g_pending_resize = false;
+        clearPendingResize();
         render_diagnostics.log("platform-resize root-grid-updated {}x{}", .{ term_cols, term_rows });
     }
 
@@ -9912,16 +9913,9 @@ fn runMainLoop(self: *AppWindow) !void {
         // We wait for RESIZE_COALESCE_MS after last resize event before applying.
         // Only update the root grid dimensions here — actual terminal + PTY resize
         // is handled by computeSplitLayout → setScreenSize in the render loop below.
-        if (g_pending_resize) {
-            const now = std.time.milliTimestamp();
-            if (now - g_last_resize_time >= RESIZE_COALESCE_MS) {
-                g_pending_resize = false;
-
-                if (g_pending_cols != term_cols or g_pending_rows != term_rows) {
-                    term_cols = g_pending_cols;
-                    term_rows = g_pending_rows;
-                }
-            }
+        if (consumePendingGridResize(std.time.milliTimestamp())) |grid| {
+            term_cols = grid.cols;
+            term_rows = grid.rows;
         }
 
         // PTY reading is handled by per-surface IO threads (termio.Thread).
@@ -10031,7 +10025,7 @@ fn runMainLoop(self: *AppWindow) !void {
             (gate_now - g_gate_last_blink_render >= CURSOR_BLINK_INTERVAL_MS);
 
         const signals = render_gate.RenderSignals{
-            .force_rebuild = g_force_rebuild or !g_cells_valid or g_pending_resize or g_layout_resize_immediate,
+            .force_rebuild = g_force_rebuild or !g_cells_valid or pendingResizeActive() or windowState().layout_resize_immediate,
             .any_surface_dirty = anyVisibleSurfaceDirty(),
             .cursor_blink_due = blink_due,
             .ai_streaming = aiStreamingActive(),
@@ -10347,8 +10341,7 @@ fn runMainLoop(self: *AppWindow) !void {
         forceOpaqueBackbufferForPresent();
         gpu.state.endFrame();
         window_backend.swapBuffers(win);
-        if (!g_present_bringup_settled) {
-            g_present_bringup_settled = true;
+        if (windowState().takePresentBringupSettlement()) {
             platform_window_state.settleD3dBringup(allocator);
         }
         recordFrameLatencyIfInputDriven();
