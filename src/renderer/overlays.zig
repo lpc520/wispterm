@@ -2505,7 +2505,12 @@ fn handleAiHistorySourceKey(ev: input_key.KeyEvent) void {
     }
 }
 
-pub fn sessionLauncherHandleKey(ev: input_key.KeyEvent) void {
+pub fn sessionLauncherHandleKey(ev: input_key.KeyEvent) AppWindow.UiEffect {
+    sessionLauncherHandleKeyImpl(ev);
+    return .repaint;
+}
+
+fn sessionLauncherHandleKeyImpl(ev: input_key.KeyEvent) void {
     if (ev.key == .escape) {
         if (g_ssh_list_visible and sshState().list_filter_len > 0) {
             clearSshListFilter();

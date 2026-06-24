@@ -402,6 +402,21 @@ test "input: session launcher arrow navigation requests a repaint" {
     try std.testing.expect(!AppWindow.g_cells_valid);
 }
 
+test "input: session launcher dispatchKey returns repaint effect" {
+    const previous_keybinds = AppWindow.g_keybinds;
+    defer AppWindow.g_keybinds = previous_keybinds;
+    defer overlays.sessionLauncherClose();
+
+    AppWindow.g_keybinds = keybind.Set.defaults();
+    overlays.sessionLauncherOpen();
+
+    const effect = dispatchKey(arrow_down_event);
+
+    try std.testing.expect(effect.consumed);
+    try std.testing.expect(effect.needs_rebuild);
+    try std.testing.expect(effect.cells_invalid);
+}
+
 test "input: command center child escape returns to command center" {
     const previous_keybinds = AppWindow.g_keybinds;
     defer AppWindow.g_keybinds = previous_keybinds;
@@ -3021,16 +3036,9 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
     if (!is_close_shortcut and !isModifierKey(ev.key_code)) g_close_shortcut_confirm_until_ms = 0;
     if (overlays.sessionLauncherVisible()) {
         if (actionIs(action, .paste)) {
-            if (pasteClipboardIntoSessionLauncher()) {
-                AppWindow.g_force_rebuild = true;
-                AppWindow.g_cells_valid = false;
-            }
-            return .none;
+            return if (pasteClipboardIntoSessionLauncher()) .repaint else .none;
         }
-        overlays.sessionLauncherHandleKey(key_event);
-        AppWindow.g_force_rebuild = true;
-        AppWindow.g_cells_valid = false;
-        return .none;
+        return overlays.sessionLauncherHandleKey(key_event);
     }
     if (action) |app_action| {
         if (handleConfiguredKeybindAction(app_action, .early)) return .none;
