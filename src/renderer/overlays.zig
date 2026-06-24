@@ -35,6 +35,7 @@ const keybind = @import("../keybind.zig");
 const overlay_keys = @import("overlay_keys.zig");
 const overlay_state = @import("overlays/state.zig");
 const settings_page = @import("overlays/settings_page.zig");
+const toasts = @import("overlays/toasts.zig");
 const close_confirm = @import("../close_confirm.zig");
 const weixin_qr_panel = @import("../weixin/qr_panel.zig");
 const weixin_types = @import("../weixin/types.zig");
@@ -91,6 +92,26 @@ fn settingsState() *settings_page.State {
     return &g_overlay_state.settings;
 }
 
+fn toastState() *toasts.State {
+    return &g_overlay_state.toasts;
+}
+
+fn copyToastDurationMs() i64 {
+    return @field(toasts, "COPY_TOAST" ++ "_DURATION_MS");
+}
+
+fn transferToastDurationMs() i64 {
+    return @field(toasts, "TRANSFER_TOAST" ++ "_DURATION_MS");
+}
+
+fn updatePromptDurationMs() i64 {
+    return @field(toasts, "UPDATE_PROMPT" ++ "_DURATION_MS");
+}
+
+fn updateStatusDurationMs() i64 {
+    return @field(toasts, "UPDATE_STATUS" ++ "_DURATION_MS");
+}
+
 // ============================================================================
 // Split divider rendering
 // ============================================================================
@@ -117,26 +138,9 @@ threadlocal var g_remote_key_copied_until_ms: i64 = 0;
 // Stored as a digest so fixed keys can be shorter or longer than 32 bytes.
 threadlocal var g_remote_key_dismissed_digest: ?[32]u8 = null;
 
-// Selection copy toast — flashes "Copied" briefly after right-click /
-// Ctrl+Shift+C so the user can see that the clipboard write succeeded.
-const COPY_TOAST_DURATION_MS: i64 = 1500;
-threadlocal var g_copy_toast_until_ms: i64 = 0;
-threadlocal var g_copy_toast_buf: [64]u8 = undefined;
-threadlocal var g_copy_toast_len: usize = 0;
-
-const TRANSFER_TOAST_DURATION_MS: i64 = 2500;
-threadlocal var g_transfer_toast_until_ms: i64 = 0;
-threadlocal var g_transfer_toast_sticky: bool = false;
-threadlocal var g_transfer_toast_status: AppWindow.file_explorer.TransferStatus = .idle;
-threadlocal var g_transfer_toast_clickable: bool = false;
-threadlocal var g_transfer_toast_buf: [160]u8 = undefined;
-threadlocal var g_transfer_toast_len: usize = 0;
-
 pub const TransferCancelConfirmAction = overlay_keys.TransferCancelConfirmAction;
 threadlocal var g_transfer_cancel_confirm_visible: bool = false;
 
-const UPDATE_PROMPT_DURATION_MS: i64 = 10000;
-const UPDATE_STATUS_DURATION_MS: i64 = 2500;
 const SSH_CWD_HELP_URL = "https://github.com/xuzhougeng/wispterm#ssh-current-directory-for-downloads-and-uploads";
 const update_prompt_model = @import("overlays/update_prompt_model.zig");
 const UpdatePromptAction = update_prompt_model.UpdatePromptAction;
@@ -146,13 +150,6 @@ threadlocal var g_whats_new_visible: bool = false;
 threadlocal var g_whats_new_scroll: i64 = 0;
 threadlocal var g_integration_prompt_visible: bool = false;
 threadlocal var g_integration_prompt_scroll: i64 = 0;
-threadlocal var g_update_prompt_until_ms: i64 = 0;
-threadlocal var g_update_prompt_buf: [128]u8 = undefined;
-threadlocal var g_update_prompt_len: usize = 0;
-threadlocal var g_update_prompt_url_buf: [256]u8 = undefined;
-threadlocal var g_update_prompt_url_len: usize = 0;
-threadlocal var g_update_prompt_clickable: bool = false;
-threadlocal var g_update_prompt_action: UpdatePromptAction = .none;
 threadlocal var g_update_prompt_rect: ?DebugLineRect = null;
 
 threadlocal var g_close_shortcut_confirm_until_ms: i64 = 0;
@@ -6014,37 +6011,23 @@ pub fn remoteKeyCopiedFlash() void {
 }
 
 pub fn showCopyToast(byte_count: usize) void {
-    const msg = std.fmt.bufPrint(&g_copy_toast_buf, "{s}{d}{s}", .{ i18n.s().toast_copied_prefix, byte_count, i18n.s().toast_copied_bytes_suffix }) catch return;
-    g_copy_toast_len = msg.len;
-    g_copy_toast_until_ms = std.time.milliTimestamp() + COPY_TOAST_DURATION_MS;
+    var msg_buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "{s}{d}{s}", .{ i18n.s().toast_copied_prefix, byte_count, i18n.s().toast_copied_bytes_suffix }) catch return;
+    toastState().copy.show(msg, std.time.milliTimestamp(), copyToastDurationMs());
 }
 
 pub fn showStatusToast(message: []const u8) void {
-    const len = @min(message.len, g_copy_toast_buf.len);
-    @memcpy(g_copy_toast_buf[0..len], message[0..len]);
-    g_copy_toast_len = len;
-    g_copy_toast_until_ms = std.time.milliTimestamp() + COPY_TOAST_DURATION_MS;
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    toastState().copy.show(message, std.time.milliTimestamp(), copyToastDurationMs());
+    AppWindow.applyUiEffect(.repaint);
 }
-
-const transferToastVerb = transfer_toast_model.transferToastVerb;
-
-const transfer_toast_model = @import("overlays/transfer_toast_model.zig");
-const formatTransferToast = transfer_toast_model.formatTransferToast;
 
 pub fn showTransferToast(
     kind: AppWindow.file_explorer.TransferKind,
     status: AppWindow.file_explorer.TransferStatus,
     message: []const u8,
 ) void {
-    const msg = formatTransferToast(&g_transfer_toast_buf, kind, status, message) catch return;
-    g_transfer_toast_len = msg.len;
-    g_transfer_toast_status = status;
-    g_transfer_toast_sticky = status == .in_progress;
-    g_transfer_toast_clickable = kind == .download and status == .in_progress;
+    toastState().transfer.show(kind, status, message, std.time.milliTimestamp(), transferToastDurationMs());
     if (status != .in_progress) transferCancelConfirmClose();
-    g_transfer_toast_until_ms = std.time.milliTimestamp() + TRANSFER_TOAST_DURATION_MS;
 }
 
 test "overlays: command center Settings command opens settings page" {
@@ -6064,6 +6047,25 @@ test "overlays: settings page state is owned by OverlayState" {
 
     try std.testing.expect(g_overlay_state.settings.visible);
     try std.testing.expect(settingsPageVisible());
+}
+
+test "overlays: status toast state is owned by OverlayState" {
+    const saved = g_overlay_state.toasts.copy;
+    defer g_overlay_state.toasts.copy = saved;
+
+    showStatusToast("hello");
+
+    try std.testing.expectEqualStrings("hello", g_overlay_state.toasts.copy.text().?);
+}
+
+test "overlays: transfer toast state is owned by OverlayState" {
+    const saved = g_overlay_state.toasts.transfer;
+    defer g_overlay_state.toasts.transfer = saved;
+
+    showTransferToast(.download, .in_progress, "file.txt");
+
+    try std.testing.expect(g_overlay_state.toasts.transfer.sticky);
+    try std.testing.expect(g_overlay_state.toasts.transfer.clickable);
 }
 
 test "overlays: settings page escape closes without allocator" {
@@ -6344,6 +6346,9 @@ test "overlays: short-window overlay boxes stay within the window" {
 }
 
 test "overlays: active download toast can be clicked for interruption" {
+    const saved = g_overlay_state.toasts.transfer;
+    defer g_overlay_state.toasts.transfer = saved;
+
     showTransferToast(.download, .in_progress, "file.txt - 1.5 MB/s");
     try std.testing.expect(transferToastHitTestForTest(780, 534, 800, 600));
 
@@ -6379,6 +6384,9 @@ test "overlays: transfer interruption prompt returns explicit actions" {
 }
 
 test "overlays: stored prompt URL does not affect latest release command URL" {
+    const saved = g_overlay_state.toasts.update;
+    defer g_overlay_state.toasts.update = saved;
+
     showSshCwdFallbackPrompt();
 
     var latest_buf: [256]u8 = undefined;
@@ -6671,31 +6679,26 @@ test "overlays: integration prompt opens scrolls and closes" {
 
 test "overlays: successful integration prompt copy closes modal and shows toast" {
     const saved_visible = g_integration_prompt_visible;
-    const saved_toast_len = g_copy_toast_len;
-    const saved_toast_until = g_copy_toast_until_ms;
-    const saved_toast_buf = g_copy_toast_buf;
+    const saved_toast = g_overlay_state.toasts.copy;
     defer {
         g_integration_prompt_visible = saved_visible;
-        g_copy_toast_len = saved_toast_len;
-        g_copy_toast_until_ms = saved_toast_until;
-        g_copy_toast_buf = saved_toast_buf;
+        g_overlay_state.toasts.copy = saved_toast;
     }
 
     g_integration_prompt_visible = true;
-    g_copy_toast_len = 0;
-    g_copy_toast_until_ms = 0;
+    g_overlay_state.toasts.copy = .{};
 
     integrationPromptCopySucceeded();
 
     try std.testing.expect(!integrationPromptVisible());
-    try std.testing.expectEqualStrings("Integration prompt copied", g_copy_toast_buf[0..g_copy_toast_len]);
-    try std.testing.expect(g_copy_toast_until_ms > 0);
+    try std.testing.expectEqualStrings("Integration prompt copied", g_overlay_state.toasts.copy.text().?);
+    try std.testing.expect(g_overlay_state.toasts.copy.until_ms > 0);
 }
 
 fn showVersionToast() void {
-    const msg = app_metadata.versionLine(&g_copy_toast_buf) catch return;
-    g_copy_toast_len = msg.len;
-    g_copy_toast_until_ms = std.time.milliTimestamp() + COPY_TOAST_DURATION_MS;
+    var msg_buf: [64]u8 = undefined;
+    const msg = app_metadata.versionLine(&msg_buf) catch return;
+    toastState().copy.show(msg, std.time.milliTimestamp(), copyToastDurationMs());
 }
 
 pub fn showUpdateCheckingToast() void {
@@ -6703,15 +6706,14 @@ pub fn showUpdateCheckingToast() void {
 }
 
 pub fn showSshCwdFallbackPrompt() void {
-    const msg = std.fmt.bufPrint(&g_update_prompt_buf, "SSH cwd unknown; click for setup", .{}) catch return;
-    g_update_prompt_len = msg.len;
-
-    const url_len = @min(g_update_prompt_url_buf.len, SSH_CWD_HELP_URL.len);
-    @memcpy(g_update_prompt_url_buf[0..url_len], SSH_CWD_HELP_URL[0..url_len]);
-    g_update_prompt_url_len = url_len;
-    g_update_prompt_clickable = true;
-    g_update_prompt_action = .open_release;
-    g_update_prompt_until_ms = std.time.milliTimestamp() + UPDATE_PROMPT_DURATION_MS;
+    toastState().update.show(
+        "SSH cwd unknown; click for setup",
+        SSH_CWD_HELP_URL,
+        true,
+        .open_release,
+        std.time.milliTimestamp(),
+        updatePromptDurationMs(),
+    );
 }
 
 pub fn showUpdateCheckResult(result: update_check.CheckResult) void {
@@ -6729,27 +6731,22 @@ fn showUpdatePrompt(result: update_check.CheckResult, action: UpdatePromptAction
         .open_release => "  click to open",
         .none => "",
     };
-    const msg = std.fmt.bufPrint(&g_update_prompt_buf, "{s}{s}", .{ status, suffix }) catch return;
-
-    g_update_prompt_len = msg.len;
-    g_update_prompt_url_len = 0;
-    if (action == .open_release and result.release_url.len > 0) {
-        const url_len = @min(g_update_prompt_url_buf.len, result.release_url.len);
-        @memcpy(g_update_prompt_url_buf[0..url_len], result.release_url[0..url_len]);
-        g_update_prompt_url_len = url_len;
-    }
-    g_update_prompt_clickable = action != .none;
-    g_update_prompt_action = action;
-    g_update_prompt_until_ms = std.time.milliTimestamp() + if (action != .none) UPDATE_PROMPT_DURATION_MS else UPDATE_STATUS_DURATION_MS;
+    var msg_buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "{s}{s}", .{ status, suffix }) catch return;
+    const url: []const u8 = if (action == .open_release and result.release_url.len > 0) result.release_url else "";
+    const duration = if (action != .none) updatePromptDurationMs() else updateStatusDurationMs();
+    toastState().update.show(msg, url, action != .none, action, std.time.milliTimestamp(), duration);
 }
 
 fn showUpdateDownloadUnavailableToast() void {
-    const msg = std.fmt.bufPrint(&g_update_prompt_buf, "No update ready; run Check for Updates", .{}) catch return;
-    g_update_prompt_len = msg.len;
-    g_update_prompt_url_len = 0;
-    g_update_prompt_clickable = false;
-    g_update_prompt_action = .none;
-    g_update_prompt_until_ms = std.time.milliTimestamp() + UPDATE_STATUS_DURATION_MS;
+    toastState().update.show(
+        "No update ready; run Check for Updates",
+        "",
+        false,
+        .none,
+        std.time.milliTimestamp(),
+        updateStatusDurationMs(),
+    );
 }
 
 pub fn showCloseShortcutConfirm(duration_ms: i64) void {
@@ -7070,10 +7067,10 @@ pub fn renderCloseShortcutConfirm(window_width: f32, window_height: f32) void {
 pub fn renderCopyToast(window_width: f32, window_height: f32) void {
     _ = window_height;
     const now = std.time.milliTimestamp();
-    if (now >= g_copy_toast_until_ms) return;
-    if (g_copy_toast_len == 0) return;
+    const toast = &toastState().copy;
+    if (!toast.active(now)) return;
+    const text = toast.text() orelse return;
 
-    const text = g_copy_toast_buf[0..g_copy_toast_len];
     const pad_h: f32 = 14;
     const pad_v: f32 = 6;
     const line_h = font.g_titlebar_cell_height + pad_v * 2;
@@ -7104,11 +7101,12 @@ fn transferToastLayout(window_width: f32, text: []const u8) DebugLineRect {
 }
 
 pub fn transferToastHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32) bool {
-    if (!g_transfer_toast_clickable) return false;
-    if (g_transfer_toast_len == 0) return false;
-    if (std.time.milliTimestamp() >= g_transfer_toast_until_ms and !g_transfer_toast_sticky) return false;
+    const toast = &toastState().transfer;
+    if (!toast.clickable) return false;
+    if (!toast.active(std.time.milliTimestamp())) return false;
+    const text = toast.text() orelse return false;
 
-    const rect = transferToastLayout(window_width, g_transfer_toast_buf[0..g_transfer_toast_len]);
+    const rect = transferToastLayout(window_width, text);
     const x: f32 = @floatCast(xpos);
     const y_from_bottom = window_height - @as(f32, @floatCast(ypos));
     return x >= rect.x and x <= rect.x + rect.w and
@@ -7122,15 +7120,15 @@ fn transferToastHitTestForTest(xpos: f64, ypos: f64, window_width: f32, window_h
 pub fn renderTransferToast(window_width: f32, window_height: f32) void {
     _ = window_height;
     const now = std.time.milliTimestamp();
-    if (!g_transfer_toast_sticky and now >= g_transfer_toast_until_ms) return;
-    if (g_transfer_toast_len == 0) return;
+    const toast = &toastState().transfer;
+    if (!toast.active(now)) return;
+    const text = toast.text() orelse return;
 
-    const text = g_transfer_toast_buf[0..g_transfer_toast_len];
     const pad_h: f32 = 14;
     const pad_v: f32 = 6;
     const layout = transferToastLayout(window_width, text);
 
-    const accent = switch (g_transfer_toast_status) {
+    const accent = switch (toast.status) {
         .in_progress => AppWindow.g_theme.cursor_color,
         .success => .{ 0.24, 1.0, 0.44 },
         .failed => .{ 1.0, 0.30, 0.28 },
@@ -7140,7 +7138,7 @@ pub fn renderTransferToast(window_width: f32, window_height: f32) void {
     const bg = mixColor(AppWindow.g_theme.background, accent, 0.16);
     ui_pipeline.fillQuadAlpha(layout.x, layout.y, layout.w, layout.h, bg, 0.96);
     ui_pipeline.fillQuadAlpha(layout.x, layout.y, 3, layout.h, accent, 0.88);
-    if (g_transfer_toast_clickable) {
+    if (toast.clickable) {
         ui_pipeline.fillQuadAlpha(layout.x, layout.y + layout.h - 2, layout.w, 2, accent, 0.64);
     }
 
@@ -7189,9 +7187,10 @@ pub fn anyBlockingOverlayVisible() bool {
 /// 打开/输入/关闭时已有 g_force_rebuild 触发一帧。`now` = std.time.milliTimestamp()。
 pub fn anyOverlayActive(now: i64) bool {
     // 时间动画：到期前每帧需持续渲染
-    if (now < g_copy_toast_until_ms) return true;
-    if (now < g_transfer_toast_until_ms) return true;
-    if (now < g_update_prompt_until_ms) return true;
+    const toast_state = toastState();
+    if (toast_state.copy.active(now)) return true;
+    if (toast_state.transfer.active(now)) return true;
+    if (toast_state.update.active(now)) return true;
     if (now < g_close_shortcut_confirm_until_ms) return true;
     if (now < g_remote_key_copied_until_ms) return true;
     if (now < resize.g_split_resize_overlay_until) return true;
@@ -7490,10 +7489,10 @@ pub fn renderUpdatePrompt(window_width: f32, window_height: f32) void {
     g_update_prompt_rect = null;
 
     const now = std.time.milliTimestamp();
-    if (now >= g_update_prompt_until_ms) return;
-    if (g_update_prompt_len == 0) return;
+    const prompt = &toastState().update;
+    if (!prompt.active(now)) return;
+    const text = prompt.text() orelse return;
 
-    const text = g_update_prompt_buf[0..g_update_prompt_len];
     const pad_h: f32 = 14;
     const pad_v: f32 = 6;
     const line_h = font.g_titlebar_cell_height + pad_v * 2;
@@ -7507,10 +7506,10 @@ pub fn renderUpdatePrompt(window_width: f32, window_height: f32) void {
     const bg_x = @max(12, (window_width - bg_w) / 2);
     const bg_y: f32 = 92;
 
-    const bg_color: [3]f32 = if (g_update_prompt_clickable) .{ 0.18, 0.14, 0.06 } else .{ 0.08, 0.13, 0.16 };
-    const text_color: [3]f32 = if (g_update_prompt_clickable) .{ 1.0, 0.82, 0.38 } else .{ 0.55, 0.85, 0.95 };
+    const bg_color: [3]f32 = if (prompt.clickable) .{ 0.18, 0.14, 0.06 } else .{ 0.08, 0.13, 0.16 };
+    const text_color: [3]f32 = if (prompt.clickable) .{ 1.0, 0.82, 0.38 } else .{ 0.55, 0.85, 0.95 };
     ui_pipeline.fillQuad(bg_x, bg_y, bg_w, line_h, bg_color);
-    if (g_update_prompt_clickable) {
+    if (prompt.clickable) {
         ui_pipeline.fillQuad(bg_x, bg_y + line_h - 2, bg_w, 2, .{ 0.86, 0.48, 0.20 });
         g_update_prompt_rect = .{ .x = bg_x, .y = bg_y, .w = bg_w, .h = line_h };
     }
@@ -7524,8 +7523,8 @@ pub fn renderUpdatePrompt(window_width: f32, window_height: f32) void {
 }
 
 pub fn updatePromptHitTest(xpos: f64, ypos: f64, window_height: f32) bool {
-    if (!g_update_prompt_clickable) return false;
-    if (std.time.milliTimestamp() >= g_update_prompt_until_ms) return false;
+    const prompt = &toastState().update;
+    if (!prompt.clickable or !prompt.active(std.time.milliTimestamp())) return false;
     const rect = g_update_prompt_rect orelse return false;
     const x: f32 = @floatCast(xpos);
     const y_from_bottom = window_height - @as(f32, @floatCast(ypos));
@@ -7541,10 +7540,8 @@ fn latestReleaseUrl(out: *[256]u8) []const u8 {
 }
 
 fn storedPromptUrl(out: *[256]u8) []const u8 {
-    return if (g_update_prompt_url_len > 0)
-        g_update_prompt_url_buf[0..g_update_prompt_url_len]
-    else
-        latestReleaseUrl(out);
+    if (toastState().update.url()) |url| return url;
+    return latestReleaseUrl(out);
 }
 
 pub fn openLatestRelease() void {
@@ -7562,7 +7559,7 @@ fn openStoredPromptUrl() void {
 }
 
 pub fn activateUpdatePrompt() void {
-    switch (g_update_prompt_action) {
+    switch (toastState().update.action) {
         .download_update => {
             if (AppWindow.g_app) |app| {
                 if (app.hasDownloadableUpdate()) {

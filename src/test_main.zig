@@ -779,6 +779,7 @@ comptime {
     _ = @import("renderer/overlays/command_palette_input.zig");
     _ = @import("renderer/overlays/settings_page.zig");
     _ = @import("renderer/overlays/state.zig");
+    _ = @import("renderer/overlays/toasts.zig");
     _ = @import("selection_unit.zig");
     _ = @import("session_persist.zig");
     _ = @import("agent_memory.zig");
