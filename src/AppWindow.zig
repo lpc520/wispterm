@@ -7123,14 +7123,53 @@ fn openDefaultAiAgentForRemoteSync() remote_sync.AiAgentOpenStatus {
 }
 
 fn remoteSyncHost() remote_sync.Host {
+    const client = if (g_app) |app| app.remote_client else null;
     return .{
-        .app = g_app,
+        .client = client,
         .window = g_window,
         .state = &g_appwindow_state,
         .allocator = g_allocator,
         .markUiDirty = markRemoteSyncUiDirty,
         .openDefaultAiAgentForRemote = openDefaultAiAgentForRemoteSync,
     };
+}
+
+fn remoteAiAgentOpen(ctx: *anyopaque, request_id: []const u8) void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const client = app.remote_client orelse return;
+
+    const owned_request_id = std.heap.page_allocator.dupe(u8, request_id) catch {
+        client.sendAiAgentOpenResult(request_id, .failed);
+        return;
+    };
+    defer std.heap.page_allocator.free(owned_request_id);
+
+    var native_handle: ?window_backend.NativeHandle = null;
+    {
+        app.mutex.lock();
+        defer app.mutex.unlock();
+        for (app.windows.items) |window| {
+            if (window.getNativeHandle()) |candidate| {
+                native_handle = candidate;
+                break;
+            }
+        }
+    }
+
+    const target = native_handle orelse {
+        if (app.remote_client) |current_client| {
+            current_client.sendAiAgentOpenResult(owned_request_id, .failed);
+        }
+        return;
+    };
+
+    var request = remote_sync.RemoteAiAgentOpenRequest{ .request_id = owned_request_id };
+    const result = thread_message.sendPointer(target, .remote_open_ai_agent, @intFromPtr(&request));
+    if (result == 0) {
+        if (app.remote_client) |current_client| {
+            current_client.sendAiAgentOpenResult(owned_request_id, .failed);
+        }
+    }
 }
 
 // ============================================================================
@@ -8024,7 +8063,7 @@ fn installAgentToolHost(self: *AppWindow) void {
 
 fn installRemoteControlHandlers(self: *AppWindow) void {
     if (self.app.remote_client) |client| {
-        client.registerAiAgentOpener(self.app, remote_sync.openAiAgent);
+        client.registerAiAgentOpener(self.app, remoteAiAgentOpen);
     }
 }
 

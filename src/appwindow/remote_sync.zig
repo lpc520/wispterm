@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
-const App = @import("../App.zig");
 const Surface = @import("../Surface.zig");
 const SplitTree = @import("../split_tree.zig");
 const ai_chat = @import("../ai_chat.zig");
@@ -20,7 +19,7 @@ const window_backend = @import("../platform/window_backend.zig");
 pub const AiAgentOpenStatus = remote.AiAgentOpenStatus;
 
 pub const Host = struct {
-    app: ?*App,
+    client: ?*remote.Client,
     window: ?*window_backend.Window,
     state: *appwindow_state.State,
     allocator: ?std.mem.Allocator = null,
@@ -38,8 +37,7 @@ pub const RemoteAiAgentOpenRequest = struct {
 };
 
 pub fn syncLayout(host: Host, allocator: std.mem.Allocator) void {
-    const app = host.app orelse return;
-    const client = app.remote_client orelse return;
+    const client = host.client orelse return;
 
     const now = std.time.milliTimestamp();
     if (!host.state.remote.shouldSendLayout(now, 250)) return;
@@ -164,8 +162,7 @@ pub fn remoteAiHistorySurfaceId(tab_index: usize) [16]u8 {
 }
 
 fn registerRemoteAiInputSink(host: Host, tab_index: usize) void {
-    const app = host.app orelse return;
-    const client = app.remote_client orelse return;
+    const client = host.client orelse return;
     const window = host.window orelse return;
 
     const sink = host.state.remote.recordAiSink(tab_index, window_backend.nativeHandleBits(window)) orelse return;
@@ -188,44 +185,6 @@ pub fn writeAiInput(ctx: *anyopaque, data: []const u8) void {
     if (!ok) {
         std.heap.page_allocator.free(request.data);
         std.heap.page_allocator.destroy(request);
-    }
-}
-
-pub fn openAiAgent(ctx: *anyopaque, request_id: []const u8) void {
-    const app: *App = @ptrCast(@alignCast(ctx));
-    const client = app.remote_client orelse return;
-
-    const owned_request_id = std.heap.page_allocator.dupe(u8, request_id) catch {
-        client.sendAiAgentOpenResult(request_id, .failed);
-        return;
-    };
-    defer std.heap.page_allocator.free(owned_request_id);
-
-    var native_handle: ?window_backend.NativeHandle = null;
-    {
-        app.mutex.lock();
-        defer app.mutex.unlock();
-        for (app.windows.items) |window| {
-            if (window.getNativeHandle()) |candidate| {
-                native_handle = candidate;
-                break;
-            }
-        }
-    }
-
-    const target = native_handle orelse {
-        if (app.remote_client) |current_client| {
-            current_client.sendAiAgentOpenResult(owned_request_id, .failed);
-        }
-        return;
-    };
-
-    var request = RemoteAiAgentOpenRequest{ .request_id = owned_request_id };
-    const result = thread_message.sendPointer(target, .remote_open_ai_agent, @intFromPtr(&request));
-    if (result == 0) {
-        if (app.remote_client) |current_client| {
-            current_client.sendAiAgentOpenResult(owned_request_id, .failed);
-        }
     }
 }
 
@@ -313,8 +272,7 @@ pub fn handleAiInputRequest(request: *RemoteAiInputRequest, host: Host) void {
 }
 
 pub fn handleAiAgentOpenRequest(request: *RemoteAiAgentOpenRequest, host: Host) void {
-    const app = host.app orelse return;
-    const client = app.remote_client orelse return;
+    const client = host.client orelse return;
 
     const status = host.openDefaultAiAgentForRemote();
     client.sendAiAgentOpenResult(request.request_id, status);
@@ -333,7 +291,7 @@ fn failOpenDefaultAiAgentForRemote() remote.AiAgentOpenStatus {
 
 fn testHost(state: *appwindow_state.State, allocator: std.mem.Allocator) Host {
     return .{
-        .app = null,
+        .client = null,
         .window = null,
         .state = state,
         .allocator = allocator,
