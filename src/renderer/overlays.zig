@@ -39,6 +39,7 @@ const settings_page = @import("overlays/settings_page.zig");
 const toasts = @import("overlays/toasts.zig");
 const ssh_profiles = @import("overlays/ssh_profiles.zig");
 const ai_profiles = @import("overlays/ai_profiles.zig");
+const session_launcher = @import("overlays/session_launcher.zig");
 const close_confirm = @import("../close_confirm.zig");
 const weixin_qr_panel = @import("../weixin/qr_panel.zig");
 const weixin_types = @import("../weixin/types.zig");
@@ -109,6 +110,19 @@ fn sshState() *ssh_profiles.State {
 
 fn aiState() *ai_profiles.State {
     return &g_overlay_state.ai;
+}
+
+fn launcherState() *session_launcher.State {
+    return &g_overlay_state.session;
+}
+
+fn switchModelTarget() ?*AppWindow.ai_chat.Session {
+    const ptr = launcherState().switch_model_target orelse return null;
+    return @ptrCast(@alignCast(ptr));
+}
+
+fn setSwitchModelTarget(session: ?*AppWindow.ai_chat.Session) void {
+    launcherState().switch_model_target = @ptrCast(session);
 }
 
 // ============================================================================
@@ -2193,7 +2207,7 @@ const SshListMode = ssh_profiles.SshListMode;
 
 const AiListMode = ai_profiles.AiListMode;
 
-const AiHistorySourceChoice = enum { local, wsl, ssh };
+const AiHistorySourceChoice = session_launcher.AiHistorySourceChoice;
 
 const SshProfile = profile_codec.SshProfile;
 pub const AgentSshConnectResult = union(enum) {
@@ -2234,11 +2248,10 @@ threadlocal var g_ssh_list_visible: bool = false;
 threadlocal var g_ssh_form_visible: bool = false;
 threadlocal var g_ai_list_visible: bool = false;
 threadlocal var g_ai_form_visible: bool = false;
-/// Live session bound to a `.switch_model` picker; set when the picker opens,
-/// cleared when a row is chosen or the picker closes.
-threadlocal var g_switch_model_target: ?*AppWindow.ai_chat.Session = null;
 threadlocal var g_ai_history_source_visible: bool = false;
-threadlocal var g_ai_history_source_selected: usize = 0;
+// Launcher transient state (AI history source selection + switch-model target)
+// now lives in `g_overlay_state.session` (session_launcher.State), reached
+// through `launcherState()` / `switchModelTarget()` / `setSwitchModelTarget()`.
 // SSH list/form state now lives in `g_overlay_state.ssh` (ssh_profiles.State),
 // reached through `sshState()`.
 // AI list/form state now lives in `g_overlay_state.ai` (ai_profiles.State),
@@ -2380,7 +2393,7 @@ pub fn sessionLauncherOpenFromCommandPalette() void {
 fn resetSessionLauncherTransientModes() void {
     sshState().list_mode = .manage;
     aiState().list_mode = .manage;
-    g_ai_history_source_selected = 0;
+    launcherState().ai_history_source_selected = 0;
 }
 
 pub fn sessionLauncherClose() void {
@@ -2480,9 +2493,9 @@ fn aiHistorySourceChoiceForRow(row: usize) ?AiHistorySourceChoice {
 fn handleAiHistorySourceKey(ev: input_key.KeyEvent) void {
     const row_count = aiHistorySourceRowCount();
     switch (ev.key) {
-        .arrow_down, .tab => g_ai_history_source_selected = (g_ai_history_source_selected + 1) % row_count,
-        .arrow_up => g_ai_history_source_selected = if (g_ai_history_source_selected == 0) row_count - 1 else g_ai_history_source_selected - 1,
-        .enter => runAiHistorySourceRow(g_ai_history_source_selected),
+        .arrow_down, .tab => launcherState().historySourceNext(row_count),
+        .arrow_up => launcherState().historySourcePrev(row_count),
+        .enter => runAiHistorySourceRow(launcherState().ai_history_source_selected),
         .key_l => runAiHistorySourceRow(0),
         .key_w => {
             if (platform_pty_command.sessionLauncherWslRow() != null) runAiHistorySourceRow(1);
@@ -2659,7 +2672,7 @@ fn openAiHistorySourcePicker() void {
     g_ai_list_visible = false;
     g_ai_form_visible = false;
     g_ai_history_source_visible = true;
-    g_ai_history_source_selected = 0;
+    launcherState().ai_history_source_selected = 0;
 }
 
 fn openLocalAiHistorySession() void {
@@ -4003,9 +4016,9 @@ fn runAiListRow(row: usize) void {
         },
         .switch_model => {
             if (row < aiState().profile_count) {
-                if (g_switch_model_target) |session| _ = applyProfileToSession(session, row);
+                if (switchModelTarget()) |session| _ = applyProfileToSession(session, row);
             }
-            g_switch_model_target = null;
+            launcherState().clearSwitchTarget();
             sessionLauncherClose();
         },
     }
@@ -4175,7 +4188,7 @@ pub fn openSwitchModelPicker(session: *AppWindow.ai_chat.Session) void {
         AppWindow.g_cells_valid = false;
         return;
     }
-    g_switch_model_target = session;
+    setSwitchModelTarget(session);
     openAiList(); // sets visibility flags + mode .manage
     aiState().list_mode = .switch_model;
     aiState().list_selected = @min(aiState().list_selected, aiListRowCount() - 1);
@@ -4799,7 +4812,7 @@ fn sessionActiveSelection() usize {
     else if (g_ai_list_visible)
         aiState().list_selected
     else if (g_ai_history_source_visible)
-        g_ai_history_source_selected
+        launcherState().ai_history_source_selected
     else if (g_ssh_form_visible)
         sshState().focus
     else if (g_ssh_list_visible)
@@ -4815,7 +4828,7 @@ fn sessionActiveSelectionPtr() *usize {
     else if (g_ai_list_visible)
         &aiState().list_selected
     else if (g_ai_history_source_visible)
-        &g_ai_history_source_selected
+        &launcherState().ai_history_source_selected
     else if (g_ssh_form_visible)
         &sshState().focus
     else if (g_ssh_list_visible)
@@ -4887,7 +4900,7 @@ fn sessionHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, t
 
     if (g_ai_history_source_visible) {
         if (row >= aiHistorySourceRowCount()) return null;
-        g_ai_history_source_selected = row;
+        launcherState().ai_history_source_selected = row;
         return switch (aiHistorySourceChoiceForRow(row) orelse return .cancel) {
             .local => .ai_history_local,
             .wsl => .ai_history_wsl,
@@ -5134,15 +5147,15 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
     if (!g_ssh_form_visible and !g_ai_form_visible) {
         if (g_ai_history_source_visible) {
             var row: usize = 0;
-            renderSessionRow(layout, window_height, row, "Local", "This computer", g_ai_history_source_selected == row);
+            renderSessionRow(layout, window_height, row, "Local", "This computer", launcherState().ai_history_source_selected == row);
             row += 1;
             if (platform_pty_command.sessionLauncherWslRow() != null) {
-                renderSessionRow(layout, window_height, row, "WSL", "Default distro", g_ai_history_source_selected == row);
+                renderSessionRow(layout, window_height, row, "WSL", "Default distro", launcherState().ai_history_source_selected == row);
                 row += 1;
             }
-            renderSessionRow(layout, window_height, row, "SSH Profile...", "Choose server", g_ai_history_source_selected == row);
+            renderSessionRow(layout, window_height, row, "SSH Profile...", "Choose server", launcherState().ai_history_source_selected == row);
             row += 1;
-            renderSessionRow(layout, window_height, row, sessionLauncherCancelLabel(), "Esc", g_ai_history_source_selected == row);
+            renderSessionRow(layout, window_height, row, sessionLauncherCancelLabel(), "Esc", launcherState().ai_history_source_selected == row);
             return;
         }
         if (g_ai_list_visible) {
