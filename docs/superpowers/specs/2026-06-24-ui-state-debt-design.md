@@ -336,3 +336,9 @@ P2 is complete when:
 - New UI feature state lands in explicit state structs or feature-owned modules,
   not as fresh `AppWindow.zig` globals.
 - `zig build test` and `zig build test-full` pass.
+
+## P1 handoff
+
+P1 introduced `UiEffect`, `AppWindow.applyUiEffect`, and the command-palette
+input-effect sample. P2 should split settings/toasts/session launcher next,
+then migrate state into `WindowState`, `OverlayState`, and `InputState`.
