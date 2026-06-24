@@ -93,6 +93,7 @@ test {
     _ = @import("appwindow/window_state.zig");
     _ = @import("appwindow/remote_state.zig");
     _ = @import("appwindow/state.zig");
+    _ = @import("appwindow/state_guard.zig");
     _ = @import("scp.zig");
     _ = @import("surface_registry.zig");
     _ = @import("ctl/protocol.zig");
