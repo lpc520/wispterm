@@ -25,6 +25,11 @@ leaf/model tasks and code review for AppWindow/input integration tasks. Treat
 integration risk justifies the time. This preserves the pre-merge gate while
 keeping the task loop fast enough to make progress.
 
+Where a check is static and does not need the full app binary, move it into the
+fast suite. In particular, the command-palette source guard in Task 6 should be
+implemented as a leaf fast test rather than another `input.zig` full-suite-only
+test.
+
 Ghostty reference: Ghostty's `Surface` owns per-surface input/renderer state and
 uses explicit input outcomes such as `InputEffect`. WispTerm's P1 mirrors that
 direction by making input handlers return `UiEffect` instead of requiring each
@@ -750,15 +755,21 @@ git commit -m "refactor(input): return command palette char effects"
 ### Task 6: Remove Direct Dirty Writes From the Converted Command Palette Branches
 
 **Files:**
-- Modify: `src/input.zig`
+- Create: `src/input/command_palette_effect_guard.zig`
+- Modify: `src/test_fast.zig`
 
 - [ ] **Step 1: Add a source guard for the converted branches**
 
-Add this test near the command palette input tests in `src/input.zig`:
+Create `src/input/command_palette_effect_guard.zig` and register it in
+`src/test_fast.zig` near the other input/helper imports. The guard reads
+`../input.zig` directly so it can run in the fast suite without compiling the
+full app input module:
 
 ```zig
+const std = @import("std");
+
 test "input: command palette dispatch branches use UiEffect instead of direct dirty writes" {
-    const source = @embedFile("input.zig");
+    const source = @embedFile("../input.zig");
     const key_marker = "if (overlays.commandPaletteVisible()) {";
     const key_start = std.mem.indexOf(u8, source, key_marker) orelse return error.MissingCommandPaletteBranch;
     const key_tail = source[key_start..];
@@ -785,7 +796,7 @@ test "input: command palette dispatch branches use UiEffect instead of direct di
 Run:
 
 ```bash
-zig build test-full
+zig build test
 ```
 
 Expected: PASS if Tasks 4 and 5 removed direct dirty writes from the converted
@@ -808,7 +819,7 @@ command-palette key or char branches guarded by the new source test.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/input.zig
+git add src/input/command_palette_effect_guard.zig src/test_fast.zig
 git commit -m "test(input): guard command palette effect dispatch"
 ```
 
