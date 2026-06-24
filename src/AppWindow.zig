@@ -96,6 +96,7 @@ const surface_snapshots = @import("appwindow/surface_snapshots.zig");
 const control_api = @import("appwindow/control_api.zig");
 const remote_sync = @import("appwindow/remote_sync.zig");
 const weixin_bridge = @import("appwindow/weixin_bridge.zig");
+const agent_requests = @import("appwindow/agent_requests.zig");
 const ui_effect = @import("appwindow/ui_effect.zig");
 pub const UiEffect = ui_effect.UiEffect;
 pub const fbo = @import("renderer/fbo.zig");
@@ -1544,37 +1545,6 @@ pub const MAX_TABS = tab.MAX_TABS;
 comptime {
     std.debug.assert(@import("appwindow/remote_state.zig").MAX_REMOTE_AI_SINKS == tab.MAX_TABS);
 }
-
-const AgentSshConnectRequest = struct {
-    allocator: std.mem.Allocator,
-    profile_name: []const u8,
-    result: ?ai_chat.ToolSurface = null,
-    err: ?anyerror = null,
-};
-
-const AgentSshSaveRequest = struct {
-    allocator: std.mem.Allocator,
-    args: ai_chat.SshProfileSaveArgs,
-    result: ?ai_chat.SavedSshProfile = null,
-    err: ?anyerror = null,
-};
-
-const AgentTabNewRequest = struct {
-    allocator: std.mem.Allocator,
-    kind: []const u8,
-    command: ?[]const u8,
-    result: ?ai_chat.ToolSurface = null,
-    err: ?anyerror = null,
-};
-
-const AgentTabCloseRequest = struct {
-    allocator: std.mem.Allocator,
-    tab_index: ?usize,
-    surface_id: ?[]const u8,
-    title: ?[]const u8,
-    result: ?ai_chat.ToolClosedTab = null,
-    err: ?anyerror = null,
-};
 
 // ============================================================================
 // Tab/split operation wrappers — delegate to tab module, handle UI side effects
@@ -7240,268 +7210,46 @@ pub fn activeSurfaceSnapshot(allocator: std.mem.Allocator) ?[]u8 {
     return surface_snapshots.activeSurfaceSnapshot(allocator);
 }
 
-fn postAgentTabNew(native_handle: window_backend.NativeHandle, request: *AgentTabNewRequest) void {
-    _ = thread_message.sendPointer(native_handle, .agent_tab_new, @intFromPtr(request));
-}
-
-fn postAgentTabClose(native_handle: window_backend.NativeHandle, request: *AgentTabCloseRequest) void {
-    _ = thread_message.sendPointer(native_handle, .agent_tab_close, @intFromPtr(request));
-}
-
-fn postAgentSshConnect(native_handle: window_backend.NativeHandle, request: *AgentSshConnectRequest) void {
-    _ = thread_message.sendPointer(native_handle, .agent_ssh_connect, @intFromPtr(request));
-}
-
-fn postAgentSshSave(native_handle: window_backend.NativeHandle, request: *AgentSshSaveRequest) void {
-    _ = thread_message.sendPointer(native_handle, .agent_ssh_save, @intFromPtr(request));
-}
-
-fn agentSpawnTab(ctx: *anyopaque, allocator: std.mem.Allocator, kind: []const u8, command: ?[]const u8) anyerror!ai_chat.ToolSurface {
+fn agentRequestNativeHandle(ctx: *anyopaque) ?window_backend.NativeHandle {
     const window: *AppWindow = @ptrCast(@alignCast(ctx));
-    const native_handle = window.getNativeHandle() orelse return error.WindowUnavailable;
-
-    var request = AgentTabNewRequest{
-        .allocator = allocator,
-        .kind = kind,
-        .command = command,
-    };
-
-    if (g_window) |current| {
-        if (window_backend.nativeHandle(current) == native_handle) {
-            handleAgentTabNewRequest(&request);
-        } else {
-            postAgentTabNew(native_handle, &request);
-        }
-    } else {
-        postAgentTabNew(native_handle, &request);
-    }
-
-    if (request.err) |err| return err;
-    return request.result orelse error.SpawnFailed;
+    return window.getNativeHandle();
 }
 
-fn agentCloseTab(ctx: *anyopaque, allocator: std.mem.Allocator, tab_index: ?usize, surface_id: ?[]const u8, title_text: ?[]const u8) anyerror!ai_chat.ToolClosedTab {
-    const window: *AppWindow = @ptrCast(@alignCast(ctx));
-    const native_handle = window.getNativeHandle() orelse return error.WindowUnavailable;
-
-    var request = AgentTabCloseRequest{
-        .allocator = allocator,
-        .tab_index = tab_index,
-        .surface_id = surface_id,
-        .title = title_text,
-    };
-
-    if (g_window) |current| {
-        if (window_backend.nativeHandle(current) == native_handle) {
-            handleAgentTabCloseRequest(&request);
-        } else {
-            postAgentTabClose(native_handle, &request);
-        }
-    } else {
-        postAgentTabClose(native_handle, &request);
-    }
-
-    if (request.err) |err| return err;
-    return request.result orelse error.TabNotFound;
+fn agentRequestSpawnDefaultTab() ?*Surface {
+    const allocator = g_allocator orelse return null;
+    if (!spawnTab(allocator)) return null;
+    return activeSurface();
 }
 
-fn agentConnectSshProfile(ctx: *anyopaque, allocator: std.mem.Allocator, profile_name: []const u8) anyerror!ai_chat.ToolSurface {
-    const window: *AppWindow = @ptrCast(@alignCast(ctx));
-    const native_handle = window.getNativeHandle() orelse return error.WindowUnavailable;
-
-    var request = AgentSshConnectRequest{
-        .allocator = allocator,
-        .profile_name = profile_name,
-    };
-
-    if (g_window) |current| {
-        if (window_backend.nativeHandle(current) == native_handle) {
-            handleAgentSshConnectRequest(&request);
-        } else {
-            postAgentSshConnect(native_handle, &request);
-        }
-    } else {
-        postAgentSshConnect(native_handle, &request);
-    }
-
-    if (request.err) |err| return err;
-    return request.result orelse error.ConnectFailed;
+fn agentRequestSpawnTabWithCommand(command: []const u8) ?*Surface {
+    return spawnTabWithCommandUtf8ReturningSurface(command);
 }
 
-fn agentSaveSshProfile(ctx: *anyopaque, allocator: std.mem.Allocator, args: ai_chat.SshProfileSaveArgs) anyerror!ai_chat.SavedSshProfile {
-    const window: *AppWindow = @ptrCast(@alignCast(ctx));
-    const native_handle = window.getNativeHandle() orelse return error.WindowUnavailable;
-
-    var request = AgentSshSaveRequest{
-        .allocator = allocator,
-        .args = args,
-    };
-
-    if (g_window) |current| {
-        if (window_backend.nativeHandle(current) == native_handle) {
-            handleAgentSshSaveRequest(&request);
-        } else {
-            postAgentSshSave(native_handle, &request);
-        }
-    } else {
-        postAgentSshSave(native_handle, &request);
-    }
-
-    if (request.err) |err| return err;
-    return request.result orelse error.SaveFailed;
-}
-
-fn agentTabCommand(kind_raw: []const u8, command_raw: ?[]const u8) anyerror!?[]const u8 {
-    return platform_pty_command.tabCommandForKind(kind_raw, command_raw, tab.getShellCmd());
-}
-
-fn handleAgentTabNewRequest(request: *AgentTabNewRequest) void {
-    const command = agentTabCommand(request.kind, request.command) catch |err| {
-        request.err = err;
-        return;
-    };
-
-    const surface = if (command) |cmd|
-        spawnTabWithCommandUtf8ReturningSurface(cmd)
-    else blk: {
-        const allocator = g_allocator orelse {
-            request.err = error.SpawnFailed;
-            return;
-        };
-        if (!spawnTab(allocator)) {
-            request.err = error.SpawnFailed;
-            return;
-        }
-        break :blk activeSurface();
-    };
-
-    const new_surface = surface orelse {
-        request.err = error.SpawnFailed;
-        return;
-    };
-
-    const location = surface_snapshots.findAgentSurfaceLocation(new_surface) orelse {
-        request.err = error.SpawnFailed;
-        return;
-    };
-    request.result = surface_snapshots.makeAgentToolSurface(
-        request.allocator,
-        new_surface,
-        location.tab_index,
-        location.focused,
-    ) catch |err| {
-        request.err = err;
-        return;
-    };
-}
-
-fn findTabIndexBySurfaceId(surface_id: []const u8) ?usize {
-    for (0..tab.g_tab_count) |tab_index| {
-        const tab_state = tab.g_tabs[tab_index] orelse continue;
-        if (tab_state.kind != .terminal) continue;
-        var it = tab_state.tree.surfaces();
-        while (it.next()) |entry| {
-            if (std.mem.eql(u8, entry.surface.remote_id[0..], surface_id)) return tab_index;
-        }
-    }
-    return null;
-}
-
-fn findTabIndexByTitle(title_text: []const u8) ?usize {
-    const title_trimmed = std.mem.trim(u8, title_text, " \t\r\n");
-    if (title_trimmed.len == 0) return null;
-
-    for (0..tab.g_tab_count) |tab_index| {
-        const tab_state = tab.g_tabs[tab_index] orelse continue;
-        if (std.ascii.eqlIgnoreCase(tab_state.getTitle(), title_trimmed)) return tab_index;
-    }
-
-    var partial: ?usize = null;
-    var partial_count: usize = 0;
-    for (0..tab.g_tab_count) |tab_index| {
-        const tab_state = tab.g_tabs[tab_index] orelse continue;
-        if (std.ascii.indexOfIgnoreCase(tab_state.getTitle(), title_trimmed) != null) {
-            partial = tab_index;
-            partial_count += 1;
-        }
-    }
-    return if (partial_count == 1) partial else null;
-}
-
-fn resolveAgentCloseTabIndex(request: *const AgentTabCloseRequest) ?usize {
-    if (request.tab_index) |idx| return idx;
-    if (request.surface_id) |surface_id| {
-        if (findTabIndexBySurfaceId(surface_id)) |idx| return idx;
-    }
-    if (request.title) |title_text| {
-        if (findTabIndexByTitle(title_text)) |idx| return idx;
-    }
-    return active_tab_state.g_active_tab;
-}
-
-fn handleAgentTabCloseRequest(request: *AgentTabCloseRequest) void {
-    if (tab.g_tab_count <= 1) {
-        request.err = error.LastTab;
-        return;
-    }
-
-    const idx = resolveAgentCloseTabIndex(request) orelse {
-        request.err = error.TabNotFound;
-        return;
-    };
-    if (idx >= tab.g_tab_count) {
-        request.err = error.TabNotFound;
-        return;
-    }
-
-    const tab_state = tab.g_tabs[idx] orelse {
-        request.err = error.TabNotFound;
-        return;
-    };
-    if (tab_state.kind != .terminal) {
-        request.err = error.CannotCloseAiChatTab;
-        return;
-    }
-
-    const title_copy = request.allocator.dupe(u8, tab_state.getTitle()) catch |err| {
-        request.err = err;
-        return;
-    };
-
+fn agentRequestCloseTabByIndex(idx: usize) void {
     closeTab(idx);
-    request.result = .{
-        .tab_index = idx,
-        .active_tab = active_tab_state.g_active_tab,
-        .title = title_copy,
+}
+
+fn agentRequestConnectSshProfile(identifier: []const u8) agent_requests.SshConnectResult {
+    return switch (overlays.agentConnectSshProfile(identifier)) {
+        .connected => |surface| .{ .connected = surface },
+        .not_found => .not_found,
+        .failed => .failed,
     };
 }
 
-fn handleAgentSshConnectRequest(request: *AgentSshConnectRequest) void {
-    switch (overlays.agentConnectSshProfile(request.profile_name)) {
-        .connected => |surface| {
-            const location = surface_snapshots.findAgentSurfaceLocation(surface) orelse {
-                request.err = error.ConnectFailed;
-                return;
-            };
-            request.result = surface_snapshots.makeAgentToolSurface(
-                request.allocator,
-                surface,
-                location.tab_index,
-                location.focused,
-            ) catch |err| {
-                request.err = err;
-                return;
-            };
-        },
-        .not_found => request.err = error.ProfileNotFound,
-        .failed => request.err = error.ConnectFailed,
-    }
+fn agentRequestSaveSshProfile(allocator: std.mem.Allocator, args: ai_chat.SshProfileSaveArgs) anyerror!ai_chat.SavedSshProfile {
+    return overlays.agentSaveSshProfile(allocator, args);
 }
 
-fn handleAgentSshSaveRequest(request: *AgentSshSaveRequest) void {
-    request.result = overlays.agentSaveSshProfile(request.allocator, request.args) catch |err| {
-        request.err = err;
-        return;
+fn agentRequestHost() agent_requests.Host {
+    return .{
+        .nativeHandleForContext = agentRequestNativeHandle,
+        .currentNativeHandle = currentNativeHandle,
+        .spawnDefaultTab = agentRequestSpawnDefaultTab,
+        .spawnTabWithCommand = agentRequestSpawnTabWithCommand,
+        .closeTabByIndex = agentRequestCloseTabByIndex,
+        .connectSshProfile = agentRequestConnectSshProfile,
+        .saveSshProfile = agentRequestSaveSshProfile,
     };
 }
 
@@ -7634,11 +7382,12 @@ fn onPlatformMessage(msg: window_backend.MessageId, wParam: window_backend.WordP
     }
 
     const decoded = thread_message.decode(msg, lParam) orelse return null;
+    const agent_host = agentRequestHost();
     switch (decoded.tag) {
-        .agent_ssh_connect => handleAgentSshConnectRequest(@ptrFromInt(decoded.ptr)),
-        .agent_ssh_save => handleAgentSshSaveRequest(@ptrFromInt(decoded.ptr)),
-        .agent_tab_new => handleAgentTabNewRequest(@ptrFromInt(decoded.ptr)),
-        .agent_tab_close => handleAgentTabCloseRequest(@ptrFromInt(decoded.ptr)),
+        .agent_ssh_connect => agent_requests.handleSshConnectRequest(@ptrFromInt(decoded.ptr), agent_host),
+        .agent_ssh_save => agent_requests.handleSshSaveRequest(@ptrFromInt(decoded.ptr), agent_host),
+        .agent_tab_new => agent_requests.handleTabNewRequest(@ptrFromInt(decoded.ptr), agent_host),
+        .agent_tab_close => agent_requests.handleTabCloseRequest(@ptrFromInt(decoded.ptr), agent_host),
         .remote_ai_input => remote_sync.handleAiInputRequest(@ptrFromInt(decoded.ptr), remoteSyncHost()),
         .remote_open_ai_agent => remote_sync.handleAiAgentOpenRequest(@ptrFromInt(decoded.ptr), remoteSyncHost()),
         .weixin_control => weixin_bridge.handleControlRequest(@ptrFromInt(decoded.ptr), weixinBridgeHost()),
@@ -7647,15 +7396,16 @@ fn onPlatformMessage(msg: window_backend.MessageId, wParam: window_backend.WordP
 }
 
 fn installAgentToolHost(self: *AppWindow) void {
+    agent_requests.setHost(agentRequestHost());
     ai_chat.setToolHost(.{
         .ctx = @ptrCast(self),
         .collectSnapshot = surface_snapshots.collectAgentToolSnapshot,
         .surfaceSnapshot = surface_snapshots.agentSurfaceSnapshot,
         .writeSurface = surface_snapshots.agentWriteSurface,
-        .spawnTab = agentSpawnTab,
-        .closeTab = agentCloseTab,
-        .saveSshProfile = agentSaveSshProfile,
-        .connectSshProfile = agentConnectSshProfile,
+        .spawnTab = agent_requests.spawnTab,
+        .closeTab = agent_requests.closeTab,
+        .saveSshProfile = agent_requests.saveSshProfile,
+        .connectSshProfile = agent_requests.connectSshProfile,
         .sshConnectionForSurface = surface_snapshots.agentSshConnectionForSurface,
     });
 }
