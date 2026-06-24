@@ -770,8 +770,10 @@ const std = @import("std");
 
 test "input: command palette dispatch branches use UiEffect instead of direct dirty writes" {
     const source = @embedFile("../input.zig");
-    const key_marker = "if (overlays.commandPaletteVisible()) {";
-    const key_start = std.mem.indexOf(u8, source, key_marker) orelse return error.MissingCommandPaletteBranch;
+    const key_marker = "command_palette_input.keyAction";
+    const key_action_start = std.mem.indexOf(u8, source, key_marker) orelse return error.MissingCommandPaletteBranch;
+    const key_branch_marker = "if (overlays.commandPaletteVisible()) {";
+    const key_start = std.mem.lastIndexOf(u8, source[0..key_action_start], key_branch_marker) orelse return error.MissingCommandPaletteBranch;
     const key_tail = source[key_start..];
     const key_end = std.mem.indexOf(u8, key_tail, "if (copilot_picker.isVisible())") orelse return error.MissingCommandPaletteBranchEnd;
     const key_branch = key_tail[0..key_end];
