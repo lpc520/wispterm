@@ -1,6 +1,6 @@
 # UI State Debt P3.1 - AppWindow Integration Extraction Design
 
-Status: Draft for user review
+Status: Approved for implementation
 
 ## Context
 
