@@ -76,3 +76,66 @@ def pane(app):
     """Per-test convenience: focus + return the active surface id."""
     app.focus()
     return app.primary_pane()
+
+
+# ---- failure diagnostics --------------------------------------------------
+import json
+import re
+
+ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), "_artifacts")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """On a GUI test's failure, dump the oracles that explain *why* — panes
+    topology, terminal text, window geometry, overlay ui-state, and a screenshot
+    — so a red run is diagnosable without re-running locally. Best-effort: a
+    dump that itself fails never overrides the real test failure."""
+    outcome = yield
+    rep = outcome.get_result()
+    if rep.when != "call" or not rep.failed:
+        return
+    app = getattr(item, "funcargs", {}).get("app")
+    if app is None:
+        return  # not a GUI test (no `app` fixture) — nothing to dump
+    _dump_failure_artifacts(item, app)
+
+
+def _dump_failure_artifacts(item, app):
+    out_dir = os.path.join(ARTIFACTS_DIR, re.sub(r"[^A-Za-z0-9_.-]", "_", item.nodeid))
+    os.makedirs(out_dir, exist_ok=True)
+    written = []
+
+    def _try(name, fn):
+        try:
+            fn(os.path.join(out_dir, name))
+            written.append(name)
+        except Exception as e:
+            with open(os.path.join(out_dir, name + ".error"), "w") as f:
+                f.write(repr(e))
+
+    def _json(path, obj):
+        with open(path, "w") as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False)
+
+    def _text(path, s):
+        with open(path, "w") as f:
+            f.write(s)
+
+    _try("panes.json", lambda p: _json(p, app.ctl.panes()))
+    _try("ui-state.json", lambda p: _json(p, app.ui_state()))
+    try:
+        pane = app.primary_pane()
+    except Exception:
+        pane = None
+    if pane:
+        _try("text.txt", lambda p: _text(p, app.get_text(pane)))
+    _try("window.txt", lambda p: _text(
+        p, "".join(f"{a}={app.window_attr(a)}\n" for a in ("size", "position"))))
+
+    def _shot(p):
+        if not app.screenshot(p):
+            raise RuntimeError("screencapture unavailable (Screen Recording permission?)")
+    _try("screen.png", _shot)
+
+    print(f"\n[e2e] failure artifacts for {item.nodeid} -> {out_dir} ({', '.join(written) or 'none'})")

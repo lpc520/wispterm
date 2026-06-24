@@ -12,10 +12,23 @@ from .base import ItemState
 from .ctl import Ctl
 from .panes import primary_pane_id
 
+# Deterministic base config for E2E: isolate the control channel, suppress
+# network/update side effects, fix the font, and pin the locale to English so
+# command-palette entries are matched by their English names regardless of the
+# host language. The initial grid (window-width/height = cols/rows in CELLS, see
+# config.zig / App.zig) is appended per-launch.
+#
+# NOTE: we deliberately do NOT set `cursor-style-blink = false`. The blink timer
+# is what keeps the render loop ticking while otherwise idle, and ui-state is
+# published on the render tick; with blink off, the publish that should report a
+# freshly-opened overlay can lag past the assertion window, so ui-state-based
+# overlay tests flake (verified by bisection). We don't golden-diff screenshots,
+# so a blinking cursor costs us nothing here.
 _CONFIG = (
     "agent-control-enabled = true\n"
     "auto-update-check = false\n"
     "font-size = 14\n"
+    "language = en\n"
 )
 
 
@@ -46,8 +59,13 @@ class MacDriver:
     def launch(self, *, cols: int = 80, rows: int = 24) -> None:
         cfg_dir = self._config_dir()
         os.makedirs(cfg_dir, exist_ok=True)
+        # window-width/height are the initial terminal grid in CELLS, so the
+        # cross-platform launch(cols, rows) contract maps straight onto them and
+        # the window starts at a deterministic size (no longer ignored).
         with open(os.path.join(cfg_dir, "config"), "w") as f:
             f.write(_CONFIG)
+            f.write(f"window-width = {cols}\n")
+            f.write(f"window-height = {rows}\n")
         # Pre-mark the first-run wizard as already prompted so the AI-setup form
         # does not auto-open and capture the keyboard on a fresh launch (it has no
         # AI profile). Without this the form swallows synthetic key input even after
@@ -196,3 +214,33 @@ class MacDriver:
 
     def read_clipboard(self) -> str:
         return osascript.run(osascript.clipboard_script())
+
+    def screenshot(self, path: str) -> bool:
+        """Best-effort PNG capture of the test instance's frontmost window for
+        failure triage. Returns False (never raises) if capture is unavailable —
+        e.g. Screen Recording permission not granted on CI — so a diagnostic dump
+        never masks the original test failure. Captures the WispTerm window by id
+        when resolvable, else falls back to the full screen."""
+        try:
+            self.focus()
+            win_id = self._frontmost_window_id()
+            cmd = ["/usr/sbin/screencapture", "-x"]
+            if win_id is not None:
+                cmd += ["-l", str(win_id), "-o"]
+            cmd.append(path)
+            subprocess.run(cmd, timeout=10, check=True)
+            return os.path.exists(path)
+        except Exception:
+            return False
+
+    def _frontmost_window_id(self):
+        """CoreGraphics window id of our pid's on-screen window, or None."""
+        try:
+            import Quartz
+            opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+            for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []:
+                if w.get("kCGWindowOwnerPID") == self.pid and w.get("kCGWindowLayer", 1) == 0:
+                    return w.get("kCGWindowNumber")
+        except Exception:
+            pass
+        return None
