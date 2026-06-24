@@ -53,4 +53,12 @@ test "input: converted settings and confirm branches return UiEffect instead of 
     );
     try std.testing.expect(std.mem.indexOf(u8, settings_branch, "return overlays.settingsPageHandleKey") != null);
     try expectNoManualDirtyWrites(settings_branch);
+
+    const session_launcher_branch = try branchAfter(
+        source,
+        "if (overlays.sessionLauncherVisible()) {",
+        "if (action) |app_action| {",
+    );
+    try std.testing.expect(std.mem.indexOf(u8, session_launcher_branch, "return overlays.sessionLauncherHandleKey") != null);
+    try expectNoManualDirtyWrites(session_launcher_branch);
 }
