@@ -424,6 +424,21 @@ test "input: settings page arrow navigation requests a repaint" {
     try std.testing.expect(!AppWindow.g_cells_valid);
 }
 
+test "input: settings page dispatchKey returns repaint effect" {
+    const previous_keybinds = AppWindow.g_keybinds;
+    defer AppWindow.g_keybinds = previous_keybinds;
+    defer overlays.settingsPageClose();
+
+    AppWindow.g_keybinds = keybind.Set.defaults();
+    overlays.settingsPageOpen();
+
+    const effect = dispatchKey(arrow_down_event);
+
+    try std.testing.expect(effect.consumed);
+    try std.testing.expect(effect.needs_rebuild);
+    try std.testing.expect(effect.cells_invalid);
+}
+
 test "input: port forwarding arrow navigation requests a repaint" {
     const allocator = std.testing.allocator;
     const previous_count = tab.g_tab_count;
@@ -3067,10 +3082,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
         return .none;
     }
     if (overlays.settingsPageVisible()) {
-        overlays.settingsPageHandleKey(key_event);
-        AppWindow.g_force_rebuild = true;
-        AppWindow.g_cells_valid = false;
-        return .none;
+        return overlays.settingsPageHandleKey(key_event);
     }
     if (AppWindow.weixin_qr_panel.visible()) {
         switch (ev.key_code) {

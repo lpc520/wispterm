@@ -33,6 +33,8 @@ const platform_pty_command = @import("../platform/pty_command.zig");
 const update_check = @import("../update_check.zig");
 const keybind = @import("../keybind.zig");
 const overlay_keys = @import("overlay_keys.zig");
+const overlay_state = @import("overlays/state.zig");
+const settings_page = @import("overlays/settings_page.zig");
 const close_confirm = @import("../close_confirm.zig");
 const weixin_qr_panel = @import("../weixin/qr_panel.zig");
 const weixin_types = @import("../weixin/types.zig");
@@ -82,6 +84,12 @@ pub const renderCopilotEdgeHandle = copilot_edge_handle.render;
 pub const copilotEdgeHandleSetTarget = copilot_edge_handle.setProximityTarget;
 pub const copilotEdgeHandleSetHovered = copilot_edge_handle.setHovered;
 pub const copilotEdgeHandleStartShimmer = copilot_edge_handle.startShimmer;
+
+threadlocal var g_overlay_state: overlay_state.OverlayState = .{};
+
+fn settingsState() *settings_page.State {
+    return &g_overlay_state.settings;
+}
 
 // ============================================================================
 // Split divider rendering
@@ -2360,7 +2368,7 @@ fn commandCenterStateSnapshot() command_center_state.State {
         .ai_list_visible = g_ai_list_visible,
         .ai_form_visible = g_ai_form_visible,
         .ai_history_source_visible = g_ai_history_source_visible,
-        .settings_visible = g_settings_visible,
+        .settings_visible = settingsState().visible,
     };
 }
 
@@ -2388,7 +2396,7 @@ fn commandCenterStateApply(state: command_center_state.State) void {
     g_ai_list_visible = state.ai_list_visible;
     g_ai_form_visible = state.ai_form_visible;
     g_ai_history_source_visible = state.ai_history_source_visible;
-    g_settings_visible = state.settings_visible;
+    settingsState().visible = state.settings_visible;
 }
 
 pub fn sessionLauncherOpen() void {
@@ -3858,7 +3866,7 @@ fn openAiForm() void {
     g_ssh_form_visible = false;
     g_ai_list_visible = false;
     g_session_launcher_visible = false;
-    g_settings_visible = false;
+    settingsState().visible = false;
     g_ai_form_visible = true;
     g_ai_focus = @intFromEnum(AiField.name);
 }
@@ -5304,28 +5312,10 @@ const SETTINGS_THEME_PRESETS = [_]ThemePreset{
     .{ .label = "Xcode Light", .theme = "Xcode Light", .detail = "Bright native" },
 };
 
-const SETTINGS_THEME_ROW = 1;
-const SETTINGS_CONTROL_ROW_START = SETTINGS_THEME_ROW + 1;
-const SETTINGS_ROW_COUNT = SETTINGS_CONTROL_ROW_START + 12;
-
-const SettingsAction = enum {
-    font_size_minus,
-    font_size_plus,
-    cycle_theme,
-    cycle_cursor_style,
-    toggle_cursor_blink,
-    toggle_focus_follows_mouse,
-    cycle_shell,
-    cycle_default_ai_profile,
-    cycle_default_ai_profile_prev,
-    toggle_weixin_direct,
-    cycle_language,
-    toggle_restore_tabs,
-    toggle_distill_suggest,
-    open_raw_config,
-    restore_defaults,
-    close,
-};
+const SettingsAction = settings_page.Action;
+const SETTINGS_THEME_ROW = settings_page.SETTINGS_THEME_ROW;
+const SETTINGS_CONTROL_ROW_START = settings_page.SETTINGS_CONTROL_ROW_START;
+const SETTINGS_ROW_COUNT = settings_page.SETTINGS_ROW_COUNT;
 
 const SettingsLayout = struct {
     box_x: f32,
@@ -5342,57 +5332,34 @@ const SettingsLayout = struct {
     scroll: usize,
 };
 
-pub threadlocal var g_settings_visible: bool = false;
-threadlocal var g_settings_focus: usize = SETTINGS_THEME_ROW;
-threadlocal var g_settings_cfg_dirty: bool = true;
-threadlocal var g_settings_cfg_cache: Config = .{};
-
 pub fn settingsPageVisible() bool {
-    return g_settings_visible;
+    return settingsState().visible;
 }
 
 pub fn settingsPageOpen() void {
     var state = commandCenterStateSnapshot();
     state.settingsPageOpen();
     commandCenterStateCommit(state);
-    g_settings_focus = SETTINGS_THEME_ROW;
+    settingsState().open();
     g_ai_list_mode = .manage;
-    g_settings_cfg_dirty = true;
 }
 
 fn settingsPageReloadCfg() void {
-    g_settings_cfg_dirty = true;
+    settingsState().reloadConfig();
 }
 
 fn settingsCfg(allocator: std.mem.Allocator) *Config {
-    if (g_settings_cfg_dirty) {
-        g_settings_cfg_cache.deinit(allocator);
-        g_settings_cfg_cache = Config.load(allocator) catch Config{};
-        g_settings_cfg_dirty = false;
-    }
-    return &g_settings_cfg_cache;
+    return settingsState().cfg(allocator);
 }
 
 pub fn settingsPageClose() void {
-    g_settings_visible = false;
-    if (g_settings_cfg_dirty == false) {
-        const allocator = AppWindow.g_allocator orelse return;
-        g_settings_cfg_cache.deinit(allocator);
-        g_settings_cfg_cache = .{};
-        g_settings_cfg_dirty = true;
-    }
+    settingsState().close(AppWindow.g_allocator);
 }
 
-pub fn settingsPageHandleKey(ev: input_key.KeyEvent) void {
-    switch (ev.key) {
-        .escape => settingsPageClose(),
-        .arrow_down, .tab => g_settings_focus = (g_settings_focus + 1) % SETTINGS_ROW_COUNT,
-        .arrow_up => g_settings_focus = if (g_settings_focus == 0) SETTINGS_ROW_COUNT - 1 else g_settings_focus - 1,
-        .arrow_left => runSettingsFocusLeft(),
-        .arrow_right => runSettingsFocusRight(),
-        .enter => runSettingsFocusPrimary(),
-        else => {},
-    }
+pub fn settingsPageHandleKey(ev: input_key.KeyEvent) AppWindow.UiEffect {
+    if (!settingsPageVisible()) return .none;
+    if (settingsState().handleKey(ev)) |action| executeSettingsAction(action);
+    return .repaint;
 }
 
 pub fn settingsPageContainsPoint(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_offset: f32) bool {
@@ -5422,10 +5389,7 @@ fn settingsRowCapacity(content_height: f32, base_h: f32, row_h: f32) usize {
 /// First row to render so the focused row stays visible (scroll offset).
 /// Mirrors commandPaletteFirstVisibleIndex().
 fn settingsFirstVisibleRow(visible_rows: usize) usize {
-    if (visible_rows == 0 or SETTINGS_ROW_COUNT <= visible_rows) return 0;
-    const focus = @min(g_settings_focus, SETTINGS_ROW_COUNT - 1);
-    if (focus < visible_rows) return 0;
-    return @min(focus - visible_rows + 1, SETTINGS_ROW_COUNT - visible_rows);
+    return settingsState().firstVisibleRow(visible_rows);
 }
 
 fn settingsLayout(window_width: f32, window_height: f32, top_offset: f32) SettingsLayout {
@@ -5470,7 +5434,7 @@ fn settingsHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, 
     if (visible_index >= layout.visible_rows) return null;
     const row = visible_index + layout.scroll;
     if (row >= SETTINGS_ROW_COUNT) return null;
-    g_settings_focus = row;
+    settingsState().focus = row;
 
     if (row == 0) {
         const plus_x = layout.box_x + layout.box_w - 70;
@@ -5516,6 +5480,7 @@ fn executeSettingsAction(action: SettingsAction) void {
             writeConfigInt("font-size", next);
         },
         .cycle_theme => cycleThemePreset(1),
+        .cycle_theme_prev => cycleThemePreset(-1),
         .cycle_cursor_style => Config.setConfigValue(allocator, "cursor-style", nextCursorStyle(cfg.@"cursor-style")) catch {},
         .toggle_cursor_blink => Config.setConfigValue(allocator, "cursor-style-blink", if (cfg.@"cursor-style-blink") "false" else "true") catch {},
         .toggle_focus_follows_mouse => Config.setConfigValue(allocator, "focus-follows-mouse", if (cfg.@"focus-follows-mouse") "false" else "true") catch {},
@@ -5537,7 +5502,7 @@ fn executeSettingsAction(action: SettingsAction) void {
     // cycle_theme already applies via cycleThemePreset; the excluded actions open
     // an editor/confirm dialog or close the page and write nothing to apply.
     switch (action) {
-        .cycle_theme, .open_raw_config, .restore_defaults, .close => {},
+        .cycle_theme, .cycle_theme_prev, .open_raw_config, .restore_defaults, .close => {},
         else => AppWindow.reloadConfigImmediate(allocator),
     }
 }
@@ -5547,43 +5512,6 @@ fn writeConfigInt(key: []const u8, value: u32) void {
     var buf: [32]u8 = undefined;
     const value_text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch return;
     Config.setConfigValue(allocator, key, value_text) catch {};
-}
-
-fn runSettingsFocusPrimary() void {
-    switch (g_settings_focus) {
-        0 => executeSettingsAction(.font_size_plus),
-        SETTINGS_THEME_ROW => cycleThemePreset(1),
-        SETTINGS_CONTROL_ROW_START + 0 => executeSettingsAction(.cycle_cursor_style),
-        SETTINGS_CONTROL_ROW_START + 1 => executeSettingsAction(.toggle_cursor_blink),
-        SETTINGS_CONTROL_ROW_START + 2 => executeSettingsAction(.toggle_focus_follows_mouse),
-        SETTINGS_CONTROL_ROW_START + 3 => executeSettingsAction(.cycle_shell),
-        SETTINGS_CONTROL_ROW_START + 4 => executeSettingsAction(.cycle_default_ai_profile),
-        SETTINGS_CONTROL_ROW_START + 5 => executeSettingsAction(.toggle_weixin_direct),
-        SETTINGS_CONTROL_ROW_START + 6 => executeSettingsAction(.cycle_language),
-        SETTINGS_CONTROL_ROW_START + 7 => executeSettingsAction(.toggle_restore_tabs),
-        SETTINGS_CONTROL_ROW_START + 8 => executeSettingsAction(.toggle_distill_suggest),
-        SETTINGS_CONTROL_ROW_START + 9 => executeSettingsAction(.open_raw_config),
-        SETTINGS_CONTROL_ROW_START + 10 => executeSettingsAction(.restore_defaults),
-        SETTINGS_CONTROL_ROW_START + 11 => executeSettingsAction(.close),
-        else => {},
-    }
-}
-
-fn runSettingsFocusLeft() void {
-    switch (g_settings_focus) {
-        0 => executeSettingsAction(.font_size_minus),
-        SETTINGS_THEME_ROW => cycleThemePreset(-1),
-        SETTINGS_CONTROL_ROW_START + 4 => executeSettingsAction(.cycle_default_ai_profile_prev),
-        else => {},
-    }
-}
-
-fn runSettingsFocusRight() void {
-    switch (g_settings_focus) {
-        0 => executeSettingsAction(.font_size_plus),
-        SETTINGS_THEME_ROW => cycleThemePreset(1),
-        else => runSettingsFocusPrimary(),
-    }
 }
 
 const THEME_RESET_KEYS = [_][]const u8{
@@ -5737,8 +5665,9 @@ fn renderSettingsRow(layout: SettingsLayout, window_height: f32, row: usize, tit
 }
 
 pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32) void {
-    if (!g_settings_visible) return;
+    if (!settingsPageVisible()) return;
     const allocator = AppWindow.g_allocator orelse return;
+    const focus = settingsState().focus;
 
     const cfg = settingsCfg(allocator);
 
@@ -5764,16 +5693,16 @@ pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32
 
     var font_buf: [24]u8 = undefined;
     const font_value = std.fmt.bufPrint(&font_buf, "-  {d}  +", .{cfg.@"font-size"}) catch "";
-    renderSettingsRow(layout, window_height, 0, i18n.s().settings_font_size, font_value, "", true, g_settings_focus == 0);
+    renderSettingsRow(layout, window_height, 0, i18n.s().settings_font_size, font_value, "", true, focus == 0);
 
     var theme_buf: [96]u8 = undefined;
     const theme_value = std.fmt.bufPrint(&theme_buf, "< {s} >", .{currentThemePresetLabel(cfg)}) catch currentThemePresetLabel(cfg);
-    renderSettingsRow(layout, window_height, SETTINGS_THEME_ROW, i18n.s().settings_theme, theme_value, "", true, g_settings_focus == SETTINGS_THEME_ROW);
+    renderSettingsRow(layout, window_height, SETTINGS_THEME_ROW, i18n.s().settings_theme, theme_value, "", true, focus == SETTINGS_THEME_ROW);
 
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 0, i18n.s().settings_cursor_style, cursorStyleText(cfg.@"cursor-style"), "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 0);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 1, i18n.s().settings_cursor_blink, boolText(cfg.@"cursor-style-blink"), "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 1);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 2, i18n.s().settings_focus_follows_mouse, boolText(cfg.@"focus-follows-mouse"), "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 2);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 3, i18n.s().settings_shell, cfg.shell, "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 3);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 0, i18n.s().settings_cursor_style, cursorStyleText(cfg.@"cursor-style"), "", true, focus == SETTINGS_CONTROL_ROW_START + 0);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 1, i18n.s().settings_cursor_blink, boolText(cfg.@"cursor-style-blink"), "", true, focus == SETTINGS_CONTROL_ROW_START + 1);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 2, i18n.s().settings_focus_follows_mouse, boolText(cfg.@"focus-follows-mouse"), "", true, focus == SETTINGS_CONTROL_ROW_START + 2);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 3, i18n.s().settings_shell, cfg.shell, "", true, focus == SETTINGS_CONTROL_ROW_START + 3);
     loadAiProfiles();
     const ai_default_value = if (g_ai_profile_count > 0)
         aiProfileField(&g_ai_profiles[defaultAiProfileIndex()], .name)
@@ -5783,14 +5712,14 @@ pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32
         aiProfileModeLabel(&g_ai_profiles[defaultAiProfileIndex()])
     else
         i18n.s().settings_hint_add_profiles;
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 4, i18n.s().settings_default_ai, ai_default_value, ai_default_hint, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 4);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 5, i18n.s().settings_weixin_direct, boolText(cfg.@"weixin-direct-enabled"), "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 5);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 6, i18n.s().settings_language, languageSettingText(cfg.language), i18n.s().settings_hint_restart, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 6);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 7, i18n.s().settings_restore_tabs, boolText(cfg.@"restore-tabs-on-startup"), "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 7);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 8, i18n.s().settings_distill_suggest, boolText(cfg.@"ai-distill-suggest"), "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 8);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 9, i18n.s().settings_raw_config, i18n.s().settings_value_open, i18n.s().settings_hint_advanced_editor, true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 9);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 10, i18n.s().settings_restore_defaults, "Enter", "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 10);
-    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 11, i18n.s().settings_close, "Esc", "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 11);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 4, i18n.s().settings_default_ai, ai_default_value, ai_default_hint, true, focus == SETTINGS_CONTROL_ROW_START + 4);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 5, i18n.s().settings_weixin_direct, boolText(cfg.@"weixin-direct-enabled"), "", true, focus == SETTINGS_CONTROL_ROW_START + 5);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 6, i18n.s().settings_language, languageSettingText(cfg.language), i18n.s().settings_hint_restart, true, focus == SETTINGS_CONTROL_ROW_START + 6);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 7, i18n.s().settings_restore_tabs, boolText(cfg.@"restore-tabs-on-startup"), "", true, focus == SETTINGS_CONTROL_ROW_START + 7);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 8, i18n.s().settings_distill_suggest, boolText(cfg.@"ai-distill-suggest"), "", true, focus == SETTINGS_CONTROL_ROW_START + 8);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 9, i18n.s().settings_raw_config, i18n.s().settings_value_open, i18n.s().settings_hint_advanced_editor, true, focus == SETTINGS_CONTROL_ROW_START + 9);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 10, i18n.s().settings_restore_defaults, "Enter", "", true, focus == SETTINGS_CONTROL_ROW_START + 10);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 11, i18n.s().settings_close, "Esc", "", true, focus == SETTINGS_CONTROL_ROW_START + 11);
 
     // Scrollbar indicator when not all rows fit (short windows). The list is
     // scrolled via keyboard/click focus-follow and the mouse wheel.
@@ -5817,12 +5746,7 @@ pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32
 /// focused row (which the view follows), matching the keyboard navigation model.
 /// Positive delta scrolls toward the top, mirroring whatsNewHandleScroll().
 pub fn settingsPageHandleScroll(delta_y: f64) void {
-    if (!g_settings_visible) return;
-    if (delta_y > 0) {
-        if (g_settings_focus > 0) g_settings_focus -= 1;
-    } else if (delta_y < 0) {
-        if (g_settings_focus + 1 < SETTINGS_ROW_COUNT) g_settings_focus += 1;
-    }
+    settingsState().handleScroll(delta_y);
 }
 
 // ============================================================================
@@ -6129,6 +6053,14 @@ test "overlays: command center Settings command opens settings page" {
     try std.testing.expect(!commandPaletteVisible());
 }
 
+test "overlays: settings page state is owned by OverlayState" {
+    settingsPageOpen();
+    defer settingsPageClose();
+
+    try std.testing.expect(g_overlay_state.settings.visible);
+    try std.testing.expect(settingsPageVisible());
+}
+
 test "macOS UI smoke: command center opens settings and settings writes config" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
 
@@ -6170,8 +6102,8 @@ test "macOS UI smoke: command center opens settings and settings writes config" 
     try std.testing.expect(!commandPaletteVisible());
     try std.testing.expect(settingsPageVisible());
 
-    settingsPageHandleKey(.{ .key = .arrow_up });
-    settingsPageHandleKey(.{ .key = .arrow_right });
+    _ = settingsPageHandleKey(.{ .key = .arrow_up });
+    _ = settingsPageHandleKey(.{ .key = .arrow_right });
 
     const config_path = try std.fs.path.join(allocator, &.{ config_dir, "config" });
     defer allocator.free(config_path);
@@ -6237,20 +6169,20 @@ test "overlays: settings page caps visible rows and scrolls to keep focus visibl
     try std.testing.expect(short_rows >= 1);
     try std.testing.expect(short_rows < SETTINGS_ROW_COUNT);
 
-    const saved_focus = g_settings_focus;
-    defer g_settings_focus = saved_focus;
+    const saved_focus = settingsState().focus;
+    defer settingsState().focus = saved_focus;
 
     // Focus near the top keeps the list pinned to the top.
-    g_settings_focus = 0;
+    settingsState().focus = 0;
     try std.testing.expectEqual(@as(usize, 0), settingsFirstVisibleRow(short_rows));
 
     // Focusing the last row (the close action that was clipped in the report)
     // scrolls just far enough to reveal it as the bottom visible row.
-    g_settings_focus = SETTINGS_ROW_COUNT - 1;
+    settingsState().focus = SETTINGS_ROW_COUNT - 1;
     const scroll = settingsFirstVisibleRow(short_rows);
     try std.testing.expectEqual(SETTINGS_ROW_COUNT - short_rows, scroll);
-    try std.testing.expect(g_settings_focus >= scroll);
-    try std.testing.expect(g_settings_focus < scroll + short_rows);
+    try std.testing.expect(settingsState().focus >= scroll);
+    try std.testing.expect(settingsState().focus < scroll + short_rows);
 }
 
 test "overlays: command center mouse wheel moves selection without wrapping" {
@@ -6625,7 +6557,7 @@ test "overlays: SSH list filter backspace restores matching rows" {
 
 test "overlays: anyBlockingOverlayVisible reflects each modal overlay" {
     const saved_palette = g_command_palette_visible;
-    const saved_settings = g_settings_visible;
+    const saved_settings_visible = settingsState().visible;
     const saved_whats_new = g_whats_new_visible;
     const saved_integration_prompt = g_integration_prompt_visible;
     const saved_close = g_window_close_confirm_visible;
@@ -6639,7 +6571,7 @@ test "overlays: anyBlockingOverlayVisible reflects each modal overlay" {
     const saved_ai_history = g_ai_history_source_visible;
     defer {
         g_command_palette_visible = saved_palette;
-        g_settings_visible = saved_settings;
+        settingsState().visible = saved_settings_visible;
         g_whats_new_visible = saved_whats_new;
         g_integration_prompt_visible = saved_integration_prompt;
         g_window_close_confirm_visible = saved_close;
@@ -6655,7 +6587,7 @@ test "overlays: anyBlockingOverlayVisible reflects each modal overlay" {
 
     // Clear every blocking flag → nothing should report blocking.
     g_command_palette_visible = false;
-    g_settings_visible = false;
+    settingsState().visible = false;
     g_whats_new_visible = false;
     g_integration_prompt_visible = false;
     g_window_close_confirm_visible = false;
@@ -6674,9 +6606,9 @@ test "overlays: anyBlockingOverlayVisible reflects each modal overlay" {
     try std.testing.expect(anyBlockingOverlayVisible());
     g_command_palette_visible = false;
 
-    g_settings_visible = true;
+    settingsState().visible = true;
     try std.testing.expect(anyBlockingOverlayVisible());
-    g_settings_visible = false;
+    settingsState().visible = false;
 
     g_whats_new_visible = true;
     try std.testing.expect(anyBlockingOverlayVisible());
