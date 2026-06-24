@@ -33,6 +33,7 @@ test "remote file ssh helpers include short keepalive options" {
 
 test {
     _ = @import("input/command_dispatch.zig");
+    _ = @import("input/effects.zig");
     _ = @import("input/command_palette_effect_guard.zig");
     _ = @import("input/overlay_effect_guard.zig");
     _ = @import("input/click_tracker.zig");
