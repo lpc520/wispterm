@@ -2044,8 +2044,7 @@ pub fn toggleSidebar() void {
         syncPanelGridFromWindow(win);
         syncSidebarWidthToBackend(win);
     }
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    requestInputRepaint();
 }
 
 pub fn toggleFileExplorer() void {
@@ -2059,8 +2058,7 @@ pub fn toggleFileExplorer() void {
     if (AppWindow.g_window) |win| {
         syncPanelGridFromWindow(win);
     }
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    requestInputRepaint();
 }
 
 fn closeFileExplorerPanel() void {
@@ -2069,8 +2067,7 @@ fn closeFileExplorerPanel() void {
     if (AppWindow.g_window) |win| {
         syncPanelGridFromWindow(win);
     }
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    requestInputRepaint();
 }
 
 pub fn toggleBrowserPanel() void {
@@ -2091,8 +2088,7 @@ pub fn toggleBrowserPanel() void {
     if (AppWindow.g_window) |win| {
         syncPanelGridFromWindow(win);
     }
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    requestInputRepaint();
 }
 
 pub fn openJupyterPanel() void {
@@ -2118,8 +2114,7 @@ pub fn openJupyterPanel() void {
                 return;
             } else if (result.urls.len >= 2) {
                 jupyter_picker.show(@ptrCast(result.urls));
-                AppWindow.g_force_rebuild = true;
-                AppWindow.g_cells_valid = false;
+                requestInputRepaint();
                 return;
             }
         }
@@ -2134,8 +2129,7 @@ fn finishOpenJupyter() void {
     if (AppWindow.g_window) |win| {
         syncPanelGridFromWindow(win);
     }
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    requestInputRepaint();
 }
 
 fn closeBrowserPanel() void {
@@ -2144,14 +2138,12 @@ fn closeBrowserPanel() void {
     if (AppWindow.g_window) |win| {
         syncPanelGridFromWindow(win);
     }
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    requestInputRepaint();
 }
 
 pub fn refreshBrowserPanel() void {
     browser_panel.refresh();
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    requestInputRepaint();
 }
 
 fn closeAiCopilotPanel() void {
@@ -2159,8 +2151,7 @@ fn closeAiCopilotPanel() void {
     if (AppWindow.g_window) |win| {
         syncPanelGridFromWindow(win);
     }
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    requestInputRepaint();
 }
 
 pub fn closePanelOrTab() void {
@@ -2180,8 +2171,7 @@ pub fn closePanelOrTab() void {
         .confirm_running_program => {
             g_close_shortcut_confirm_until_ms = 0;
             overlays.closeConfirmOpen(.focused_split, .running_program);
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
+            requestInputRepaint();
         },
         .window_press_again => {
             const now = std.time.milliTimestamp();
@@ -2192,14 +2182,12 @@ pub fn closePanelOrTab() void {
             }
             g_close_shortcut_confirm_until_ms = now + CLOSE_SHORTCUT_CONFIRM_MS;
             overlays.showCloseShortcutConfirm(CLOSE_SHORTCUT_CONFIRM_MS);
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
+            requestInputRepaint();
         },
         .confirm_terminal => {
             g_close_shortcut_confirm_until_ms = 0;
             overlays.closeConfirmOpen(.focused_split, .terminal_split);
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
+            requestInputRepaint();
         },
         .close_now => {
             g_close_shortcut_confirm_until_ms = 0;
@@ -2228,8 +2216,7 @@ fn closePreviewPaneByHandle(handle: SplitTree.Node.Handle) void {
     g_preview_close_hover = null;
     tb.focused = handle;
     AppWindow.closeFocusedSplit();
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    requestInputRepaint();
 }
 
 /// Close a tab via a pointer gesture (middle-click or the × button), honoring
@@ -2239,8 +2226,7 @@ fn requestCloseTabGesture(tab_idx: usize) void {
     if (close_confirm.shouldConfirm(AppWindow.g_confirm_close_running_program, AppWindow.tabHasRunningProgram(tab_idx))) {
         const action: close_confirm.PendingClose = if (closes_window) .window else .{ .tab = tab_idx };
         overlays.closeConfirmOpen(action, .running_program);
-        AppWindow.g_force_rebuild = true;
-        AppWindow.g_cells_valid = false;
+        requestInputRepaint();
         return;
     }
     if (closes_window) {
@@ -2273,8 +2259,7 @@ pub fn copyRemoteSessionKeyToClipboard() bool {
     if (!copyTextToClipboard(key)) return false;
     overlays.remoteKeyCopiedFlash();
     overlays.remoteKeyOverlayDismiss(key);
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    requestInputRepaint();
     std.debug.print("Remote session key copied to clipboard\n", .{});
     return true;
 }
@@ -2621,8 +2606,7 @@ fn processSizeChange(win: anytype) void {
     );
     if (titlebar.setSidebarWidth(titlebar.g_sidebar_width, @floatFromInt(size.width))) {
         syncSidebarWidthToBackend(win);
-        AppWindow.g_force_rebuild = true;
-        AppWindow.g_cells_valid = false;
+        requestInputRepaint();
     }
 
     syncGridFromWindowSize(size.width, size.height);
