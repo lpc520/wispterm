@@ -2,6 +2,135 @@
 //! ai_chat.zig. Text + skill metadata -> suggestion data; no Session state.
 const std = @import("std");
 const skill_registry = @import("skill_registry.zig");
+const input_text = @import("ai_chat_input_text.zig");
+
+/// Max bytes the composer input buffer can hold. Mirrors
+/// `ai_chat.INPUT_PROMPT_MAX_BYTES` exactly so the editable buffer semantics
+/// (truncation on overflow) are identical when Session delegates here.
+pub const INPUT_PROMPT_MAX_BYTES: usize = 64 * 1024;
+
+/// The editable text + cursor of the AI chat input box, with the PURE editing
+/// operations (no mutex, no scroll/suggestion/selection/history side effects —
+/// those stay in `ai_chat.Session`). The byte-level logic here is a faithful
+/// copy of Session's `insertInputBytesLocked` / boundary deletes / cursor moves
+/// so routing Session through these helpers preserves behavior exactly.
+///
+/// The buffer is a fixed array (no allocation), matching Session's
+/// `input_buf: [INPUT_PROMPT_MAX_BYTES]u8`. All ops are UTF-8 aware where the
+/// current Session code is.
+pub const Composer = struct {
+    buf: [INPUT_PROMPT_MAX_BYTES]u8 = undefined,
+    len: usize = 0,
+    cursor: usize = 0,
+
+    /// The current editable text (const view into the buffer).
+    pub fn text(self: *const Composer) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    /// True when the trimmed text is non-empty, i.e. a submit would do work.
+    /// Mirrors the `prompt_raw.len == 0` early-return guard in Session.submit.
+    pub fn canSubmit(self: *const Composer) bool {
+        return std.mem.trim(u8, self.text(), " \t\r\n").len != 0;
+    }
+
+    /// Clamp the cursor onto a UTF-8 boundary within [0, len]. Mirrors
+    /// Session.clampInputCursorLocked.
+    pub fn clampCursor(self: *Composer) void {
+        if (self.cursor > self.len) self.cursor = self.len;
+        while (self.cursor > 0 and self.cursor < self.len and (self.buf[self.cursor] & 0xC0) == 0x80) {
+            self.cursor -= 1;
+        }
+    }
+
+    /// Insert `bytes` at the cursor, truncating to fit the buffer and to a
+    /// UTF-8 boundary. Mirrors Session.insertInputBytesLocked (sans the
+    /// scroll/suggestion side effects). Cursor advances past the inserted run.
+    pub fn insertText(self: *Composer, bytes: []const u8) void {
+        self.clampCursor();
+        var n = @min(bytes.len, self.buf.len - self.len);
+        while (n > 0 and n < bytes.len and (bytes[n] & 0xC0) == 0x80) {
+            n -= 1;
+        }
+        if (n == 0) return;
+        if (self.cursor < self.len) {
+            std.mem.copyBackwards(
+                u8,
+                self.buf[self.cursor + n .. self.len + n],
+                self.buf[self.cursor..self.len],
+            );
+        }
+        @memcpy(self.buf[self.cursor..][0..n], bytes[0..n]);
+        self.len += n;
+        self.cursor += n;
+    }
+
+    /// Delete the UTF-8 codepoint before the cursor. Mirrors the
+    /// non-select-all path of Session.backspaceInput.
+    pub fn backspace(self: *Composer) void {
+        self.clampCursor();
+        if (self.cursor == 0) return;
+        const start = input_text.previousUtf8Boundary(self.text(), self.cursor);
+        self.deleteRange(start, self.cursor);
+        self.cursor = start;
+    }
+
+    /// Delete the UTF-8 codepoint after the cursor. Mirrors the
+    /// non-select-all path of Session.deleteInput.
+    pub fn deleteForward(self: *Composer) void {
+        self.clampCursor();
+        if (self.cursor >= self.len) return;
+        const end = input_text.nextUtf8Boundary(self.text(), self.cursor);
+        self.deleteRange(self.cursor, end);
+    }
+
+    /// Move the cursor one UTF-8 codepoint left. Mirrors the cursor math in
+    /// Session.moveInputCursorLeft.
+    pub fn moveLeft(self: *Composer) void {
+        self.cursor = cursorLeft(self.text(), self.cursor);
+    }
+
+    /// Move the cursor one UTF-8 codepoint right. Mirrors the cursor math in
+    /// Session.moveInputCursorRight.
+    pub fn moveRight(self: *Composer) void {
+        self.cursor = cursorRight(self.text(), self.cursor);
+    }
+
+    /// Empty the buffer and reset the cursor. Mirrors the buffer/cursor part of
+    /// Session.clearSubmittedInputLocked.
+    pub fn clear(self: *Composer) void {
+        self.len = 0;
+        self.cursor = 0;
+    }
+
+    /// Delete bytes in [start, end) from the buffer, shifting the tail down.
+    /// Mirrors Session.deleteInputRangeLocked.
+    fn deleteRange(self: *Composer, start: usize, end: usize) void {
+        if (start >= end or end > self.len) return;
+        const removed = end - start;
+        if (end < self.len) {
+            std.mem.copyForwards(
+                u8,
+                self.buf[start .. self.len - removed],
+                self.buf[end..self.len],
+            );
+        }
+        self.len -= removed;
+        if (self.cursor > self.len) self.cursor = self.len;
+    }
+};
+
+/// Pure cursor-left primitive: previous UTF-8 boundary. Shared by
+/// Composer.moveLeft and Session.moveInputCursorLeft.
+pub fn cursorLeft(text_bytes: []const u8, cursor: usize) usize {
+    return input_text.previousUtf8Boundary(text_bytes, cursor);
+}
+
+/// Pure cursor-right primitive: next UTF-8 boundary. Shared by
+/// Composer.moveRight and Session.moveInputCursorRight.
+pub fn cursorRight(text_bytes: []const u8, cursor: usize) usize {
+    return input_text.nextUtf8Boundary(text_bytes, cursor);
+}
 
 pub const SlashCommand = enum {
     skills,
@@ -550,4 +679,104 @@ test "parseCwdArg classifies show, reset, and set" {
     }
     try std.testing.expect(exactBuiltinCommand("/cwd") != null);
     try std.testing.expect(exactBuiltinCommand("/cwd").? == .cwd);
+}
+
+test "Composer inserts ascii at the cursor and advances" {
+    var c: Composer = .{};
+    c.insertText("hello");
+    try std.testing.expectEqualStrings("hello", c.text());
+    try std.testing.expectEqual(@as(usize, 5), c.cursor);
+    // Insert in the middle.
+    c.cursor = 2;
+    c.insertText("XY");
+    try std.testing.expectEqualStrings("heXYllo", c.text());
+    try std.testing.expectEqual(@as(usize, 4), c.cursor);
+}
+
+test "Composer inserts utf-8 without splitting a codepoint" {
+    var c: Composer = .{};
+    c.insertText("a\u{00e9}b"); // 'a', 'é' (2 bytes), 'b'
+    try std.testing.expectEqualStrings("a\u{00e9}b", c.text());
+    try std.testing.expectEqual(@as(usize, 4), c.len);
+    try std.testing.expectEqual(@as(usize, 4), c.cursor);
+}
+
+test "Composer backspace deletes a whole utf-8 codepoint" {
+    var c: Composer = .{};
+    c.insertText("a\u{00e9}"); // 'a' + 'é'
+    c.backspace();
+    try std.testing.expectEqualStrings("a", c.text());
+    try std.testing.expectEqual(@as(usize, 1), c.cursor);
+    c.backspace();
+    try std.testing.expectEqualStrings("", c.text());
+    try std.testing.expectEqual(@as(usize, 0), c.cursor);
+    // Backspace at the start is a no-op.
+    c.backspace();
+    try std.testing.expectEqual(@as(usize, 0), c.len);
+}
+
+test "Composer deleteForward removes the codepoint after the cursor" {
+    var c: Composer = .{};
+    c.insertText("a\u{00e9}b");
+    c.cursor = 1; // before 'é'
+    c.deleteForward();
+    try std.testing.expectEqualStrings("ab", c.text());
+    try std.testing.expectEqual(@as(usize, 1), c.cursor);
+    // At end is a no-op.
+    c.cursor = c.len;
+    c.deleteForward();
+    try std.testing.expectEqualStrings("ab", c.text());
+}
+
+test "Composer cursor left/right step over multi-byte runes" {
+    var c: Composer = .{};
+    c.insertText("a\u{00e9}b"); // cursor at 4 (end)
+    c.moveLeft();
+    try std.testing.expectEqual(@as(usize, 3), c.cursor); // before 'b'
+    c.moveLeft();
+    try std.testing.expectEqual(@as(usize, 1), c.cursor); // before 'é' (skips its 2 bytes)
+    c.moveLeft();
+    try std.testing.expectEqual(@as(usize, 0), c.cursor);
+    c.moveLeft(); // clamp at 0
+    try std.testing.expectEqual(@as(usize, 0), c.cursor);
+    c.moveRight();
+    try std.testing.expectEqual(@as(usize, 1), c.cursor);
+    c.moveRight();
+    try std.testing.expectEqual(@as(usize, 3), c.cursor); // past 'é'
+    c.moveRight();
+    try std.testing.expectEqual(@as(usize, 4), c.cursor);
+    c.moveRight(); // clamp at len
+    try std.testing.expectEqual(@as(usize, 4), c.cursor);
+}
+
+test "Composer clear empties buffer and resets cursor" {
+    var c: Composer = .{};
+    c.insertText("some text");
+    c.clear();
+    try std.testing.expectEqualStrings("", c.text());
+    try std.testing.expectEqual(@as(usize, 0), c.len);
+    try std.testing.expectEqual(@as(usize, 0), c.cursor);
+}
+
+test "Composer canSubmit is false for empty / whitespace-only input" {
+    var c: Composer = .{};
+    try std.testing.expect(!c.canSubmit());
+    c.insertText("   \t\n");
+    try std.testing.expect(!c.canSubmit());
+    c.insertText("hi");
+    try std.testing.expect(c.canSubmit());
+}
+
+test "Composer insertText truncates at the buffer boundary without splitting utf-8" {
+    var c: Composer = .{};
+    // Fill the buffer one byte short of full, then try to insert a 2-byte rune.
+    c.len = INPUT_PROMPT_MAX_BYTES - 1;
+    c.cursor = c.len;
+    @memset(c.buf[0..c.len], 'x');
+    c.insertText("\u{00e9}"); // would split the codepoint -> rejected entirely
+    try std.testing.expectEqual(@as(usize, INPUT_PROMPT_MAX_BYTES - 1), c.len);
+    // A single ascii byte fits exactly.
+    c.insertText("z");
+    try std.testing.expectEqual(@as(usize, INPUT_PROMPT_MAX_BYTES), c.len);
+    try std.testing.expectEqual(@as(u8, 'z'), c.buf[INPUT_PROMPT_MAX_BYTES - 1]);
 }
