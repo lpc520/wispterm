@@ -769,6 +769,7 @@ comptime {
     _ = @import("renderer/overlays.zig");
     _ = @import("renderer/overlays/confirm_modals.zig");
     _ = @import("renderer/overlays/command_palette_input.zig");
+    _ = @import("renderer/overlays/command_palette_layout.zig");
     _ = @import("renderer/overlays/settings_page.zig");
     _ = @import("renderer/overlays/ssh_profiles.zig");
     _ = @import("renderer/overlays/ai_profiles.zig");

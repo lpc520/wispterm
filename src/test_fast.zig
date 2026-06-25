@@ -51,6 +51,7 @@ test {
     _ = @import("input/close_confirm.zig");
     _ = @import("renderer/overlays/profile_codec.zig");
     _ = @import("renderer/overlays/command_palette_input.zig");
+    _ = @import("renderer/overlays/command_palette_layout.zig");
     _ = @import("renderer/overlays/settings_page.zig");
     _ = @import("renderer/overlays/toasts.zig");
     _ = @import("renderer/overlays/confirm_modals.zig");
