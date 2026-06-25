@@ -40,6 +40,7 @@ const toasts = @import("overlays/toasts.zig");
 const ssh_profiles = @import("overlays/ssh_profiles.zig");
 const ai_profiles = @import("overlays/ai_profiles.zig");
 const session_launcher = @import("overlays/session_launcher.zig");
+const command_palette_layout = @import("overlays/command_palette_layout.zig");
 const close_confirm = @import("../close_confirm.zig");
 const close_confirm_state = @import("../input/close_confirm.zig");
 const weixin_qr_panel = @import("../weixin/qr_panel.zig");
@@ -202,7 +203,7 @@ const TransferCancelConfirmLayout = struct {
 // ============================================================================
 
 const COMMAND_PALETTE_FILTER_MAX = 64;
-const COMMAND_PALETTE_MAX_VISIBLE_ROWS = 14;
+const COMMAND_PALETTE_MAX_VISIBLE_ROWS = command_palette_layout.MAX_VISIBLE_ROWS;
 
 const THEME_OVERRIDE_KEYS = [_][]const u8{
     "background",
@@ -243,18 +244,7 @@ threadlocal var g_command_palette_history_selected: usize = 0;
 threadlocal var g_command_palette_history_source: command_palette_history_view.SourceFilter = .all;
 threadlocal var g_command_palette_history_item_count: usize = 0;
 
-const CommandPaletteLayout = struct {
-    box_x: f32,
-    box_top_px: f32,
-    box_w: f32,
-    box_h: f32,
-    header_h: f32,
-    filter_h: f32,
-    footer_h: f32,
-    row_top_px: f32,
-    row_h: f32,
-    rendered_rows: usize,
-};
+const CommandPaletteLayout = command_palette_layout.Layout;
 
 pub fn commandPaletteVisible() bool {
     return g_command_palette_visible;
@@ -1265,55 +1255,23 @@ fn rowTextY(row_y: f32, row_h: f32) f32 {
     return @round(row_y + (row_h - overlayTextHeight()) / 2.0);
 }
 
-fn commandPaletteRowCapacity(content_height: f32, base_h: f32, row_h: f32) usize {
-    const usable_h = @max(row_h, content_height - 32.0 - base_h);
-    if (usable_h <= row_h) return 1;
-    const count_f = @floor(usable_h / row_h);
-    const count: usize = @intFromFloat(@max(1.0, count_f));
-    return @min(count, COMMAND_PALETTE_MAX_VISIBLE_ROWS);
-}
-
 fn commandPaletteFirstVisibleIndex(rendered_rows: usize) usize {
     const count = commandPaletteResultCount();
-    if (rendered_rows == 0 or count <= rendered_rows) return 0;
     const selected = if (commandPaletteIsHistoryMode())
-        @min(g_command_palette_history_selected, count - 1)
+        g_command_palette_history_selected
     else
-        @min(g_command_palette_selected, count - 1);
-    if (selected < rendered_rows) return 0;
-    return @min(selected - rendered_rows + 1, count - rendered_rows);
+        g_command_palette_selected;
+    return command_palette_layout.firstVisibleIndex(rendered_rows, count, selected);
 }
 
 fn commandPaletteLayout(window_width: f32, window_height: f32, top_offset: f32) CommandPaletteLayout {
-    const content_height = @max(1, window_height - top_offset);
-    const visible_count = commandPaletteResultCount();
-
-    const box_w = @round(@min(@max(520, window_width - 64), 760));
-    const row_h = overlayRowHeight(38);
-    const header_h = @round(@max(48.0, overlayTextHeight() + 30.0));
-    const filter_h = overlayControlHeight(42);
-    const footer_h = @round(@max(34.0, overlayTextHeight() + 18.0));
-    const base_h = header_h + filter_h + 12 + footer_h;
-    const max_rows = commandPaletteRowCapacity(content_height, base_h, row_h);
-    const rendered_rows = @min(visible_count, max_rows);
-    const row_area_h = row_h * @as(f32, @floatFromInt(@max(rendered_rows, 1)));
-    const box_h = @round(clampOverlayBoxHeight(base_h + row_area_h, content_height));
-    const box_x = @round(@max(16, (window_width - box_w) / 2));
-    const box_top_px = @round(top_offset + @max(16, (content_height - box_h) / 2));
-    const row_top_px = @round(box_top_px + header_h + filter_h + 12);
-
-    return .{
-        .box_x = box_x,
-        .box_top_px = box_top_px,
-        .box_w = box_w,
-        .box_h = box_h,
-        .header_h = header_h,
-        .filter_h = filter_h,
-        .footer_h = footer_h,
-        .row_top_px = row_top_px,
-        .row_h = row_h,
-        .rendered_rows = rendered_rows,
-    };
+    return command_palette_layout.compute(
+        window_width,
+        window_height,
+        top_offset,
+        font.g_titlebar_cell_height,
+        commandPaletteResultCount(),
+    );
 }
 
 pub const ImeCaretPx = struct { x: f32, y: f32, h: f32 };
