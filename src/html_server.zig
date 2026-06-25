@@ -113,10 +113,6 @@ const Server = struct {
             std.mem.eql(u8, self.sshPort(), conn.port()) and
             std.mem.eql(u8, self.proxyJump(), conn.proxyJump());
     }
-
-    fn matchesSurface(self: *const Server, surface: *const Surface) bool {
-        return surfaceIdsEqual(&self.source_surface_id, &surface.remote_id);
-    }
 };
 
 threadlocal var g_servers: [MAX_SERVERS]?Server = [_]?Server{null} ** MAX_SERVERS;
@@ -128,13 +124,6 @@ pub fn deinit() void {
 
 pub fn stopAll() void {
     for (&g_servers) |*slot| stopServer(slot);
-}
-
-pub fn stopForSurface(surface: *const Surface) void {
-    for (&g_servers) |*slot| {
-        const server = if (slot.*) |*server| server else continue;
-        if (server.matchesSurface(surface)) stopServer(slot);
-    }
 }
 
 pub fn stopForSurfaceId(source_surface_id: *const [16]u8) void {
@@ -857,9 +846,9 @@ test "html_server: public stop API shape stays stable" {
 }
 
 test "html_server: public surface stop API shape stays stable" {
-    const info = @typeInfo(@TypeOf(stopForSurface)).@"fn";
+    const info = @typeInfo(@TypeOf(stopForSurfaceId)).@"fn";
     try std.testing.expectEqual(@as(usize, 1), info.params.len);
-    try std.testing.expect(info.params[0].type.? == *const Surface);
+    try std.testing.expect(info.params[0].type.? == *const [16]u8);
     try std.testing.expect(info.return_type.? == void);
 }
 
