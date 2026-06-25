@@ -3016,15 +3016,11 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
     const key_event = logicalKeyEvent(ev);
     if (overlays.whatsNewVisible()) {
         overlays.whatsNewHandleKey(key_event);
-        AppWindow.g_force_rebuild = true;
-        AppWindow.g_cells_valid = false;
-        return .none;
+        return input_effects.repaint();
     }
     if (overlays.integrationPromptVisible()) {
         overlays.integrationPromptHandleKey(key_event);
-        AppWindow.g_force_rebuild = true;
-        AppWindow.g_cells_valid = false;
-        return .none;
+        return input_effects.repaint();
     }
     if (overlays.windowCloseConfirmVisible()) {
         return overlays.windowCloseConfirmHandleKey(key_event);
@@ -3076,9 +3072,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
             },
             else => {},
         }
-        AppWindow.g_force_rebuild = true;
-        AppWindow.g_cells_valid = false;
-        return .none;
+        return input_effects.repaint();
     }
     if (jupyter_picker.isVisible()) {
         switch (ev.key_code) {
@@ -3098,9 +3092,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
             },
             else => {},
         }
-        AppWindow.g_force_rebuild = true;
-        AppWindow.g_cells_valid = false;
-        return .none;
+        return input_effects.repaint();
     }
     if (overlays.restoreDefaultsConfirmVisible()) {
         return overlays.restoreDefaultsConfirmHandleKey(key_event);
@@ -3121,8 +3113,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
         if (handleFileExplorerKey(ev)) {
             // Navigation/edits change what the panel draws; request a frame so it
             // updates immediately (same rationale as the wheel-scroll path).
-            AppWindow.g_force_rebuild = true;
-            return .none;
+            return input_effects.rebuildOnly();
         }
     }
     // When tab rename is active, handle special keys
@@ -3139,9 +3130,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
     if (browser_panel.isVisibleForActiveTab() and !browser_panel.urlBarFocused() and !jupyter_picker.isVisible() and !copilot_picker.isVisible()) {
         if (ev.key_code == platform_input.key_escape) {
             closeBrowserPanel();
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
-            return .none;
+            return input_effects.repaint();
         }
     }
     if (AppWindow.activeAiChat()) |chat| {
@@ -3149,9 +3138,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
         const mod = ev.ctrl or ev.super;
         if (mod and !ev.alt and ev.key_code == 0x41) { // select all
             chat.selectAll();
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
-            return .none;
+            return input_effects.repaint();
         }
         if (mod and !ev.alt and ev.key_code == 0x43) { // copy
             copyAiChatToClipboard(chat);
@@ -3169,9 +3156,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
             const mod = ev.ctrl or ev.super;
             if (mod and !ev.alt and ev.key_code == 0x41) { // select all
                 chat.selectAll();
-                AppWindow.g_force_rebuild = true;
-                AppWindow.g_cells_valid = false;
-                return .none;
+                return input_effects.repaint();
             }
             if (mod and !ev.alt and ev.key_code == 0x43) { // copy
                 copyAiChatToClipboard(chat);
@@ -3191,9 +3176,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
         if (isAiChatKey(ev)) {
             AppWindow.resetCursorBlink();
             chat.handleKeyWithWrapCols(key_event, aiChatInputWrapCols());
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
-            return .none;
+            return input_effects.repaint();
         }
     }
 
@@ -3483,16 +3466,12 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
                 } else {
                     AppWindow.hideAiCopilot();
                 }
-                AppWindow.g_force_rebuild = true;
-                AppWindow.g_cells_valid = false;
-                return .none;
+                return input_effects.repaint();
             }
             if (isAiChatKey(ev)) {
                 AppWindow.resetCursorBlink();
                 chat.handleKeyWithWrapCols(key_event, aiCopilotInputWrapCols());
-                AppWindow.g_force_rebuild = true;
-                AppWindow.g_cells_valid = false;
-                return .none;
+                return input_effects.repaint();
             }
         }
     }
@@ -3532,9 +3511,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
                 else => consumed = false,
             }
             if (consumed) {
-                AppWindow.g_force_rebuild = true;
-                AppWindow.g_cells_valid = false;
-                return .none;
+                return input_effects.repaint();
             }
         }
     }
