@@ -27,6 +27,18 @@ test "input dispatch key routes UI dirtying through effects" {
     try std.testing.expect(std.mem.indexOf(u8, region, "input_effects.rebuildOnly()") != null);
 }
 
+test "input key-dispatched preview helpers route UI dirtying through effects" {
+    const region = try sourceSlice("fn openPreviewGalleryNeighbor", "\nfn findPreviewGalleryNeighbor");
+    try expectNoDirectDirtyWrites(region);
+    try std.testing.expect(std.mem.indexOf(u8, region, "requestInputRepaint()") != null);
+}
+
+test "input key-dispatched agent history helpers route UI dirtying through effects" {
+    const region = try sourceSlice("fn deleteSelectedAgentHistoryRow", "\nfn hitTestConfigButton");
+    try expectNoDirectDirtyWrites(region);
+    try std.testing.expect(std.mem.indexOf(u8, region, "requestInputRepaint()") != null);
+}
+
 test "input dirty helpers delegate to the local apply boundary" {
     const helper_region = try sourceSlice("fn applyInputEffect", "\nfn blurBrowserUrlBarIfFocused");
     try std.testing.expect(std.mem.indexOf(u8, helper_region, "AppWindow.applyUiEffect(effect)") != null);

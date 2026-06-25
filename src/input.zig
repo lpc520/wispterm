@@ -4250,8 +4250,7 @@ fn deleteSelectedAgentHistoryRow() void {
     const session_id = file_explorer.selectedHistorySessionId() orelse return;
     if (!AppWindow.deleteAiChatHistorySessionId(session_id)) return;
     AppWindow.syncFileExplorerAgentHistoryRows();
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    requestInputRepaint();
 }
 
 fn hitTestConfigButton(xpos: f64, ypos: f64) bool {
@@ -4909,8 +4908,7 @@ fn openPreviewGalleryNeighbor(p: *PreviewPane, forward: bool) bool {
         return false;
     }
 
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
+    requestInputRepaint();
     return true;
 }
 
