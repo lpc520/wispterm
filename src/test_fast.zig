@@ -58,6 +58,7 @@ test {
     _ = @import("renderer/overlays/toasts.zig");
     _ = @import("renderer/overlays/confirm_modals.zig");
     _ = @import("renderer/overlays/ssh_profiles.zig");
+    _ = @import("renderer/overlays/ssh_profiles_layout.zig");
     _ = @import("renderer/overlays/ai_profiles.zig");
     _ = @import("renderer/overlays/session_launcher.zig");
     _ = @import("renderer/overlays/state.zig");
@@ -105,6 +106,7 @@ test {
     _ = @import("apprt/window_registry.zig");
     _ = @import("appwindow/active_tab.zig");
     _ = @import("appwindow/frame_latency.zig");
+    _ = @import("appwindow/frame_scheduler.zig");
     _ = @import("appwindow/render_gate.zig");
     _ = @import("appwindow/ui_effect.zig");
     _ = @import("appwindow/window_state.zig");
