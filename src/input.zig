@@ -5237,8 +5237,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             const xpos: f64 = @floatFromInt(ev.x);
             const ypos: f64 = @floatFromInt(ev.y);
             _ = overlays.whatsNewExecuteAt(xpos, ypos, @floatFromInt(fb.width), @floatFromInt(fb.height));
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
+            requestInputRepaint();
         }
         return;
     }
@@ -5249,8 +5248,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             const xpos: f64 = @floatFromInt(ev.x);
             const ypos: f64 = @floatFromInt(ev.y);
             _ = overlays.integrationPromptExecuteAt(xpos, ypos, @floatFromInt(fb.width), @floatFromInt(fb.height));
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
+            requestInputRepaint();
         }
         return;
     }
@@ -5261,8 +5259,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             const xpos: f64 = @floatFromInt(ev.x);
             const ypos: f64 = @floatFromInt(ev.y);
             _ = overlays.windowCloseConfirmExecuteAt(xpos, ypos, @floatFromInt(fb.width), @floatFromInt(fb.height));
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
+            requestInputRepaint();
         }
         return;
     }
@@ -5276,8 +5273,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 .interrupt => _ = file_explorer.cancelActiveTransfer(),
                 .keep, .none => {},
             }
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
+            requestInputRepaint();
         }
         return;
     }
@@ -5306,8 +5302,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             const xpos: f64 = @floatFromInt(ev.x);
             const ypos: f64 = @floatFromInt(ev.y);
             _ = overlays.restoreDefaultsConfirmExecuteAt(xpos, ypos, @floatFromInt(fb.width), @floatFromInt(fb.height));
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
+            requestInputRepaint();
         }
         return;
     }
@@ -5363,8 +5358,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
         const ypos: f64 = @floatFromInt(ev.y);
         if (overlays.transferToastHitTest(xpos, ypos, @floatFromInt(fb.width), @floatFromInt(fb.height))) {
             overlays.transferCancelConfirmOpen();
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
+            requestInputRepaint();
             return;
         }
         if (overlays.updatePromptHitTest(xpos, ypos, @floatFromInt(fb.height))) {
@@ -5502,8 +5496,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             }
             if (file_explorer.g_panel_mode == .files and hitTestFileExplorerRefreshButton(xpos, ypos)) {
                 file_explorer.refresh();
-                AppWindow.g_force_rebuild = true;
-                AppWindow.g_cells_valid = false;
+                requestInputRepaint();
                 return;
             }
             if (hitTestBrowserRefreshButton(xpos, ypos)) {
@@ -5979,8 +5972,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                         const tb = AppWindow.activeTab() orelse return;
                         if (tb.focused != hit.handle) {
                             tb.focused = hit.handle;
-                            AppWindow.g_force_rebuild = true;
-                            AppWindow.g_cells_valid = false;
+                            requestInputRepaint();
                         }
                         if (AppWindow.g_allocator) |gpa| {
                             if (g_preview_image_drag.begin(gpa, p, xpos, ypos))
@@ -6016,8 +6008,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 g_ai_transcript_select_chat = null;
                 g_ai_transcript_select_auto_copy = false;
                 g_ai_transcript_select_panel = .active_chat;
-                AppWindow.g_force_rebuild = true;
-                AppWindow.g_cells_valid = false;
+                requestInputRepaint();
                 platform_cursor.set(.arrow);
                 return;
             }
