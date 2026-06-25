@@ -2637,8 +2637,7 @@ fn dispatchChar(ev: platform_input.CharEvent) ui_effect.UiEffect {
     if (overlays.sessionLauncherVisible()) {
         if (!ev.ctrl and !ev.alt) {
             overlays.sessionLauncherInsertChar(ev.codepoint);
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
+            return input_effects.repaint();
         }
         return .none;
     }
@@ -2671,8 +2670,7 @@ fn dispatchChar(ev: platform_input.CharEvent) ui_effect.UiEffect {
         if (!ev.ctrl and !ev.alt) {
             AppWindow.resetCursorBlink();
             chat.handleChar(ev.codepoint);
-            AppWindow.g_force_rebuild = true;
-            AppWindow.g_cells_valid = false;
+            return input_effects.repaint();
         }
         return .none;
     }
@@ -2715,8 +2713,7 @@ fn dispatchChar(ev: platform_input.CharEvent) ui_effect.UiEffect {
             if (!ev.ctrl and !ev.alt) {
                 AppWindow.resetCursorBlink();
                 chat.handleChar(ev.codepoint);
-                AppWindow.g_force_rebuild = true;
-                AppWindow.g_cells_valid = false;
+                return input_effects.repaint();
             }
             return .none;
         }
@@ -2732,10 +2729,7 @@ fn dispatchChar(ev: platform_input.CharEvent) ui_effect.UiEffect {
                 '-', '_' => p.zoomImageBySteps(1, false),
                 else => false,
             };
-            if (zoomed) {
-                AppWindow.g_force_rebuild = true;
-                AppWindow.g_cells_valid = false;
-            }
+            if (zoomed) return input_effects.repaint();
             switch (ev.codepoint) {
                 '+', '=', '-', '_' => return .none,
                 else => {},
