@@ -589,9 +589,9 @@ test "input: skill center tool toggle requests a repaint" {
     try std.testing.expect(AppWindow.g_force_rebuild);
     try std.testing.expect(!AppWindow.g_cells_valid);
 
-    const manifest = try tmp.dir.readFileAlloc(allocator, "tools/fake_tool/manifest.json", 4096);
-    defer allocator.free(manifest);
-    try std.testing.expect(std.mem.indexOf(u8, manifest, "\"enabled\": true") != null);
+    const persisted_manifest = try tmp.dir.readFileAlloc(allocator, "tools/fake_tool/manifest.json", 4096);
+    defer allocator.free(persisted_manifest);
+    try std.testing.expect(std.mem.indexOf(u8, persisted_manifest, "\"enabled\": true") != null);
 
     _ = AppWindow.skillCenterToggleToolEnabled();
 }
@@ -806,9 +806,9 @@ test "input: skill center tool toggle is blocked while selection overlay is acti
     AppWindow.g_cells_valid = true;
     handleKey(.{ .key_code = 0x45, .ctrl = false, .shift = false, .alt = false, .super = false });
 
-    const manifest = try tmp.dir.readFileAlloc(allocator, "tools/fake_tool/manifest.json", 4096);
-    defer allocator.free(manifest);
-    try std.testing.expect(std.mem.indexOf(u8, manifest, "\"enabled\": true") != null);
+    const persisted_manifest = try tmp.dir.readFileAlloc(allocator, "tools/fake_tool/manifest.json", 4096);
+    defer allocator.free(persisted_manifest);
+    try std.testing.expect(std.mem.indexOf(u8, persisted_manifest, "\"enabled\": true") != null);
 
     session.mutex.lock();
     defer session.mutex.unlock();
@@ -1407,9 +1407,9 @@ test "input: skill center main actions are blocked while import list overlay is 
     handleKey(.{ .key_code = 0x45, .ctrl = false, .shift = false, .alt = false, .super = false });
     try std.testing.expect(!AppWindow.g_force_rebuild);
     try std.testing.expect(AppWindow.g_cells_valid);
-    const manifest = try tmp.dir.readFileAlloc(allocator, "tools/fake_tool/manifest.json", 4096);
-    defer allocator.free(manifest);
-    try std.testing.expect(std.mem.indexOf(u8, manifest, "\"enabled\": true") != null);
+    const persisted_manifest = try tmp.dir.readFileAlloc(allocator, "tools/fake_tool/manifest.json", 4096);
+    defer allocator.free(persisted_manifest);
+    try std.testing.expect(std.mem.indexOf(u8, persisted_manifest, "\"enabled\": true") != null);
     {
         session.mutex.lock();
         defer session.mutex.unlock();
