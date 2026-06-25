@@ -3312,7 +3312,7 @@ pub const Session = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.clearSelectionLocked();
-        self.input_cursor = previousUtf8Boundary(self.input(), self.input_cursor);
+        self.input_cursor = ai_chat_composer.cursorLeft(self.input(), self.input_cursor);
         self.input_scroll_follow_cursor = true;
         self.suggestion_selected = 0;
     }
@@ -3321,7 +3321,7 @@ pub const Session = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.clearSelectionLocked();
-        self.input_cursor = nextUtf8Boundary(self.input(), self.input_cursor);
+        self.input_cursor = ai_chat_composer.cursorRight(self.input(), self.input_cursor);
         self.input_scroll_follow_cursor = true;
         self.suggestion_selected = 0;
     }
