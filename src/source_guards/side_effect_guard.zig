@@ -19,6 +19,9 @@ const Frozen = struct {
     ceiling: usize,
 };
 
+// Verified against the post-round-1 tree: every direct-write ceiling here
+// already equals the current actual (AppWindow 63, input 81, overlays 12,
+// ai_chat 0), so there is no slack to ratchet away this round.
 const monoliths = [_]Frozen{
     .{ .name = "AppWindow.zig", .source = @embedFile("../AppWindow.zig"), .ceiling = 63 },
     .{ .name = "input.zig", .source = @embedFile("../input.zig"), .ceiling = 81 },
