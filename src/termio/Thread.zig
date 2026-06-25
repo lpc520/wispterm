@@ -17,7 +17,7 @@
 const std = @import("std");
 const xev = @import("xev");
 const Surface = @import("../Surface.zig");
-const renderer = @import("../renderer.zig");
+const geometry = @import("../core/geometry.zig");
 const window_backend = @import("../platform/window_backend.zig");
 
 const Thread = @This();
@@ -35,7 +35,7 @@ coalesce_c: xev.Completion = .{},
 coalesce_cancel_c: xev.Completion = .{},
 
 /// Pending coalesced resize (latest wins). Writer-thread-only.
-coalesce_data: ?renderer.size.GridSize = null,
+coalesce_data: ?geometry.GridSize = null,
 
 /// Whether the coalesce timer is currently active.
 coalesce_active: bool = false,
@@ -110,7 +110,7 @@ fn writeToPty(surface: *Surface, data: []const u8) void {
     surface.pty.writeInput(data) catch {};
 }
 
-fn handleResize(self: *Thread, grid: renderer.size.GridSize) void {
+fn handleResize(self: *Thread, grid: geometry.GridSize) void {
     self.coalesce_data = grid;
 
     if (self.coalesce_active) return; // timer already running, it will pick up latest data
@@ -120,7 +120,7 @@ fn handleResize(self: *Thread, grid: renderer.size.GridSize) void {
     self.coalesce.run(&self.loop, &self.coalesce_c, COALESCE_MS, Thread, self, coalesceCallback);
 }
 
-fn handleResizeImmediate(self: *Thread, grid: renderer.size.GridSize) void {
+fn handleResizeImmediate(self: *Thread, grid: geometry.GridSize) void {
     // Drop any older coalesced resize so a delayed timer cannot undo the
     // immediate layout change.
     self.coalesce_data = null;
@@ -149,7 +149,7 @@ fn coalesceCallback(
     return .disarm;
 }
 
-fn applyResize(surface: *Surface, grid: renderer.size.GridSize) void {
+fn applyResize(surface: *Surface, grid: geometry.GridSize) void {
     // PTY resize first (like Ghostty), then terminal.
     // The ReadThread is concurrently in a blocking PTY read. This keeps
     // backend output draining while resize side effects are emitted.
