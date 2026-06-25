@@ -520,7 +520,7 @@ test "input: skill center tool toggle requests a repaint" {
     try tmp.dir.makePath("tools/fake_tool/bin");
     try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/SKILL.md", .data = "---\nname: fake_tool\n---\n" });
     try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/bin/fake_tool", .data = "" });
-    try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/manifest.json", .data =
+    const manifest =
         \\{
         \\  "kind": "binary_tool",
         \\  "id": "fake_tool",
@@ -532,7 +532,8 @@ test "input: skill center tool toggle requests a repaint" {
         \\  "imported_at_ms": 1,
         \\  "description": "fake"
         \\}
-    });
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/manifest.json", .data = manifest });
     const root = try tmp.dir.realpathAlloc(allocator, ".");
     defer allocator.free(root);
     platform_dirs.setTestConfigDirForCurrentThread(root);
@@ -710,7 +711,7 @@ test "input: skill center tool toggle is blocked while selection overlay is acti
     try tmp.dir.makePath("tools/fake_tool/bin");
     try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/SKILL.md", .data = "---\nname: fake_tool\n---\n" });
     try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/bin/fake_tool", .data = "" });
-    try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/manifest.json", .data =
+    const manifest =
         \\{
         \\  "kind": "binary_tool",
         \\  "id": "fake_tool",
@@ -722,7 +723,8 @@ test "input: skill center tool toggle is blocked while selection overlay is acti
         \\  "imported_at_ms": 1,
         \\  "description": "fake"
         \\}
-    });
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/manifest.json", .data = manifest });
     const root = try tmp.dir.realpathAlloc(allocator, ".");
     defer allocator.free(root);
     platform_dirs.setTestConfigDirForCurrentThread(root);
@@ -1253,7 +1255,7 @@ test "input: skill center main actions are blocked while import list overlay is 
     try tmp.dir.makePath("tools/fake_tool/bin");
     try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/SKILL.md", .data = "---\nname: fake_tool\n---\n" });
     try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/bin/fake_tool", .data = "" });
-    try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/manifest.json", .data =
+    const manifest =
         \\{
         \\  "kind": "binary_tool",
         \\  "id": "fake_tool",
@@ -1265,7 +1267,8 @@ test "input: skill center main actions are blocked while import list overlay is 
         \\  "imported_at_ms": 1,
         \\  "description": "fake"
         \\}
-    });
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "tools/fake_tool/manifest.json", .data = manifest });
     const root = try tmp.dir.realpathAlloc(allocator, ".");
     defer allocator.free(root);
     platform_dirs.setTestConfigDirForCurrentThread(root);
