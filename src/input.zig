@@ -1986,6 +1986,10 @@ fn requestInputRebuild() void {
     applyInputEffect(input_effects.rebuildOnly());
 }
 
+fn requestInputDirtyFlags(force_rebuild: bool, cells_valid: bool) void {
+    applyInputEffect(input_effects.fromDirtyFlags(force_rebuild, cells_valid));
+}
+
 fn markBrowserUrlBarDirty() void {
     requestInputRepaint();
 }
@@ -6960,8 +6964,7 @@ fn handleMouseWheel(ev: platform_input.MouseWheelEvent) void {
         const delta: isize = @intFromFloat(-notches * 3);
         surface.terminal.scrollViewport(.{ .delta = delta });
         if (mouse_wheel_scroll.repaintFlagsForViewportScroll(delta)) |flags| {
-            AppWindow.g_force_rebuild = flags.force_rebuild;
-            AppWindow.g_cells_valid = flags.cells_valid;
+            requestInputDirtyFlags(flags.force_rebuild, flags.cells_valid);
         }
 
         // Show scrollbar for the scrolled surface

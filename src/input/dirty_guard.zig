@@ -44,4 +44,6 @@ test "input dirty helpers delegate to the local apply boundary" {
     try std.testing.expect(std.mem.indexOf(u8, helper_region, "AppWindow.applyUiEffect(effect)") != null);
     try std.testing.expect(std.mem.indexOf(u8, helper_region, "requestInputRepaint()") != null);
     try std.testing.expect(std.mem.indexOf(u8, helper_region, "requestInputRebuild()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, helper_region, "requestInputDirtyFlags") != null);
+    try std.testing.expect(std.mem.indexOf(u8, helper_region, "input_effects.fromDirtyFlags(force_rebuild, cells_valid)") != null);
 }
