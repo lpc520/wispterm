@@ -204,3 +204,14 @@ Final gate:
 ## Recommended Next Step
 
 Write a P3.3 implementation plan for the full input dirty-boundary sweep. Keep each task small and commit after each conversion slice. The first task should add exact-flag helper coverage, then convert small helpers before touching `handleMouseButton`.
+
+## P3.3 Implementation Results
+
+- `src/input.zig`: 7016 lines after P3.3.
+- `src/input/effects.zig`: 90 lines.
+- `src/input/dirty_guard.zig`: 57 lines.
+- `src/input.zig` direct `AppWindow.` references: 699.
+- Runtime direct input dirty assignments: 0.
+- Mouse, pointer, hover, drag, selection, preview, and wheel invalidation now routes through input effect helpers.
+- Top-of-file tests still set and assert AppWindow dirty globals intentionally.
+- No keyboard shortcut behavior or user-visible shortcut text changed.
