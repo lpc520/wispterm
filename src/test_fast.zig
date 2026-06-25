@@ -185,6 +185,7 @@ test {
     _ = @import("appwindow/resize_throttle.zig");
     _ = @import("termio/read_coalesce.zig");
     _ = @import("ai_chat_protocol.zig");
+    _ = @import("ai_chat/message_store.zig");
     _ = @import("weixin/types.zig");
     _ = @import("weixin/ilink_codec.zig");
     _ = @import("weixin/ilink_client.zig");
