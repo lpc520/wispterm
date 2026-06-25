@@ -200,10 +200,6 @@ pub fn openForSurface(allocator: std.mem.Allocator, surface: *Surface, path: []c
     return .{ .url = url };
 }
 
-pub fn commandForKindForTest(allocator: std.mem.Allocator, kind: model.ServerKind, port: u16) ![]u8 {
-    return serverCommandForKindAlloc(allocator, kind, port);
-}
-
 fn ensureServerForSurface(allocator: std.mem.Allocator, surface: *Surface, root: []const u8, file_name: []const u8) Error!u16 {
     if (root.len == 0 or root.len > MAX_ROOT_BYTES) return error.PathTooLong;
 
@@ -888,19 +884,35 @@ test "html_server: non-html model check rejects markdown" {
 }
 
 test "html_server: command builder emits python and node server commands" {
-    const py3 = try commandForKindForTest(std.testing.allocator, .python3, 49152);
+    const py3 = try serverCommandForKindAlloc(std.testing.allocator, .python3, 49152);
     defer std.testing.allocator.free(py3);
     try std.testing.expect(std.mem.indexOf(u8, py3, "python3 -m http.server 49152 --bind 127.0.0.1") != null);
 
-    const py2 = try commandForKindForTest(std.testing.allocator, .python2, 49153);
+    const py2 = try serverCommandForKindAlloc(std.testing.allocator, .python2, 49153);
     defer std.testing.allocator.free(py2);
     try std.testing.expect(std.mem.indexOf(u8, py2, "SimpleHTTPServer") != null);
     try std.testing.expect(std.mem.indexOf(u8, py2, "49153") != null);
 
-    const node = try commandForKindForTest(std.testing.allocator, .node_inline, 49154);
+    const node = try serverCommandForKindAlloc(std.testing.allocator, .node_inline, 49154);
     defer std.testing.allocator.free(node);
     try std.testing.expect(std.mem.indexOf(u8, node, "node -e") != null);
     try std.testing.expect(std.mem.indexOf(u8, node, "49154") != null);
+}
+
+test "html_server: server probe order prefers python before node" {
+    const script = serverProbeScript();
+    const python3 = std.mem.indexOf(u8, script, "echo python3").?;
+    const python = std.mem.indexOf(u8, script, "command -v python ").?;
+    const python2 = std.mem.indexOf(u8, script, "command -v python2").?;
+    const node = std.mem.indexOf(u8, script, "command -v node").?;
+    const npx = std.mem.indexOf(u8, script, "command -v npx").?;
+    try std.testing.expect(python3 < python);
+    try std.testing.expect(python < python2);
+    try std.testing.expect(python2 < node);
+    try std.testing.expect(node < npx);
+    try std.testing.expectEqual(model.ServerKind.python3, probeOutputToKind("python3\n").?);
+    try std.testing.expectEqual(model.ServerKind.node_inline, probeOutputToKind("node\n").?);
+    try std.testing.expectEqual(@as(?model.ServerKind, null), probeOutputToKind("none\n"));
 }
 
 test "html_server: remote ready probe verifies an HTTP response" {
