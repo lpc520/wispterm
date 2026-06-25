@@ -9,34 +9,42 @@ fn sourceSlice(start_marker: []const u8, end_marker: []const u8) ![]const u8 {
     return rest[0..end_rel];
 }
 
-fn expectNoDirectDirtyWrites(region: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, region, "AppWindow.g_force_rebuild = true") == null);
-    try std.testing.expect(std.mem.indexOf(u8, region, "AppWindow.g_cells_valid = false") == null);
+fn expectNoDirectDirtyAssignments(region: []const u8) !void {
+    try std.testing.expect(std.mem.indexOf(u8, region, "AppWindow.g_force_rebuild =") == null);
+    try std.testing.expect(std.mem.indexOf(u8, region, "AppWindow.g_cells_valid =") == null);
 }
 
 test "input dispatch char routes UI dirtying through effects" {
     const region = try sourceSlice("fn dispatchChar", "\nfn triggerFromKeyEvent");
-    try expectNoDirectDirtyWrites(region);
+    try expectNoDirectDirtyAssignments(region);
     try std.testing.expect(std.mem.indexOf(u8, region, "input_effects.repaint()") != null);
 }
 
 test "input dispatch key routes UI dirtying through effects" {
     const region = try sourceSlice("fn dispatchKey", "\nfn isModifierKey");
-    try expectNoDirectDirtyWrites(region);
+    try expectNoDirectDirtyAssignments(region);
     try std.testing.expect(std.mem.indexOf(u8, region, "input_effects.repaint()") != null);
     try std.testing.expect(std.mem.indexOf(u8, region, "input_effects.rebuildOnly()") != null);
 }
 
 test "input key-dispatched preview helpers route UI dirtying through effects" {
     const region = try sourceSlice("fn openPreviewGalleryNeighbor", "\nfn findPreviewGalleryNeighbor");
-    try expectNoDirectDirtyWrites(region);
+    try expectNoDirectDirtyAssignments(region);
     try std.testing.expect(std.mem.indexOf(u8, region, "requestInputRepaint()") != null);
 }
 
 test "input key-dispatched agent history helpers route UI dirtying through effects" {
     const region = try sourceSlice("fn deleteSelectedAgentHistoryRow", "\nfn hitTestConfigButton");
-    try expectNoDirectDirtyWrites(region);
+    try expectNoDirectDirtyAssignments(region);
     try std.testing.expect(std.mem.indexOf(u8, region, "requestInputRepaint()") != null);
+}
+
+test "input runtime dirtying routes through effect boundary" {
+    const region = try sourceSlice("fn applyInputEffect", "\n// --- Maximize toggle (native window) ---");
+    try expectNoDirectDirtyAssignments(region);
+    try std.testing.expect(std.mem.indexOf(u8, region, "requestInputRepaint()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, region, "requestInputRebuild()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, region, "requestInputDirtyFlags(") != null);
 }
 
 test "input dirty helpers delegate to the local apply boundary" {
