@@ -807,11 +807,24 @@ pub const Session = struct {
     pub fn typeIntoSearch(self: *Session, codepoint: u21) bool {
         if (self.focus != .search) return false;
         if (codepoint < 0x20 or codepoint == 0x7f) return false;
+        // A leading space is useless as a query prefix, so it stays reserved for
+        // the "Press Space to load transcript" preview shortcut even while the
+        // Search box owns focus. Once the query has content, Space joins it as a
+        // normal multi-word separator.
+        if (codepoint == ' ' and self.filter_len == 0) return false;
         var buf: [4]u8 = undefined;
         const len = std.unicode.utf8Encode(codepoint, &buf) catch return false;
         if (len > self.filter.len - self.filter_len) return false;
         self.appendFilterBytes(buf[0..len]);
         return true;
+    }
+
+    /// Whether a plain Space should preview the selected transcript rather than
+    /// edit the query: true whenever the Search box isn't focused, or it is but
+    /// the query is still empty (mirrors `typeIntoSearch` declining the leading
+    /// space). Lets "Press Space to load transcript" work from the default focus.
+    pub fn spacePreviewsTranscript(self: *const Session) bool {
+        return self.focus != .search or self.filter_len == 0;
     }
 
     /// Number of rows in the combined CATEGORY+DATE list the Filters cursor walks
@@ -2319,6 +2332,24 @@ test "ai_history_session: typeIntoSearch only edits the filter while the search 
     session.focus = .sessions;
     try std.testing.expect(!session.typeIntoSearch('x'));
     try std.testing.expectEqualSlices(u8, "r R", session.filter[0..session.filter_len]);
+}
+
+test "ai_history_session: leading Space is reserved for transcript preview" {
+    var session = Session.init(std.testing.allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+
+    // Default focus is the search box, but a Space on an empty query is NOT
+    // swallowed — it falls through so the input layer can preview the transcript.
+    try std.testing.expect(session.spacePreviewsTranscript());
+    try std.testing.expect(!session.typeIntoSearch(' '));
+    try std.testing.expectEqual(@as(usize, 0), session.filter_len);
+
+    // Once the query has content, Space is a normal separator again.
+    try std.testing.expect(session.typeIntoSearch('a'));
+    try std.testing.expect(!session.spacePreviewsTranscript());
+    try std.testing.expect(session.typeIntoSearch(' '));
+    try std.testing.expect(session.typeIntoSearch('b'));
+    try std.testing.expectEqualSlices(u8, "a b", session.filter[0..session.filter_len]);
 }
 
 test "ai_history_session: scan host replaces rows and marks ready" {

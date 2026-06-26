@@ -2554,6 +2554,15 @@ pub fn aiHistorySearchFocused() bool {
     return session.focus == .search;
 }
 
+/// True when a plain Space should preview the selected transcript instead of
+/// typing into the Search box (search unfocused, or focused with an empty
+/// query). Keeps "Press Space to load transcript" working from the default
+/// focus while still allowing spaces inside a non-empty query.
+pub fn aiHistorySpacePreviews() bool {
+    const session = activeAiHistory() orelse return false;
+    return session.spacePreviewsTranscript();
+}
+
 pub fn aiHistoryBackspaceFilter() bool {
     const session = activeAiHistory() orelse return false;
     session.mutex.lock();

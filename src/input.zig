@@ -2674,7 +2674,8 @@ fn dispatchChar(ev: platform_input.CharEvent) ui_effect.UiEffect {
     if (AppWindow.activeAiHistory() != null) {
         // aiHistoryInsertCodepoint only consumes the codepoint while the Search box
         // owns focus, so 'r'/Space type into the query there yet stay free to act as
-        // Scan/Preview shortcuts when another panel is focused.
+        // Scan/Preview shortcuts when another panel is focused. A Space on an empty
+        // query is declined (see typeIntoSearch) so it previews the transcript too.
         if (!ev.ctrl and !ev.alt and !ev.super) {
             _ = AppWindow.aiHistoryInsertCodepoint(ev.codepoint);
         }
@@ -3246,7 +3247,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
                 _ = AppWindow.aiHistoryScrollTranscript(1 << 30);
                 return .none;
             },
-            0x20 => if (plain and !search_focused) {
+            0x20 => if (plain and AppWindow.aiHistorySpacePreviews()) {
                 _ = AppWindow.aiHistoryPreviewSelectedTranscript();
                 return .none;
             },

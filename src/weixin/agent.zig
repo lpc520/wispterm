@@ -7,7 +7,7 @@ const approval_reply = @import("approval_reply.zig");
 const question_reply = @import("question_reply.zig");
 const session_list = @import("session_list.zig");
 
-const AI_ACK = "信息已收到，开始处理。\n发送 /stop 可停止本次处理。";
+const AI_ACK = "信息已收到，开始处理。\n发送 /stop 可停止本次处理。\n发送 /help 查看帮助手册。";
 const AI_BUSY = "副驾正在处理上一条消息，请稍候再发，或发送 /stop 停止当前处理。";
 const ESC = "\x1b";
 const AI_OPEN_TIMEOUT_MS: u32 = 2000;
@@ -549,6 +549,8 @@ test "default text goes to the AI surface with a carriage return" {
     try t.expectEqualStrings("hello world\r", fake.lastInput());
     try t.expectEqualSlices(u8, &FakeControl.aiId(), &fake.last_surface);
     try t.expect(out.expect_ai_progress);
+    // The receipt ack points first-time users at the help manual.
+    try t.expect(std.mem.indexOf(u8, out.text.items, "/help") != null);
 }
 
 test "busy copilot replies with a busy notice and does not start a follow-up" {
