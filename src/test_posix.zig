@@ -31,13 +31,21 @@ test "ctl server answers a real loopback request and stops cleanly" {
     const ctl_server = @import("ctl/server.zig");
     const protocol = @import("ctl/protocol.zig");
     const control_mod = @import("ctl/control.zig");
+    const transport = @import("ctl/transport.zig");
 
+    // get-text for id "big" returns a payload larger than one recv chunk so the
+    // round-trip exercises sendAll's partial-write loop and multi-recv reassembly
+    // (not just a one-shot small reply).
+    const big_len = 200_000;
     const C = struct {
         fn list_panes(_: *anyopaque, a: std.mem.Allocator) anyerror!?[]u8 {
             return try a.dupe(u8, "{\"activeTab\":0,\"tabs\":[]}");
         }
-        fn get_text(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: ?u32) anyerror!?[]u8 {
-            return null;
+        fn get_text(_: *anyopaque, a: std.mem.Allocator, id: []const u8, _: ?u32) anyerror!?[]u8 {
+            if (!std.mem.eql(u8, id, "big")) return null;
+            const out = try a.alloc(u8, big_len);
+            @memset(out, 'x');
+            return out;
         }
         fn send_text(_: *anyopaque, _: []const u8, _: []const u8) bool {
             return false;
@@ -60,53 +68,63 @@ test "ctl server answers a real loopback request and stops cleanly" {
     try std.testing.expect(srv.port != 0);
 
     const addr = try std.net.Address.parseIp4("127.0.0.1", srv.port);
-    var stream = try std.net.tcpConnectToAddress(addr);
-    defer stream.close();
 
-    const line = try protocol.encodeRequest(std.testing.allocator, .{ .token = "tok", .cmd = .panes });
-    defer std.testing.allocator.free(line);
-    try stream.writeAll(line);
+    // Drive the client side through ctl/transport (posix.recv/posix.send) — the
+    // same code path wisptermctl uses — so this round-trip guards the transport
+    // the Windows v1.30.0 bug lived in, not just the protocol layer.
+    const roundtrip = struct {
+        fn run(a: std.mem.Allocator, ad: std.net.Address, req: protocol.Request, sink: *std.ArrayListUnmanaged(u8)) !void {
+            var stream = try std.net.tcpConnectToAddress(ad);
+            defer stream.close();
+            const line = try protocol.encodeRequest(a, req);
+            defer a.free(line);
+            try transport.sendAll(stream.handle, line);
+            var chunk: [4096]u8 = undefined;
+            while (true) {
+                const n = transport.recv(stream.handle, &chunk) catch break;
+                if (n == 0) break;
+                try sink.appendSlice(a, chunk[0..n]);
+                if (std.mem.indexOfScalar(u8, sink.items, '\n') != null) break;
+            }
+        }
+    }.run;
 
-    var buf: [4096]u8 = undefined;
-    var total: usize = 0;
-    while (total < buf.len) {
-        const n = try stream.read(buf[total..]);
-        if (n == 0) break;
-        total += n;
-        if (std.mem.indexOfScalar(u8, buf[0..total], '\n') != null) break;
-    }
-    try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "\"ok\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "activeTab") != null);
+    const alloc = std.testing.allocator;
+
+    var panes: std.ArrayListUnmanaged(u8) = .empty;
+    defer panes.deinit(alloc);
+    try roundtrip(alloc, addr, .{ .token = "tok", .cmd = .panes }, &panes);
+    try std.testing.expect(std.mem.indexOf(u8, panes.items, "\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, panes.items, "activeTab") != null);
 
     // ui-state round-trips over the same socket protocol as panes.
-    var s_ui = try std.net.tcpConnectToAddress(addr);
-    defer s_ui.close();
-    const ui_line = try protocol.encodeRequest(std.testing.allocator, .{ .token = "tok", .cmd = .ui_state });
-    defer std.testing.allocator.free(ui_line);
-    try s_ui.writeAll(ui_line);
-    var ui_buf: [256]u8 = undefined;
-    const ui_n = try s_ui.read(&ui_buf);
-    try std.testing.expect(std.mem.indexOf(u8, ui_buf[0..ui_n], "activeOverlay") != null);
+    var ui: std.ArrayListUnmanaged(u8) = .empty;
+    defer ui.deinit(alloc);
+    try roundtrip(alloc, addr, .{ .token = "tok", .cmd = .ui_state }, &ui);
+    try std.testing.expect(std.mem.indexOf(u8, ui.items, "activeOverlay") != null);
 
     // spawn round-trips its cwd+command over the wire and replies ok.
-    var s_sp = try std.net.tcpConnectToAddress(addr);
-    defer s_sp.close();
-    const sp_line = try protocol.encodeRequest(std.testing.allocator, .{ .token = "tok", .cmd = .spawn, .data = "claude -r abc", .cwd = "/work" });
-    defer std.testing.allocator.free(sp_line);
-    try s_sp.writeAll(sp_line);
-    var sp_buf: [256]u8 = undefined;
-    const sp_n = try s_sp.read(&sp_buf);
-    try std.testing.expect(std.mem.indexOf(u8, sp_buf[0..sp_n], "\"ok\":true") != null);
+    var sp: std.ArrayListUnmanaged(u8) = .empty;
+    defer sp.deinit(alloc);
+    try roundtrip(alloc, addr, .{ .token = "tok", .cmd = .spawn, .data = "claude -r abc", .cwd = "/work" }, &sp);
+    try std.testing.expect(std.mem.indexOf(u8, sp.items, "\"ok\":true") != null);
+
+    // A large get-text reply round-trips intact: this is what a multi-write
+    // server response + multi-read client looks like, and proves no bytes are
+    // dropped or truncated by the transport.
+    var big: std.ArrayListUnmanaged(u8) = .empty;
+    defer big.deinit(alloc);
+    try roundtrip(alloc, addr, .{ .token = "tok", .cmd = .get_text, .id = "big" }, &big);
+    var big_resp = try protocol.parseResponse(alloc, big.items);
+    defer big_resp.deinit();
+    try std.testing.expect(big_resp.ok);
+    try std.testing.expectEqual(@as(usize, big_len), big_resp.result_text.?.len);
 
     // A bad token is rejected over the wire too.
-    var s2 = try std.net.tcpConnectToAddress(addr);
-    defer s2.close();
-    const bad = try protocol.encodeRequest(std.testing.allocator, .{ .token = "nope", .cmd = .panes });
-    defer std.testing.allocator.free(bad);
-    try s2.writeAll(bad);
-    var buf2: [256]u8 = undefined;
-    const n2 = try s2.read(&buf2);
-    try std.testing.expect(std.mem.indexOf(u8, buf2[0..n2], "unauthorized") != null);
+    var bad: std.ArrayListUnmanaged(u8) = .empty;
+    defer bad.deinit(alloc);
+    try roundtrip(alloc, addr, .{ .token = "nope", .cmd = .panes }, &bad);
+    try std.testing.expect(std.mem.indexOf(u8, bad.items, "unauthorized") != null);
 }
 
 test "ctl server shutdown does not hang on a stalled (newline-less) connection" {

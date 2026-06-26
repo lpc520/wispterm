@@ -15,6 +15,7 @@ const std = @import("std");
 const protocol = @import("ctl/protocol.zig");
 const discovery = @import("ctl/discovery.zig");
 const client = @import("ctl/client.zig");
+const transport = @import("ctl/transport.zig");
 
 const ResultKind = enum { raw, text, ok_only };
 
@@ -72,13 +73,16 @@ fn requestOnce(allocator: std.mem.Allocator, info: discovery.Info, req: protocol
 
     const line = try protocol.encodeRequest(allocator, req);
     defer allocator.free(line);
-    try stream.writeAll(line);
+    // posix.send/recv, not the deprecated Stream.write/read: the read path is
+    // broken on Windows overlapped sockets and returned 0 bytes for every reply
+    // ("malformed response from WispTerm"). See ctl/transport.zig.
+    try transport.sendAll(stream.handle, line);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
     var chunk: [4096]u8 = undefined;
     while (buf.items.len < 16 * 1024 * 1024) {
-        const n = stream.read(&chunk) catch break;
+        const n = transport.recv(stream.handle, &chunk) catch break;
         if (n == 0) break;
         try buf.appendSlice(allocator, chunk[0..n]);
         if (std.mem.indexOfScalar(u8, buf.items, '\n') != null) break;
