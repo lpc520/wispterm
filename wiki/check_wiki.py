@@ -17,7 +17,8 @@ BASE_SLUGS = [
     "Home", "Installation", "Getting-Started", "Tabs-Splits-Panels",
     "Configuration", "Themes-Appearance", "Keyboard-Shortcuts", "File-Explorer",
     "SSH-Remote-Development", "Port-Forwarding", "AI-Copilot",
-    "Browser-Jupyter-Panel", "Inline-Images", "Remote-Access", "FAQ",
+    "Agent-Terminal-Control", "Browser-Jupyter-Panel", "Inline-Images",
+    "Remote-Access", "FAQ",
 ]
 CANONICAL = set(BASE_SLUGS) | {s + "-zh" for s in BASE_SLUGS}
 SPECIAL = {"_Sidebar", "_Footer", "README"}

@@ -26,6 +26,7 @@ out where relevant.
 - **SSH & remote development** — profile sessions, remote file download, automatic loopback port forwarding → [[SSH-Remote-Development]]
 - **Port forwarding & proxy** — manual reverse/local SSH tunnels; share your local proxy with a remote server → [[Port-Forwarding]]
 - **AI Copilot & Agent** — OpenAI-/Anthropic-compatible profiles, per-tab copilot sidebar, skills, history & resume → [[AI-Copilot]]
+- **Agent terminal control** — opt-in local `wisptermctl` API for scripts and external agents → [[Agent-Terminal-Control]]
 - **Browser & Jupyter panel** — open URLs in a side WebView panel (Windows/macOS) → [[Browser-Jupyter-Panel]]
 - **Inline images** — Kitty Graphics protocol; show images and PDFs from remote shells → [[Inline-Images]]
 - **Opt-in remote access** — share a session over a Cloudflare relay, disabled by default → [[Remote-Access]]

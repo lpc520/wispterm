@@ -70,8 +70,9 @@ Surface ids come from `wisptermctl panes` (the `id` field).
 ### Example: jump to a saved session in its own tab
 
 ```sh
-wisptermctl spawn --cwd "F:\1_Bio-analysis" -- claude -r 1b42b2ea
-wisptermctl spawn --cwd /home/me/code            # just a shell in that dir
+wisptermctl spawn --cwd "F:\1_Bio-analysis" -- claude -r 1b42b2ea   # the issue's use case
+wisptermctl spawn --cwd /home/me/code                              # just a shell in that dir
+wisptermctl spawn                                                  # new tab, active tab's cwd
 ```
 
 ### Example: run a test in another pane and read the result
