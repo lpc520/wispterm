@@ -142,7 +142,8 @@ The fix for Gap 1 is the abstraction Ghostty already ships and that
 - **`src/renderer/opengl/`** and **`src/renderer/metal/`** each expose the
   *same* primitive set: `Target`, `RenderPass`, `Frame`, `Pipeline`, `Buffer`,
   `Texture`, `Sampler`, `shaders` (Metal adds `IOSurfaceLayer`, `api`).
-- **`cell.zig` / `cursor.zig` / `image.zig` / `row.zig`** stay API-agnostic —
+- **`cell_geometry.zig`** (cell/cursor/selection geometry, consumed by
+  `cell_renderer.zig`) and **`image_renderer.zig`** stay API-agnostic —
   they build geometry/instances, not GL/Metal calls.
 
 ### WispTerm target layout
@@ -347,7 +348,7 @@ that gets real runtime coverage on Linux.
 | `src/renderer/gpu/backend.zig` | `src/renderer/backend.zig` | `Backend{opengl,metal,webgl}`; `default(target)` → Metal on Darwin |
 | `src/renderer/gpu/opengl/*` | `src/renderer/opengl/*` | `Target/Frame/RenderPass/Pipeline/Buffer/Texture/Sampler/shaders` |
 | `src/renderer/gpu/metal/*` | `src/renderer/metal/*` | Phase D; mirrors opengl with MSL shaders |
-| API-agnostic cell/cursor/image | `src/renderer/cell.zig`, `cursor.zig`, `image.zig` | Build geometry, not GL/Metal calls |
+| `src/renderer/cell_geometry.zig`, `image_renderer.zig` | `src/renderer/cell.zig`, `cursor.zig`, `image.zig` | API-agnostic; build geometry, not GL/Metal calls |
 | `src/platform/pty_posix.zig` | `src/pty.zig` (POSIX) | `openpty`/`fork`/`exec` + `ioctl(TIOCSWINSZ)` |
 | `src/platform/window_backend_macos.zig` | Swift/AppKit + `src/apprt/embedded.zig` | AppKit host owns its own event loop |
 | `src/platform/font_backend_macos.zig` | `src/font/discovery.zig` | CoreText discovery + fallback |
