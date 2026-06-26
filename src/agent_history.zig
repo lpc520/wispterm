@@ -37,6 +37,9 @@ pub const SessionRecord = struct {
     agent_enabled: bool,
     vision_enabled: bool = false,
     copilot: bool = false,
+    /// True once the user manually renamed the chat; defaults false for records
+    /// written before this field existed (std.json fills the default).
+    title_is_custom: bool = false,
     created_at: i64,
     updated_at: i64,
     messages: []MessageRecord,
@@ -291,6 +294,7 @@ pub fn cloneRecord(allocator: std.mem.Allocator, input: anytype) !SessionRecord 
         .agent_enabled = input.agent_enabled,
         .vision_enabled = if (@hasField(@TypeOf(input), "vision_enabled")) input.vision_enabled else false,
         .copilot = if (@hasField(@TypeOf(input), "copilot")) input.copilot else false,
+        .title_is_custom = if (@hasField(@TypeOf(input), "title_is_custom")) input.title_is_custom else false,
         .created_at = input.created_at,
         .updated_at = input.updated_at,
         .messages = messages,

@@ -108,36 +108,51 @@ test "extractFirstTurn: null when user missing" {
 pub const TitleGate = struct {
     attempted: bool,
     has_api_key: bool,
-    title: []const u8,
-    default_name: []const u8,
+    /// True once the user has manually renamed the chat. Auto-title must never
+    /// overwrite a user-chosen name. This replaces the old `title == "DeepSeek"`
+    /// check, which only ever fired for sessions literally named after the
+    /// original default profile — every other profile (glm-5.2, GPT-5, any
+    /// renamed one) silently lost auto-title.
+    is_custom: bool,
 };
 
 /// Auto-title fires only when: not attempted yet, an API key is configured, the
-/// title is still the default (user has not renamed), and a first turn exists.
+/// user has not manually renamed the chat, and a first turn exists.
 pub fn shouldAutoTitle(gate: TitleGate, turn: ?FirstTurn) bool {
     if (gate.attempted) return false;
     if (!gate.has_api_key) return false;
-    if (!std.mem.eql(u8, gate.title, gate.default_name)) return false;
+    if (gate.is_custom) return false;
     return turn != null;
 }
 
-test "shouldAutoTitle: fires on first turn with default title and key" {
+test "shouldAutoTitle: fires on first turn when not renamed and key present" {
     const turn = FirstTurn{ .user = "u", .assistant = "a" };
     try std.testing.expect(shouldAutoTitle(.{
         .attempted = false,
         .has_api_key = true,
-        .title = "DeepSeek",
-        .default_name = "DeepSeek",
+        .is_custom = false,
     }, turn));
 }
 
-test "shouldAutoTitle: blocked when title not default" {
+test "shouldAutoTitle: fires regardless of the profile name (glm-5.2 regression)" {
+    // Regression for the hardcoded `title == "DeepSeek"` gate: a session whose
+    // default title is its profile name (e.g. an Anthropic-protocol glm-5.2
+    // chat) must still auto-title. The name is irrelevant now — only whether
+    // the user manually renamed it (is_custom) matters.
+    const turn = FirstTurn{ .user = "hi", .assistant = "Hi! How can I help?" };
+    try std.testing.expect(shouldAutoTitle(.{
+        .attempted = false,
+        .has_api_key = true,
+        .is_custom = false,
+    }, turn));
+}
+
+test "shouldAutoTitle: blocked when the user has renamed the chat" {
     const turn = FirstTurn{ .user = "u", .assistant = "a" };
     try std.testing.expect(!shouldAutoTitle(.{
         .attempted = false,
         .has_api_key = true,
-        .title = "My chat",
-        .default_name = "DeepSeek",
+        .is_custom = true,
     }, turn));
 }
 
@@ -146,20 +161,17 @@ test "shouldAutoTitle: blocked when attempted / no key / no turn" {
     const base = TitleGate{
         .attempted = false,
         .has_api_key = true,
-        .title = "DeepSeek",
-        .default_name = "DeepSeek",
+        .is_custom = false,
     };
     try std.testing.expect(!shouldAutoTitle(.{
         .attempted = true,
         .has_api_key = base.has_api_key,
-        .title = base.title,
-        .default_name = base.default_name,
+        .is_custom = base.is_custom,
     }, turn));
     try std.testing.expect(!shouldAutoTitle(.{
         .attempted = base.attempted,
         .has_api_key = false,
-        .title = base.title,
-        .default_name = base.default_name,
+        .is_custom = base.is_custom,
     }, turn));
     try std.testing.expect(!shouldAutoTitle(base, null));
 }
