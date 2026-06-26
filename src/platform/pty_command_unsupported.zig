@@ -187,8 +187,10 @@ fn appendAscii(buf: []u8, pos: *usize, text: []const u8) bool {
     return true;
 }
 
-fn appendPosixSingleQuotedArg(buf: []u8, pos: *usize, value: []const u8) bool {
-    if (!appendAscii(buf, pos, "'")) return false;
+/// Escape `value` for a POSIX single-quoted context WITHOUT writing the
+/// surrounding quotes, so callers can splice an unquoted literal (e.g. an env
+/// prefix) into the same quoted run.
+fn appendPosixSingleQuotedInner(buf: []u8, pos: *usize, value: []const u8) bool {
     for (value) |ch| {
         if (ch == '\'') {
             if (!appendAscii(buf, pos, "'\\''")) return false;
@@ -198,6 +200,12 @@ fn appendPosixSingleQuotedArg(buf: []u8, pos: *usize, value: []const u8) bool {
             pos.* += 1;
         }
     }
+    return true;
+}
+
+fn appendPosixSingleQuotedArg(buf: []u8, pos: *usize, value: []const u8) bool {
+    if (!appendAscii(buf, pos, "'")) return false;
+    if (!appendPosixSingleQuotedInner(buf, pos, value)) return false;
     return appendAscii(buf, pos, "'");
 }
 
@@ -226,6 +234,20 @@ pub fn scpExecutableName() []const u8 {
 }
 
 pub fn sshInteractiveCommand(buf: []u8, options: SshCommandOptions) ?[]const u8 {
+    return buildSshCommandLine(buf, options, true);
+}
+
+pub fn sshControlCommand(buf: []u8, options: SshCommandOptions) ?[]const u8 {
+    // tmux -CC control mode: leave the remote command byte-for-byte so nothing
+    // perturbs the control-protocol handshake (no env injection here).
+    return buildSshCommandLine(buf, options, false);
+}
+
+/// Prepended to an interactive SSH remote command so the remote shell exports a
+/// TERM_PROGRAM that TUIs recognize as Kitty-keyboard-capable (#302).
+const ssh_remote_env_prefix = "export TERM_PROGRAM=ghostty; ";
+
+fn buildSshCommandLine(buf: []u8, options: SshCommandOptions, export_term_program: bool) ?[]const u8 {
     var pos: usize = 0;
     if (!appendAscii(buf, &pos, "ssh -tt ")) return null;
     if (options.proxy_jump.len > 0) {
@@ -249,13 +271,22 @@ pub fn sshInteractiveCommand(buf: []u8, options: SshCommandOptions) ?[]const u8 
     if (!appendAscii(buf, &pos, options.host)) return null;
     if (options.remote_command.len > 0) {
         if (!appendAscii(buf, &pos, " ")) return null;
-        if (!appendPosixSingleQuotedArg(buf, &pos, options.remote_command)) return null;
+        if (export_term_program) {
+            // Export TERM_PROGRAM on the remote so full-screen TUIs (Claude Code,
+            // Codex) enable the Kitty keyboard protocol there too — otherwise
+            // Shift+Enter can't be told from Enter. ssh forwards TERM but not
+            // TERM_PROGRAM (it's not in the default SendEnv/AcceptEnv set), so we
+            // bake it into the remote command rather than relying on -o SetEnv,
+            // which the remote sshd would silently drop. Spliced inside the single
+            // quotes since the prefix itself is quote-free. See pty_posix.zig.
+            if (!appendAscii(buf, &pos, "'" ++ ssh_remote_env_prefix)) return null;
+            if (!appendPosixSingleQuotedInner(buf, &pos, options.remote_command)) return null;
+            if (!appendAscii(buf, &pos, "'")) return null;
+        } else {
+            if (!appendPosixSingleQuotedArg(buf, &pos, options.remote_command)) return null;
+        }
     }
     return buf[0..pos];
-}
-
-pub fn sshControlCommand(buf: []u8, options: SshCommandOptions) ?[]const u8 {
-    return sshInteractiveCommand(buf, options);
 }
 
 pub fn launchKindForCommand(command: CommandLine) LaunchKind {
@@ -290,6 +321,28 @@ test "unsupported backend builds SSH interactive command lines with ProxyJump" {
             .port = "2222",
             .proxy_jump = "admin@jump.test:2200",
         }).?,
+    );
+}
+
+test "unsupported backend exports TERM_PROGRAM into the SSH remote command (#302)" {
+    var buf: [512]u8 = undefined;
+
+    // A remote command gains the env prefix so the remote Claude Code/Codex sees
+    // a Kitty-capable TERM_PROGRAM (ssh doesn't forward the local one). The
+    // original command stays intact inside the same single-quoted argument.
+    try std.testing.expectEqualStrings(
+        "ssh -tt user@example.test 'export TERM_PROGRAM=ghostty; cd '\\''/srv/p'\\'' && claude'",
+        sshInteractiveCommand(&buf, .{
+            .user = "user",
+            .host = "example.test",
+            .remote_command = "cd '/srv/p' && claude",
+        }).?,
+    );
+
+    // No remote command (plain interactive login shell) is left untouched.
+    try std.testing.expectEqualStrings(
+        "ssh -tt user@example.test",
+        sshInteractiveCommand(&buf, .{ .user = "user", .host = "example.test" }).?,
     );
 }
 

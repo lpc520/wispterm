@@ -251,10 +251,10 @@ fn appendAscii(buf: []u8, pos: *usize, text: []const u8) bool {
     return true;
 }
 
-fn appendCommandLineQuotedArg(buf: []u8, pos: *usize, arg: []const u8) bool {
-    if (pos.* >= buf.len) return false;
-    buf[pos.*] = '"';
-    pos.* += 1;
+/// Escape `arg` for a double-quoted Windows command-line argument WITHOUT the
+/// surrounding quotes, so callers can splice an unquoted literal (e.g. an env
+/// prefix) into the same quoted run.
+fn appendCommandLineQuotedInner(buf: []u8, pos: *usize, arg: []const u8) bool {
     for (arg) |ch| {
         if (ch == '"') {
             if (!appendAscii(buf, pos, "\\\"")) return false;
@@ -264,11 +264,25 @@ fn appendCommandLineQuotedArg(buf: []u8, pos: *usize, arg: []const u8) bool {
             pos.* += 1;
         }
     }
+    return true;
+}
+
+fn appendCommandLineQuotedArg(buf: []u8, pos: *usize, arg: []const u8) bool {
+    if (pos.* >= buf.len) return false;
+    buf[pos.*] = '"';
+    pos.* += 1;
+    if (!appendCommandLineQuotedInner(buf, pos, arg)) return false;
     if (pos.* >= buf.len) return false;
     buf[pos.*] = '"';
     pos.* += 1;
     return true;
 }
+
+/// Prepended to an interactive SSH remote command so the remote shell exports a
+/// TERM_PROGRAM that TUIs recognize as Kitty-keyboard-capable (#302). The remote
+/// is a POSIX host, so `export …;` is the right syntax regardless of the local
+/// Windows client.
+const ssh_remote_env_prefix = "export TERM_PROGRAM=ghostty; ";
 
 threadlocal var g_wsl_available_cached: bool = false;
 threadlocal var g_wsl_available_value: bool = false;
@@ -368,8 +382,14 @@ pub fn sshInteractiveCommand(buf: []u8, options: SshCommandOptions) ?[]const u8 
     if (!appendAscii(buf, &pos, "@")) return null;
     if (!appendAscii(buf, &pos, options.host)) return null;
     if (options.remote_command.len > 0) {
-        if (!appendAscii(buf, &pos, " ")) return null;
-        if (!appendCommandLineQuotedArg(buf, &pos, options.remote_command)) return null;
+        // Export TERM_PROGRAM on the remote so full-screen TUIs (Claude Code,
+        // Codex) enable the Kitty keyboard protocol there too. ssh forwards TERM
+        // but not TERM_PROGRAM, so we bake it into the remote command. Spliced
+        // inside the double quotes since the prefix is quote-free. tmux -CC
+        // control transport below is deliberately left untouched.
+        if (!appendAscii(buf, &pos, " \"" ++ ssh_remote_env_prefix)) return null;
+        if (!appendCommandLineQuotedInner(buf, &pos, options.remote_command)) return null;
+        if (!appendAscii(buf, &pos, "\"")) return null;
     }
     return buf[0..pos];
 }
@@ -486,7 +506,11 @@ fn appendWslenvEntry(allocator: std.mem.Allocator, env: *std.process.EnvMap, ent
 fn applyWslTerminalEnvironment(allocator: std.mem.Allocator, env: *std.process.EnvMap) !void {
     try env.put("TERM", "xterm-256color");
     try env.put("COLORTERM", "truecolor");
-    try env.put("TERM_PROGRAM", "wispterm");
+    // Advertise as Ghostty (our embedded VT engine) so TUIs that gate the Kitty
+    // keyboard protocol on a TERM_PROGRAM allowlist (Claude Code, …) enable it
+    // and Shift+Enter becomes a distinct CSI-u sequence. See pty_posix.zig and
+    // issue #302.
+    try env.put("TERM_PROGRAM", "ghostty");
 
     try appendWslenvEntry(allocator, env, "TERM/u");
     try appendWslenvEntry(allocator, env, "COLORTERM/u");
@@ -754,6 +778,17 @@ test "windows pty command builds SSH interactive command lines" {
             .identity_file = "C:/Users/user/.ssh/id_ed25519",
         }).?,
     );
+
+    // An interactive remote command gains the TERM_PROGRAM export so remote
+    // Claude Code/Codex enable the Kitty keyboard protocol (#302).
+    try std.testing.expectEqualStrings(
+        "cmd.exe /k ssh.exe -tt -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 -o ServerAliveCountMax=3 user@example.test \"export TERM_PROGRAM=ghostty; cd /srv && claude\"",
+        sshInteractiveCommand(&buf, .{
+            .user = "user",
+            .host = "example.test",
+            .remote_command = "cd /srv && claude",
+        }).?,
+    );
 }
 
 test "windows pty command builds direct SSH control command lines" {
@@ -810,7 +845,7 @@ test "windows pty command applies WSL terminal environment bridge" {
 
     try std.testing.expectEqualStrings("xterm-256color", env.get("TERM").?);
     try std.testing.expectEqualStrings("truecolor", env.get("COLORTERM").?);
-    try std.testing.expectEqualStrings("wispterm", env.get("TERM_PROGRAM").?);
+    try std.testing.expectEqualStrings("ghostty", env.get("TERM_PROGRAM").?);
 
     const wslenv = env.get("WSLENV").?;
     try std.testing.expect(wslenvContainsEntry(wslenv, "EXISTING/u"));

@@ -3448,8 +3448,19 @@ pub fn connectProfileByName(name: []const u8) bool {
 }
 
 fn connectSshProfileReturningSurface(idx: usize) ?*Surface {
-    return connectSshProfileReturningSurfaceWithCommand(idx, "");
+    // Launch the remote login shell explicitly so the SSH command builder's
+    // `export TERM_PROGRAM=ghostty;` prefix actually lands on the remote — ssh
+    // forwards TERM but not TERM_PROGRAM, so a bare interactive `ssh host`
+    // leaves remote Claude Code/Codex unable to enable the Kitty keyboard
+    // protocol (Shift+Enter). This is equivalent to the default interactive
+    // login shell, just with the env exported first (#302).
+    return connectSshProfileReturningSurfaceWithCommand(idx, ssh_interactive_login_shell);
 }
+
+/// Re-exec the remote login shell for an interactive SSH profile connection.
+/// Combined with the command builder's TERM_PROGRAM export prefix this yields
+/// `ssh -tt host 'export TERM_PROGRAM=ghostty; exec ${SHELL:-/bin/sh} -l'`.
+const ssh_interactive_login_shell = "exec ${SHELL:-/bin/sh} -l";
 
 fn connectSshProfileReturningSurfaceWithCommand(idx: usize, remote_command: []const u8) ?*Surface {
     if (idx >= sshState().profile_count) return null;
