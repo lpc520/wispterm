@@ -5,6 +5,7 @@ const confirm_modals = @import("confirm_modals.zig");
 const ssh_profiles = @import("ssh_profiles.zig");
 const ai_profiles = @import("ai_profiles.zig");
 const session_launcher = @import("session_launcher.zig");
+const command_palette_state = @import("command_palette_state.zig");
 
 pub const OverlayState = struct {
     settings: settings_page.State = .{},
@@ -13,6 +14,7 @@ pub const OverlayState = struct {
     ssh: ssh_profiles.State = .{},
     ai: ai_profiles.State = .{},
     session: session_launcher.State = .{},
+    command_palette: command_palette_state.State = .{},
 
     pub fn deinit(self: *OverlayState, allocator: std.mem.Allocator) void {
         self.settings.deinit(allocator);
@@ -31,6 +33,7 @@ test "overlay state aggregates migrated overlay groups" {
     state.ssh.setFormField(.name, "web");
     state.ai.setFormField(.name, "claude");
     state.session.ai_history_source_selected = 2;
+    state.command_palette.openWithMode(.commands);
 
     try std.testing.expect(state.settings.visible);
     try std.testing.expectEqualStrings("Copied", state.toasts.copy.text().?);
@@ -38,6 +41,7 @@ test "overlay state aggregates migrated overlay groups" {
     try std.testing.expectEqualStrings("web", state.ssh.formField(.name));
     try std.testing.expectEqualStrings("claude", state.ai.formField(.name));
     try std.testing.expectEqual(@as(usize, 2), state.session.ai_history_source_selected);
+    try std.testing.expect(state.command_palette.visible);
 }
 
 test "overlay state deinit releases settings cache" {
