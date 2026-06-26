@@ -9,6 +9,7 @@
 ///
 /// TabState in main.zig becomes a thin wrapper: `{ surface: *Surface }`.
 const std = @import("std");
+const builtin = @import("builtin");
 const ghostty_vt = @import("ghostty-vt");
 const Pty = @import("pty.zig").Pty;
 const Command = @import("Command.zig");
@@ -29,6 +30,7 @@ const ssh_connection_mod = @import("ssh_connection.zig");
 const clipboard_osc52 = @import("clipboard_osc52.zig");
 
 const Surface = @This();
+const io_log = std.log.scoped(.surface_io);
 
 // ============================================================================
 // Types
@@ -46,6 +48,43 @@ pub const Selection = struct {
     end_row: usize = 0,
     /// Active selections are rendered and copied; anchor-only clicks are not.
     active: bool = false,
+};
+
+pub const Operation = enum {
+    event_loop,
+    pty_read,
+    pty_write,
+    pty_resize,
+    terminal_resize,
+    thread_spawn,
+    thread_shutdown,
+};
+
+pub const IoFailure = struct {
+    operation: Operation,
+    error_code: anyerror,
+    timestamp_ms: i64,
+};
+
+pub const ExitReason = enum {
+    eof,
+    broken_pipe,
+    user_closed,
+};
+
+pub const ExitInfo = struct {
+    reason: ExitReason,
+    status: ?Command.Exit = null,
+    timestamp_ms: i64,
+};
+
+pub const IoState = union(enum) {
+    starting,
+    running,
+    stopping,
+    stopped,
+    exited: ExitInfo,
+    failed: IoFailure,
 };
 
 /// OSC parser state machine — handles sequences split across PTY reads.
@@ -242,6 +281,11 @@ sync_output_state: sync_output.State = .{},
 
 /// Set when the PTY process has exited.
 exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+/// Thread-safe terminal IO lifecycle. `exited` remains as the cheap legacy
+/// stop flag; this carries the reason surfaced to callers and UI.
+io_state_mutex: std.Thread.Mutex = .{},
+io_state: IoState = .starting,
 
 /// Set while the IO writer thread is resizing PTY and terminal state.
 /// The reader thread still drains PTY output during this window, but
@@ -450,6 +494,8 @@ fn finishInit(
     surface.dirty = std.atomic.Value(bool).init(true);
     surface.sync_output_state = .{};
     surface.exited = std.atomic.Value(bool).init(false);
+    surface.io_state_mutex = .{};
+    surface.io_state = .starting;
     surface.resize_in_progress = std.atomic.Value(bool).init(false);
 
     // Desktop-notification state. `allocator.create` returns undefined memory
@@ -526,6 +572,7 @@ fn finishInit(
     // Spawn IO writer thread (xev event loop — handles resize, future messages)
     surface.io_writer_thread = std.Thread.spawn(threading.surface_thread_spawn_config, termio.Thread.threadMain, .{ thread_state, surface }) catch |err| {
         std.debug.print("Failed to spawn IO writer thread: {}\n", .{err});
+        surface.failIo(.thread_spawn, err);
         return err;
     };
     errdefer {
@@ -537,8 +584,11 @@ fn finishInit(
     // Spawn IO reader thread (blocking PTY output loop)
     surface.io_reader_thread = std.Thread.spawn(threading.surface_thread_spawn_config, termio.ReadThread.threadMain, .{surface}) catch |err| {
         std.debug.print("Failed to spawn IO reader thread: {}\n", .{err});
+        surface.failIo(.thread_spawn, err);
         return err;
     };
+
+    surface.setIoRunning();
 
     // The renderer thread is kept as a future integration point, but the actual
     // snapshot/rebuild path still runs on the main thread today. Starting it now
@@ -618,7 +668,7 @@ pub fn deinit(self: *Surface, allocator: std.mem.Allocator) void {
     }
 
     // 2. Signal both IO threads to stop.
-    self.exited.store(true, .release);
+    self.beginStopping();
 
     // Stop the writer thread (xev event loop) via its stop async
     if (self.io_thread_state) |state| {
@@ -637,6 +687,7 @@ pub fn deinit(self: *Surface, allocator: std.mem.Allocator) void {
         thread.join();
         self.io_reader_thread = null;
     }
+    self.markStopped();
     self.remote_client = null;
 
     // Clean up writer thread state and mailbox
@@ -704,6 +755,149 @@ pub fn setSshConnectionValue(self: *Surface, conn: SshConnection) void {
     self.ssh_connection = conn;
 }
 
+pub fn currentIoState(self: *Surface) IoState {
+    self.io_state_mutex.lock();
+    defer self.io_state_mutex.unlock();
+    return self.io_state;
+}
+
+pub fn acceptsInput(self: *Surface) bool {
+    return switch (self.currentIoState()) {
+        .running => true,
+        else => false,
+    };
+}
+
+fn setIoRunning(self: *Surface) void {
+    self.io_state_mutex.lock();
+    defer self.io_state_mutex.unlock();
+    if (self.io_state == .starting) self.io_state = .running;
+}
+
+pub fn beginStopping(self: *Surface) void {
+    self.io_state_mutex.lock();
+    defer self.io_state_mutex.unlock();
+    switch (self.io_state) {
+        .failed, .exited, .stopped => {},
+        else => self.io_state = .stopping,
+    }
+    self.exited.store(true, .release);
+}
+
+pub fn markStopped(self: *Surface) void {
+    self.io_state_mutex.lock();
+    defer self.io_state_mutex.unlock();
+    switch (self.io_state) {
+        .failed, .exited, .stopped => {},
+        else => self.io_state = .stopped,
+    }
+}
+
+pub fn pollExitStatus(self: *Surface) ?Command.Exit {
+    return self.command.wait(false) catch |err| {
+        io_log.warn("process exit poll failed err={s}", .{@errorName(err)});
+        return null;
+    };
+}
+
+pub fn markExited(self: *Surface, reason: ExitReason, status: ?Command.Exit) void {
+    const info: ExitInfo = .{
+        .reason = reason,
+        .status = status,
+        .timestamp_ms = std.time.milliTimestamp(),
+    };
+    var should_notify = false;
+
+    self.io_state_mutex.lock();
+    switch (self.io_state) {
+        .failed, .exited, .stopped => {},
+        .stopping => self.io_state = .stopped,
+        else => {
+            self.io_state = .{ .exited = info };
+            should_notify = true;
+        },
+    }
+    self.exited.store(true, .release);
+    self.io_state_mutex.unlock();
+
+    if (!should_notify) return;
+    io_log.info("surface io exited reason={s}", .{@tagName(reason)});
+    self.requestWriterStop();
+    self.paintIoStatus(.{ .exited = info });
+    window_backend.postWakeup();
+}
+
+pub fn failIo(self: *Surface, operation: Operation, err: anyerror) void {
+    const failure: IoFailure = .{
+        .operation = operation,
+        .error_code = err,
+        .timestamp_ms = std.time.milliTimestamp(),
+    };
+    var should_notify = false;
+
+    self.io_state_mutex.lock();
+    switch (self.io_state) {
+        .failed, .exited, .stopped => {},
+        else => {
+            self.io_state = .{ .failed = failure };
+            should_notify = true;
+        },
+    }
+    self.exited.store(true, .release);
+    self.io_state_mutex.unlock();
+
+    if (!should_notify) return;
+    if (builtin.is_test) {
+        io_log.warn("surface io failed operation={s} err={s}", .{ @tagName(operation), @errorName(err) });
+    } else {
+        io_log.err("surface io failed operation={s} err={s}", .{ @tagName(operation), @errorName(err) });
+    }
+    self.requestWriterStop();
+    if (self.io_reader_thread != null) self.pty.cancelOutputRead();
+    self.paintIoStatus(.{ .failed = failure });
+    window_backend.postWakeup();
+}
+
+fn requestWriterStop(self: *Surface) void {
+    if (self.io_thread_state) |state| {
+        state.stop.notify() catch |err| {
+            io_log.warn("failed to notify io writer stop err={s}", .{@errorName(err)});
+        };
+    }
+}
+
+fn paintIoStatus(self: *Surface, state: IoState) void {
+    self.render_state.mutex.lock();
+    defer self.render_state.mutex.unlock();
+
+    var buf: [256]u8 = undefined;
+    const message = switch (state) {
+        .failed => |failure| std.fmt.bufPrint(
+            &buf,
+            "\r\n[WispTerm] Terminal IO failed during {s}: {s}\r\n",
+            .{ @tagName(failure.operation), @errorName(failure.error_code) },
+        ) catch return,
+        .exited => |info| exited: {
+            if (info.status) |status| switch (status) {
+                .exited => |code| break :exited std.fmt.bufPrint(
+                    &buf,
+                    "\r\n[WispTerm] Process exited with code {d}.\r\n",
+                    .{code},
+                ) catch return,
+                .unknown => {},
+            };
+            break :exited std.fmt.bufPrint(&buf, "\r\n[WispTerm] Process exited.\r\n", .{}) catch return;
+        },
+        else => return,
+    };
+
+    self.terminal.printString(message) catch |err| {
+        io_log.warn("failed to paint io status err={s}", .{@errorName(err)});
+        return;
+    };
+    self.clearSynchronizedOutputLocked();
+}
+
 // ============================================================================
 // Size and Resize
 // ============================================================================
@@ -762,6 +956,8 @@ pub fn setScreenSizeWithPolicy(
         // Terminal rows/cols and pixel dimensions are updated together in
         // the IO thread, under the render-state lock.
         const grid: renderer.size.GridSize = .{ .cols = new_cols, .rows = new_rows };
+        // queueIo stores the resize on the mailbox's infallible control lane;
+        // a grid change always triggers a UI rebuild regardless of IO state.
         switch (resize_policy) {
             .coalesced => self.queueIo(.{ .resize = grid }),
             .immediate => self.queueIo(.{ .resize_immediate = grid }),
@@ -782,8 +978,8 @@ const mailbox_log = std.log.scoped(.mailbox);
 /// silent-drop path. A fire-and-forget caller may `catch |e| log...` but the
 /// outcome is always surfaced.
 pub const QueueWriteError = error{
-    /// The owning surface has already exited (PTY process gone); writes are
-    /// pointless and the IO writer thread is tearing down.
+    /// The owning surface is no longer accepting input (stopping/exited/failed);
+    /// the PTY process is gone and the IO writer thread is tearing down.
     SurfaceExited,
     /// The payload ring stayed full across the bounded notify+retry window;
     /// the write was NOT delivered and NOT dropped behind the caller's back.
@@ -816,7 +1012,7 @@ pub fn queueIo(self: *Surface, msg: termio.Message) void {
 /// success — the caller decides how loud to be. We NEVER use msg.deinit() to
 /// implicitly mean "delivered".
 pub fn queuePtyWrite(self: *Surface, data: []const u8) QueueWriteError!void {
-    if (self.exited.load(.acquire)) return error.SurfaceExited;
+    if (!self.acceptsInput()) return error.SurfaceExited;
 
     const msg = termio.Message.writeReq(self.allocator, data) catch
         return error.OutOfMemory;
@@ -1482,6 +1678,9 @@ fn vtResponseHarness(surface: *Surface) !void {
     });
     surface.mailbox = try termio.Mailbox.init();
     surface.vt_stream = surface.initVtStream();
+    surface.io_state_mutex = .{};
+    surface.io_state = .running;
+    surface.exited = std.atomic.Value(bool).init(false);
 }
 
 fn vtResponseHarnessDeinit(surface: *Surface) void {
@@ -1517,24 +1716,27 @@ test "kitty keyboard query is answered back to the PTY (issue #302)" {
     try expectPtyResponse(&surface, "\x1b[?1u");
 }
 
-// queuePtyWrite only touches surface.allocator, surface.mailbox, and the
-// exited flag, so a tiny harness is enough to exercise its outcome contract.
+// queuePtyWrite needs surface.allocator, surface.mailbox, and the IO lifecycle
+// state (acceptsInput gates writes), so a tiny harness is enough to exercise its
+// outcome contract. io_state must be .running for writes to be accepted.
 fn writeOutcomeHarness(surface: *Surface) !void {
     surface.allocator = std.testing.allocator;
     surface.mailbox = try termio.Mailbox.init();
     surface.exited = std.atomic.Value(bool).init(false);
+    surface.io_state_mutex = .{};
+    surface.io_state = .running;
 }
 
 fn writeOutcomeHarnessDeinit(surface: *Surface) void {
     surface.mailbox.deinit();
 }
 
-test "queuePtyWrite returns SurfaceExited on an exited surface" {
+test "queuePtyWrite returns SurfaceExited when the surface stops accepting input" {
     var surface: Surface = undefined;
     try writeOutcomeHarness(&surface);
     defer writeOutcomeHarnessDeinit(&surface);
 
-    surface.exited.store(true, .release);
+    surface.io_state = .stopped; // acceptsInput() is true only while .running
     try std.testing.expectError(error.SurfaceExited, surface.queuePtyWrite("hello"));
 }
 
@@ -1575,5 +1777,75 @@ test "queuePtyWrite enqueues a write onto the payload ring on success" {
     switch (msg) {
         .write_small => |*w| try std.testing.expectEqualStrings("ok", w.data[0..w.len]),
         else => return error.UnexpectedMessage,
+    }
+}
+
+fn ioStateHarness(surface: *Surface) !void {
+    surface.allocator = std.testing.allocator;
+    surface.terminal = try ghostty_vt.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    surface.render_state = renderer.State.init(&surface.terminal);
+    surface.surface_renderer = Renderer.init(surface);
+    surface.io_state_mutex = .{};
+    surface.io_state = .running;
+    surface.exited = std.atomic.Value(bool).init(false);
+    surface.dirty = std.atomic.Value(bool).init(false);
+    surface.io_thread_state = null;
+    surface.io_writer_thread = null;
+    surface.io_reader_thread = null;
+}
+
+fn ioStateHarnessDeinit(surface: *Surface) void {
+    surface.surface_renderer.deinit();
+    surface.terminal.deinit(std.testing.allocator);
+}
+
+test "Surface failIo records first failure, wakes rendering, and blocks input" {
+    var surface: Surface = undefined;
+    try ioStateHarness(&surface);
+    defer ioStateHarnessDeinit(&surface);
+
+    try std.testing.expect(surface.acceptsInput());
+
+    surface.failIo(.pty_write, error.BrokenPipe);
+    try std.testing.expect(!surface.acceptsInput());
+    try std.testing.expect(surface.exited.load(.acquire));
+    try std.testing.expect(surface.dirty.load(.acquire));
+
+    switch (surface.currentIoState()) {
+        .failed => |failure| {
+            try std.testing.expectEqual(Operation.pty_write, failure.operation);
+            try std.testing.expectEqual(error.BrokenPipe, failure.error_code);
+        },
+        else => return error.ExpectedFailedState,
+    }
+
+    surface.failIo(.pty_resize, error.ResizeFailed);
+    switch (surface.currentIoState()) {
+        .failed => |failure| {
+            try std.testing.expectEqual(Operation.pty_write, failure.operation);
+            try std.testing.expectEqual(error.BrokenPipe, failure.error_code);
+        },
+        else => return error.ExpectedFailedState,
+    }
+}
+
+test "Surface markExited preserves a normal exit as non-failure and blocks input" {
+    var surface: Surface = undefined;
+    try ioStateHarness(&surface);
+    defer ioStateHarnessDeinit(&surface);
+
+    surface.markExited(.eof, .{ .exited = 0 });
+
+    try std.testing.expect(!surface.acceptsInput());
+    try std.testing.expect(surface.exited.load(.acquire));
+    switch (surface.currentIoState()) {
+        .exited => |info| {
+            try std.testing.expectEqual(ExitReason.eof, info.reason);
+            try std.testing.expectEqual(@as(?Command.Exit, .{ .exited = 0 }), info.status);
+        },
+        else => return error.ExpectedExitedState,
     }
 }
