@@ -29,6 +29,22 @@ pub fn clampSidebarWidth(width: f32, min_width: f32, max_for_window: f32) f32 {
     return @max(min_width, @min(max_for_window, width));
 }
 
+pub const SIDEBAR_STATUS_CLOSE_GAP: f32 = 10;
+pub const SIDEBAR_STATUS_LEADING_GAP: f32 = 6;
+
+pub const SidebarStatusBadgeLayout = struct {
+    x: f32,
+    next_right_content_x: f32,
+};
+
+pub fn sidebarStatusBadgeLayout(close_btn_x: f32, badge_w: f32) SidebarStatusBadgeLayout {
+    const x = close_btn_x - SIDEBAR_STATUS_CLOSE_GAP - badge_w;
+    return .{
+        .x = x,
+        .next_right_content_x = x - SIDEBAR_STATUS_LEADING_GAP,
+    };
+}
+
 /// Printable-ASCII passthrough, else '?'.
 pub fn fallbackCodepoint(byte: u8) u32 {
     return if (byte >= 0x20 and byte <= 0x7e) byte else '?';
@@ -62,6 +78,15 @@ test "clampSidebarWidth bounds" {
     try std.testing.expectEqual(@as(f32, 160), clampSidebarWidth(50, 160, 720));
     try std.testing.expectEqual(@as(f32, 720), clampSidebarWidth(900, 160, 720));
     try std.testing.expectEqual(@as(f32, 300), clampSidebarWidth(300, 160, 720));
+}
+
+test "sidebar status badge leaves readable gap before close button" {
+    const close_btn_x: f32 = 184;
+    const badge_w: f32 = 34;
+    const layout = sidebarStatusBadgeLayout(close_btn_x, badge_w);
+
+    try std.testing.expectEqual(@as(f32, 10), close_btn_x - (layout.x + badge_w));
+    try std.testing.expectEqual(@as(f32, close_btn_x - 10 - badge_w - 6), layout.next_right_content_x);
 }
 
 test "fallbackCodepoint maps printable ASCII, else '?'" {
