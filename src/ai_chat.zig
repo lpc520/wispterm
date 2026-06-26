@@ -870,6 +870,11 @@ pub const Session = struct {
     distill_last_suggested_turn_count: usize = 0,
     distill_inflight: bool = false,
     auto_title_attempted: bool = false,
+    /// True once the user has manually renamed the chat (via the tab rename UI).
+    /// Auto-title checks this instead of comparing the title to a hardcoded
+    /// default name, so every profile — not just one literally named "DeepSeek"
+    /// — gets an auto-generated title on its first turn.
+    title_is_custom: bool = false,
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     scroll_px: f32 = 0,
@@ -1107,6 +1112,7 @@ pub const Session = struct {
         session.max_tokens = record.max_tokens;
         session.vision_enabled = record.vision_enabled;
         session.copilot = record.copilot;
+        session.title_is_custom = record.title_is_custom;
         session.created_at_ms = record.created_at;
         session.updated_at_ms = record.updated_at;
         for (record.messages) |msg| {
@@ -1454,21 +1460,26 @@ pub const Session = struct {
         };
     }
 
+    /// Explicit (user-driven) rename. Marks the title as custom so a later
+    /// auto-title never overwrites the user's choice.
     pub fn setTitle(self: *Session, title_text: []const u8) void {
         var history_change: ?PendingHistoryChange = null;
         self.mutex.lock();
         self.copyTitle(title_text);
+        self.title_is_custom = true;
         history_change = self.captureHistoryChangeLocked();
         self.mutex.unlock();
         self.notifyHistoryChange(history_change);
     }
 
-    /// Set the title only if it is still the default name. Returns true if it
-    /// changed. Used by auto-title so a concurrent manual rename always wins.
-    pub fn setTitleIfDefault(self: *Session, title_text: []const u8) bool {
+    /// Set the title only if the user has not manually renamed the chat. Returns
+    /// true if it changed. Used by auto-title so a concurrent manual rename
+    /// always wins. Leaves `title_is_custom` false: an auto-generated title is
+    /// not a user choice, and `auto_title_attempted` already prevents re-firing.
+    pub fn setTitleIfNotCustom(self: *Session, title_text: []const u8) bool {
         var history_change: ?PendingHistoryChange = null;
         self.mutex.lock();
-        if (!std.mem.eql(u8, self.title_buf[0..self.title_len], DEFAULT_NAME)) {
+        if (self.title_is_custom) {
             self.mutex.unlock();
             return false;
         }
@@ -4157,6 +4168,7 @@ pub const Session = struct {
             .agent_enabled = self.agent_enabled,
             .vision_enabled = self.vision_enabled,
             .copilot = self.copilot,
+            .title_is_custom = self.title_is_custom,
             .created_at = self.created_at_ms,
             .updated_at = self.updated_at_ms,
             .messages = messages,
@@ -4479,13 +4491,13 @@ pub fn finishStoppedRequest(session: *Session) void {
 }
 
 /// Clean a raw model title response and apply it to the session, but only if the
-/// title is still the default (a manual rename in the meantime always wins) and
-/// the session is not closing.
+/// user has not manually renamed it (a manual rename in the meantime always
+/// wins) and the session is not closing.
 pub fn applyGeneratedTitle(session: *Session, raw: []const u8) void {
     if (session.closing.load(.acquire)) return;
     var buf: [ai_chat_title.max_title_bytes]u8 = undefined;
     const cleaned = ai_chat_title.cleanTitle(raw, &buf) orelse return;
-    _ = session.setTitleIfDefault(cleaned);
+    _ = session.setTitleIfNotCustom(cleaned);
 }
 
 /// Swap the live session to a different provider/model (session-only; does not
@@ -4767,8 +4779,7 @@ pub fn maybeAutoTitle(session: *Session) void {
         const gate = ai_chat_title.TitleGate{
             .attempted = session.auto_title_attempted,
             .has_api_key = session.api_key_len > 0,
-            .title = session.title_buf[0..session.title_len],
-            .default_name = DEFAULT_NAME,
+            .is_custom = session.title_is_custom,
         };
         if (!ai_chat_title.shouldAutoTitle(gate, turn)) break :locked;
 
@@ -6166,11 +6177,11 @@ test "ai_chat: applyGeneratedTitle cleans and sets title when still default" {
     try std.testing.expectEqualStrings("Deploy the App", session.title());
 }
 
-test "ai_chat: applyGeneratedTitle leaves a renamed title untouched" {
+test "ai_chat: applyGeneratedTitle leaves a user-renamed title untouched" {
     const allocator = std.testing.allocator;
     const session = try Session.init(
         allocator,
-        "My Custom Name",
+        DEFAULT_NAME,
         "https://api.example.com",
         "secret",
         "model-a",
@@ -6181,8 +6192,67 @@ test "ai_chat: applyGeneratedTitle leaves a renamed title untouched" {
         "true",
     );
     defer session.deinit();
+    // A manual rename (setTitle) marks the title custom; auto-title must not win.
+    session.setTitle("My Custom Name");
+    try std.testing.expect(session.title_is_custom);
     applyGeneratedTitle(session, "Generated Title");
     try std.testing.expectEqualStrings("My Custom Name", session.title());
+}
+
+test "ai_chat: applyGeneratedTitle titles a non-DeepSeek profile (glm-5.2 regression)" {
+    // Regression for the hardcoded `title == "DeepSeek"` gate: a fresh session
+    // whose default title is its profile name (here an Anthropic glm-5.2 chat)
+    // must still receive an auto-generated title. The name is no longer compared
+    // against a single hardcoded default.
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "glm-5.2",
+        "https://open.bigmodel.cn/api/anthropic",
+        "secret",
+        "glm-5.2",
+        "system",
+        "enabled",
+        "high",
+        "false",
+        "true",
+    );
+    defer session.deinit();
+    try std.testing.expect(!session.title_is_custom);
+    applyGeneratedTitle(session, "Greeting Exchange");
+    try std.testing.expectEqualStrings("Greeting Exchange", session.title());
+}
+
+test "ai_chat: title_is_custom survives a history record round trip" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "glm-5.2",
+        "https://open.bigmodel.cn/api/anthropic",
+        "secret",
+        "glm-5.2",
+        "system",
+        "enabled",
+        "high",
+        "false",
+        "true",
+    );
+    defer session.deinit();
+    try std.testing.expect(!session.title_is_custom);
+
+    session.setTitle("Renamed By User");
+    try std.testing.expect(session.title_is_custom);
+
+    var record = try session.toHistoryRecord(allocator);
+    defer agent_history.freeOwnedRecord(allocator, &record);
+    try std.testing.expect(record.title_is_custom);
+
+    const restored = try Session.initFromHistoryRecord(allocator, record);
+    defer restored.deinit();
+    try std.testing.expect(restored.title_is_custom);
+    // And a restored, user-renamed chat must not be auto-titled over.
+    applyGeneratedTitle(restored, "Auto Title");
+    try std.testing.expectEqualStrings("Renamed By User", restored.title());
 }
 
 test "ai_chat: applyGeneratedTitle ignores empty model output" {
