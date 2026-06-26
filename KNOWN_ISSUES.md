@@ -28,8 +28,9 @@ console release unless the release explicitly includes `remote/`.
 ## macOS
 
 - Event buffers in `window_macos_bridge.m` cross the AppKit main thread and the
-  render/input worker thread. They need explicit locking or atomics before the
-  port should be considered fully load-tested for heavy input.
+  render/input worker thread. They are now serialized with `os_unfair_lock`
+  (`input_lock`/`message_lock`); the remaining gap is heavy-input stress testing
+  rather than an unguarded data race.
 - With the native title bar hidden, the window is only reliably draggable via
   traffic-light gaps. Add a drag region to the app-drawn titlebar.
 - Window-position persistence stores AppKit bottom-origin coordinates in fields

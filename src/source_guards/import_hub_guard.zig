@@ -11,10 +11,10 @@ const scan = @import("scan.zig");
 
 const app_window = @embedFile("../AppWindow.zig");
 
-/// Frozen at the current count; the ratchet may only ratchet DOWN.
-/// Verified post-round-1: AppWindow re-exports 18 modules today, so the
-/// ceiling already equals the actual and has no slack to lower this round.
-const reexport_ceiling: usize = 18;
+/// Frozen at the current baseline; the ratchet may only ratchet DOWN.
+/// AppWindow re-exports 17 modules today (the unused `fbo` re-export was
+/// removed), so the ceiling already equals the actual.
+const reexport_ceiling: usize = 17;
 
 fn reexportCount(source: []const u8) usize {
     return scan.countTopLevelLinesContaining(source, "pub const ", "= @import(");
