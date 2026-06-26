@@ -9,6 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const protocol = @import("protocol.zig");
 const control_mod = @import("control.zig");
+const transport = @import("transport.zig");
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 pub const default_rows: u32 = 1000;
@@ -92,7 +93,9 @@ pub const Server = struct {
         var chunk: [4096]u8 = undefined;
         while (buf.items.len < MAX_REQUEST_BYTES) {
             if (self.stop_flag.load(.acquire)) return; // bail promptly on shutdown
-            const n = stream.read(&chunk) catch break; // includes recv timeout (WouldBlock)
+            // posix.recv, not the deprecated Stream.read: the latter is broken on
+            // Windows overlapped sockets (ReadFile + NULL OVERLAPPED). See transport.zig.
+            const n = transport.recv(stream.handle, &chunk) catch break; // includes recv timeout (WouldBlock)
             if (n == 0) break;
             try buf.appendSlice(self.allocator, chunk[0..n]);
             if (std.mem.indexOfScalar(u8, buf.items, '\n') != null) break;
@@ -100,7 +103,7 @@ pub const Server = struct {
         const nl = std.mem.indexOfScalar(u8, buf.items, '\n') orelse buf.items.len;
         const reply = try self.dispatch(buf.items[0..nl]);
         defer self.allocator.free(reply);
-        stream.writeAll(reply) catch {};
+        transport.sendAll(stream.handle, reply) catch {};
     }
 
     /// Parse + authenticate + act. Returns an owned, newline-terminated reply.
