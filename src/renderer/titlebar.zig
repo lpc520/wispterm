@@ -1157,7 +1157,7 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
 
         const close_opacity = tab.g_tab_close_opacity[tab_idx];
         const close_btn_x = sidebar_w - tab.TAB_CLOSE_BTN_W - 4;
-        var right_content_x = close_btn_x - 4;
+        var right_content_x = close_btn_x - titlebar_layout.SIDEBAR_STATUS_CLOSE_GAP;
         // Use aggregate of all panes' visible states so the sidebar badge
         // reflects the most attention-worthy agent across all split panes,
         // not just the focused one.
@@ -1200,8 +1200,9 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
         if (show_agent_badge) {
             const badge_text_w = titlebarTextWidth(detection.badge());
             agent_badge_w = @max(@as(f32, 18), badge_text_w + 10);
-            agent_badge_x = right_content_x - agent_badge_w;
-            right_content_x = agent_badge_x - 6;
+            const badge_layout = titlebar_layout.sidebarStatusBadgeLayout(close_btn_x, agent_badge_w);
+            agent_badge_x = badge_layout.x;
+            right_content_x = badge_layout.next_right_content_x;
         }
 
         const bell_opacity: f32 = if (tab.g_tabs[tab_idx]) |t| (if (t.focusedSurface()) |s| s.bell_opacity else 0) else 0;
