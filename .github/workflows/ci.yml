@@ -90,6 +90,9 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      # Production emit: typecheck alone does not validate the Vite client
+      # bundle or the tsc server emit (build:docker = build + build:server).
+      - run: npm run build:docker
 
   windows-smoke:
     name: Windows smoke
