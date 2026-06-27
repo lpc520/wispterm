@@ -365,6 +365,10 @@ monolith UI files cannot quietly regrow while they are being decomposed. This
 section is the playbook the `AGENTS.md` "Cohesion and coupling" section points
 to.
 
+Directory moves are governed separately because they should only reflect
+boundaries that have already stabilized. See
+[source-layout.md](source-layout.md) before moving files between directories.
+
 ### 8.1 The criterion
 
 Cohesion and coupling — **not** line count — decide whether a file is too big. A
