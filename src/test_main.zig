@@ -665,6 +665,7 @@ comptime {
     _ = @import("App.zig");
     _ = @import("AppWindow.zig");
     _ = @import("agent_tools/args.zig");
+    _ = @import("agent_tools/research.zig");
     _ = @import("surface_registry.zig");
     _ = @import("preview/png_dimensions.zig");
     _ = @import("appwindow/flush_scheduler.zig");

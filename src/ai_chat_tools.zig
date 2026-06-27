@@ -34,9 +34,7 @@ const platform_wsl = @import("platform/wsl.zig");
 const platform_agent_prompt = @import("platform/agent_prompt.zig");
 const ai_agent_access = @import("ai_agent_access.zig");
 const tool_args = @import("agent_tools/args.zig");
-const web_search = @import("research/web_search.zig");
-const web_read = @import("research/web_read.zig");
-const pubmed = @import("research/pubmed.zig");
+const agent_research = @import("agent_tools/research.zig");
 const agent_memory = @import("agent_memory.zig");
 
 /// Number of output lines included in a copilot context block.
@@ -233,20 +231,20 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         defer args.deinit();
         const query = tool_args.string(args.value, "query") orelse return ctx.allocator.dupe(u8, "Missing query");
         const max_results = tool_args.int(args.value, "max_results");
-        return webSearchTool(ctx.allocator, query, max_results);
+        return agent_research.webSearch(ctx.allocator, query, max_results);
     }
     if (std.mem.eql(u8, call.name, "webread")) {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
         const url = tool_args.string(args.value, "url") orelse return ctx.allocator.dupe(u8, "Missing url");
-        return webReadTool(ctx.allocator, url, ctx.settings.working_dir);
+        return agent_research.webRead(ctx.allocator, url, ctx.settings.working_dir);
     }
     if (std.mem.eql(u8, call.name, "pubmed")) {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
         const query = tool_args.string(args.value, "query") orelse return ctx.allocator.dupe(u8, "Missing query");
         const max_results = tool_args.int(args.value, "max_results");
-        return pubMedTool(ctx.allocator, query, max_results);
+        return agent_research.pubMed(ctx.allocator, query, max_results);
     }
     if (std.mem.startsWith(u8, call.name, "memory_") and !ctx.settings.memory_enabled) {
         return ctx.allocator.dupe(u8, "Memory is disabled (ai-memory-enabled = false).");
@@ -388,45 +386,6 @@ pub fn wisptermDocsTool(allocator: std.mem.Allocator, topic: ?[]const u8) ![]u8 
         return out.toOwnedSlice(allocator);
     }
     return wispterm_docs.listTopics(allocator);
-}
-
-/// Agent `websearch` tool: full-content Jina search, formatted for the model.
-fn webSearchTool(allocator: std.mem.Allocator, query: []const u8, max_results: ?u32) ![]u8 {
-    const key = (web_search.jinaApiKeyAlloc(allocator) catch null) orelse
-        return web_search.formatErrorText(allocator, error.MissingApiKey);
-    defer allocator.free(key);
-    const max: usize = if (max_results) |m| @min(@max(m, 1), 20) else 10;
-    var results = web_search.executeSearch(allocator, query, .{
-        .engine = .jina,
-        .api_key = key,
-        .with_content = true,
-        .max_results = max,
-    }) catch |err| return web_search.formatErrorText(allocator, err);
-    defer results.deinit();
-    return web_search.formatForAgent(allocator, query, results.items);
-}
-
-/// Agent `webread` tool: read a URL or local file into markdown for the model.
-/// Key is optional (anonymous read works), so a null key becomes "". `working_dir`
-/// (the conversation's cwd) is the cache root and resolves relative file targets.
-fn webReadTool(allocator: std.mem.Allocator, target_in: []const u8, working_dir: ?[]const u8) ![]u8 {
-    const target = std.mem.trim(u8, target_in, " \t\r\n");
-    const key_opt = web_search.jinaApiKeyAlloc(allocator) catch null;
-    defer if (key_opt) |k| allocator.free(k);
-    const key = key_opt orelse "";
-    var result = web_read.executeRead(allocator, target, .{ .api_key = key, .cache_dir = working_dir }) catch |err|
-        return web_read.formatErrorText(allocator, err);
-    defer result.deinit();
-    return web_read.formatForAgent(allocator, target, &result);
-}
-
-/// Agent `pubmed` tool: NCBI PubMed search with abstracts, formatted for the model.
-fn pubMedTool(allocator: std.mem.Allocator, query: []const u8, max_results: ?u32) ![]u8 {
-    const max: usize = if (max_results) |m| @min(@max(m, 1), 20) else 10;
-    var results = pubmed.executeSearch(allocator, query, .{ .max_results = max }) catch |err|
-        return pubmed.formatErrorText(allocator, err);
-    defer results.deinit();
-    return pubmed.formatForAgent(allocator, query, results.items);
 }
 
 // ---------------------------------------------------------------------------
