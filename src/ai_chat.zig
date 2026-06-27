@@ -22,7 +22,7 @@ const ai_model_switch = @import("ai_model_switch.zig");
 const ai_chat_skills = @import("ai_chat_skills.zig");
 const ai_skill_distill = @import("ai_skill_distill.zig");
 const ai_chat_types = @import("ai_chat_types.zig");
-const ai_chat_tools = @import("ai_chat_tools.zig");
+const agent_terminal = @import("agent_tools/terminal.zig");
 const ai_agent_access = @import("ai_agent_access.zig");
 const platform_dirs = @import("platform/dirs.zig");
 const ai_chat_markdown = @import("ai_chat_markdown.zig");
@@ -3940,8 +3940,8 @@ pub const Session = struct {
         var copilot_target_idx: ?usize = null;
         if (self.copilot and self.bound_surface_id_len > 0) {
             if (tool_snapshot) |snap| {
-                if (ai_chat_tools.findSurface(snap, self.boundSurfaceId())) |surface| {
-                    copilot_ctx = ai_chat_tools.buildCopilotContext(self.allocator, surface.cwd, surface.snapshot) catch null;
+                if (agent_terminal.findSurface(snap, self.boundSurfaceId())) |surface| {
+                    copilot_ctx = agent_terminal.buildCopilotContext(self.allocator, surface.cwd, surface.snapshot) catch null;
                     if (copilot_ctx != null) {
                         // index of the LAST user message in self.messages
                         var k: usize = self.messages.items.len;
@@ -4029,8 +4029,8 @@ pub const Session = struct {
         disabled_first_party_tools_owned = false;
         if (self.copilot and self.bound_surface_id_len > 0) {
             // Inline the write-context seed directly on ChatRequest (the field
-            // layout is identical to ToolContext; setWriteContext in
-            // ai_chat_tools operates on ToolContext).
+            // layout is identical to ToolContext; terminal tool helpers operate
+            // on ToolContext).
             const bound_id = self.boundSurfaceId();
             const len = @min(bound_id.len, req.write_context_surface_id.len);
             @memcpy(req.write_context_surface_id[0..len], bound_id[0..len]);
@@ -5114,9 +5114,8 @@ fn wslSessionExecTool(request: *ChatRequest, surface_id: []const u8, command: []
     });
 }
 
-// All tool implementations are in ai_chat_tools.zig.
-// The block that was here (executeToolCall body, parseArgs, jsonStringArg, ... isWordChar)
-// has been removed and lives in src/ai_chat_tools.zig instead.
+// Tool dispatch lives in src/agent_tools/mod.zig; individual runtime adapters
+// live under src/agent_tools/.
 
 // Response parsing delegates to ai_chat_protocol
 const parseApiResponse = ai_chat_protocol.parseApiResponse;

@@ -154,6 +154,7 @@ test {
     _ = @import("source_guards/import_hub_guard.zig");
     _ = @import("source_guards/side_effect_guard.zig");
     _ = @import("source_guards/process_runner_guard.zig");
+    _ = @import("source_guards/agent_tools_guard.zig");
     _ = @import("source_guards/layered_dependency_guard.zig");
     _ = @import("source_guards/overlay_boundary_guard.zig");
     _ = @import("source_guards/input_feature_boundary_guard.zig");
@@ -218,6 +219,19 @@ test {
     _ = @import("ai_chat_input_text.zig");
     _ = @import("ai_chat_composer.zig");
     _ = @import("composer_detail_wrap.zig");
+    _ = @import("agent_tools/args.zig");
+    _ = @import("agent_tools/mod.zig");
+    _ = @import("agent_tools/research.zig");
+    _ = @import("agent_tools/knowledge.zig");
+    _ = @import("agent_tools/memory.zig");
+    _ = @import("agent_tools/output.zig");
+    _ = @import("agent_tools/terminal.zig");
+    _ = @import("agent_tools/sessions.zig");
+    _ = @import("agent_tools/access.zig");
+    _ = @import("agent_tools/files.zig");
+    _ = @import("agent_tools/exec.zig");
+    _ = @import("agent_tools/dynamic.zig");
+    _ = @import("agent_tools/weixin.zig");
     _ = @import("research/commands.zig");
     _ = @import("research/web_search.zig");
     _ = @import("agent_prompt_answer.zig");

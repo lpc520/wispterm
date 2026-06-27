@@ -8,7 +8,9 @@ const Session = ai_chat.Session;
 const ChatRequest = ai_chat.ChatRequest;
 const ai_chat_protocol = @import("ai_chat_protocol.zig");
 const ai_skill_distill = @import("ai_skill_distill.zig");
-const ai_chat_tools = @import("ai_chat_tools.zig");
+const agent_tools = @import("agent_tools/mod.zig");
+const tool_args = @import("agent_tools/args.zig");
+const tool_output = @import("agent_tools/output.zig");
 const first_party_tools = @import("tools/first_party.zig");
 const web_search = @import("research/web_search.zig");
 const web_read = @import("research/web_read.zig");
@@ -371,10 +373,10 @@ fn realSubagentModelCall(_: ?*anyopaque, request: *const ChatRequest, messages: 
 }
 
 fn subagentToolCall(request: *ChatRequest, call: ToolCall) anyerror![]u8 {
-    const args = ai_chat_tools.parseArgs(request.allocator, call.arguments) orelse
+    const args = tool_args.parse(request.allocator, call.arguments) orelse
         return request.allocator.dupe(u8, "Invalid tool arguments");
     defer args.deinit();
-    const task = ai_chat_tools.jsonStringArg(args.value, "task") orelse
+    const task = tool_args.string(args.value, "task") orelse
         return request.allocator.dupe(u8, "Missing task");
     if (std.mem.trim(u8, task, " \t\r\n").len == 0)
         return request.allocator.dupe(u8, "Missing task");
@@ -443,7 +445,7 @@ pub fn runSubagentTaskWithModel(request: *ChatRequest, task: []const u8, model: 
                 defer allocator.free(text);
                 ai_chat.appendProgressMessage(request.session, text) catch {};
             }
-            return ai_chat_tools.truncateOwned(allocator, ai_chat.currentAgentSettings(), result.content);
+            return tool_output.truncateOwned(allocator, ai_chat.currentAgentSettings(), result.content);
         }
         errdefer result.deinit(allocator);
 
@@ -894,7 +896,7 @@ pub fn executeToolCall(request: *ChatRequest, call: ToolCall) ![]u8 {
     }
     if (std.mem.eql(u8, call.name, "subagent")) return subagentToolCall(request, call);
     var tool_ctx = toolContextFromRequest(request);
-    const result = try ai_chat_tools.executeToolCall(&tool_ctx, call);
+    const result = try agent_tools.executeToolCall(&tool_ctx, call);
     // Write-context state may have changed inside the tool (e.g. terminal_select).
     request.write_context_surface_id = tool_ctx.write_context_surface_id;
     request.write_context_surface_id_len = tool_ctx.write_context_surface_id_len;
