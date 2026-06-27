@@ -668,6 +668,8 @@ comptime {
     _ = @import("agent_tools/research.zig");
     _ = @import("agent_tools/knowledge.zig");
     _ = @import("agent_tools/memory.zig");
+    _ = @import("agent_tools/output.zig");
+    _ = @import("agent_tools/terminal.zig");
     _ = @import("surface_registry.zig");
     _ = @import("preview/png_dimensions.zig");
     _ = @import("appwindow/flush_scheduler.zig");

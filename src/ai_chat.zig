@@ -23,6 +23,7 @@ const ai_chat_skills = @import("ai_chat_skills.zig");
 const ai_skill_distill = @import("ai_skill_distill.zig");
 const ai_chat_types = @import("ai_chat_types.zig");
 const ai_chat_tools = @import("ai_chat_tools.zig");
+const agent_terminal = @import("agent_tools/terminal.zig");
 const ai_agent_access = @import("ai_agent_access.zig");
 const platform_dirs = @import("platform/dirs.zig");
 const ai_chat_markdown = @import("ai_chat_markdown.zig");
@@ -3940,8 +3941,8 @@ pub const Session = struct {
         var copilot_target_idx: ?usize = null;
         if (self.copilot and self.bound_surface_id_len > 0) {
             if (tool_snapshot) |snap| {
-                if (ai_chat_tools.findSurface(snap, self.boundSurfaceId())) |surface| {
-                    copilot_ctx = ai_chat_tools.buildCopilotContext(self.allocator, surface.cwd, surface.snapshot) catch null;
+                if (agent_terminal.findSurface(snap, self.boundSurfaceId())) |surface| {
+                    copilot_ctx = agent_terminal.buildCopilotContext(self.allocator, surface.cwd, surface.snapshot) catch null;
                     if (copilot_ctx != null) {
                         // index of the LAST user message in self.messages
                         var k: usize = self.messages.items.len;

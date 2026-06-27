@@ -10,6 +10,7 @@ const ai_chat_protocol = @import("ai_chat_protocol.zig");
 const ai_skill_distill = @import("ai_skill_distill.zig");
 const ai_chat_tools = @import("ai_chat_tools.zig");
 const tool_args = @import("agent_tools/args.zig");
+const tool_output = @import("agent_tools/output.zig");
 const first_party_tools = @import("tools/first_party.zig");
 const web_search = @import("research/web_search.zig");
 const web_read = @import("research/web_read.zig");
@@ -444,7 +445,7 @@ pub fn runSubagentTaskWithModel(request: *ChatRequest, task: []const u8, model: 
                 defer allocator.free(text);
                 ai_chat.appendProgressMessage(request.session, text) catch {};
             }
-            return ai_chat_tools.truncateOwned(allocator, ai_chat.currentAgentSettings(), result.content);
+            return tool_output.truncateOwned(allocator, ai_chat.currentAgentSettings(), result.content);
         }
         errdefer result.deinit(allocator);
 

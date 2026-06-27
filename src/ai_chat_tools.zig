@@ -34,9 +34,8 @@ const tool_args = @import("agent_tools/args.zig");
 const agent_research = @import("agent_tools/research.zig");
 const knowledge = @import("agent_tools/knowledge.zig");
 const agent_memory_tool = @import("agent_tools/memory.zig");
-
-/// Number of output lines included in a copilot context block.
-pub const COPILOT_CONTEXT_LINES: usize = 40;
+const tool_output = @import("agent_tools/output.zig");
+const terminal_tools = @import("agent_tools/terminal.zig");
 
 // ---------------------------------------------------------------------------
 // Tool dispatch
@@ -48,22 +47,22 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         return std.fmt.allocPrint(ctx.allocator, "Tool is disabled: {s}", .{call.name});
     }
     if (std.mem.eql(u8, call.name, "terminal_list")) {
-        return terminalListTool(ctx);
+        return terminal_tools.list(ctx);
     }
     if (std.mem.eql(u8, call.name, "terminal_context")) {
-        return terminalContextTool(ctx);
+        return terminal_tools.context(ctx);
     }
     if (std.mem.eql(u8, call.name, "terminal_snapshot")) {
         const args = tool_args.parse(ctx.allocator, call.arguments);
         defer if (args) |parsed| parsed.deinit();
         const surface_id = if (args) |parsed| tool_args.string(parsed.value, "surface_id") else null;
-        return terminalSnapshotTool(ctx, surface_id);
+        return terminal_tools.snapshot(ctx, surface_id);
     }
     if (std.mem.eql(u8, call.name, "terminal_select")) {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
         const surface_id = tool_args.string(args.value, "surface_id") orelse return ctx.allocator.dupe(u8, "Missing surface_id");
-        return terminalSelectTool(ctx, surface_id);
+        return terminal_tools.select(ctx, surface_id);
     }
     if (std.mem.eql(u8, call.name, platform_process.localCommandToolName())) {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
@@ -76,7 +75,7 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
     if (std.mem.eql(u8, call.name, "ssh_session_exec")) {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const surface_id = tool_args.string(args.value, "surface_id") orelse defaultExecSurfaceId(ctx) orelse return ctx.allocator.dupe(u8, "Missing surface_id");
+        const surface_id = tool_args.string(args.value, "surface_id") orelse terminal_tools.defaultExecSurfaceId(ctx) orelse return ctx.allocator.dupe(u8, "Missing surface_id");
         const command = tool_args.string(args.value, "command") orelse return ctx.allocator.dupe(u8, "Missing command");
         const timeout_ms = tool_args.int(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
         return sshSessionExecTool(ctx, surface_id, command, timeout_ms);
@@ -84,7 +83,7 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
     if (std.mem.eql(u8, call.name, "wsl_session_exec")) {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const surface_id = tool_args.string(args.value, "surface_id") orelse defaultExecSurfaceId(ctx) orelse return ctx.allocator.dupe(u8, "Missing surface_id");
+        const surface_id = tool_args.string(args.value, "surface_id") orelse terminal_tools.defaultExecSurfaceId(ctx) orelse return ctx.allocator.dupe(u8, "Missing surface_id");
         const command = tool_args.string(args.value, "command") orelse return ctx.allocator.dupe(u8, "Missing command");
         const timeout_ms = tool_args.int(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
         return wslSessionExecTool(ctx, surface_id, command, timeout_ms);
@@ -92,7 +91,7 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
     if (std.mem.eql(u8, call.name, "terminal_repl_exec")) {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const surface_id = tool_args.string(args.value, "surface_id") orelse defaultExecSurfaceId(ctx) orelse return ctx.allocator.dupe(u8, "Missing surface_id");
+        const surface_id = tool_args.string(args.value, "surface_id") orelse terminal_tools.defaultExecSurfaceId(ctx) orelse return ctx.allocator.dupe(u8, "Missing surface_id");
         const repl = tool_args.string(args.value, "repl") orelse return ctx.allocator.dupe(u8, "Missing repl");
         const code = tool_args.string(args.value, "code") orelse return ctx.allocator.dupe(u8, "Missing code");
         const timeout_ms = tool_args.int(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
@@ -370,230 +369,6 @@ fn weixinSendAttachmentTool(
 }
 
 // ---------------------------------------------------------------------------
-// Terminal surface helpers
-// ---------------------------------------------------------------------------
-
-fn toolSurfaceKind(surface: ToolSurface) []const u8 {
-    if (surface.is_ssh) return "ssh";
-    if (surface.is_wsl) return "wsl";
-    return "terminal";
-}
-
-fn terminalContextTool(ctx: *const ToolContext) ![]u8 {
-    const selected = selectedWriteContext(ctx) orelse return ctx.allocator.dupe(u8, "No terminal context is selected.");
-    const snapshot = collectToolSnapshot(ctx) catch {
-        return std.fmt.allocPrint(ctx.allocator, "Selected terminal context surface_id={s}; terminal snapshot host unavailable.", .{selected});
-    };
-    defer snapshot.deinit(ctx.allocator);
-    const surface = findSurface(snapshot, selected) orelse {
-        return std.fmt.allocPrint(ctx.allocator, "Selected terminal context surface_id={s} is no longer open.", .{selected});
-    };
-    if (surface.agent_app != .none) {
-        return std.fmt.allocPrint(
-            ctx.allocator,
-            "selected surface_id={s} tab={d} focused={} kind={s} title=\"{s}\" cwd=\"{s}\" agent={s}:{s} confidence={d}",
-            .{
-                surface.id,
-                surface.tab_index + 1,
-                surface.focused,
-                toolSurfaceKind(surface),
-                surface.title,
-                surface.cwd,
-                surface.agent_app.label(),
-                surface.agent_state.label(),
-                surface.agent_confidence,
-            },
-        );
-    }
-    return std.fmt.allocPrint(
-        ctx.allocator,
-        "selected surface_id={s} tab={d} focused={} kind={s} title=\"{s}\" cwd=\"{s}\"",
-        .{
-            surface.id,
-            surface.tab_index + 1,
-            surface.focused,
-            toolSurfaceKind(surface),
-            surface.title,
-            surface.cwd,
-        },
-    );
-}
-
-fn terminalListTool(ctx: *const ToolContext) ![]u8 {
-    const snapshot = collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
-    defer snapshot.deinit(ctx.allocator);
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(ctx.allocator);
-    const selected = selectedWriteContext(ctx);
-    // tab/active_tab are shown one-based to match the tab numbers the user sees
-    // in the UI (the internal tab_index is zero-based).
-    try out.print(ctx.allocator, "active_tab={d}\n", .{snapshot.active_tab + 1});
-    if (selected) |id| {
-        try out.print(ctx.allocator, "selected_context={s}\n", .{id});
-    } else {
-        try out.appendSlice(ctx.allocator, "selected_context=none\n");
-    }
-    for (snapshot.surfaces) |surface| {
-        const is_selected = if (selected) |id| std.mem.eql(u8, id, surface.id) else false;
-        try out.print(ctx.allocator, "- id={s} tab={d} focused={} selected={} kind={s} title=\"{s}\" cwd=\"{s}\"", .{
-            surface.id,
-            surface.tab_index + 1,
-            surface.focused,
-            is_selected,
-            toolSurfaceKind(surface),
-            surface.title,
-            surface.cwd,
-        });
-        if (surface.agent_app != .none) {
-            try out.print(ctx.allocator, " agent={s}:{s} confidence={d}", .{
-                surface.agent_app.label(),
-                surface.agent_state.label(),
-                surface.agent_confidence,
-            });
-        }
-        try out.append(ctx.allocator, '\n');
-    }
-    return truncateOwned(ctx.allocator, ctx.settings, try out.toOwnedSlice(ctx.allocator));
-}
-
-fn terminalSnapshotTool(ctx: *const ToolContext, surface_id: ?[]const u8) ![]u8 {
-    const snapshot = collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
-    defer snapshot.deinit(ctx.allocator);
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(ctx.allocator);
-
-    // Resolve a focused-surface alias (focused/active/current/empty) to a
-    // concrete id so the filter below matches the focused terminal.
-    var target_id = surface_id;
-    if (surface_id) |sid| {
-        if (resolveSurfaceId(snapshot, sid, selectedWriteContext(ctx))) |s| target_id = s.id;
-    }
-
-    for (snapshot.surfaces) |surface| {
-        if (target_id) |id| {
-            if (!std.mem.eql(u8, surface.id, id)) continue;
-        }
-        try out.print(ctx.allocator, "surface={s} title=\"{s}\" kind={s} focused={}", .{
-            surface.id,
-            surface.title,
-            toolSurfaceKind(surface),
-            surface.focused,
-        });
-        if (surface.agent_app != .none) {
-            try out.print(ctx.allocator, " agent={s}:{s} confidence={d}", .{
-                surface.agent_app.label(),
-                surface.agent_state.label(),
-                surface.agent_confidence,
-            });
-        }
-        try out.append(ctx.allocator, '\n');
-
-        // For a specifically targeted surface, read the LIVE screen via the
-        // per-surface snapshot (mutex-protected, works on the worker thread)
-        // rather than the request-start pre-capture, which goes stale mid-turn.
-        var live: ?[]u8 = null;
-        defer if (live) |t| ctx.allocator.free(t);
-        if (target_id != null) {
-            if (ctx.tool_host) |host| {
-                live = host.surfaceSnapshot(host.ctx, ctx.allocator, surface.id, surface.ptr) catch null;
-            }
-        }
-        try out.appendSlice(ctx.allocator, live orelse surface.snapshot);
-        try out.appendSlice(ctx.allocator, "\n---\n");
-    }
-    if (out.items.len == 0) {
-        if (surface_id) |sid| return allocNoSurfaceError(ctx.allocator, snapshot, sid);
-        try out.appendSlice(ctx.allocator, "No matching terminal surface.");
-    }
-    return truncateTailOwned(ctx.allocator, ctx.settings, try out.toOwnedSlice(ctx.allocator));
-}
-
-fn terminalSelectTool(ctx: *ToolContext, surface_id: []const u8) ![]u8 {
-    const snapshot = collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
-    defer snapshot.deinit(ctx.allocator);
-    const surface = resolveSurfaceId(snapshot, surface_id, selectedWriteContext(ctx)) orelse return allocNoSurfaceError(ctx.allocator, snapshot, surface_id);
-    setWriteContext(ctx, surface.id);
-    return std.fmt.allocPrint(
-        ctx.allocator,
-        "selected surface_id={s} tab={d} focused={} kind={s} title=\"{s}\" cwd=\"{s}\"",
-        .{
-            surface.id,
-            surface.tab_index + 1,
-            surface.focused,
-            toolSurfaceKind(surface),
-            surface.title,
-            surface.cwd,
-        },
-    );
-}
-
-pub fn collectToolSnapshot(ctx: *const ToolContext) !ToolSnapshot {
-    if (ctx.tool_snapshot) |snapshot| {
-        return snapshot.clone(ctx.allocator);
-    }
-    const host = ctx.tool_host orelse return error.NoTerminalSnapshotHost;
-    return host.collectSnapshot(host.ctx, ctx.allocator);
-}
-
-pub fn rememberConnectedSurface(ctx: *ToolContext, surface: ToolSurface) !void {
-    setWriteContext(ctx, surface.id);
-    if (ctx.tool_snapshot) |*snapshot| {
-        for (snapshot.surfaces) |*existing| {
-            existing.focused = false;
-        }
-        const prev_len = snapshot.surfaces.len;
-        snapshot.surfaces = try ctx.allocator.realloc(snapshot.surfaces, prev_len + 1);
-        snapshot.surfaces[prev_len] = surface;
-        snapshot.active_tab = surface.tab_index;
-        return;
-    }
-
-    const surfaces = try ctx.allocator.alloc(ToolSurface, 1);
-    surfaces[0] = surface;
-    ctx.tool_snapshot = .{
-        .surfaces = surfaces,
-        .active_tab = surface.tab_index,
-    };
-}
-
-pub fn rememberClosedTab(ctx: *ToolContext, closed: ToolClosedTab) !void {
-    if (ctx.tool_snapshot) |*snapshot| {
-        var write: usize = 0;
-        const closed_active = snapshot.active_tab == closed.tab_index;
-        for (snapshot.surfaces) |*surface| {
-            if (surface.tab_index == closed.tab_index) {
-                surface.deinit(ctx.allocator);
-                continue;
-            }
-            if (surface.tab_index > closed.tab_index) {
-                surface.tab_index -= 1;
-            }
-            snapshot.surfaces[write] = surface.*;
-            write += 1;
-        }
-
-        snapshot.surfaces = try ctx.allocator.realloc(snapshot.surfaces, write);
-        snapshot.active_tab = closed.active_tab;
-
-        if (closed_active) {
-            var focused_set = false;
-            for (snapshot.surfaces) |*surface| {
-                if (surface.tab_index == snapshot.active_tab and !focused_set) {
-                    surface.focused = true;
-                    focused_set = true;
-                } else {
-                    surface.focused = false;
-                }
-            }
-        } else {
-            for (snapshot.surfaces) |*surface| {
-                surface.focused = surface.focused and surface.tab_index == snapshot.active_tab;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Local command exec tool
 // ---------------------------------------------------------------------------
 
@@ -699,7 +474,7 @@ fn localCommandExecTool(ctx: *const ToolContext, command: []const u8, cwd: ?[]co
     errdefer out.deinit(ctx.allocator);
     if (result.timed_out) try out.appendSlice(ctx.allocator, "timed_out=true\n");
     try out.print(ctx.allocator, "exit_code={d}\nstdout:\n{s}\nstderr:\n{s}", .{ result.exit_code, result.stdout, result.stderr });
-    return truncateOwned(ctx.allocator, ctx.settings, try out.toOwnedSlice(ctx.allocator));
+    return tool_output.truncateOwned(ctx.allocator, ctx.settings, try out.toOwnedSlice(ctx.allocator));
 }
 
 fn dynamicBinaryTool(ctx: *ToolContext, tool: types.DynamicBinaryTool, args: []const []const u8, cwd: ?[]const u8, timeout_ms: u32) ![]u8 {
@@ -736,7 +511,7 @@ fn dynamicBinaryTool(ctx: *ToolContext, tool: types.DynamicBinaryTool, args: []c
     errdefer out.deinit(ctx.allocator);
     if (result.timed_out) try out.appendSlice(ctx.allocator, "timed_out=true\n");
     try out.print(ctx.allocator, "exit_code={d}\nstdout:\n{s}\nstderr:\n{s}", .{ result.exit_code, result.stdout, result.stderr });
-    return truncateOwned(ctx.allocator, ctx.settings, try out.toOwnedSlice(ctx.allocator));
+    return tool_output.truncateOwned(ctx.allocator, ctx.settings, try out.toOwnedSlice(ctx.allocator));
 }
 
 pub const ShellResult = struct {
@@ -1115,7 +890,7 @@ fn sendControlKey(ctx: *const ToolContext, host: ToolHost, surface: ToolSurface,
         return std.fmt.allocPrint(ctx.allocator, "Sent {s}; failed to read terminal snapshot.", .{label});
     defer ctx.allocator.free(latest);
     const out = try std.fmt.allocPrint(ctx.allocator, "Sent {s} to terminal.\nLatest snapshot:\n{s}", .{ label, latest });
-    return truncateTailOwned(ctx.allocator, ctx.settings, out);
+    return tool_output.truncateTailOwned(ctx.allocator, ctx.settings, out);
 }
 
 fn terminalReplExecTool(ctx: *ToolContext, surface_id: []const u8, repl_name: []const u8, code: []const u8, timeout_ms: u32) ![]u8 {
@@ -1138,11 +913,11 @@ fn terminalReplExecTool(ctx: *ToolContext, surface_id: []const u8, repl_name: []
         }
     }
 
-    const snapshot = collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
+    const snapshot = terminal_tools.collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
     defer snapshot.deinit(ctx.allocator);
     const host = ctx.tool_host orelse return ctx.allocator.dupe(u8, "No terminal tool host is available.");
-    const surface = resolveSurfaceId(snapshot, surface_id, selectedWriteContext(ctx)) orelse return allocNoSurfaceError(ctx.allocator, snapshot, surface_id);
-    if (try ensureWriteContext(ctx, surface)) |message| return message;
+    const surface = terminal_tools.resolveSurfaceId(snapshot, surface_id, terminal_tools.selectedWriteContext(ctx)) orelse return terminal_tools.allocNoSurfaceError(ctx.allocator, snapshot, surface_id);
+    if (try terminal_tools.ensureWriteContext(ctx, surface)) |message| return message;
 
     if (control) |byte| {
         return sendControlKey(ctx, host, surface, std.mem.trim(u8, code, " \t\r\n"), byte);
@@ -1177,11 +952,11 @@ fn terminalAnswerPromptTool(ctx: *ToolContext, surface_id: ?[]const u8, answer: 
         return std.fmt.allocPrint(ctx.allocator, "Unknown answer \"{s}\". Use approve, approve_all, reject, enter, esc, or a digit 1-9.", .{answer});
     const option_number: u8 = if (intent == .option) (agent_prompt_answer.parseOptionNumber(answer) orelse 0) else 0;
 
-    const snapshot = collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
+    const snapshot = terminal_tools.collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
     defer snapshot.deinit(ctx.allocator);
     const host = ctx.tool_host orelse return ctx.allocator.dupe(u8, "No terminal tool host is available.");
     const sid = surface_id orelse "focused";
-    const surface = resolveSurfaceId(snapshot, sid, selectedWriteContext(ctx)) orelse return allocNoSurfaceError(ctx.allocator, snapshot, sid);
+    const surface = terminal_tools.resolveSurfaceId(snapshot, sid, terminal_tools.selectedWriteContext(ctx)) orelse return terminal_tools.allocNoSurfaceError(ctx.allocator, snapshot, sid);
 
     // Read the LIVE screen (per-surface, mutex-protected, worker-safe).
     const screen = host.surfaceSnapshot(host.ctx, ctx.allocator, surface.id, surface.ptr) catch
@@ -1199,14 +974,14 @@ fn terminalAnswerPromptTool(ctx: *ToolContext, surface_id: ?[]const u8, answer: 
             "No Claude Code/Codex prompt is awaiting an answer (agent={s}:{s}). Nothing sent.\nLatest snapshot:\n{s}",
             .{ detection.app.label(), detection.state.label(), screen },
         );
-        return truncateTailOwned(ctx.allocator, ctx.settings, out);
+        return tool_output.truncateTailOwned(ctx.allocator, ctx.settings, out);
     }
 
     var options_buf: [12]agent_prompt_answer.Option = undefined;
     const n = agent_prompt_answer.parsePromptOptions(screen, &options_buf);
     const keystroke = agent_prompt_answer.resolveAnswer(options_buf[0..n], screen, intent, option_number) orelse {
         const out = try allocPromptOptionsHint(ctx.allocator, options_buf[0..n], screen);
-        return truncateTailOwned(ctx.allocator, ctx.settings, out);
+        return tool_output.truncateTailOwned(ctx.allocator, ctx.settings, out);
     };
 
     // Approval gate mirrors terminal_repl_exec: the payload is a single selector
@@ -1225,7 +1000,7 @@ fn terminalAnswerPromptTool(ctx: *ToolContext, surface_id: ?[]const u8, answer: 
     // (mirrors terminal_select). This is the explicitly-targeted prompt surface,
     // so it is safe — and it avoids ensureWriteContext refusing when nothing is
     // pre-selected (e.g. a non-copilot caller).
-    setWriteContext(ctx, surface.id);
+    terminal_tools.setWriteContext(ctx, surface.id);
 
     if (!host.writeSurface(host.ctx, surface.id, surface.ptr, keystroke.bytes)) {
         return ctx.allocator.dupe(u8, "Failed to write to terminal surface.");
@@ -1245,7 +1020,7 @@ fn terminalAnswerPromptTool(ctx: *ToolContext, surface_id: ?[]const u8, answer: 
         return std.fmt.allocPrint(ctx.allocator, "Answer sent ({s}); failed to read terminal snapshot.", .{answer});
     defer ctx.allocator.free(latest);
     const out = try std.fmt.allocPrint(ctx.allocator, "Answered prompt ({s}).\nLatest snapshot:\n{s}", .{ answer, latest });
-    return truncateTailOwned(ctx.allocator, ctx.settings, out);
+    return tool_output.truncateTailOwned(ctx.allocator, ctx.settings, out);
 }
 
 /// Pause between writing a Codex message body and its submit keystroke so the
@@ -1335,7 +1110,7 @@ fn allocAgentAppReplResult(
         .{ repl.label(), note, app.label(), state.label(), confidence },
     );
     try out.appendSlice(allocator, snapshot);
-    return truncateTailOwned(allocator, settings, try out.toOwnedSlice(allocator));
+    return tool_output.truncateTailOwned(allocator, settings, try out.toOwnedSlice(allocator));
 }
 
 fn waitForAgentAppReplResult(ctx: *const ToolContext, host: ToolHost, surface: ToolSurface, repl: ReplKind, timeout_ms: u32) ![]u8 {
@@ -1472,7 +1247,7 @@ fn waitForReplPromptReturn(
 
         const quiesced = now - started >= min_wait_ms and now - last_change_ms >= quiet_ms;
         if (quiesced and promptReturned(last_text, captured_prompt)) {
-            return truncateOwned(ctx.allocator, ctx.settings, try ctx.allocator.dupe(u8, last_text));
+            return tool_output.truncateOwned(ctx.allocator, ctx.settings, try ctx.allocator.dupe(u8, last_text));
         }
     }
 
@@ -1483,7 +1258,7 @@ fn waitForReplPromptReturn(
     );
     defer ctx.allocator.free(note);
     const combined = try std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ last_text, note });
-    return truncateOwned(ctx.allocator, ctx.settings, combined);
+    return tool_output.truncateOwned(ctx.allocator, ctx.settings, combined);
 }
 
 /// The trailing prompt of a terminal snapshot: the last non-empty line, trimmed
@@ -1571,11 +1346,11 @@ fn unixSessionExecTool(ctx: *ToolContext, kind: UnixSessionKind, surface_id: []c
             return deniedResult(ctx.allocator, command, if (kind == .ssh) "operator rejected SSH PTY command" else "operator rejected WSL PTY command");
         }
     }
-    const snapshot = collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
+    const snapshot = terminal_tools.collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
     defer snapshot.deinit(ctx.allocator);
     const host = ctx.tool_host orelse return ctx.allocator.dupe(u8, "No terminal tool host is available.");
-    const surface = resolveSurfaceId(snapshot, surface_id, selectedWriteContext(ctx)) orelse return allocNoSurfaceError(ctx.allocator, snapshot, surface_id);
-    if (try ensureWriteContext(ctx, surface)) |message| return message;
+    const surface = terminal_tools.resolveSurfaceId(snapshot, surface_id, terminal_tools.selectedWriteContext(ctx)) orelse return terminal_tools.allocNoSurfaceError(ctx.allocator, snapshot, surface_id);
+    if (try terminal_tools.ensureWriteContext(ctx, surface)) |message| return message;
     if (!kind.matches(surface)) {
         return std.fmt.allocPrint(ctx.allocator, "Target surface is not an opened {s} session.", .{kind.label()});
     }
@@ -1718,7 +1493,7 @@ fn sshProfileSaveTool(ctx: *ToolContext, args: SshProfileSaveArgs) ![]u8 {
             saved.name,
         },
     );
-    return truncateOwned(ctx.allocator, ctx.settings, out);
+    return tool_output.truncateOwned(ctx.allocator, ctx.settings, out);
 }
 
 fn sshProfileConnectTool(ctx: *ToolContext, profile_name: []const u8) ![]u8 {
@@ -1745,16 +1520,16 @@ fn sshProfileConnectTool(ctx: *ToolContext, profile_name: []const u8) ![]u8 {
             surface.id,
             surface.tab_index + 1,
             surface.focused,
-            toolSurfaceKind(surface),
+            terminal_tools.surfaceKind(surface),
             surface.title,
             surface.cwd,
         },
     );
     errdefer ctx.allocator.free(out);
 
-    try rememberConnectedSurface(ctx, surface);
+    try terminal_tools.rememberConnectedSurface(ctx, surface);
     surface_owned = false;
-    return truncateOwned(ctx.allocator, ctx.settings, out);
+    return tool_output.truncateOwned(ctx.allocator, ctx.settings, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -1789,16 +1564,16 @@ fn tabNewTool(ctx: *ToolContext, kind: []const u8, command: ?[]const u8) ![]u8 {
             surface.id,
             surface.tab_index + 1,
             surface.focused,
-            toolSurfaceKind(surface),
+            terminal_tools.surfaceKind(surface),
             surface.title,
             surface.cwd,
         },
     );
     errdefer ctx.allocator.free(out);
 
-    try rememberConnectedSurface(ctx, surface);
+    try terminal_tools.rememberConnectedSurface(ctx, surface);
     surface_owned = false;
-    return truncateOwned(ctx.allocator, ctx.settings, out);
+    return tool_output.truncateOwned(ctx.allocator, ctx.settings, out);
 }
 
 fn tabCloseTool(ctx: *ToolContext, tab_index: ?usize, surface_id: ?[]const u8, title: ?[]const u8) ![]u8 {
@@ -1829,143 +1604,16 @@ fn tabCloseTool(ctx: *ToolContext, tab_index: ?usize, surface_id: ?[]const u8, t
     };
     defer closed.deinit(ctx.allocator);
 
-    try rememberClosedTab(ctx, closed);
+    try terminal_tools.rememberClosedTab(ctx, closed);
 
     const out = try std.fmt.allocPrint(
         ctx.allocator,
         "closed tab={d} title=\"{s}\" active_tab={d}",
         .{ closed.tab_index + 1, closed.title, closed.active_tab + 1 },
     );
-    return truncateOwned(ctx.allocator, ctx.settings, out);
+    return tool_output.truncateOwned(ctx.allocator, ctx.settings, out);
 }
 
-// ---------------------------------------------------------------------------
-// Surface lookup and write-context helpers
-// ---------------------------------------------------------------------------
-
-pub fn findSurface(snapshot: ToolSnapshot, surface_id: []const u8) ?ToolSurface {
-    for (snapshot.surfaces) |surface| {
-        if (std.mem.eql(u8, surface.id, surface_id)) return surface;
-    }
-    return null;
-}
-
-/// Sentinel surface ids that mean "the terminal the user is looking at".
-fn isFocusedSurfaceAlias(surface_id: []const u8) bool {
-    const t = std.mem.trim(u8, surface_id, " \t\r\n");
-    return t.len == 0 or
-        std.ascii.eqlIgnoreCase(t, "focused") or
-        std.ascii.eqlIgnoreCase(t, "active") or
-        std.ascii.eqlIgnoreCase(t, "current");
-}
-
-fn focusedSurface(snapshot: ToolSnapshot) ?ToolSurface {
-    for (snapshot.surfaces) |surface| {
-        if (surface.focused) return surface;
-    }
-    return null;
-}
-
-/// Resolve a tool surface_id, honoring focused-surface aliases. A selected
-/// write-context wins over UI focus so scheduled Copilot work stays attached to
-/// the terminal that created it; otherwise aliases resolve to the focused
-/// terminal. Returns null if nothing matches.
-pub fn resolveSurfaceId(snapshot: ToolSnapshot, surface_id: []const u8, write_context: ?[]const u8) ?ToolSurface {
-    if (isFocusedSurfaceAlias(surface_id)) {
-        if (write_context) |wc| {
-            if (findSurface(snapshot, wc)) |surface| return surface;
-        }
-        if (focusedSurface(snapshot)) |surface| return surface;
-        return null;
-    }
-    return findSurface(snapshot, surface_id);
-}
-
-/// Error result for an unmatched surface_id that lists the open surfaces, so the
-/// model can retry in one step instead of calling terminal_list.
-fn allocNoSurfaceError(allocator: std.mem.Allocator, snapshot: ToolSnapshot, surface_id: []const u8) ![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.print(allocator, "No terminal surface matches surface_id={s}. Open surfaces:\n", .{surface_id});
-    if (snapshot.surfaces.len == 0) try out.appendSlice(allocator, "(none)\n");
-    for (snapshot.surfaces) |surface| {
-        try out.print(allocator, "- id={s} tab={d} focused={} kind={s} title=\"{s}\"\n", .{
-            surface.id,
-            surface.tab_index + 1,
-            surface.focused,
-            toolSurfaceKind(surface),
-            surface.title,
-        });
-    }
-    try out.appendSlice(allocator, "Use one of these ids, or surface_id=focused for the focused terminal.");
-    return out.toOwnedSlice(allocator);
-}
-
-/// Build the per-message copilot context block from a full surface snapshot:
-/// the cwd plus the last COPILOT_CONTEXT_LINES lines of output. Owned result.
-pub fn buildCopilotContext(allocator: std.mem.Allocator, cwd: []const u8, snapshot: []const u8) ![]u8 {
-    const trimmed = std.mem.trimRight(u8, snapshot, "\n");
-    var start: usize = trimmed.len;
-    var newlines: usize = 0;
-    while (start > 0) {
-        const c = trimmed[start - 1];
-        if (c == '\n') {
-            newlines += 1;
-            if (newlines > COPILOT_CONTEXT_LINES) break;
-        }
-        start -= 1;
-    }
-    const tail = trimmed[start..];
-    return std.fmt.allocPrint(
-        allocator,
-        "[wispterm current terminal]\ncwd: {s}\nrecent output:\n{s}",
-        .{ cwd, tail },
-    );
-}
-
-fn selectedWriteContext(ctx: *const ToolContext) ?[]const u8 {
-    return ctx.writeContextSurfaceId();
-}
-
-pub fn setWriteContext(ctx: *ToolContext, surface_id: []const u8) void {
-    const len = @min(surface_id.len, ctx.write_context_surface_id.len);
-    @memcpy(ctx.write_context_surface_id[0..len], surface_id[0..len]);
-    ctx.write_context_surface_id_len = len;
-}
-
-/// Copilot fallback: when an exec tool omits surface_id, use the context's
-/// pre-seeded write-context (the bound/focused terminal). Non-copilot requests
-/// keep the original "Missing surface_id" behavior.
-fn defaultExecSurfaceId(ctx: *const ToolContext) ?[]const u8 {
-    if (!ctx.copilot) return null;
-    return ctx.writeContextSurfaceId();
-}
-
-pub fn ensureWriteContext(ctx: *ToolContext, surface: ToolSurface) !?[]u8 {
-    const context = selectedWriteContext(ctx) orelse {
-        const message = try std.fmt.allocPrint(
-            ctx.allocator,
-            "Refusing to write to surface_id={s} tab={d} title=\"{s}\" because no agent terminal context is selected. Call terminal_select with the intended surface_id before writing.",
-            .{ surface.id, surface.tab_index + 1, surface.title },
-        );
-        return message;
-    };
-    if (std.mem.eql(u8, context, surface.id)) return null;
-
-    const message = try std.fmt.allocPrint(
-        ctx.allocator,
-        "Refusing to write to surface_id={s} tab={d} title=\"{s}\" because selected agent terminal context is surface_id={s}. Call terminal_select with the intended surface_id before writing to another panel.",
-        .{
-            surface.id,
-            surface.tab_index + 1,
-            surface.title,
-            context,
-        },
-    );
-    return message;
-}
-
-// ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
 
@@ -2030,7 +1678,7 @@ fn renderReadResult(ctx: *ToolContext, path: []const u8, bytes: []const u8, offs
         return std.fmt.allocPrint(ctx.allocator, "File {s} appears to be binary; refusing to read as text.", .{path});
     }
     const numbered = try agent_file_edit.sliceLinesAlloc(ctx.allocator, bytes, offset, limit);
-    return truncateOwned(ctx.allocator, ctx.settings, numbered);
+    return tool_output.truncateOwned(ctx.allocator, ctx.settings, numbered);
 }
 
 // ---------------------------------------------------------------------------
@@ -2062,8 +1710,8 @@ const CopyEndpoint = union(enum) {
 fn resolveFileTarget(ctx: *ToolContext, surface_id: ?[]const u8) !FileTarget {
     const sid = surface_id orelse return .local;
     const snapshot = ctx.tool_snapshot orelse return .local;
-    const surface = resolveSurfaceId(snapshot, sid, selectedWriteContext(ctx)) orelse {
-        return .{ .err = try allocNoSurfaceError(ctx.allocator, snapshot, sid) };
+    const surface = terminal_tools.resolveSurfaceId(snapshot, sid, terminal_tools.selectedWriteContext(ctx)) orelse {
+        return .{ .err = try terminal_tools.allocNoSurfaceError(ctx.allocator, snapshot, sid) };
     };
     if (!surface.is_ssh) return .local;
     if (surface.ssh_connection) |conn| return .{ .remote = conn };
@@ -2076,8 +1724,8 @@ fn resolveCopyEndpoint(ctx: *ToolContext, surface_id: ?[]const u8) !CopyEndpoint
     const snapshot = ctx.tool_snapshot orelse return .{
         .err = try std.fmt.allocPrint(ctx.allocator, "No terminal snapshot is available for surface_id={s}.", .{sid}),
     };
-    const surface = resolveSurfaceId(snapshot, sid, selectedWriteContext(ctx)) orelse {
-        return .{ .err = try allocNoSurfaceError(ctx.allocator, snapshot, sid) };
+    const surface = terminal_tools.resolveSurfaceId(snapshot, sid, terminal_tools.selectedWriteContext(ctx)) orelse {
+        return .{ .err = try terminal_tools.allocNoSurfaceError(ctx.allocator, snapshot, sid) };
     };
     if (surface.is_ssh) {
         if (surface.ssh_connection) |conn| {
@@ -2456,29 +2104,6 @@ fn deniedResult(allocator: std.mem.Allocator, command: []const u8, reason: []con
     return std.fmt.allocPrint(allocator, "DENIED by operator (reason: {s})\ncommand: {s}", .{ reason, command });
 }
 
-pub fn truncateOwned(allocator: std.mem.Allocator, settings: AgentSettings, text: []u8) ![]u8 {
-    const limit = settings.output_limit;
-    if (text.len <= limit) return text;
-    errdefer allocator.free(text); // owned: must not leak when allocPrint fails
-    const truncated = try std.fmt.allocPrint(allocator, "{s}\n...[truncated to {d} bytes]", .{ text[0..limit], limit });
-    allocator.free(text);
-    return truncated;
-}
-
-/// Like truncateOwned, but keeps the LAST `limit` bytes (the most recent
-/// output) and marks the dropped head. Use for terminal-snapshot-bearing
-/// results, where the live interactive screen is at the tail — keeping the head
-/// would hide the current prompt.
-fn truncateTailOwned(allocator: std.mem.Allocator, settings: AgentSettings, text: []u8) ![]u8 {
-    const limit: usize = settings.output_limit;
-    if (text.len <= limit) return text;
-    errdefer allocator.free(text); // owned: must not leak when allocPrint fails
-    const tail = text[text.len - limit ..];
-    const truncated = try std.fmt.allocPrint(allocator, "...[older output truncated to {d} bytes]\n{s}", .{ limit, tail });
-    allocator.free(text);
-    return truncated;
-}
-
 pub const DANGEROUS_COMMAND_APPROVAL_REASON = "Destructive command (delete/rename/format) - confirm to run";
 
 /// Whether a command is destructive enough to require operator approval in
@@ -2825,237 +2450,6 @@ test "executeToolCall reports invalid dynamic binary tool args as a tool result"
     try std.testing.expectEqualStrings("Invalid tool arguments", out);
 }
 
-// ---------------------------------------------------------------------------
-// Moved tool-layer tests
-// ---------------------------------------------------------------------------
-
-test "buildCopilotContext keeps cwd and the last N lines" {
-    const snap = "l1\nl2\nl3\nl4\nl5\n";
-    const out = try buildCopilotContext(std.testing.allocator, "/home/u", snap);
-    defer std.testing.allocator.free(out);
-    try std.testing.expect(std.mem.indexOf(u8, out, "cwd: /home/u") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "l5") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "l1") != null);
-}
-
-test "buildCopilotContext truncates to the last COPILOT_CONTEXT_LINES" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var i: usize = 0;
-    while (i < 100) : (i += 1) try buf.print(std.testing.allocator, "line{d}\n", .{i});
-    const out = try buildCopilotContext(std.testing.allocator, "/x", buf.items);
-    defer std.testing.allocator.free(out);
-    try std.testing.expect(std.mem.indexOf(u8, out, "line99") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "line0\n") == null);
-}
-
-test "ai chat tools prefer request-local terminal snapshot" {
-    const allocator = std.testing.allocator;
-    var surfaces = try allocator.alloc(ToolSurface, 1);
-    surfaces[0] = .{
-        .id = try allocator.dupe(u8, "surface-1"),
-        .title = try allocator.dupe(u8, "Local Shell"),
-        .cwd = try allocator.dupe(u8, "/home/user"),
-        .snapshot = try allocator.dupe(u8, "$ "),
-        .tab_index = 1,
-        .focused = true,
-        .is_ssh = false,
-        .is_wsl = false,
-        .agent_app = .none,
-        .agent_state = .none,
-        .agent_confidence = 0,
-        .ptr = @ptrFromInt(1),
-    };
-    const cached_snapshot = ToolSnapshot{
-        .surfaces = surfaces,
-        .active_tab = 1,
-    };
-    defer cached_snapshot.deinit(allocator);
-
-    var dummy: u8 = 0;
-    const ctx = ToolContext{
-        .allocator = allocator,
-        .ctx = &dummy,
-        .tool_host = null,
-        .tool_snapshot = cached_snapshot,
-        .settings = .{},
-        .approve = fakeApprove,
-        .cancelled = fakeCancelled,
-    };
-
-    const snapshot = try collectToolSnapshot(&ctx);
-    defer snapshot.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 1), snapshot.active_tab);
-    try std.testing.expectEqual(@as(usize, 1), snapshot.surfaces.len);
-    try std.testing.expectEqualStrings("surface-1", snapshot.surfaces[0].id);
-    try std.testing.expect(snapshot.surfaces[0].id.ptr != cached_snapshot.surfaces[0].id.ptr);
-}
-
-test "terminal_snapshot reads the live surface screen for a targeted surface" {
-    const allocator = std.testing.allocator;
-    var host_ctx = ReplWaitTestHost.Ctx{ .busy_until = 0, .settled_text = "LIVE-SCREEN-9999" };
-    var surfaces = try allocator.alloc(ToolSurface, 1);
-    surfaces[0] = .{
-        .id = try allocator.dupe(u8, "s1"),
-        .title = try allocator.dupe(u8, "Local Shell"),
-        .cwd = try allocator.dupe(u8, "/home/user"),
-        // The request-start pre-capture is stale; the live read must win.
-        .snapshot = try allocator.dupe(u8, "STALE-PRECAPTURE-0000"),
-        .tab_index = 0,
-        .focused = true,
-        .is_ssh = false,
-        .is_wsl = false,
-        .agent_app = .none,
-        .agent_state = .none,
-        .agent_confidence = 0,
-        .ptr = @ptrFromInt(1),
-    };
-    const cached = ToolSnapshot{ .surfaces = surfaces, .active_tab = 0 };
-    defer cached.deinit(allocator);
-
-    var dummy: u8 = 0;
-    const ctx = ToolContext{
-        .allocator = allocator,
-        .ctx = &dummy,
-        .tool_host = ReplWaitTestHost.host(&host_ctx),
-        .tool_snapshot = cached,
-        .settings = .{},
-        .approve = fakeApprove,
-        .cancelled = fakeCancelled,
-    };
-
-    const result = try terminalSnapshotTool(&ctx, "s1");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "LIVE-SCREEN-9999") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "STALE-PRECAPTURE") == null);
-    try std.testing.expectEqual(@as(usize, 1), host_ctx.snap_calls);
-}
-
-test "ai chat write context requires explicit selection and can switch surfaces" {
-    const allocator = std.testing.allocator;
-    var surfaces = try allocator.alloc(ToolSurface, 2);
-    surfaces[0] = .{
-        .id = try allocator.dupe(u8, "surface-a"),
-        .title = try allocator.dupe(u8, "panel1"),
-        .cwd = try allocator.dupe(u8, ""),
-        .snapshot = try allocator.dupe(u8, ""),
-        .tab_index = 0,
-        .focused = false,
-        .is_ssh = false,
-        .is_wsl = false,
-        .agent_app = .none,
-        .agent_state = .none,
-        .agent_confidence = 0,
-        .ptr = @ptrFromInt(1),
-    };
-    surfaces[1] = .{
-        .id = try allocator.dupe(u8, "surface-b"),
-        .title = try allocator.dupe(u8, "panel2"),
-        .cwd = try allocator.dupe(u8, ""),
-        .snapshot = try allocator.dupe(u8, ""),
-        .tab_index = 0,
-        .focused = false,
-        .is_ssh = false,
-        .is_wsl = false,
-        .agent_app = .none,
-        .agent_state = .none,
-        .agent_confidence = 0,
-        .ptr = @ptrFromInt(2),
-    };
-    const snapshot = ToolSnapshot{
-        .surfaces = surfaces,
-        .active_tab = 0,
-    };
-    defer snapshot.deinit(allocator);
-
-    var dummy: u8 = 0;
-    var ctx = ToolContext{
-        .allocator = allocator,
-        .ctx = &dummy,
-        .tool_host = null,
-        .tool_snapshot = null,
-        .settings = .{},
-        .approve = fakeApprove,
-        .cancelled = fakeCancelled,
-    };
-
-    const missing = (try ensureWriteContext(&ctx, snapshot.surfaces[1])).?;
-    defer allocator.free(missing);
-    try std.testing.expect(std.mem.indexOf(u8, missing, "no agent terminal context is selected") != null);
-
-    setWriteContext(&ctx, snapshot.surfaces[1].id);
-    try std.testing.expectEqualStrings("surface-b", ctx.write_context_surface_id[0..ctx.write_context_surface_id_len]);
-    try std.testing.expect(try ensureWriteContext(&ctx, snapshot.surfaces[1]) == null);
-
-    const message = (try ensureWriteContext(&ctx, snapshot.surfaces[0])).?;
-    defer allocator.free(message);
-    try std.testing.expect(std.mem.indexOf(u8, message, "selected agent terminal context is surface_id=surface-b") != null);
-
-    setWriteContext(&ctx, snapshot.surfaces[0].id);
-    try std.testing.expectEqualStrings("surface-a", ctx.write_context_surface_id[0..ctx.write_context_surface_id_len]);
-    try std.testing.expect(try ensureWriteContext(&ctx, snapshot.surfaces[0]) == null);
-    const switched = (try ensureWriteContext(&ctx, snapshot.surfaces[1])).?;
-    defer allocator.free(switched);
-    try std.testing.expect(std.mem.indexOf(u8, switched, "selected agent terminal context is surface_id=surface-a") != null);
-}
-
-test "terminal_list shows one-based tab numbers matching the UI" {
-    const allocator = std.testing.allocator;
-    var surfaces = try allocator.alloc(ToolSurface, 2);
-    surfaces[0] = .{
-        .id = try allocator.dupe(u8, "surface-a"),
-        .title = try allocator.dupe(u8, "panel1"),
-        .cwd = try allocator.dupe(u8, "/tmp"),
-        .snapshot = try allocator.dupe(u8, ""),
-        .tab_index = 0,
-        .focused = true,
-        .is_ssh = false,
-        .is_wsl = false,
-        .agent_app = .none,
-        .agent_state = .none,
-        .agent_confidence = 0,
-        .ptr = @ptrFromInt(1),
-    };
-    surfaces[1] = .{
-        .id = try allocator.dupe(u8, "surface-b"),
-        .title = try allocator.dupe(u8, "panel2"),
-        .cwd = try allocator.dupe(u8, "/tmp"),
-        .snapshot = try allocator.dupe(u8, ""),
-        .tab_index = 1,
-        .focused = false,
-        .is_ssh = false,
-        .is_wsl = false,
-        .agent_app = .none,
-        .agent_state = .none,
-        .agent_confidence = 0,
-        .ptr = @ptrFromInt(2),
-    };
-    const snapshot = ToolSnapshot{ .surfaces = surfaces, .active_tab = 0 };
-    defer snapshot.deinit(allocator);
-
-    var dummy: u8 = 0;
-    const ctx = ToolContext{
-        .allocator = allocator,
-        .ctx = &dummy,
-        .tool_host = null,
-        .tool_snapshot = snapshot,
-        .settings = .{},
-        .approve = fakeApprove,
-        .cancelled = fakeCancelled,
-    };
-
-    const out = try terminalListTool(&ctx);
-    defer allocator.free(out);
-
-    // The first tab is shown as 1 and the second as 2, even though they are
-    // internally zero-based (tab_index 0 and 1) — matching the UI tab numbers.
-    try std.testing.expect(std.mem.indexOf(u8, out, "active_tab=1\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "id=surface-a tab=1 ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "id=surface-b tab=2 ") != null);
-    // The zero-based index must never leak into the user-facing listing.
-    try std.testing.expect(std.mem.indexOf(u8, out, "tab=0") == null);
-}
-
 test "shell exec refuses interactive Codex launcher commands" {
     const allocator = std.testing.allocator;
     const refused = (try shellExecInteractiveAgentCommandRefusal(allocator, .wsl, "codex --model o4-mini")).?;
@@ -3116,7 +2510,7 @@ test "terminal_context reports the selected write context" {
         .approve = fakeApprove,
         .cancelled = fakeCancelled,
     };
-    setWriteContext(&ctx, "aaa");
+    terminal_tools.setWriteContext(&ctx, "aaa");
     const call = ToolCall{ .id = @constCast("c1"), .name = @constCast("terminal_context"), .arguments = @constCast("{}") };
 
     const out = try executeToolCall(&ctx, call);
@@ -3163,7 +2557,7 @@ test "terminal_context reports a stale selected write context" {
         .approve = fakeApprove,
         .cancelled = fakeCancelled,
     };
-    setWriteContext(&ctx, "closed-surface");
+    terminal_tools.setWriteContext(&ctx, "closed-surface");
     const call = ToolCall{ .id = @constCast("c1"), .name = @constCast("terminal_context"), .arguments = @constCast("{}") };
 
     const out = try executeToolCall(&ctx, call);
@@ -3171,96 +2565,6 @@ test "terminal_context reports a stale selected write context" {
 
     try std.testing.expectEqualStrings("Selected terminal context surface_id=closed-surface is no longer open.", out);
     try std.testing.expectEqualStrings("closed-surface", ctx.write_context_surface_id[0..ctx.write_context_surface_id_len]);
-}
-
-test "terminal_select resolves the focused-surface alias to the focused surface" {
-    const allocator = std.testing.allocator;
-    const cached = try twoSurfaceSnapshotForTest(allocator);
-    defer cached.deinit(allocator);
-    var dummy: u8 = 0;
-    var ctx = ToolContext{
-        .allocator = allocator,
-        .ctx = &dummy,
-        .tool_host = null,
-        .tool_snapshot = cached,
-        .settings = .{},
-        .approve = fakeApprove,
-        .cancelled = fakeCancelled,
-    };
-    for ([_][]const u8{ "focused", "active", "current", "" }) |alias| {
-        const result = try terminalSelectTool(&ctx, alias);
-        defer allocator.free(result);
-        try std.testing.expect(std.mem.indexOf(u8, result, "surface_id=bbb") != null);
-    }
-    // An exact id still resolves directly.
-    const exact = try terminalSelectTool(&ctx, "aaa");
-    defer allocator.free(exact);
-    try std.testing.expect(std.mem.indexOf(u8, exact, "surface_id=aaa") != null);
-}
-
-test "terminal_select focused alias honors selected write context before UI focus" {
-    const allocator = std.testing.allocator;
-    const cached = try twoSurfaceSnapshotForTest(allocator);
-    defer cached.deinit(allocator);
-    var dummy: u8 = 0;
-    var ctx = ToolContext{
-        .allocator = allocator,
-        .ctx = &dummy,
-        .tool_host = null,
-        .tool_snapshot = cached,
-        .settings = .{},
-        .approve = fakeApprove,
-        .cancelled = fakeCancelled,
-    };
-    setWriteContext(&ctx, "aaa");
-
-    const result = try terminalSelectTool(&ctx, "focused");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "surface_id=aaa") != null);
-    try std.testing.expectEqualStrings("aaa", ctx.write_context_surface_id[0..ctx.write_context_surface_id_len]);
-}
-
-test "terminal_select focused alias falls back when selected write context is stale" {
-    const allocator = std.testing.allocator;
-    const cached = try twoSurfaceSnapshotForTest(allocator);
-    defer cached.deinit(allocator);
-    var dummy: u8 = 0;
-    var ctx = ToolContext{
-        .allocator = allocator,
-        .ctx = &dummy,
-        .tool_host = null,
-        .tool_snapshot = cached,
-        .settings = .{},
-        .approve = fakeApprove,
-        .cancelled = fakeCancelled,
-    };
-    setWriteContext(&ctx, "closed-surface");
-
-    const result = try terminalSelectTool(&ctx, "focused");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "surface_id=bbb") != null);
-    try std.testing.expectEqualStrings("bbb", ctx.write_context_surface_id[0..ctx.write_context_surface_id_len]);
-}
-
-test "terminal_select lists available surfaces when the id does not match" {
-    const allocator = std.testing.allocator;
-    const cached = try twoSurfaceSnapshotForTest(allocator);
-    defer cached.deinit(allocator);
-    var dummy: u8 = 0;
-    var ctx = ToolContext{
-        .allocator = allocator,
-        .ctx = &dummy,
-        .tool_host = null,
-        .tool_snapshot = cached,
-        .settings = .{},
-        .approve = fakeApprove,
-        .cancelled = fakeCancelled,
-    };
-    const result = try terminalSelectTool(&ctx, "zzz");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "zzz") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "aaa") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "bbb") != null);
 }
 
 test "shell exec refuses bare REPL launchers but allows run-and-exit invocations" {
@@ -4247,44 +3551,6 @@ test "executeToolCall reports memory disabled when ai-memory-enabled is off" {
     try std.testing.expect(std.mem.indexOf(u8, out, "disabled") != null);
 }
 
-test "truncateTailOwned keeps the tail and marks the dropped head" {
-    const a = std.testing.allocator;
-    const settings = AgentSettings{ .output_limit = 8 };
-    const text = try a.dupe(u8, "ABCDEFGHIJKLMNOP"); // 16 bytes, limit 8
-    const out = try truncateTailOwned(a, settings, text);
-    defer a.free(out);
-    try std.testing.expect(std.mem.endsWith(u8, out, "IJKLMNOP"));
-    try std.testing.expect(std.mem.indexOf(u8, out, "older output truncated") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "ABCD") == null);
-}
-
-test "truncateTailOwned returns short text unchanged" {
-    const a = std.testing.allocator;
-    const settings = AgentSettings{ .output_limit = 1024 };
-    const text = try a.dupe(u8, "small");
-    const out = try truncateTailOwned(a, settings, text);
-    defer a.free(out);
-    try std.testing.expectEqualStrings("small", out);
-}
-
-test "truncate helpers free the owned input when the truncation alloc fails" {
-    // Both helpers take ownership of `text`; if the replacement allocPrint
-    // hits OOM they must free it. std.testing.allocator's leak check is the
-    // assertion here (allocation #0 = the input dupe, #1 = the failing
-    // allocPrint).
-    const settings = AgentSettings{ .output_limit = 4 };
-
-    var failing_tail = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
-    const tail_alloc = failing_tail.allocator();
-    const tail_text = try tail_alloc.dupe(u8, "0123456789");
-    try std.testing.expectError(error.OutOfMemory, truncateTailOwned(tail_alloc, settings, tail_text));
-
-    var failing_head = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
-    const head_alloc = failing_head.allocator();
-    const head_text = try head_alloc.dupe(u8, "0123456789");
-    try std.testing.expectError(error.OutOfMemory, truncateOwned(head_alloc, settings, head_text));
-}
-
 test "terminal_snapshot keeps the live screen tail when output exceeds the limit" {
     const a = std.testing.allocator;
     // A long screen whose only prompt marker is at the very bottom.
@@ -4326,7 +3592,7 @@ test "terminal_snapshot keeps the live screen tail when output exceeds the limit
     // on a clone internally, so the literal-backed originals are never freed.
     defer if (ctx.tool_snapshot) |snap| a.free(snap.surfaces);
 
-    const result = try terminalSnapshotTool(&ctx, @as(?[]const u8, "surface-claude"));
+    const result = try terminal_tools.snapshot(&ctx, @as(?[]const u8, "surface-claude"));
     defer a.free(result);
 
     try std.testing.expect(std.mem.indexOf(u8, result, "PROMPT_AT_BOTTOM") != null);
