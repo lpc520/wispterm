@@ -36,6 +36,7 @@ const knowledge = @import("agent_tools/knowledge.zig");
 const agent_memory_tool = @import("agent_tools/memory.zig");
 const tool_output = @import("agent_tools/output.zig");
 const terminal_tools = @import("agent_tools/terminal.zig");
+const agent_sessions = @import("agent_tools/sessions.zig");
 
 // ---------------------------------------------------------------------------
 // Tool dispatch
@@ -117,7 +118,7 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         defer args.deinit();
         const host = tool_args.string(args.value, "host") orelse return ctx.allocator.dupe(u8, "Missing host");
         const user = tool_args.string(args.value, "user") orelse return ctx.allocator.dupe(u8, "Missing user");
-        return sshProfileSaveTool(ctx, .{
+        return agent_sessions.sshProfileSave(ctx, .{
             .name = tool_args.string(args.value, "name") orelse "",
             .host = host,
             .user = user,
@@ -132,14 +133,14 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
         const profile_name = tool_args.string(args.value, "profile_name") orelse return ctx.allocator.dupe(u8, "Missing profile_name");
-        return sshProfileConnectTool(ctx, profile_name);
+        return agent_sessions.sshProfileConnect(ctx, profile_name);
     }
     if (std.mem.eql(u8, call.name, "tab_new")) {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
         const kind = tool_args.string(args.value, "kind") orelse "default";
         const command = tool_args.string(args.value, "command");
-        return tabNewTool(ctx, kind, command);
+        return agent_sessions.tabNew(ctx, kind, command);
     }
     if (std.mem.eql(u8, call.name, "tab_close")) {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
@@ -152,7 +153,7 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         }
         const surface_id = tool_args.string(args.value, "surface_id");
         const title = tool_args.string(args.value, "title");
-        return tabCloseTool(ctx, tab_index, surface_id, title);
+        return agent_sessions.tabClose(ctx, tab_index, surface_id, title);
     }
     if (std.mem.eql(u8, call.name, "read_file")) {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
@@ -356,7 +357,7 @@ fn weixinSendAttachmentTool(
                 defer if (bl_reason) |r| ctx.allocator.free(r);
                 const reason = bl_reason orelse "Sends a protected file — confirm to allow";
                 if (!ctx.requestApproval("weixin_send_attachment", path, reason)) {
-                    return deniedResult(ctx.allocator, path, "operator rejected sending a protected file");
+                    return tool_output.deniedResult(ctx.allocator, path, "operator rejected sending a protected file");
                 }
             }
         }
@@ -462,7 +463,7 @@ fn localCommandExecTool(ctx: *const ToolContext, command: []const u8, cwd: ?[]co
         defer if (bl_reason) |r| ctx.allocator.free(r);
         const reason = bl_reason orelse if (gate.dangerous) DANGEROUS_COMMAND_APPROVAL_REASON else platform_process.localCommandApprovalLabel();
         if (!ctx.requestApproval(platform_process.localCommandToolName(), command, reason)) {
-            return deniedResult(ctx.allocator, command, platform_process.localCommandDeniedReason());
+            return tool_output.deniedResult(ctx.allocator, command, platform_process.localCommandDeniedReason());
         }
     }
     const result = runShellCommand(ctx.allocator, command, effective_cwd, ctx.settings.output_limit, timeout_ms, ctx) catch |err| {
@@ -491,7 +492,7 @@ fn dynamicBinaryTool(ctx: *ToolContext, tool: types.DynamicBinaryTool, args: []c
     switch (ctx.settings.permission) {
         .confirm, .auto => {
             if (!ctx.requestApproval(tool.function_name, approval_text.items, "Run installed binary tool")) {
-                return deniedResult(ctx.allocator, approval_text.items, "operator denied binary tool execution");
+                return tool_output.deniedResult(ctx.allocator, approval_text.items, "operator denied binary tool execution");
             }
         },
         .full => {},
@@ -909,7 +910,7 @@ fn terminalReplExecTool(ctx: *ToolContext, surface_id: []const u8, repl_name: []
         else
             std.fmt.bufPrint(&reason_buf, "Type input into opened {s} REPL/app terminal", .{repl.label()}) catch "Type input into terminal";
         if (!ctx.requestApproval("terminal_repl_exec", code, reason)) {
-            return deniedResult(ctx.allocator, code, "operator rejected REPL terminal input");
+            return tool_output.deniedResult(ctx.allocator, code, "operator rejected REPL terminal input");
         }
     }
 
@@ -992,7 +993,7 @@ fn terminalAnswerPromptTool(ctx: *ToolContext, surface_id: ?[]const u8, answer: 
     const gate = accessGate(ctx, keystroke.bytes, null);
     if (approvalRequiredForGate(ctx.settings.permission, gate)) {
         if (!ctx.requestApproval("terminal_answer_prompt", answer, "Answer a Claude Code/Codex approval prompt")) {
-            return deniedResult(ctx.allocator, answer, "operator rejected prompt answer");
+            return tool_output.deniedResult(ctx.allocator, answer, "operator rejected prompt answer");
         }
     }
 
@@ -1343,7 +1344,7 @@ fn unixSessionExecTool(ctx: *ToolContext, kind: UnixSessionKind, surface_id: []c
         else
             std.fmt.bufPrint(&reason_buf, "Type command into opened {s} terminal", .{kind.label()}) catch "Type command into terminal";
         if (!ctx.requestApproval(kind.toolName(), command, reason)) {
-            return deniedResult(ctx.allocator, command, if (kind == .ssh) "operator rejected SSH PTY command" else "operator rejected WSL PTY command");
+            return tool_output.deniedResult(ctx.allocator, command, if (kind == .ssh) "operator rejected SSH PTY command" else "operator rejected WSL PTY command");
         }
     }
     const snapshot = terminal_tools.collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
@@ -1441,178 +1442,6 @@ fn waitForSentinelResult(
 // ---------------------------------------------------------------------------
 // SSH profile tools
 // ---------------------------------------------------------------------------
-
-pub fn sshProfileSaveApprovalText(allocator: std.mem.Allocator, args: SshProfileSaveArgs) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
-        "name=\"{s}\" host=\"{s}\" user=\"{s}\" port=\"{s}\" proxy_jump=\"{s}\" auth_method=\"{s}\" identity_file=\"{s}\" password={s}",
-        .{
-            if (args.name.len > 0) args.name else "<default>",
-            args.host,
-            args.user,
-            if (args.port.len > 0) args.port else "22",
-            if (args.proxy_jump.len > 0) args.proxy_jump else "<none>",
-            if (args.auth_method.len > 0) args.auth_method else "<auto>",
-            if (args.identity_file.len > 0) args.identity_file else "<none>",
-            if (args.password.len > 0) "<redacted>" else "<empty>",
-        },
-    );
-}
-
-fn sshProfileSaveTool(ctx: *ToolContext, args: SshProfileSaveArgs) ![]u8 {
-    if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
-
-    const approval_text = try sshProfileSaveApprovalText(ctx.allocator, args);
-    defer ctx.allocator.free(approval_text);
-    if (ctx.settings.permission == .confirm) {
-        if (!ctx.requestApproval("ssh_profile_save", approval_text, "Save SSH server profile")) {
-            return deniedResult(ctx.allocator, approval_text, "operator rejected saved SSH profile update");
-        }
-    }
-
-    const host = ctx.tool_host orelse return ctx.allocator.dupe(u8, "No terminal tool host is available.");
-    var saved = host.saveSshProfile(host.ctx, ctx.allocator, args) catch |err| switch (err) {
-        error.InvalidProfile => return ctx.allocator.dupe(u8, "Invalid SSH profile. Provide a non-empty safe host and user, and a numeric port."),
-        error.ProfileLimit => return ctx.allocator.dupe(u8, "Cannot save SSH profile: profile limit reached."),
-        else => return std.fmt.allocPrint(ctx.allocator, "Failed to save SSH profile: {}", .{err}),
-    };
-    defer saved.deinit(ctx.allocator);
-
-    const out = try std.fmt.allocPrint(
-        ctx.allocator,
-        "saved profile=\"{s}\" host=\"{s}\" user=\"{s}\" port=\"{s}\" auth_method=\"{s}\" updated_existing={} password_saved={} identity_file_saved={}. Use ssh_profile_connect with profile_name=\"{s}\" to open it.",
-        .{
-            saved.name,
-            saved.host,
-            saved.user,
-            saved.port,
-            saved.auth_method,
-            saved.updated_existing,
-            saved.password_saved,
-            saved.identity_file_saved,
-            saved.name,
-        },
-    );
-    return tool_output.truncateOwned(ctx.allocator, ctx.settings, out);
-}
-
-fn sshProfileConnectTool(ctx: *ToolContext, profile_name: []const u8) ![]u8 {
-    if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
-    if (ctx.settings.permission == .confirm) {
-        if (!ctx.requestApproval("ssh_profile_connect", profile_name, "Open saved SSH server in a new tab")) {
-            return deniedResult(ctx.allocator, profile_name, "operator rejected saved SSH profile connection");
-        }
-    }
-
-    const host = ctx.tool_host orelse return ctx.allocator.dupe(u8, "No terminal tool host is available.");
-    var surface = host.connectSshProfile(host.ctx, ctx.allocator, profile_name) catch |err| switch (err) {
-        error.ProfileNotFound => return std.fmt.allocPrint(ctx.allocator, "No saved SSH profile matched \"{s}\".", .{profile_name}),
-        else => return std.fmt.allocPrint(ctx.allocator, "Failed to connect saved SSH profile \"{s}\": {}", .{ profile_name, err }),
-    };
-    var surface_owned = true;
-    errdefer if (surface_owned) surface.deinit(ctx.allocator);
-
-    const out = try std.fmt.allocPrint(
-        ctx.allocator,
-        "connected profile=\"{s}\" surface_id={s} tab={d} focused={} kind={s} title=\"{s}\" cwd=\"{s}\"",
-        .{
-            profile_name,
-            surface.id,
-            surface.tab_index + 1,
-            surface.focused,
-            terminal_tools.surfaceKind(surface),
-            surface.title,
-            surface.cwd,
-        },
-    );
-    errdefer ctx.allocator.free(out);
-
-    try terminal_tools.rememberConnectedSurface(ctx, surface);
-    surface_owned = false;
-    return tool_output.truncateOwned(ctx.allocator, ctx.settings, out);
-}
-
-// ---------------------------------------------------------------------------
-// Tab management tools
-// ---------------------------------------------------------------------------
-
-fn tabNewTool(ctx: *ToolContext, kind: []const u8, command: ?[]const u8) ![]u8 {
-    if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
-
-    const trimmed_kind = std.mem.trim(u8, kind, " \t\r\n");
-    const command_for_approval = command orelse trimmed_kind;
-    if (ctx.settings.permission == .confirm) {
-        if (!ctx.requestApproval("tab_new", command_for_approval, "Open a new local terminal tab")) {
-            return deniedResult(ctx.allocator, command_for_approval, "operator rejected new tab creation");
-        }
-    }
-
-    const host = ctx.tool_host orelse return ctx.allocator.dupe(u8, "No terminal tool host is available.");
-    var surface = host.spawnTab(host.ctx, ctx.allocator, trimmed_kind, command) catch |err| switch (err) {
-        error.CommandRequired => return ctx.allocator.dupe(u8, "tab_new kind=command requires a non-empty command."),
-        error.InvalidTabKind => return std.fmt.allocPrint(ctx.allocator, "Unsupported tab kind \"{s}\". Use {s}.", .{ trimmed_kind, platform_pty_command.tabKindUsage() }),
-        else => return std.fmt.allocPrint(ctx.allocator, "Failed to create new tab: {}", .{err}),
-    };
-    var surface_owned = true;
-    errdefer if (surface_owned) surface.deinit(ctx.allocator);
-
-    const out = try std.fmt.allocPrint(
-        ctx.allocator,
-        "created tab kind={s} surface_id={s} tab={d} focused={} surface_kind={s} title=\"{s}\" cwd=\"{s}\"",
-        .{
-            if (trimmed_kind.len > 0) trimmed_kind else "default",
-            surface.id,
-            surface.tab_index + 1,
-            surface.focused,
-            terminal_tools.surfaceKind(surface),
-            surface.title,
-            surface.cwd,
-        },
-    );
-    errdefer ctx.allocator.free(out);
-
-    try terminal_tools.rememberConnectedSurface(ctx, surface);
-    surface_owned = false;
-    return tool_output.truncateOwned(ctx.allocator, ctx.settings, out);
-}
-
-fn tabCloseTool(ctx: *ToolContext, tab_index: ?usize, surface_id: ?[]const u8, title: ?[]const u8) ![]u8 {
-    if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
-
-    var selector_buf: [256]u8 = undefined;
-    const selector = if (surface_id) |id|
-        std.fmt.bufPrint(&selector_buf, "surface_id={s}", .{id}) catch "surface_id"
-    else if (title) |text|
-        std.fmt.bufPrint(&selector_buf, "title={s}", .{text}) catch "title"
-    else if (tab_index) |idx|
-        std.fmt.bufPrint(&selector_buf, "tab={d}", .{idx + 1}) catch "tab"
-    else
-        "active terminal tab";
-
-    if (ctx.settings.permission == .confirm) {
-        if (!ctx.requestApproval("tab_close", selector, "Close a terminal tab")) {
-            return deniedResult(ctx.allocator, selector, "operator rejected tab close");
-        }
-    }
-
-    const host = ctx.tool_host orelse return ctx.allocator.dupe(u8, "No terminal tool host is available.");
-    var closed = host.closeTab(host.ctx, ctx.allocator, tab_index, surface_id, title) catch |err| switch (err) {
-        error.TabNotFound => return ctx.allocator.dupe(u8, "No matching terminal tab was found."),
-        error.CannotCloseAiChatTab => return ctx.allocator.dupe(u8, "Refusing to close an AI Chat tab from the agent."),
-        error.LastTab => return ctx.allocator.dupe(u8, "Refusing to close the last remaining tab."),
-        else => return std.fmt.allocPrint(ctx.allocator, "Failed to close tab: {}", .{err}),
-    };
-    defer closed.deinit(ctx.allocator);
-
-    try terminal_tools.rememberClosedTab(ctx, closed);
-
-    const out = try std.fmt.allocPrint(
-        ctx.allocator,
-        "closed tab={d} title=\"{s}\" active_tab={d}",
-        .{ closed.tab_index + 1, closed.title, closed.active_tab + 1 },
-    );
-    return tool_output.truncateOwned(ctx.allocator, ctx.settings, out);
-}
 
 // Utility helpers
 // ---------------------------------------------------------------------------
@@ -1944,7 +1773,7 @@ fn readFileTool(ctx: *ToolContext, path: []const u8, surface_id: ?[]const u8, of
         const gate = remoteFileGate(false);
         if (approvalRequiredForGate(ctx.settings.permission, gate)) {
             if (!ctx.requestApproval("read_file", path, "Read remote file")) {
-                return deniedResult(ctx.allocator, path, "operator rejected remote read");
+                return tool_output.deniedResult(ctx.allocator, path, "operator rejected remote read");
             }
         }
         const bytes = scp.sshReadFile(ctx.allocator, &conn, path, agent_file_edit.MAX_FILE_BYTES) orelse
@@ -1956,7 +1785,7 @@ fn readFileTool(ctx: *ToolContext, path: []const u8, surface_id: ?[]const u8, of
     if (approvalRequiredForGate(ctx.settings.permission, gate)) {
         const reason = if (gate.blacklisted) "Reads a protected path - confirm to allow" else "Read file";
         if (!ctx.requestApproval("read_file", path, reason)) {
-            return deniedResult(ctx.allocator, path, "operator rejected file read");
+            return tool_output.deniedResult(ctx.allocator, path, "operator rejected file read");
         }
     }
     const resolved = try resolveLocalPath(ctx.allocator, path, ctx.settings.working_dir);
@@ -2013,7 +1842,7 @@ fn writeFileTool(ctx: *ToolContext, path: []const u8, content: []const u8, surfa
         const reason = try std.fmt.allocPrint(ctx.allocator, "Write {s}", .{path});
         defer ctx.allocator.free(reason);
         if (!ctx.requestApproval("write_file", path, reason)) {
-            return deniedResult(ctx.allocator, path, "operator rejected file write");
+            return tool_output.deniedResult(ctx.allocator, path, "operator rejected file write");
         }
     }
 
@@ -2083,7 +1912,7 @@ fn editFileTool(ctx: *ToolContext, path: []const u8, old_string: []const u8, new
         const reason = try std.fmt.allocPrint(ctx.allocator, "Edit {s} ({d} change(s))", .{ path, outcome.occurrences });
         defer ctx.allocator.free(reason);
         if (!ctx.requestApproval("edit_file", path, reason)) {
-            return deniedResult(ctx.allocator, path, "operator rejected file edit");
+            return tool_output.deniedResult(ctx.allocator, path, "operator rejected file edit");
         }
     }
 
@@ -2098,10 +1927,6 @@ fn editFileTool(ctx: *ToolContext, path: []const u8, old_string: []const u8, new
             return std.fmt.allocPrint(ctx.allocator, "Failed to write {s}: {s}", .{ path, @errorName(err) });
     }
     return std.fmt.allocPrint(ctx.allocator, "Edited {s} ({d} change(s)).", .{ path, outcome.occurrences });
-}
-
-fn deniedResult(allocator: std.mem.Allocator, command: []const u8, reason: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "DENIED by operator (reason: {s})\ncommand: {s}", .{ reason, command });
 }
 
 pub const DANGEROUS_COMMAND_APPROVAL_REASON = "Destructive command (delete/rename/format) - confirm to run";
@@ -2854,28 +2679,6 @@ test "ai chat detects dangerous shell commands" {
     try std.testing.expect(!isDangerousCommand("git commit -m 'confirm the fix'"));
     try std.testing.expect(!isDangerousCommand("git log --format=oneline"));
     try std.testing.expect(!isDangerousCommand("echo perform a dry run"));
-}
-
-test "ai chat ssh profile save approval text redacts password" {
-    const allocator = std.testing.allocator;
-    const args = SshProfileSaveArgs{
-        .name = "lab",
-        .host = "192.0.2.10",
-        .user = "alice",
-        .password = "super-secret",
-        .port = "2222",
-        .proxy_jump = "admin@bastion.example.com:22",
-    };
-    const text = try sshProfileSaveApprovalText(allocator, args);
-    defer allocator.free(text);
-
-    try std.testing.expect(std.mem.indexOf(u8, text, "lab") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "192.0.2.10") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "alice") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "2222") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "admin@bastion.example.com:22") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "super-secret") == null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "<redacted>") != null);
 }
 
 const WeixinAttachmentCapture = struct {

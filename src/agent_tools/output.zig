@@ -27,6 +27,10 @@ pub fn truncateTailOwned(allocator: std.mem.Allocator, settings: AgentSettings, 
     return truncated;
 }
 
+pub fn deniedResult(allocator: std.mem.Allocator, command: []const u8, reason: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "DENIED by operator (reason: {s})\ncommand: {s}", .{ reason, command });
+}
+
 test "truncateTailOwned keeps the tail and marks the dropped head" {
     const a = std.testing.allocator;
     const settings = AgentSettings{ .output_limit = 8 };

@@ -224,6 +224,7 @@ test {
     _ = @import("agent_tools/memory.zig");
     _ = @import("agent_tools/output.zig");
     _ = @import("agent_tools/terminal.zig");
+    _ = @import("agent_tools/sessions.zig");
     _ = @import("research/commands.zig");
     _ = @import("research/web_search.zig");
     _ = @import("agent_prompt_answer.zig");
