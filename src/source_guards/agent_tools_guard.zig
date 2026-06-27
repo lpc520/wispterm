@@ -4,8 +4,6 @@
 
 const std = @import("std");
 
-const self_path = "source_guards/agent_tools_guard.zig";
-
 fn containsOldRuntimePath(source: []const u8) bool {
     return std.mem.indexOf(u8, source, "@import(\"ai_chat_tools.zig\")") != null or
         std.mem.indexOf(u8, source, "ai_chat_tools.") != null;
@@ -54,7 +52,7 @@ test "active sources do not recreate old agent tool runtime paths" {
     while (try walker.next()) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
-        if (std.mem.eql(u8, entry.path, self_path)) continue;
+        if (std.mem.eql(u8, entry.basename, "agent_tools_guard.zig")) continue;
 
         const source = try dir.readFileAlloc(gpa, entry.path, 16 * 1024 * 1024);
         defer gpa.free(source);
