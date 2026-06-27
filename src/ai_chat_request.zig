@@ -9,6 +9,7 @@ const ChatRequest = ai_chat.ChatRequest;
 const ai_chat_protocol = @import("ai_chat_protocol.zig");
 const ai_skill_distill = @import("ai_skill_distill.zig");
 const ai_chat_tools = @import("ai_chat_tools.zig");
+const tool_args = @import("agent_tools/args.zig");
 const first_party_tools = @import("tools/first_party.zig");
 const web_search = @import("research/web_search.zig");
 const web_read = @import("research/web_read.zig");
@@ -371,10 +372,10 @@ fn realSubagentModelCall(_: ?*anyopaque, request: *const ChatRequest, messages: 
 }
 
 fn subagentToolCall(request: *ChatRequest, call: ToolCall) anyerror![]u8 {
-    const args = ai_chat_tools.parseArgs(request.allocator, call.arguments) orelse
+    const args = tool_args.parse(request.allocator, call.arguments) orelse
         return request.allocator.dupe(u8, "Invalid tool arguments");
     defer args.deinit();
-    const task = ai_chat_tools.jsonStringArg(args.value, "task") orelse
+    const task = tool_args.string(args.value, "task") orelse
         return request.allocator.dupe(u8, "Missing task");
     if (std.mem.trim(u8, task, " \t\r\n").len == 0)
         return request.allocator.dupe(u8, "Missing task");

@@ -33,6 +33,7 @@ const platform_pty_command = @import("platform/pty_command.zig");
 const platform_wsl = @import("platform/wsl.zig");
 const platform_agent_prompt = @import("platform/agent_prompt.zig");
 const ai_agent_access = @import("ai_agent_access.zig");
+const tool_args = @import("agent_tools/args.zig");
 const web_search = @import("research/web_search.zig");
 const web_read = @import("research/web_read.zig");
 const pubmed = @import("research/pubmed.zig");
@@ -57,130 +58,130 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         return terminalContextTool(ctx);
     }
     if (std.mem.eql(u8, call.name, "terminal_snapshot")) {
-        const args = parseArgs(ctx.allocator, call.arguments);
+        const args = tool_args.parse(ctx.allocator, call.arguments);
         defer if (args) |parsed| parsed.deinit();
-        const surface_id = if (args) |parsed| jsonStringArg(parsed.value, "surface_id") else null;
+        const surface_id = if (args) |parsed| tool_args.string(parsed.value, "surface_id") else null;
         return terminalSnapshotTool(ctx, surface_id);
     }
     if (std.mem.eql(u8, call.name, "terminal_select")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const surface_id = jsonStringArg(args.value, "surface_id") orelse return ctx.allocator.dupe(u8, "Missing surface_id");
+        const surface_id = tool_args.string(args.value, "surface_id") orelse return ctx.allocator.dupe(u8, "Missing surface_id");
         return terminalSelectTool(ctx, surface_id);
     }
     if (std.mem.eql(u8, call.name, platform_process.localCommandToolName())) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const command = jsonStringArg(args.value, "command") orelse return ctx.allocator.dupe(u8, "Missing command");
-        const cwd = jsonStringArg(args.value, "cwd");
-        const timeout_ms = jsonIntArg(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
+        const command = tool_args.string(args.value, "command") orelse return ctx.allocator.dupe(u8, "Missing command");
+        const cwd = tool_args.string(args.value, "cwd");
+        const timeout_ms = tool_args.int(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
         return localCommandExecTool(ctx, command, cwd, timeout_ms);
     }
     if (std.mem.eql(u8, call.name, "ssh_session_exec")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const surface_id = jsonStringArg(args.value, "surface_id") orelse defaultExecSurfaceId(ctx) orelse return ctx.allocator.dupe(u8, "Missing surface_id");
-        const command = jsonStringArg(args.value, "command") orelse return ctx.allocator.dupe(u8, "Missing command");
-        const timeout_ms = jsonIntArg(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
+        const surface_id = tool_args.string(args.value, "surface_id") orelse defaultExecSurfaceId(ctx) orelse return ctx.allocator.dupe(u8, "Missing surface_id");
+        const command = tool_args.string(args.value, "command") orelse return ctx.allocator.dupe(u8, "Missing command");
+        const timeout_ms = tool_args.int(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
         return sshSessionExecTool(ctx, surface_id, command, timeout_ms);
     }
     if (std.mem.eql(u8, call.name, "wsl_session_exec")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const surface_id = jsonStringArg(args.value, "surface_id") orelse defaultExecSurfaceId(ctx) orelse return ctx.allocator.dupe(u8, "Missing surface_id");
-        const command = jsonStringArg(args.value, "command") orelse return ctx.allocator.dupe(u8, "Missing command");
-        const timeout_ms = jsonIntArg(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
+        const surface_id = tool_args.string(args.value, "surface_id") orelse defaultExecSurfaceId(ctx) orelse return ctx.allocator.dupe(u8, "Missing surface_id");
+        const command = tool_args.string(args.value, "command") orelse return ctx.allocator.dupe(u8, "Missing command");
+        const timeout_ms = tool_args.int(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
         return wslSessionExecTool(ctx, surface_id, command, timeout_ms);
     }
     if (std.mem.eql(u8, call.name, "terminal_repl_exec")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const surface_id = jsonStringArg(args.value, "surface_id") orelse defaultExecSurfaceId(ctx) orelse return ctx.allocator.dupe(u8, "Missing surface_id");
-        const repl = jsonStringArg(args.value, "repl") orelse return ctx.allocator.dupe(u8, "Missing repl");
-        const code = jsonStringArg(args.value, "code") orelse return ctx.allocator.dupe(u8, "Missing code");
-        const timeout_ms = jsonIntArg(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
+        const surface_id = tool_args.string(args.value, "surface_id") orelse defaultExecSurfaceId(ctx) orelse return ctx.allocator.dupe(u8, "Missing surface_id");
+        const repl = tool_args.string(args.value, "repl") orelse return ctx.allocator.dupe(u8, "Missing repl");
+        const code = tool_args.string(args.value, "code") orelse return ctx.allocator.dupe(u8, "Missing code");
+        const timeout_ms = tool_args.int(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
         return terminalReplExecTool(ctx, surface_id, repl, code, timeout_ms);
     }
     if (std.mem.eql(u8, call.name, "terminal_answer_prompt")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const surface_id = jsonStringArg(args.value, "surface_id");
-        const answer = jsonStringArg(args.value, "answer") orelse return ctx.allocator.dupe(u8, "Missing answer");
+        const surface_id = tool_args.string(args.value, "surface_id");
+        const answer = tool_args.string(args.value, "answer") orelse return ctx.allocator.dupe(u8, "Missing answer");
         return terminalAnswerPromptTool(ctx, surface_id, answer);
     }
     if (std.mem.eql(u8, call.name, "ask_user")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const question = jsonStringArg(args.value, "question") orelse return ctx.allocator.dupe(u8, "Missing question");
+        const question = tool_args.string(args.value, "question") orelse return ctx.allocator.dupe(u8, "Missing question");
         var opts_buf: [16]types.QuestionOption = undefined;
         const options = parseAskOptions(args.value, &opts_buf);
         return askUserTool(ctx, question, options);
     }
     if (std.mem.eql(u8, call.name, "ssh_profile_save")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const host = jsonStringArg(args.value, "host") orelse return ctx.allocator.dupe(u8, "Missing host");
-        const user = jsonStringArg(args.value, "user") orelse return ctx.allocator.dupe(u8, "Missing user");
+        const host = tool_args.string(args.value, "host") orelse return ctx.allocator.dupe(u8, "Missing host");
+        const user = tool_args.string(args.value, "user") orelse return ctx.allocator.dupe(u8, "Missing user");
         return sshProfileSaveTool(ctx, .{
-            .name = jsonStringArg(args.value, "name") orelse "",
+            .name = tool_args.string(args.value, "name") orelse "",
             .host = host,
             .user = user,
-            .password = jsonStringArg(args.value, "password") orelse "",
-            .port = jsonStringArg(args.value, "port") orelse "",
-            .proxy_jump = jsonStringArg(args.value, "proxy_jump") orelse "",
-            .auth_method = jsonStringArg(args.value, "auth_method") orelse "",
-            .identity_file = jsonStringArg(args.value, "identity_file") orelse "",
+            .password = tool_args.string(args.value, "password") orelse "",
+            .port = tool_args.string(args.value, "port") orelse "",
+            .proxy_jump = tool_args.string(args.value, "proxy_jump") orelse "",
+            .auth_method = tool_args.string(args.value, "auth_method") orelse "",
+            .identity_file = tool_args.string(args.value, "identity_file") orelse "",
         });
     }
     if (std.mem.eql(u8, call.name, "ssh_profile_connect")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const profile_name = jsonStringArg(args.value, "profile_name") orelse return ctx.allocator.dupe(u8, "Missing profile_name");
+        const profile_name = tool_args.string(args.value, "profile_name") orelse return ctx.allocator.dupe(u8, "Missing profile_name");
         return sshProfileConnectTool(ctx, profile_name);
     }
     if (std.mem.eql(u8, call.name, "tab_new")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const kind = jsonStringArg(args.value, "kind") orelse "default";
-        const command = jsonStringArg(args.value, "command");
+        const kind = tool_args.string(args.value, "kind") orelse "default";
+        const command = tool_args.string(args.value, "command");
         return tabNewTool(ctx, kind, command);
     }
     if (std.mem.eql(u8, call.name, "tab_close")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        var tab_index = jsonIndexArg(args.value, "tab_index");
+        var tab_index = tool_args.index(args.value, "tab_index");
         if (tab_index == null) {
-            if (jsonIndexArg(args.value, "tab_number")) |tab_number| {
+            if (tool_args.index(args.value, "tab_number")) |tab_number| {
                 if (tab_number > 0) tab_index = tab_number - 1;
             }
         }
-        const surface_id = jsonStringArg(args.value, "surface_id");
-        const title = jsonStringArg(args.value, "title");
+        const surface_id = tool_args.string(args.value, "surface_id");
+        const title = tool_args.string(args.value, "title");
         return tabCloseTool(ctx, tab_index, surface_id, title);
     }
     if (std.mem.eql(u8, call.name, "read_file")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const path = jsonStringArg(args.value, "path") orelse return ctx.allocator.dupe(u8, "Missing path");
-        const surface_id = jsonStringArg(args.value, "surface_id");
-        const offset = jsonIndexArg(args.value, "offset") orelse 0;
-        const limit = jsonIndexArg(args.value, "limit") orelse 0;
+        const path = tool_args.string(args.value, "path") orelse return ctx.allocator.dupe(u8, "Missing path");
+        const surface_id = tool_args.string(args.value, "surface_id");
+        const offset = tool_args.index(args.value, "offset") orelse 0;
+        const limit = tool_args.index(args.value, "limit") orelse 0;
         return readFileTool(ctx, path, surface_id, offset, limit);
     }
     if (std.mem.eql(u8, call.name, "copy_file")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const source_path = jsonStringArg(args.value, "source_path") orelse return ctx.allocator.dupe(u8, "Missing source_path");
-        const source_surface_id = jsonStringArg(args.value, "source_surface_id");
-        const dest_surface_id = jsonStringArg(args.value, "dest_surface_id");
-        const dest_path = jsonStringArg(args.value, "dest_path");
-        const dest_name = jsonStringArg(args.value, "dest_name");
+        const source_path = tool_args.string(args.value, "source_path") orelse return ctx.allocator.dupe(u8, "Missing source_path");
+        const source_surface_id = tool_args.string(args.value, "source_surface_id");
+        const dest_surface_id = tool_args.string(args.value, "dest_surface_id");
+        const dest_path = tool_args.string(args.value, "dest_path");
+        const dest_name = tool_args.string(args.value, "dest_name");
         return copyFileTool(ctx, source_path, source_surface_id, dest_surface_id, dest_path, dest_name);
     }
     if (std.mem.eql(u8, call.name, "write_file")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const path = jsonStringArg(args.value, "path") orelse return ctx.allocator.dupe(u8, "Missing path");
+        const path = tool_args.string(args.value, "path") orelse return ctx.allocator.dupe(u8, "Missing path");
         // content may be empty (truncate to an empty file), so do NOT use
         // jsonStringArg (it rejects ""). Read the raw .string.
         const content = blk: {
@@ -188,154 +189,112 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
             const v = args.value.object.get("content") orelse break :blk null;
             break :blk if (v == .string) v.string else null;
         } orelse return ctx.allocator.dupe(u8, "Missing content");
-        const surface_id = jsonStringArg(args.value, "surface_id");
+        const surface_id = tool_args.string(args.value, "surface_id");
         return writeFileTool(ctx, path, content, surface_id);
     }
     if (std.mem.eql(u8, call.name, "edit_file")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const path = jsonStringArg(args.value, "path") orelse return ctx.allocator.dupe(u8, "Missing path");
-        const old_string = jsonStringArg(args.value, "old_string") orelse return ctx.allocator.dupe(u8, "Missing old_string");
+        const path = tool_args.string(args.value, "path") orelse return ctx.allocator.dupe(u8, "Missing path");
+        const old_string = tool_args.string(args.value, "old_string") orelse return ctx.allocator.dupe(u8, "Missing old_string");
         // new_string may be empty (deletion), so do NOT use jsonStringArg (it rejects ""). Read the raw .string.
         const new_string = blk: {
             if (args.value != .object) break :blk null;
             const v = args.value.object.get("new_string") orelse break :blk null;
             break :blk if (v == .string) v.string else null;
         } orelse return ctx.allocator.dupe(u8, "Missing new_string");
-        const replace_all = jsonBoolArg(args.value, "replace_all") orelse false;
-        const surface_id = jsonStringArg(args.value, "surface_id");
+        const replace_all = tool_args.boolean(args.value, "replace_all") orelse false;
+        const surface_id = tool_args.string(args.value, "surface_id");
         return editFileTool(ctx, path, old_string, new_string, replace_all, surface_id);
     }
     if (std.mem.eql(u8, call.name, "skill_info")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const skill_name = jsonStringArg(args.value, "skill_name") orelse return ctx.allocator.dupe(u8, "Missing skill_name");
+        const skill_name = tool_args.string(args.value, "skill_name") orelse return ctx.allocator.dupe(u8, "Missing skill_name");
         return skillInfoTool(ctx.allocator, skill_name);
     }
     if (std.mem.eql(u8, call.name, "wispterm_docs")) {
-        const args = parseArgs(ctx.allocator, call.arguments);
+        const args = tool_args.parse(ctx.allocator, call.arguments);
         defer if (args) |parsed| parsed.deinit();
-        const topic = if (args) |parsed| jsonStringArg(parsed.value, "topic") else null;
+        const topic = if (args) |parsed| tool_args.string(parsed.value, "topic") else null;
         return wisptermDocsTool(ctx.allocator, topic);
     }
     if (std.mem.eql(u8, call.name, "weixin_send_attachment")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const kind_text = jsonStringArg(args.value, "kind") orelse return ctx.allocator.dupe(u8, "Missing kind");
+        const kind_text = tool_args.string(args.value, "kind") orelse return ctx.allocator.dupe(u8, "Missing kind");
         const kind = weixin_types.AttachmentKind.parse(kind_text) orelse return ctx.allocator.dupe(u8, "Invalid kind; expected file, image, or voice");
-        const path = jsonStringArg(args.value, "path") orelse return ctx.allocator.dupe(u8, "Missing path");
-        const display_name = jsonStringArg(args.value, "display_name") orelse "";
+        const path = tool_args.string(args.value, "path") orelse return ctx.allocator.dupe(u8, "Missing path");
+        const display_name = tool_args.string(args.value, "display_name") orelse "";
         return weixinSendAttachmentTool(ctx, kind, path, display_name);
     }
     if (std.mem.eql(u8, call.name, "websearch")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const query = jsonStringArg(args.value, "query") orelse return ctx.allocator.dupe(u8, "Missing query");
-        const max_results = jsonIntArg(args.value, "max_results");
+        const query = tool_args.string(args.value, "query") orelse return ctx.allocator.dupe(u8, "Missing query");
+        const max_results = tool_args.int(args.value, "max_results");
         return webSearchTool(ctx.allocator, query, max_results);
     }
     if (std.mem.eql(u8, call.name, "webread")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const url = jsonStringArg(args.value, "url") orelse return ctx.allocator.dupe(u8, "Missing url");
+        const url = tool_args.string(args.value, "url") orelse return ctx.allocator.dupe(u8, "Missing url");
         return webReadTool(ctx.allocator, url, ctx.settings.working_dir);
     }
     if (std.mem.eql(u8, call.name, "pubmed")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const query = jsonStringArg(args.value, "query") orelse return ctx.allocator.dupe(u8, "Missing query");
-        const max_results = jsonIntArg(args.value, "max_results");
+        const query = tool_args.string(args.value, "query") orelse return ctx.allocator.dupe(u8, "Missing query");
+        const max_results = tool_args.int(args.value, "max_results");
         return pubMedTool(ctx.allocator, query, max_results);
     }
     if (std.mem.startsWith(u8, call.name, "memory_") and !ctx.settings.memory_enabled) {
         return ctx.allocator.dupe(u8, "Memory is disabled (ai-memory-enabled = false).");
     }
     if (std.mem.eql(u8, call.name, "memory_save")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const name = jsonStringArg(args.value, "name") orelse return ctx.allocator.dupe(u8, "Missing name");
-        const description = jsonStringArg(args.value, "description") orelse return ctx.allocator.dupe(u8, "Missing description");
+        const name = tool_args.string(args.value, "name") orelse return ctx.allocator.dupe(u8, "Missing name");
+        const description = tool_args.string(args.value, "description") orelse return ctx.allocator.dupe(u8, "Missing description");
         const body = blk: {
             if (args.value != .object) break :blk null;
             const v = args.value.object.get("body") orelse break :blk null;
             break :blk if (v == .string) v.string else null;
         } orelse return ctx.allocator.dupe(u8, "Missing body");
-        const tier_text = jsonStringArg(args.value, "tier") orelse "global";
+        const tier_text = tool_args.string(args.value, "tier") orelse "global";
         const tier: agent_memory.Tier = if (std.mem.eql(u8, tier_text, "project")) .project else .global;
-        const type_ = agent_memory.MemoryType.fromString(jsonStringArg(args.value, "type") orelse "user");
+        const type_ = agent_memory.MemoryType.fromString(tool_args.string(args.value, "type") orelse "user");
         return agent_memory.saveMemory(ctx.allocator, tier, ctx.settings.working_dir, name, description, type_, body);
     }
     if (std.mem.eql(u8, call.name, "memory_recall")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const name = jsonStringArg(args.value, "name") orelse return ctx.allocator.dupe(u8, "Missing name");
+        const name = tool_args.string(args.value, "name") orelse return ctx.allocator.dupe(u8, "Missing name");
         return agent_memory.recallMemory(ctx.allocator, ctx.settings.working_dir orelse "", name);
     }
     if (std.mem.eql(u8, call.name, "memory_delete")) {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const name = jsonStringArg(args.value, "name") orelse return ctx.allocator.dupe(u8, "Missing name");
-        const tier_opt: ?agent_memory.Tier = if (jsonStringArg(args.value, "tier")) |t|
+        const name = tool_args.string(args.value, "name") orelse return ctx.allocator.dupe(u8, "Missing name");
+        const tier_opt: ?agent_memory.Tier = if (tool_args.string(args.value, "tier")) |t|
             (if (std.mem.eql(u8, t, "project")) .project else if (std.mem.eql(u8, t, "global")) .global else null)
         else
             null;
         return agent_memory.deleteMemory(ctx.allocator, ctx.settings.working_dir orelse "", name, tier_opt);
     }
     if (findDynamicBinaryTool(ctx.settings.dynamic_binary_tools, call.name)) |tool| {
-        const args = parseArgs(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
         defer args.deinit();
-        const argv_args = jsonStringArrayArg(ctx.allocator, args.value, "args") catch |err| switch (err) {
+        const argv_args = tool_args.stringArray(ctx.allocator, args.value, "args") catch |err| switch (err) {
             error.InvalidToolArguments => return ctx.allocator.dupe(u8, "Invalid tool arguments"),
             else => return err,
         };
-        defer freeStringArray(ctx.allocator, argv_args);
-        const cwd = jsonStringArg(args.value, "cwd") orelse ctx.settings.working_dir;
-        const timeout_ms = jsonIntArg(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
+        defer tool_args.freeStringArray(ctx.allocator, argv_args);
+        const cwd = tool_args.string(args.value, "cwd") orelse ctx.settings.working_dir;
+        const timeout_ms = tool_args.int(args.value, "timeout_ms") orelse ctx.settings.command_timeout_ms;
         return dynamicBinaryTool(ctx, tool, argv_args, cwd, timeout_ms);
     }
     return std.fmt.allocPrint(ctx.allocator, "Unknown tool: {s}", .{call.name});
-}
-
-pub fn parseArgs(allocator: std.mem.Allocator, text: []const u8) ?std.json.Parsed(std.json.Value) {
-    const trimmed = std.mem.trim(u8, text, " \t\r\n");
-    const body = if (trimmed.len == 0) "{}" else trimmed;
-    return std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch null;
-}
-
-pub fn jsonStringArg(root: std.json.Value, name: []const u8) ?[]const u8 {
-    if (root != .object) return null;
-    const value = root.object.get(name) orelse return null;
-    if (value != .string or value.string.len == 0) return null;
-    return value.string;
-}
-
-fn jsonIntArg(root: std.json.Value, name: []const u8) ?u32 {
-    if (root != .object) return null;
-    const value = root.object.get(name) orelse return null;
-    return switch (value) {
-        .integer => |v| if (v > 0 and v <= std.math.maxInt(u32)) @intCast(v) else null,
-        .float => |v| if (v > 0 and v <= @as(f64, @floatFromInt(std.math.maxInt(u32)))) @intFromFloat(v) else null,
-        else => null,
-    };
-}
-
-fn jsonIndexArg(root: std.json.Value, name: []const u8) ?usize {
-    if (root != .object) return null;
-    const value = root.object.get(name) orelse return null;
-    return switch (value) {
-        .integer => |v| if (v >= 0 and v <= std.math.maxInt(usize)) @intCast(v) else null,
-        .float => |v| if (v >= 0 and v <= @as(f64, @floatFromInt(std.math.maxInt(usize)))) @intFromFloat(v) else null,
-        else => null,
-    };
-}
-
-fn jsonBoolArg(root: std.json.Value, name: []const u8) ?bool {
-    if (root != .object) return null;
-    const value = root.object.get(name) orelse return null;
-    return switch (value) {
-        .bool => |b| b,
-        else => null,
-    };
 }
 
 fn findDynamicBinaryTool(tools: []const types.DynamicBinaryTool, name: []const u8) ?types.DynamicBinaryTool {
@@ -343,32 +302,6 @@ fn findDynamicBinaryTool(tools: []const types.DynamicBinaryTool, name: []const u
         if (std.mem.eql(u8, tool.function_name, name)) return tool;
     }
     return null;
-}
-
-fn jsonStringArrayArg(allocator: std.mem.Allocator, value: std.json.Value, key: []const u8) ![]const []const u8 {
-    if (value != .object) return error.InvalidToolArguments;
-    const array_value = value.object.get(key) orelse return allocator.alloc([]const u8, 0);
-    if (array_value != .array) return error.InvalidToolArguments;
-
-    var out = try allocator.alloc([]const u8, array_value.array.items.len);
-    var n: usize = 0;
-    errdefer {
-        for (out[0..n]) |item| allocator.free(item);
-        allocator.free(out);
-    }
-
-    for (array_value.array.items) |item| {
-        if (item != .string) return error.InvalidToolArguments;
-        out[n] = try allocator.dupe(u8, item.string);
-        n += 1;
-    }
-
-    return out;
-}
-
-fn freeStringArray(allocator: std.mem.Allocator, values: []const []const u8) void {
-    for (values) |value| allocator.free(value);
-    allocator.free(values);
 }
 
 /// Extract the `options` array of an ask_user call into `buf`. Each item needs a
