@@ -176,6 +176,32 @@ pub const ToolClosedTab = struct {
     }
 };
 
+pub const UiScreenshotTarget = enum {
+    focused_panel,
+    active_tab,
+
+    pub fn label(self: UiScreenshotTarget) []const u8 {
+        return switch (self) {
+            .focused_panel => "focused_panel",
+            .active_tab => "active_tab",
+        };
+    }
+};
+
+pub const UiScreenshotResult = struct {
+    path: []u8,
+    mime: []const u8 = "image/png",
+    width: u32,
+    height: u32,
+    target: UiScreenshotTarget,
+    surface_id: ?[]u8 = null,
+
+    pub fn deinit(self: UiScreenshotResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        if (self.surface_id) |surface_id| allocator.free(surface_id);
+    }
+};
+
 pub const SshProfileSaveArgs = struct {
     name: []const u8 = "",
     host: []const u8,
@@ -219,6 +245,8 @@ pub const ToolHost = struct {
     /// null for local/WSL/unknown surfaces. Only the real AppWindow host sets
     /// this; others leave it null (file tools then treat the target as local).
     sshConnectionForSurface: ?*const fn (*anyopaque, []const u8) ?SshConnection = null,
+    uiScreenshot: ?*const fn (*anyopaque, std.mem.Allocator, UiScreenshotTarget, ?[]const u8, ?[]const u8) anyerror!UiScreenshotResult = null,
+    focusTerminal: ?*const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!ToolSurface = null,
 };
 
 pub const WeixinReplyContext = struct {
