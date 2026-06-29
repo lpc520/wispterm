@@ -234,6 +234,15 @@ pub const Strings = struct {
     shortcuts_heading: []const u8,
     shortcuts_hint: []const u8,
     shortcuts_unbound: []const u8,
+
+    // —— 飞书凭证表单 ——
+    feishu_form_title: []const u8,
+    feishu_form_enabled: []const u8,
+    feishu_form_app_id: []const u8,
+    feishu_form_app_secret: []const u8,
+    feishu_form_secret_set_hint: []const u8,
+    feishu_form_save: []const u8,
+    toast_feishu_restart: []const u8,
 };
 
 const en = Strings{
@@ -452,6 +461,14 @@ const en = Strings{
     .shortcuts_heading = "Keyboard shortcuts",
     .shortcuts_hint = "Press any key or click to hide",
     .shortcuts_unbound = "unbound",
+
+    .feishu_form_title = "Feishu bot config",
+    .feishu_form_enabled = "Enabled",
+    .feishu_form_app_id = "App ID",
+    .feishu_form_app_secret = "App Secret",
+    .feishu_form_secret_set_hint = "already set — leave blank to keep",
+    .feishu_form_save = "Save",
+    .toast_feishu_restart = "Feishu setting updated — restart WispTerm to apply",
 };
 
 const zh_CN = Strings{
@@ -670,6 +687,14 @@ const zh_CN = Strings{
     .shortcuts_heading = "键盘快捷键",
     .shortcuts_hint = "按任意键或点击隐藏",
     .shortcuts_unbound = "未绑定",
+
+    .feishu_form_title = "飞书 bot 配置",
+    .feishu_form_enabled = "启用",
+    .feishu_form_app_id = "App ID",
+    .feishu_form_app_secret = "App Secret",
+    .feishu_form_secret_set_hint = "已设置，留空保留",
+    .feishu_form_save = "保存",
+    .toast_feishu_restart = "飞书配置已更新，重启 WispTerm 生效",
 };
 
 // Set once at startup before any UI thread exists (see main.zig startup wiring).
@@ -809,6 +834,7 @@ pub fn commandTitle(action: CommandAction) ?[]const u8 {
         .stop_wechat => "微信：停止",
         .wechat_status => "微信：状态",
         .unbind_wechat => "微信：解绑",
+        .configure_feishu => "飞书：配置",
         .export_ai_chat_markdown => "导出副驾 Markdown",
         .export_ai_chat_markdown_clean => "导出副驾 Markdown 精简版",
         .show_version => "版本",
@@ -861,6 +887,7 @@ pub fn commandDetail(action: CommandAction) ?[]const u8 {
         .stop_wechat => "停止轮询并保留已保存的微信绑定",
         .wechat_status => "显示微信直连连接状态",
         .unbind_wechat => "清除已存储的微信直连绑定",
+        .configure_feishu => "填写飞书 bot 的 App ID 和 App Secret",
         .export_ai_chat_markdown => "把当前 AI 对话保存为 Markdown",
         .export_ai_chat_markdown_clean => "保存用户提问与最终回答（不含思考过程）",
         .show_version => "显示 WispTerm 版本",
