@@ -30,6 +30,8 @@ theme = Poimandres
 window-height = 32
 window-width = 120
 quake-mode = false
+# Windows Git Bash example:
+# shell = "C:\Program Files\Git\bin\bash.exe" --login -i
 keybind = global:ctrl+backquote=toggle_quake
 keybind = ctrl+shift+p=toggle_command_palette
 scrollback-limit = 10000000
@@ -68,6 +70,7 @@ feishu-app-secret = your-app-secret
 | `window-height`             | `0` (auto) | Initial height in cells (min: 4, 0 = auto 80x24)                                                                                                                                                                        |
 | `window-width`              | `0` (auto) | Initial width in cells (min: 10, 0 = auto 80x24)                                                                                                                                                                        |
 | `quake-mode`                | `false`    | Start as a Quake-style drop-down terminal. The `toggle_quake` keybind hides or shows the same window while preserving terminal state, and the Quake window's size and position are remembered across restarts.            |
+| `shell`                     | OS default | Shell command for new local sessions. Windows aliases: `cmd`, `powershell`, `pwsh`, `wsl`; POSIX examples: `sh`, `zsh`, `fish`. You can also use a custom command line such as `"C:\Program Files\Git\bin\bash.exe" --login -i`. |
 | `keybind`                   | defaults   | Configure an app-level shortcut. Can be repeated. Syntax: `keybind = [global:]modifier+key=action`; use `keybind = clear` before custom bindings to remove all defaults.                                                 |
 | `scrollback-limit`          | `10000000` | Scrollback buffer limit in bytes                                                                                                                                                                                        |
 | `url-open-mode`             | `embedded` | Where web URLs open: `embedded` uses the right-side browser panel when available (WebView2 on Windows, WKWebView on macOS), while `system-browser` always opens the system default browser. SSH loopback URLs keep local port forwards alive for either mode. |
@@ -126,6 +129,31 @@ The **Restore default settings** row resets the settings the page manages back
 to their defaults after a confirmation dialog. It only clears the keys exposed on
 the settings page; it leaves Quake mode, your saved AI profiles, and custom
 `keybind` lines untouched.
+
+## Default Shell and Git Bash
+
+Set `shell` in your config file to choose what new local shell sessions launch.
+Existing tabs keep their current process; save the config, wait for hot reload
+or restart WispTerm, then open a new session.
+
+On Windows, Git Bash should be configured as a command line with double quotes
+around the executable path:
+
+```text
+shell = "C:\Program Files\Git\bin\bash.exe" --login -i
+```
+
+Do not use single quotes, and do not write Windows backslashes as `\\`. WispTerm
+config is not JSON, so single quotes and doubled backslashes are treated as
+literal characters:
+
+```text
+# Wrong
+shell = 'C:\\Program Files\\Git\\bin\\bash.exe'
+```
+
+That wrong form can make Windows look for an executable whose path includes the
+quote characters, which shows up as `Failed to create Surface for new tab`.
 
 ## OpenSSH config import
 

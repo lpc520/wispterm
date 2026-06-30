@@ -38,6 +38,8 @@ theme = Poimandres
 window-height = 32
 window-width = 120
 quake-mode = false
+# Windows Git Bash 示例：
+# shell = "C:\Program Files\Git\bin\bash.exe" --login -i
 keybind = global:ctrl+backquote=toggle_quake
 keybind = ctrl+shift+p=toggle_command_palette
 scrollback-limit = 10000000
@@ -72,6 +74,7 @@ feishu-app-secret = your-app-secret
 | `window-height` | `0`（自动） | 初始高度（单元格数，最小 4，0 = 自动 80×24） |
 | `window-width` | `0`（自动） | 初始宽度（单元格数，最小 10，0 = 自动 80×24） |
 | `quake-mode` | `false` | 以 Quake 下拉终端方式启动；`toggle_quake` 在保留状态的前提下隐藏/显示它 |
+| `shell` | 系统默认 | 新建本地 shell 会话时启动的命令。Windows 别名：`cmd`、`powershell`、`pwsh`、`wsl`；POSIX 示例：`sh`、`zsh`、`fish`。也可以使用自定义命令行，例如 `"C:\Program Files\Git\bin\bash.exe" --login -i` |
 | `keybind` | 默认值 | 配置应用级快捷键（可重复）。语法 `[global:]modifier+key=action`；`keybind = clear` 清空全部默认 |
 | `scrollback-limit` | `10000000` | 回滚缓冲上限（字节） |
 | `focus-follows-mouse` | `false` | 焦点跟随鼠标所在面板，无需点击 |
@@ -112,6 +115,28 @@ feishu-app-secret = your-app-secret
 
 **恢复默认设置**一行会在确认对话框后把该页管理的选项重置为默认。它只清除设置页暴露的
 键 —— 不会动 Quake 模式、已保存的 AI 配置以及自定义 `keybind` 行。
+
+## 默认 shell 与 Git Bash
+
+在配置文件里设置 `shell` 可以决定新建本地 shell 会话时启动什么。已有标签页会继续运行
+当前进程；保存配置后，等待热重载或重启 WispTerm，再新建 session 才会看到变化。
+
+Windows 上配置 Git Bash 时，建议把可执行文件路径放在双引号里，并带上登录交互参数：
+
+```text
+shell = "C:\Program Files\Git\bin\bash.exe" --login -i
+```
+
+不要用单引号，也不要把 Windows 路径里的 `\` 写成 `\\`。WispTerm 配置不是 JSON，
+单引号和双反斜杠都会按字面量处理：
+
+```text
+# 错误写法
+shell = 'C:\\Program Files\\Git\\bin\\bash.exe'
+```
+
+这种错误写法会让 Windows 去查找带引号字符的路径，常见表现是新建标签页时报
+`Failed to create Surface for new tab`。
 
 ## OpenSSH config 导入
 
