@@ -9,6 +9,7 @@
 ///
 /// Shutdown is delegated to the platform PTY backend.
 const std = @import("std");
+const Command = @import("../Command.zig");
 const Surface = @import("../Surface.zig");
 const window_backend = @import("../platform/window_backend.zig");
 const read_coalesce = @import("read_coalesce.zig");
@@ -55,6 +56,7 @@ pub fn threadMain(surface: *Surface) void {
             if (resize_pending.items.len == 0) continue;
             processOutput(surface, resize_pending.items);
             resize_pending.clearRetainingCapacity();
+            if (markExitedIfProcessEndedAfterOutput(surface)) return;
             continue;
         }
 
@@ -63,12 +65,15 @@ pub fn threadMain(surface: *Surface) void {
                 processOutput(surface, resize_pending.items);
                 resize_pending.clearRetainingCapacity();
                 processOutputCoalesced(surface, data, &output_pending, &buf);
+                if (markExitedIfProcessEndedAfterOutput(surface)) return;
                 continue;
             };
             processOutput(surface, resize_pending.items);
             resize_pending.clearRetainingCapacity();
+            if (markExitedIfProcessEndedAfterOutput(surface)) return;
         } else {
             processOutputCoalesced(surface, data, &output_pending, &buf);
+            if (markExitedIfProcessEndedAfterOutput(surface)) return;
         }
     }
 }
@@ -177,6 +182,26 @@ fn processOutput(surface: *Surface, data: []const u8) void {
     if (surface.markOutputDirty()) window_backend.postWakeup();
 }
 
+const ExitAfterOutput = struct {
+    available: ?usize,
+    status: ?Command.Exit,
+};
+
+fn shouldMarkExitedAfterOutput(sample: ExitAfterOutput) bool {
+    return sample.available != null and sample.available.? == 0 and sample.status != null;
+}
+
+fn markExitedIfProcessEndedAfterOutput(surface: *Surface) bool {
+    const available = surface.pty.outputAvailable();
+    if (available == null or available.? != 0) return false;
+
+    const status = surface.pollExitStatus() orelse return false;
+    if (!shouldMarkExitedAfterOutput(.{ .available = available, .status = status })) return false;
+
+    surface.markExited(.eof, status);
+    return true;
+}
+
 const ReadErrorAction = enum { retry, stop };
 
 fn handleReadError(surface: *Surface, err: anyerror) ReadErrorAction {
@@ -193,4 +218,11 @@ fn handleReadError(surface: *Surface, err: anyerror) ReadErrorAction {
 
     surface.failIo(.pty_read, err);
     return .stop;
+}
+
+test "read thread marks process exit after drained output only" {
+    try std.testing.expect(shouldMarkExitedAfterOutput(.{ .available = 0, .status = Command.Exit{ .exited = 0 } }));
+    try std.testing.expect(!shouldMarkExitedAfterOutput(.{ .available = 12, .status = Command.Exit{ .exited = 0 } }));
+    try std.testing.expect(!shouldMarkExitedAfterOutput(.{ .available = 0, .status = null }));
+    try std.testing.expect(!shouldMarkExitedAfterOutput(.{ .available = null, .status = Command.Exit{ .exited = 0 } }));
 }
