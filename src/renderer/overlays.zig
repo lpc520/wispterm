@@ -44,6 +44,9 @@ const ssh_profiles = @import("overlays/ssh_profiles.zig");
 const ssh_profiles_layout = @import("overlays/ssh_profiles_layout.zig");
 const assistant_profiles = @import("overlays/assistant_profiles.zig");
 const feishu_config = @import("overlays/feishu_config.zig");
+const quick_ai_config = @import("overlays/quick_ai_config.zig");
+const quick_verify = @import("../assistant/quick_verify.zig");
+const window_backend = @import("../platform/window_backend.zig");
 const feishu_registration = @import("../feishu/registration.zig");
 const feishu_reg_panel = @import("../feishu/registration_panel.zig");
 const session_launcher = @import("overlays/session_launcher.zig");
@@ -128,6 +131,14 @@ fn feishuForm() *overlay_state.FeishuFormState {
 
 fn feishuConfig() *feishu_config.State {
     return &g_overlay_state.feishu.config;
+}
+
+fn quickAiForm() *overlay_state.QuickAiFormState {
+    return &g_overlay_state.quick_ai;
+}
+
+fn quickAi() *quick_ai_config.State {
+    return &g_overlay_state.quick_ai.config;
 }
 
 fn launcherState() *session_launcher.State {
@@ -687,6 +698,7 @@ fn executeCommand(action: CommandAction) void {
         .wechat_status => showWeixinDirectStatus(),
         .unbind_wechat => unbindWeixinDirect(),
         .configure_feishu => openFeishuConfigForm(),
+        .quick_configure_ai => openQuickAiForm(),
         .export_ai_chat_markdown => AppWindow.exportActiveAiChatMarkdown(.full),
         .export_ai_chat_markdown_clean => AppWindow.exportActiveAiChatMarkdown(.clean),
         .show_version => showVersionToast(),
@@ -2438,6 +2450,7 @@ fn commandCenterStateApply(state: command_center_state.State) void {
     // so it can't be stomped on open. Prevents the feishu render gate from firing stale when
     // another launcher mode (AI list, SSH, plain launcher) reuses g_session_launcher_visible.
     feishuForm().visible = false;
+    quickAiForm().visible = false;
 }
 
 pub fn sessionLauncherOpen() void {
@@ -2489,11 +2502,6 @@ fn openAiListFromCommandPalette() void {
     markSessionLauncherReturnToCommandPalette();
 }
 
-fn openAiFormNewFromCommandPalette() void {
-    openAiFormNew();
-    markSessionLauncherReturnToCommandPalette();
-}
-
 pub fn sessionLauncherInsertChar(codepoint: u21) void {
     if (codepoint < 0x20 or codepoint == 0x7f) return;
     if (feishuForm().visible) {
@@ -2501,6 +2509,14 @@ pub fn sessionLauncherInsertChar(codepoint: u21) void {
         var buf: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(codepoint, &buf) catch return;
         feishuConfig().append(field, buf[0..n]);
+        return;
+    }
+    if (quickAiForm().visible) {
+        if (quickAi().focus != quick_ai_config.ROW_KEY) return;
+        var buf: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(codepoint, &buf) catch return;
+        quickAi().append(buf[0..n]);
+        AppWindow.applyUiEffect(.{ .needs_rebuild = true });
         return;
     }
     if (g_ssh_list_visible) {
@@ -2526,6 +2542,12 @@ pub fn sessionLauncherPasteText(text: []const u8) bool {
     if (feishuForm().visible) {
         const field = feishuConfig().focusedField() orelse return false;
         feishuConfig().append(field, text);
+        return true;
+    }
+    if (quickAiForm().visible) {
+        if (quickAi().focus != quick_ai_config.ROW_KEY) return false;
+        quickAi().append(text);
+        AppWindow.applyUiEffect(.{ .needs_rebuild = true });
         return true;
     }
     if (g_ssh_list_visible) {
@@ -2601,6 +2623,24 @@ fn sessionLauncherHandleKeyImpl(ev: input_key.KeyEvent) void {
             .escape => closeFeishuConfigForm(),
             else => {},
         }
+        return;
+    }
+    if (quickAiForm().visible) {
+        switch (ev.key) {
+            .tab, .arrow_down => quickAi().focusNextRow(),
+            .arrow_up => quickAi().focusPrevRow(),
+            .enter => switch (quickAi().focus) {
+                quick_ai_config.ROW_OPEN_REGISTER => openQuickAiUrl(quick_ai_config.REGISTER_URL),
+                quick_ai_config.ROW_OPEN_TUTORIAL => openQuickAiUrl(quick_ai_config.TUTORIAL_URL),
+                quick_ai_config.ROW_KEY => quickAi().focus = quick_ai_config.ROW_VERIFY,
+                quick_ai_config.ROW_VERIFY => startQuickAiVerify(),
+                else => {},
+            },
+            .backspace => if (quickAi().focus == quick_ai_config.ROW_KEY) quickAi().backspace(),
+            .escape => closeQuickAiForm(),
+            else => {},
+        }
+        AppWindow.applyUiEffect(.{ .needs_rebuild = true });
         return;
     }
     if (ev.key == .escape) {
@@ -3772,7 +3812,7 @@ fn openAiList() void {
 fn openDefaultAiSession() void {
     loadAiProfiles();
     if (assistantProfiles().profile_count == 0) {
-        openAiFormNew();
+        openQuickAiForm(); // no AI configured: guide setup via Quick Configure, not the full form
         return;
     }
     connectAiProfile(defaultAiProfileIndex());
@@ -3781,7 +3821,7 @@ fn openDefaultAiSession() void {
 fn openDefaultAgentSessionFromCommandCenter() void {
     loadAiProfiles();
     switch (command_center_state.resolveNewAgentLaunch(assistantProfiles().profile_count != 0)) {
-        .open_form => openAiFormNewFromCommandPalette(),
+        .open_form => openQuickAiForm(), // no AI configured: guide setup via Quick Configure, not the full form
         .connect_default_profile_as_agent => connectAiProfileWithAgentOverride(defaultAiProfileIndex(), "true"),
     }
 }
@@ -3794,7 +3834,7 @@ pub fn hasAiProfiles() bool {
 pub fn openDefaultAgentSessionForStartup() DefaultAgentOpenResult {
     loadAiProfiles();
     if (assistantProfiles().profile_count == 0) {
-        openAiFormNew();
+        openQuickAiForm(); // no AI configured: guide setup via Quick Configure, not the full form
         return .form_opened;
     }
     return if (spawnAiProfileWithAgentOverride(defaultAiProfileIndex(), "true")) .opened else .failed;
@@ -3915,10 +3955,11 @@ pub fn openAiConfigForSession(session: *AppWindow.ai_chat.Session) void {
 pub fn openAiConfigForMissingCopilotApi() void {
     loadAiProfiles();
     if (assistantProfiles().profile_count == 0) {
-        openAiFormNew();
-    } else {
-        openAiFormEdit(defaultAiProfileIndex());
+        openQuickAiForm(); // no AI at all: guide setup via Quick Configure
+        return;
     }
+    // A profile exists but its API key is missing: jump to that profile's key field.
+    openAiFormEdit(defaultAiProfileIndex());
     assistantProfiles().focus = @intFromEnum(AiField.api_key);
 }
 
@@ -3985,6 +4026,76 @@ fn closeFeishuConfigForm() void {
     feishuForm().visible = false;
     g_session_launcher_visible = false;
     feishuConfig().reset();
+}
+
+/// Quick Configure AI: guided overlay to paste + verify a DeepSeek key.
+/// Rides on the session-launcher plumbing like the Feishu form.
+pub fn openQuickAiForm() void {
+    g_ssh_list_visible = false;
+    g_ssh_form_visible = false;
+    g_ai_list_visible = false;
+    g_ai_form_visible = false;
+    g_ai_history_source_visible = false;
+    settingsState().visible = false;
+    commandPaletteClose();
+    quickAi().reset();
+    g_session_launcher_visible = true;
+    quickAiForm().visible = true;
+    AppWindow.applyUiEffect(.{ .needs_rebuild = true });
+}
+
+fn closeQuickAiForm() void {
+    quickAiForm().visible = false;
+    g_session_launcher_visible = false;
+    quickAi().reset();
+    AppWindow.applyUiEffect(.{ .needs_rebuild = true });
+}
+
+fn openQuickAiUrl(url: []const u8) void {
+    if (AppWindow.g_allocator) |alloc| _ = platform_open_url.open(alloc, .{ .url = url });
+}
+
+fn startQuickAiVerify() void {
+    const k = quickAi().key();
+    if (k.len == 0) {
+        quickAi().status = .empty;
+        AppWindow.applyUiEffect(.{ .needs_rebuild = true });
+        return;
+    }
+    quickAi().status = .verifying;
+    AppWindow.applyUiEffect(.{ .needs_rebuild = true });
+    _ = quick_verify.start(quick_ai_config.BASE_URL, k, window_backend.postWakeup);
+}
+
+fn applyQuickAiConfig() void {
+    const allocator = AppWindow.g_allocator orelse return;
+    const profiles = assistantProfiles().profiles[0..];
+    var count = assistant_profile_store.loadProfiles(allocator, profiles);
+    count = quick_ai_config.upsertProfiles(profiles, count, quickAi().key());
+    if (!quick_ai_config.bothProfilesPresent(profiles, count)) {
+        quickAi().status = .store_full;
+        AppWindow.applyUiEffect(.{ .needs_rebuild = true });
+        return; // do not persist config keys, save, toast success, or close
+    }
+    assistantProfiles().profile_count = count;
+    _ = assistant_profile_store.saveProfiles(allocator, profiles[0..count]);
+    Config.setConfigValue(allocator, "ai-default-profile", quick_ai_config.MAIN_PROFILE_NAME) catch {};
+    Config.setConfigValue(allocator, "ai-subagent-profile", quick_ai_config.SUB_PROFILE_NAME) catch {};
+    showStatusToast(i18n.s().toast_quick_ai_done);
+    closeQuickAiForm();
+}
+
+/// Called every frame from the main loop. Drains a finished verify result and,
+/// if the overlay is still open, applies it (success) or shows the error.
+pub fn tickQuickAiVerify() void {
+    const outcome = quick_verify.take() orelse return; // always drain to clear the channel
+    if (!quickAiForm().visible) return; // overlay was closed mid-verify — drop stale result
+    switch (outcome) {
+        .ok => applyQuickAiConfig(),
+        .invalid_key => quickAi().status = .invalid,
+        .network_error => quickAi().status = .network,
+    }
+    AppWindow.applyUiEffect(.{ .needs_rebuild = true });
 }
 
 fn startFeishuRegistration() void {
@@ -4527,30 +4638,35 @@ test "default AI profile snapshot normalizes Anthropic URL with default protocol
     );
 }
 
-test "overlays: missing copilot API opens AI config at API key" {
+test "overlays: missing copilot API with no profile opens Quick Configure" {
     const saved_loaded = assistantProfiles().profiles_loaded;
     const saved_count = assistantProfiles().profile_count;
-    const saved_focus = assistantProfiles().focus;
     const saved_list = g_ai_list_visible;
     const saved_form = g_ai_form_visible;
+    const saved_quick = quickAiForm().visible;
+    const saved_launcher = g_session_launcher_visible;
     defer {
         assistantProfiles().profiles_loaded = saved_loaded;
         assistantProfiles().profile_count = saved_count;
-        assistantProfiles().focus = saved_focus;
         g_ai_list_visible = saved_list;
         g_ai_form_visible = saved_form;
+        quickAiForm().visible = saved_quick;
+        g_session_launcher_visible = saved_launcher;
     }
 
     assistantProfiles().profiles_loaded = true;
     assistantProfiles().profile_count = 0;
     g_ai_list_visible = true;
     g_ai_form_visible = false;
+    quickAiForm().visible = false;
 
     openAiConfigForMissingCopilotApi();
 
+    // No AI configured → guide setup via the Quick Configure overlay, not the full
+    // 12-field profile form (which g_ai_form_visible tracks).
+    try std.testing.expect(quickAiForm().visible);
+    try std.testing.expect(!g_ai_form_visible);
     try std.testing.expect(!g_ai_list_visible);
-    try std.testing.expect(g_ai_form_visible);
-    try std.testing.expectEqual(@as(usize, @intFromEnum(AiField.api_key)), assistantProfiles().focus);
 }
 
 threadlocal var g_ai_default_name_buf: [256]u8 = undefined;
@@ -4745,6 +4861,7 @@ fn sessionTwoColumnWidth(left: []const u8, right: []const u8) f32 {
 
 fn sessionLauncherTitle() []const u8 {
     if (feishuForm().visible) return i18n.s().feishu_form_title;
+    if (quickAiForm().visible) return i18n.s().quick_ai_form_title;
     if (g_ai_history_source_visible) return i18n.s().sl_sessions;
     if (g_ai_form_visible) {
         return i18n.s().sl_ai_agent;
@@ -4929,6 +5046,8 @@ fn sessionDesiredBoxWidth() f32 {
 fn sessionActiveRowCount() usize {
     return if (feishuForm().visible)
         FEISHU_ROW_COUNT
+    else if (quickAiForm().visible)
+        quick_ai_config.ROW_COUNT
     else if (g_ai_form_visible)
         AI_FIELD_COUNT + 3
     else if (g_ai_list_visible)
@@ -4947,6 +5066,8 @@ fn sessionActiveRowCount() usize {
 fn sessionActiveSelection() usize {
     return if (feishuForm().visible)
         feishuConfig().focus
+    else if (quickAiForm().visible)
+        quickAi().focus
     else if (g_ai_form_visible)
         assistantProfiles().focus
     else if (g_ai_list_visible)
@@ -4965,6 +5086,8 @@ fn sessionActiveSelection() usize {
 fn sessionActiveSelectionPtr() *usize {
     return if (feishuForm().visible)
         &feishuConfig().focus
+    else if (quickAiForm().visible)
+        &quickAi().focus
     else if (g_ai_form_visible)
         &assistantProfiles().focus
     else if (g_ai_list_visible)
@@ -5046,6 +5169,13 @@ fn sessionHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, t
         if (row == feishu_config.SAVE_ROW) return .feishu_save;
         if (row == feishu_config.SCAN_ROW) return .feishu_scan;
         feishuConfig().toggleFocusedBool(); // toggle rows flip on click; field rows no-op
+        return null;
+    }
+
+    if (quickAiForm().visible) {
+        if (row >= quick_ai_config.ROW_COUNT) return null;
+        quickAi().focus = row;
+        AppWindow.applyUiEffect(.{ .needs_rebuild = true });
         return null;
     }
 
@@ -5234,6 +5364,49 @@ fn defaultAiModeLabel() []const u8 {
     return aiModeText(AppWindow.ai_chat.DEFAULT_AGENT);
 }
 
+fn quickAiStatusText() []const u8 {
+    return switch (quickAi().status) {
+        .idle => i18n.s().quick_ai_status_idle,
+        .verifying => i18n.s().quick_ai_status_verifying,
+        .empty => i18n.s().quick_ai_status_empty,
+        .invalid => i18n.s().quick_ai_status_invalid,
+        .network => i18n.s().quick_ai_status_network,
+        .store_full => i18n.s().quick_ai_status_full,
+        .ok => i18n.s().toast_quick_ai_done,
+    };
+}
+
+// Draws the quick-configure AI form inside the session-launcher box.
+// The API key row is masked: rendered as U+2022 (•) repeated once per codepoint
+// (continuation bytes are skipped, so the dot count matches the codepoint count,
+// not the byte count; ASCII keys happen to match either way).
+fn renderQuickAiConfigForm(layout: SessionLayout, window_height: f32) void {
+    const st = quickAi();
+
+    // Row 0: register link
+    renderSessionRow(layout, window_height, quick_ai_config.ROW_OPEN_REGISTER, i18n.s().quick_ai_register_row, "", st.focus == quick_ai_config.ROW_OPEN_REGISTER);
+
+    // Row 1: tutorial link
+    renderSessionRow(layout, window_height, quick_ai_config.ROW_OPEN_TUTORIAL, i18n.s().quick_ai_tutorial_row, "", st.focus == quick_ai_config.ROW_OPEN_TUTORIAL);
+
+    // Row 2: API key (masked — never draw the raw key)
+    const key_bytes = st.key();
+    var dot_buf: [quick_ai_config.KEY_FIELD_MAX * 3]u8 = undefined; // • is 3 UTF-8 bytes
+    const key_display: []const u8 = if (key_bytes.len > 0) blk: {
+        var out: usize = 0;
+        for (key_bytes) |b| {
+            if ((b & 0xC0) == 0x80) continue; // skip UTF-8 continuation bytes — one • per codepoint
+            @memcpy(dot_buf[out..][0..3], "\u{2022}");
+            out += 3;
+        }
+        break :blk dot_buf[0..out];
+    } else "";
+    renderSessionRow(layout, window_height, quick_ai_config.ROW_KEY, "API Key:", key_display, st.focus == quick_ai_config.ROW_KEY);
+
+    // Row 3: Verify & Save
+    renderSessionRow(layout, window_height, quick_ai_config.ROW_VERIFY, i18n.s().quick_ai_verify_row, quickAiStatusText(), st.focus == quick_ai_config.ROW_VERIFY);
+}
+
 // Draws the 2-field feishu credential form inside the session-launcher box. The
 // app_secret row is masked: rendered as U+2022 (•) repeated once per *codepoint* (never the
 // plaintext), or the "leave blank to keep" hint when empty and a secret already exists.
@@ -5336,6 +5509,11 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
 
     if (feishuForm().visible) {
         renderFeishuConfigForm(layout, window_height);
+        return;
+    }
+
+    if (quickAiForm().visible) {
+        renderQuickAiConfigForm(layout, window_height);
         return;
     }
 
