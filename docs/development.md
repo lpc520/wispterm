@@ -174,9 +174,11 @@ Center, opens the Settings page from the titlebar gear, and opens the Skill
 Center from the Command Center. It captures
 screenshots, writes JSON metrics under
 `zig-out\d3d11-normal-session-smoke\`, and verifies that
-`render-diagnostic.log` contains `gpu-backend=d3d11 present=dxgi`, a successful
+`render-diagnostic.log` contains `gpu-backend=d3d11 present=dxgi`, D3D11 init
+details for swap effect / adapter / fallback reason, a successful
 `d3d11-ui-smoke` probe, and an offscreen round-trip marker. It is a Phase IV
-evidence tool only; it does not change the Windows default renderer.
+and Phase V diagnostics evidence tool only; it does not change the Windows
+default renderer.
 
 ## macOS UI Smoke Tests
 
