@@ -63,6 +63,11 @@ pub const PresentError = error{
     PresentFailed,
 };
 
+pub const ShaderError = error{
+    ShaderCompilerUnavailable,
+    ShaderCompileFailed,
+};
+
 const State = struct {
     device: *anyopaque,
     context: *anyopaque,
@@ -73,6 +78,7 @@ const State = struct {
     pixel_shader: ?*anyopaque = null,
     width: i32,
     height: i32,
+    feature_draws_this_frame: bool = false,
 
     fn releaseSized(self: *State) void {
         if (self.rtv) |rtv| {
@@ -250,9 +256,9 @@ fn bindRenderTargetAndViewport(self: *State) void {
 }
 
 fn createPhase2Pipeline(self: *State) InitError!void {
-    const vs_blob = try compileShader(shaders.phase2_vertex, "vs_main", "vs_4_0");
+    const vs_blob = try compileShaderBlob(shaders.phase2_vertex, "vs_main", "vs_4_0");
     defer core.comRelease(vs_blob);
-    const ps_blob = try compileShader(shaders.phase2_pixel, "ps_main", "ps_4_0");
+    const ps_blob = try compileShaderBlob(shaders.phase2_pixel, "ps_main", "ps_4_0");
     defer core.comRelease(ps_blob);
 
     const create_vs = core.comCall(self.device, core.slot.D3D11Device_CreateVertexShader, *const fn (*anyopaque, *const anyopaque, usize, ?*anyopaque, *?*anyopaque) callconv(.winapi) HRESULT);
@@ -271,7 +277,7 @@ fn createPhase2Pipeline(self: *State) InitError!void {
     self.pixel_shader = ps;
 }
 
-fn compileShader(source: []const u8, entrypoint: [*:0]const u8, target: [*:0]const u8) InitError!*anyopaque {
+pub fn compileShaderBlob(source: []const u8, entrypoint: [*:0]const u8, target: [*:0]const u8) ShaderError!*anyopaque {
     const compiler = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("d3dcompiler_47.dll")) orelse
         return error.ShaderCompilerUnavailable;
     const compile: D3DCompileFn = @ptrCast(GetProcAddress(compiler, "D3DCompile") orelse
@@ -304,19 +310,55 @@ fn compileShader(source: []const u8, entrypoint: [*:0]const u8, target: [*:0]con
     return code.?;
 }
 
-fn blobPointer(blob: *anyopaque) *const anyopaque {
+pub fn blobPointer(blob: *anyopaque) *const anyopaque {
     const f = core.comCall(blob, core.slot.Blob_GetBufferPointer, *const fn (*anyopaque) callconv(.winapi) *anyopaque);
     return f(blob);
 }
 
-fn blobSize(blob: *anyopaque) usize {
+pub fn blobSize(blob: *anyopaque) usize {
     const f = core.comCall(blob, core.slot.Blob_GetBufferSize, *const fn (*anyopaque) callconv(.winapi) usize);
     return f(blob);
 }
 
-fn blobBytes(blob: *anyopaque) []const u8 {
+pub fn blobBytes(blob: *anyopaque) []const u8 {
     const ptr: [*]const u8 = @ptrCast(blobPointer(blob));
     return ptr[0..blobSize(blob)];
+}
+
+pub fn isInitialized() bool {
+    return state != null;
+}
+
+pub fn deviceHandle() ?*anyopaque {
+    return if (state) |*self| self.device else null;
+}
+
+pub fn contextHandle() ?*anyopaque {
+    return if (state) |*self| self.context else null;
+}
+
+pub fn backbufferHandle() ?*anyopaque {
+    return if (state) |*self| self.backbuffer else null;
+}
+
+pub fn swapchainSize() ?struct { width: i32, height: i32 } {
+    return if (state) |*self| .{ .width = self.width, .height = self.height } else null;
+}
+
+pub fn beginFrame() void {
+    if (state) |*self| self.feature_draws_this_frame = false;
+}
+
+pub fn noteFeatureDraw() void {
+    if (state) |*self| self.feature_draws_this_frame = true;
+}
+
+pub fn featureDrawsThisFrame() bool {
+    return if (state) |*self| self.feature_draws_this_frame else false;
+}
+
+pub fn bindBackbufferRenderTarget() void {
+    if (state) |*self| bindRenderTargetAndViewport(self);
 }
 
 pub fn resize(width: i32, height: i32) bool {
