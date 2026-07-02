@@ -4411,6 +4411,7 @@ fn renderResizeFrame(width: i32, height: i32) void {
     overlays.renderCopilotPicker(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+    overlays.renderMcpServers(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     weixin_qr_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     feishu_reg_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderDebugOverlay(@floatFromInt(fb_width));
@@ -7130,6 +7131,7 @@ fn runMainLoop(self: *AppWindow) !void {
         overlays.renderCopilotPicker(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+        overlays.renderMcpServers(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         weixin_qr_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         feishu_reg_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderDebugOverlay(@floatFromInt(fb_width));
