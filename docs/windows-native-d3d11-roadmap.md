@@ -67,7 +67,10 @@ backend-neutral feature pipelines and reloadable auxiliary resources. Automatic
 fallback, environment validation, and Phase VI default migration are still
 intentionally separate work. The normal-session smoke has an opt-in
 `-RecreateSmoke` mode that latches one recreate-class request and verifies the
-successful recreate/restore diagnostics without changing the healthy path.
+successful recreate/restore diagnostics without changing the healthy path. It
+also has an opt-in `-RapidResizeSmoke` mode that drives a burst of real Win32
+resizes, restores the baseline window size, and verifies the session remains
+nonblank with D3D11 resize diagnostics and no resize/present failure lines.
 
 The Phase IV normal-session evidence gate is the checked-in Windows GUI smoke:
 
@@ -92,6 +95,9 @@ request in the healthy smoke path. This is runtime evidence for the Phase IV
 exit criteria and the first Phase V diagnostics/policy/recovery-coordination
 slice; it is not a device-recreation or automatic fallback substitute and does
 not change the Windows default backend.
+
+Add `-RapidResizeSmoke` to the same command to include Phase V rapid-resize
+stress evidence in the normal-session run.
 
 ## Ghostty Comparison
 

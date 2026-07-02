@@ -194,6 +194,18 @@ recreate request, a successful single-shot device/swapchain recreate attempt,
 and restored feature resources. It still leaves automatic fallback and the
 Windows default backend unchanged.
 
+To add rapid resize stress evidence to the same D3D11 session smoke, use:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\debug\test-d3d11-normal-session.ps1 -RapidResizeSmoke
+```
+
+This drives a burst of real Win32 `SetWindowPos` changes, restores the window
+to the baseline smoke size, captures a post-resize screenshot, and verifies that
+the session remains nonblank with D3D11 resize diagnostics and no present/resize
+failure lines. It is Phase V hardening evidence only; it does not change the
+Windows default backend or fallback policy.
+
 ## macOS UI Smoke Tests
 
 macOS UI debugging is native-target first. Unless a task explicitly asks for
