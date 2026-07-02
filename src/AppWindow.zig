@@ -1605,7 +1605,32 @@ fn presentBackendFrame(win: *window_backend.Window) void {
     }
 }
 
-fn handleD3D11RecoveryRequest(allocator: std.mem.Allocator) void {
+fn prepareD3D11DeviceRecreateResources() void {
+    if (comptime gpu.active == .d3d11) {
+        cell_pipeline.deinit();
+        ui_pipeline.deinit();
+        d3d11_offscreen_smoke.deinit();
+        d3d11_ui_smoke.deinit();
+        background_image.deinit();
+        post_process.deinit();
+        const atlas_release = font.releaseAtlasGpuTexturesForDeviceRecreate();
+        const context_release = gpu.Context.prepareForDeviceRecreate();
+        render_diagnostics.log(
+            "gpu-backend=d3d11 resource recreate prepared context_initialized={} context_released_any={} released_atlas_any={} released_atlas_glyph={} released_atlas_color={} released_atlas_icon={} released_atlas_titlebar={} released_feature_pipelines=true released_auxiliary_targets=true automatic_fallback=false default_unchanged=true",
+            .{
+                context_release.initialized,
+                context_release.anyReleased(),
+                atlas_release.anyReleased(),
+                atlas_release.glyph,
+                atlas_release.color,
+                atlas_release.icon,
+                atlas_release.titlebar,
+            },
+        );
+    }
+}
+
+fn handleD3D11RecoveryRequest() void {
     if (comptime gpu.active == .d3d11) {
         const request = gpu.Context.takeRecoveryRequest() orelse return;
         const status = request.status;
@@ -1622,7 +1647,7 @@ fn handleD3D11RecoveryRequest(allocator: std.mem.Allocator) void {
         );
 
         if (status.requires_device_recreate) {
-            font.clearGlyphCache(allocator);
+            prepareD3D11DeviceRecreateResources();
         }
         applyUiEffect(UiEffect.repaint);
         markAllRenderersDirty();
@@ -7183,7 +7208,7 @@ fn runMainLoop(self: *AppWindow) !void {
         gpu.state.endFrame();
         agent_requests.capturePendingUiScreenshots(agentRequestHost());
         presentBackendFrame(win);
-        handleD3D11RecoveryRequest(allocator);
+        handleD3D11RecoveryRequest();
         if (windowState().takePresentBringupSettlement()) {
             platform_window_state.settleD3dBringup(allocator);
         }

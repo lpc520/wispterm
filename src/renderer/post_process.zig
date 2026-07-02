@@ -232,4 +232,7 @@ pub fn deinit() void {
     g_post_pipeline.deinit();
     g_post_vbo_buf.deinit();
     g_post_fb.deinit();
+    g_post_enabled = false;
+    g_frame_count = 0;
+    g_start_time = 0;
 }

@@ -73,6 +73,19 @@ pub const ShaderError = error{
     ShaderCompileFailed,
 };
 
+pub const DeviceRecreatePreparation = struct {
+    initialized: bool = false,
+    released_backbuffer: bool = false,
+    released_render_target: bool = false,
+    released_phase2_pipeline: bool = false,
+
+    pub fn anyReleased(self: DeviceRecreatePreparation) bool {
+        return self.released_backbuffer or
+            self.released_render_target or
+            self.released_phase2_pipeline;
+    }
+};
+
 const State = struct {
     device: *anyopaque,
     context: *anyopaque,
@@ -557,6 +570,29 @@ pub fn needsDeviceRecreate() bool {
     return presentPolicyStatus().state == .needs_recreate;
 }
 
+pub fn prepareForDeviceRecreate() DeviceRecreatePreparation {
+    if (state == null) return .{};
+    const self = &state.?;
+    const result = DeviceRecreatePreparation{
+        .initialized = true,
+        .released_backbuffer = self.backbuffer != null,
+        .released_render_target = self.rtv != null,
+        .released_phase2_pipeline = self.vertex_shader != null or self.pixel_shader != null,
+    };
+    self.releaseSized();
+    self.releaseShaders();
+    render_diagnostics.log(
+        "gpu-backend=d3d11 device recreate preparation context_initialized=true released_backbuffer={} released_render_target={} released_phase2_pipeline={} released_any={}",
+        .{
+            result.released_backbuffer,
+            result.released_render_target,
+            result.released_phase2_pipeline,
+            result.anyReleased(),
+        },
+    );
+    return result;
+}
+
 fn logDxgiFailure(self: *const State, operation: []const u8, hr: HRESULT, status: present_policy.Status) void {
     const kind = core.dxgiFailureKind(hr);
     if (kind.requiresDeviceRecreate()) {
@@ -592,4 +628,10 @@ test "D3D11 present errors distinguish device-loss HRESULTs" {
     try std.testing.expectEqual(error.DeviceReset, presentErrorFromHRESULT(core.DXGI_ERROR_DEVICE_RESET));
     try std.testing.expectEqual(error.DriverInternalError, presentErrorFromHRESULT(core.DXGI_ERROR_DRIVER_INTERNAL_ERROR));
     try std.testing.expectEqual(error.PresentFailed, presentErrorFromHRESULT(core.DXGI_ERROR_INVALID_CALL));
+}
+
+test "D3D11 context device recreate preparation is a no-op when uninitialized" {
+    const preparation = prepareForDeviceRecreate();
+    try std.testing.expect(!preparation.initialized);
+    try std.testing.expect(!preparation.anyReleased());
 }

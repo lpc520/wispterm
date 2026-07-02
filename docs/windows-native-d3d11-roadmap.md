@@ -54,7 +54,13 @@ recovery request and records whether the requested action is device recreation
 or fallback-candidate handling, but actual device recreation, automatic fallback
 policy, environment validation, and Phase VI default migration remain blocked
 until fallback coverage is proven. Windows `auto` still must not default to
-D3D11 on this branch.
+D3D11 on this branch. This hardening slice adds the first controlled
+device-recreate preparation path: when the backend latches a recreate-class
+failure, the host releases D3D11-owned pipelines, auxiliary render targets,
+background/post-process resources, font atlas GPU textures, and backend
+backbuffer/RTV/phase2 shader resources, then logs that preparation. Actual
+device/swapchain recreation and automatic fallback are still intentionally
+separate Phase V work.
 
 The Phase IV normal-session evidence gate is the checked-in Windows GUI smoke:
 
