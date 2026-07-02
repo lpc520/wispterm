@@ -68,9 +68,11 @@ Markdown and image preview panes from a temporary File Explorer fixture, opens
 the Copilot assistant sidebar with a temporary AI profile, opens the startup
 shortcuts overlay from the Command Center, opens the Settings page from the
 titlebar gear and the Skill Center from the Command Center, then verifies the
-render-diagnostics log for D3D11 present, UI probe, and offscreen round-trip
-markers. This is runtime evidence for the Phase IV exit criteria; it is not a
-Phase V hardening substitute and does not change the Windows default backend.
+render-diagnostics log for D3D11 present, init details (swap effect, adapter or
+unknown-adapter fallback, and fallback reason), UI probe, and offscreen
+round-trip markers. This is runtime evidence for the Phase IV exit criteria and
+the first Phase V diagnostics slice; it is not a device-recreation or automatic
+fallback substitute and does not change the Windows default backend.
 
 ## Ghostty Comparison
 
