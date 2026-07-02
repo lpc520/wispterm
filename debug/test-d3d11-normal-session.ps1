@@ -8,6 +8,7 @@ param(
     [int]$WindowWidth = 1240,
     [int]$WindowHeight = 780,
     [switch]$RecreateSmoke,
+    [switch]$RapidResizeSmoke,
     [switch]$KeepOpen
 )
 
@@ -254,6 +255,39 @@ function Analyze-Image([string]$Path) {
         }
     } finally {
         $bitmap.Dispose()
+    }
+}
+
+function Invoke-RapidResizeSmoke([IntPtr]$Hwnd, [int]$X, [int]$Y, [int]$BaseWidth, [int]$BaseHeight, [string]$ShotPath) {
+    $sizes = @(
+        @{ Width = [Math]::Max(960, $BaseWidth - 220); Height = [Math]::Max(620, $BaseHeight - 130) },
+        @{ Width = $BaseWidth + 160; Height = $BaseHeight + 95 },
+        @{ Width = [Math]::Max(1040, $BaseWidth - 120); Height = $BaseHeight + 20 },
+        @{ Width = $BaseWidth; Height = $BaseHeight }
+    )
+
+    foreach ($size in $sizes) {
+        [WispTermD3D11SmokeAutomation]::SetWindowPos($Hwnd, [IntPtr]::Zero, $X, $Y, $size.Width, $size.Height, 0x0040) | Out-Null
+        Start-Sleep -Milliseconds 150
+    }
+
+    [WispTermD3D11SmokeAutomation]::SetForegroundWindow($Hwnd) | Out-Null
+    Start-Sleep -Milliseconds 950
+    $finalSize = Capture-Window $Hwnd $ShotPath
+    $metrics = Analyze-Image $ShotPath
+    $widthDelta = [Math]::Abs($finalSize.Width - $BaseWidth)
+    $heightDelta = [Math]::Abs($finalSize.Height - $BaseHeight)
+
+    return @{
+        Enabled = $true
+        Pass = [bool]($metrics.Pass -and $widthDelta -le 12 -and $heightDelta -le 12)
+        Width = $finalSize.Width
+        Height = $finalSize.Height
+        WidthDelta = $widthDelta
+        HeightDelta = $heightDelta
+        NonDark = $metrics.NonDark
+        Bright = $metrics.Bright
+        Saturated = $metrics.Saturated
     }
 }
 
@@ -657,6 +691,7 @@ $paletteShot = Join-Path $OutDir "d3d11-command-palette-$timestamp.png"
 $startupShortcutsShot = Join-Path $OutDir "d3d11-startup-shortcuts-$timestamp.png"
 $settingsShot = Join-Path $OutDir "d3d11-settings-page-$timestamp.png"
 $skillCenterShot = Join-Path $OutDir "d3d11-skill-center-$timestamp.png"
+$rapidResizeShot = Join-Path $OutDir "d3d11-rapid-resize-$timestamp.png"
 $metricsPath = Join-Path $OutDir "d3d11-normal-session-$timestamp.json"
 $appDataDir = Join-Path $OutDir "appdata"
 $diagnosticPath = Join-Path $appDataDir "wispterm\render-diagnostic.log"
@@ -727,6 +762,21 @@ try {
     $initialSize = Capture-Window $wisptermWindow $initialShot
     $initialMetrics = Analyze-Image $initialShot
     $backgroundImageMetrics = Analyze-BackgroundImageSurface $initialShot
+    $rapidResizeMetrics = @{
+        Enabled = [bool]$RapidResizeSmoke
+        Pass = $true
+        Width = $initialSize.Width
+        Height = $initialSize.Height
+        WidthDelta = 0
+        HeightDelta = 0
+        NonDark = 0
+        Bright = 0
+        Saturated = 0
+    }
+    if ($RapidResizeSmoke) {
+        $rapidResizeMetrics = Invoke-RapidResizeSmoke $wisptermWindow $WindowX $WindowY $initialSize.Width $initialSize.Height $rapidResizeShot
+        Start-Sleep -Milliseconds 500
+    }
 
     Send-AltDigit 0x32
     Start-Sleep -Milliseconds 700
@@ -814,6 +864,8 @@ try {
     $hasD3D11ResourceRestore = $diagText -match "gpu-backend=d3d11 resource recreate restored"
     $hasUiProbe = $diagText -match "d3d11-ui-smoke probe .* ok=true"
     $hasOffscreen = $diagText -match "d3d11-offscreen-smoke round-trip active"
+    $d3d11ResizeEventCount = [regex]::Matches($diagText, "gpu-backend=d3d11 resized swapchain to").Count
+    $rapidResizeDiagnostic = if ($RapidResizeSmoke) { $d3d11ResizeEventCount -gt 0 } else { $true }
     $hasFailures = $diagText -match "present failed|shader compile failed|backbuffer probe failed|resize sync failed"
     $recreateExpectation = if ($RecreateSmoke) {
         ($hasD3D11RecoveryRequested -and $hasD3D11RecreateSmokeRequest -and $hasD3D11RecreateSucceeded -and $hasD3D11ResourceRestore)
@@ -834,10 +886,12 @@ try {
         $startupShortcutsMetrics.Pass -and
         $settingsPageMetrics.Pass -and
         $skillCenterMetrics.Pass -and
+        $rapidResizeMetrics.Pass -and
         $hasD3D11Present -and
         $hasD3D11InitDetails -and
         $hasD3D11PolicyHealthy -and
         $recreateExpectation -and
+        $rapidResizeDiagnostic -and
         $hasUiProbe -and
         $hasOffscreen -and
         !$hasFailures
@@ -869,6 +923,7 @@ try {
             startup_shortcuts = $startupShortcutsShot
             settings_page = $settingsShot
             skill_center = $skillCenterShot
+            rapid_resize = if ($RapidResizeSmoke) { $rapidResizeShot } else { "" }
         }
         initial = [ordered]@{
             samples = $initialMetrics.Samples
@@ -983,10 +1038,23 @@ try {
             samples = $skillCenterMetrics.Samples
             pass = [bool]$skillCenterMetrics.Pass
         }
+        rapid_resize = [ordered]@{
+            enabled = [bool]$rapidResizeMetrics.Enabled
+            width = $rapidResizeMetrics.Width
+            height = $rapidResizeMetrics.Height
+            width_delta = $rapidResizeMetrics.WidthDelta
+            height_delta = $rapidResizeMetrics.HeightDelta
+            non_dark = $rapidResizeMetrics.NonDark
+            bright = $rapidResizeMetrics.Bright
+            saturated = $rapidResizeMetrics.Saturated
+            pass = [bool]$rapidResizeMetrics.Pass
+        }
         diagnostics = [ordered]@{
             d3d11_present = [bool]$hasD3D11Present
             d3d11_init_details = [bool]$hasD3D11InitDetails
             d3d11_policy_healthy = [bool]$hasD3D11PolicyHealthy
+            d3d11_resize_events = $d3d11ResizeEventCount
+            d3d11_rapid_resize_diagnostics = [bool]$rapidResizeDiagnostic
             d3d11_recovery_requested = [bool]$hasD3D11RecoveryRequested
             d3d11_recreate_smoke_requested = [bool]$hasD3D11RecreateSmokeRequest
             d3d11_recreate_succeeded = [bool]$hasD3D11RecreateSucceeded
