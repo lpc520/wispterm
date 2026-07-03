@@ -207,8 +207,10 @@ contains `environment.json`, `matrix-summary.md`, `normal-session\`, and
 weak-integrated-GPU, single-monitor, multi-monitor same-DPI, and mixed-DPI
 environments; use `-RequireMatrixClass` only when the requested class can be
 proved from collected facts. Skipped or unavailable environments must be
-recorded as missing evidence rather than treated as passing. The ledger format
-lives in [windows-native-d3d11-environment-matrix.md](windows-native-d3d11-environment-matrix.md).
+recorded as missing evidence rather than treated as passing. Use
+`debug\summarize-d3d11-environment-matrix.ps1` to aggregate packages into a
+reviewable `matrix-ledger.md` / `matrix-ledger.json`. The ledger format lives
+in [windows-native-d3d11-environment-matrix.md](windows-native-d3d11-environment-matrix.md).
 
 ## Ghostty Comparison
 

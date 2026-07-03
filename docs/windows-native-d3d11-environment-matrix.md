@@ -57,6 +57,18 @@ collector to fail if the requested class does not match the detected facts:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\debug\test-d3d11-environment-smoke.ps1 -MatrixClass rdp -RequireMatrixClass
 ```
 
+After collecting one or more evidence packages, generate a review ledger:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\debug\summarize-d3d11-environment-matrix.ps1
+```
+
+The summarizer scans `zig-out\d3d11-env-smoke\` by default and writes
+`matrix-ledger.json` plus `matrix-ledger.md` under a timestamped
+`matrix-ledger-*` directory. Use `-InputRoot <path>` to summarize uploaded or
+downloaded artifacts from another machine, and use `-FailOnMissing` only in a
+closeout audit where every matrix class is expected to be present.
+
 ## JSON Contract
 
 Each collector run writes both `environment.json` and a redacted
@@ -79,6 +91,18 @@ Each collector run writes both `environment.json` and a redacted
 issue comments. It includes branch/commit, requested matrix class, class-match
 state, adapter facts, monitor/DPI facts, smoke health, and record-only policy
 fields, without copying raw diagnostic log lines.
+
+`matrix-ledger.md` aggregates all available `environment.json` files and
+selects the best evidence per matrix class. Status values are:
+
+| Status | Meaning |
+|---|---|
+| `recorded` | Passing evidence with `class_match = true`. |
+| `operator-review` | Passing hybrid-GPU evidence that needs operator topology confirmation. |
+| `recorded-unclassified` | Passing evidence without an automatically provable class match. |
+| `mismatch` | Evidence exists but detected facts do not match the requested class. |
+| `failing` | Evidence package exists but the smoke failed. |
+| `missing` | No evidence package exists for the class. |
 
 ## Ledger
 
