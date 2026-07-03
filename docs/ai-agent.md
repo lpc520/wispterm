@@ -230,6 +230,10 @@ Local slash commands (handled in the panel, without calling the model):
   time. `/watch` lists this session's watch tasks, `/watch all` lists all watch
   tasks from Copilot, and `/watch stop <id>` or `/watch stop all` cancels
   tasks.
+- The Agent can also call `continue_later` when a terminal, SSH, Codex, Claude
+  Code, or REPL task is still running. It schedules a one-shot continuation
+  through the same `/watch` store, then resumes this session later and checks
+  progress with `terminal_snapshot` before acting.
 - `/remember <fact>` saves a long-term memory in the project tier when a
   working directory is set, otherwise in the global tier. `/记住` is the Chinese
   alias.
