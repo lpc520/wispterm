@@ -560,6 +560,111 @@ fn freeCache(allocator: std.mem.Allocator) void {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Activation: which servers' tool schemas are advertised to the model.
+// ponytail: app-global (process lifetime), not per chat session — tools can't
+// reach the Session object, and sharing activation across sessions is fine.
+// Fixed-size name slots; server names longer than 64 bytes can't be activated.
+// ---------------------------------------------------------------------------
+
+const MAX_ACTIVATED = 32;
+const MAX_ACT_NAME = 64;
+var g_act_mutex: std.Thread.Mutex = .{};
+var g_act_names: [MAX_ACTIVATED][MAX_ACT_NAME]u8 = undefined;
+var g_act_lens: [MAX_ACTIVATED]usize = [_]usize{0} ** MAX_ACTIVATED;
+var g_act_count: usize = 0;
+
+/// Mark a server's tools as advertised. Idempotent. False when the slot table
+/// is full or the name doesn't fit.
+pub fn activateServer(name: []const u8) bool {
+    if (name.len == 0 or name.len > MAX_ACT_NAME) return false;
+    g_act_mutex.lock();
+    defer g_act_mutex.unlock();
+    for (0..g_act_count) |i| {
+        if (std.mem.eql(u8, g_act_names[i][0..g_act_lens[i]], name)) return true;
+    }
+    if (g_act_count >= MAX_ACTIVATED) return false;
+    @memcpy(g_act_names[g_act_count][0..name.len], name);
+    g_act_lens[g_act_count] = name.len;
+    g_act_count += 1;
+    return true;
+}
+
+pub fn isActivated(name: []const u8) bool {
+    g_act_mutex.lock();
+    defer g_act_mutex.unlock();
+    for (0..g_act_count) |i| {
+        if (std.mem.eql(u8, g_act_names[i][0..g_act_lens[i]], name)) return true;
+    }
+    return false;
+}
+
+pub fn resetActivationForTest() void {
+    g_act_mutex.lock();
+    defer g_act_mutex.unlock();
+    g_act_count = 0;
+}
+
+/// Owned deep copies of the specs belonging to ACTIVATED servers only — what a
+/// request advertises. Caller frees each spec's three strings + the slice
+/// (session's freeOwnedMcpToolSpecs shape).
+pub fn cloneActivatedSpecs(allocator: std.mem.Allocator) ![]McpToolSpec {
+    ensureCacheFresh(allocator);
+    var out: std.ArrayListUnmanaged(McpToolSpec) = .empty;
+    errdefer {
+        freeSpecItems(allocator, out.items);
+        out.deinit(allocator);
+    }
+    for (g_cache_servers) |srv| {
+        if (!isActivated(srv.name)) continue;
+        for (g_cache_specs[srv.spec_off..][0..srv.spec_len]) |s| {
+            const n = try allocator.dupe(u8, s.name);
+            errdefer allocator.free(n);
+            const d = try allocator.dupe(u8, s.description);
+            errdefer allocator.free(d);
+            const p = try allocator.dupe(u8, s.properties_json);
+            errdefer allocator.free(p);
+            try out.append(allocator, .{ .name = n, .description = d, .properties_json = p });
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+const DIGEST_MAX_TOOL_NAMES = 8;
+
+/// System-prompt digest of the INACTIVE servers (the model's map of what it
+/// can mcp_activate). Null when every configured server is already activated
+/// (or none are configured).
+pub fn inactiveDigest(allocator: std.mem.Allocator) !?[]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var listed: usize = 0;
+    for (g_cache_servers) |srv| {
+        if (isActivated(srv.name)) continue;
+        if (listed == 0) {
+            try out.appendSlice(allocator, "Inactive MCP servers — call mcp_activate with the server name before using their tools:\n");
+        }
+        if (srv.discovered) {
+            try out.print(allocator, "- {s} ({d} tools): ", .{ srv.name, srv.spec_len });
+            const n = @min(srv.spec_len, DIGEST_MAX_TOOL_NAMES);
+            for (g_cache_specs[srv.spec_off..][0..n], 0..) |s, i| {
+                if (i > 0) try out.appendSlice(allocator, ", ");
+                try out.appendSlice(allocator, s.name);
+            }
+            if (srv.spec_len > DIGEST_MAX_TOOL_NAMES) try out.appendSlice(allocator, ", ...");
+            try out.append(allocator, '\n');
+        } else {
+            try out.print(allocator, "- {s} (not discovered yet; mcp_activate connects to it and lists its tools)\n", .{srv.name});
+        }
+        listed += 1;
+    }
+    if (listed == 0) {
+        out.deinit(allocator);
+        return null;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 const CatalogSnapshots = struct {
     snap: Snapshots,
     servers: []CachedServer,
@@ -798,4 +903,85 @@ test "ensureCacheFresh reloads after a generation bump" {
     try mcp_catalog.upsertServer(a, "s", mcp_catalog.configHash("/bin/x", no_args[0..]), 1, specs[0..]); // bumps generation
     ensureCacheFresh(a);
     try std.testing.expectEqual(@as(usize, 1), cachedSpecs().len);
+}
+
+test "activation filters cloneActivatedSpecs and inactiveDigest" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(dir_path);
+    platform_dirs.setTestConfigDirOverride(dir_path);
+    defer platform_dirs.setTestConfigDirOverride(null);
+    resetActivationForTest();
+    defer resetActivationForTest();
+
+    const servers = [_]ServerConfig{
+        .{ .name = @constCast("alpha"), .command = @constCast("/bin/a"), .args = &.{}, .enabled = true },
+        .{ .name = @constCast("beta"), .command = @constCast("/bin/b"), .args = &.{}, .enabled = true },
+    };
+    try saveConfigFile(a, servers[0..]);
+    const no_args = [_][]const u8{};
+    const sa = [_]McpToolSpec{.{ .name = "a_tool", .description = "A", .properties_json = "{}" }};
+    const sb = [_]McpToolSpec{.{ .name = "b_tool", .description = "B", .properties_json = "{}" }};
+    try mcp_catalog.upsertServer(a, "alpha", mcp_catalog.configHash("/bin/a", no_args[0..]), 1, sa[0..]);
+    try mcp_catalog.upsertServer(a, "beta", mcp_catalog.configHash("/bin/b", no_args[0..]), 1, sb[0..]);
+    reloadCache(a);
+    defer reloadCacheFromServersForTest(a, &.{});
+
+    // 未激活:specs 空,摘要两行都在
+    const none = try cloneActivatedSpecs(a);
+    defer a.free(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+    const digest1 = (try inactiveDigest(a)).?;
+    defer a.free(digest1);
+    try std.testing.expect(std.mem.indexOf(u8, digest1, "alpha") != null);
+    try std.testing.expect(std.mem.indexOf(u8, digest1, "b_tool") != null);
+    try std.testing.expect(std.mem.indexOf(u8, digest1, "mcp_activate") != null);
+
+    // 激活 alpha:只克隆 alpha 的;摘要只剩 beta
+    try std.testing.expect(activateServer("alpha"));
+    try std.testing.expect(isActivated("alpha"));
+    try std.testing.expect(activateServer("alpha")); // 幂等
+    const only_a = try cloneActivatedSpecs(a);
+    defer {
+        for (only_a) |s| {
+            a.free(s.name);
+            a.free(s.description);
+            a.free(s.properties_json);
+        }
+        a.free(only_a);
+    }
+    try std.testing.expectEqual(@as(usize, 1), only_a.len);
+    try std.testing.expectEqualStrings("a_tool", only_a[0].name);
+    const digest2 = (try inactiveDigest(a)).?;
+    defer a.free(digest2);
+    try std.testing.expect(std.mem.indexOf(u8, digest2, "alpha") == null);
+    try std.testing.expect(std.mem.indexOf(u8, digest2, "beta") != null);
+
+    // 全部激活 → null
+    _ = activateServer("beta");
+    try std.testing.expect(try inactiveDigest(a) == null);
+}
+
+test "inactiveDigest marks an undiscovered server" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(dir_path);
+    platform_dirs.setTestConfigDirOverride(dir_path);
+    defer platform_dirs.setTestConfigDirOverride(null);
+    resetActivationForTest();
+    defer resetActivationForTest();
+
+    const servers = [_]ServerConfig{.{ .name = @constCast("mystery"), .command = @constCast("/bin/m"), .args = &.{}, .enabled = true }};
+    try saveConfigFile(a, servers[0..]);
+    reloadCache(a);
+    defer reloadCacheFromServersForTest(a, &.{});
+
+    const digest = (try inactiveDigest(a)).?;
+    defer a.free(digest);
+    try std.testing.expect(std.mem.indexOf(u8, digest, "mystery") != null);
+    try std.testing.expect(std.mem.indexOf(u8, digest, "not discovered yet") != null);
 }
