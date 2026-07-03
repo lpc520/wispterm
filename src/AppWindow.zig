@@ -91,6 +91,7 @@ const post_process = @import("renderer/post_process.zig");
 const d3d11_offscreen_smoke = @import("renderer/d3d11_offscreen_smoke.zig");
 const d3d11_ui_smoke = @import("renderer/d3d11_ui_smoke.zig");
 const d3d11_recreate_smoke = @import("renderer/d3d11_recreate_smoke.zig");
+const d3d11_fallback_marker = @import("renderer/gpu/d3d11/fallback_marker.zig");
 pub const gpu = @import("renderer/gpu/gpu.zig");
 pub const split_layout = @import("appwindow/split_layout.zig");
 const render_gate = @import("appwindow/render_gate.zig");
@@ -1652,10 +1653,41 @@ fn restoreD3D11DeviceRecreateResources(allocator: std.mem.Allocator) void {
     }
 }
 
+fn recordD3D11FallbackCandidate(
+    allocator: std.mem.Allocator,
+    adapter_id: []const u8,
+    reason: d3d11_fallback_marker.Reason,
+) bool {
+    if (comptime gpu.active != .d3d11) return false;
+    var marker_buf: [d3d11_fallback_marker.marker_max_len]u8 = undefined;
+    const marker = d3d11_fallback_marker.format(
+        &marker_buf,
+        .fallback_candidate,
+        build_options.app_version,
+        adapter_id,
+        reason,
+    ) catch |err| {
+        render_diagnostics.log(
+            "gpu-backend=d3d11 fallback marker record failed error={s} adapter={s} reason={s} automatic_fallback=false default_unchanged=true",
+            .{ @errorName(err), adapter_id, reason.name() },
+        );
+        return false;
+    };
+
+    platform_window_state.recordD3d11Fallback(allocator, marker);
+    render_diagnostics.log(
+        "gpu-backend=d3d11 fallback marker recorded marker={s} adapter={s} reason={s} automatic_fallback=false default_unchanged=true",
+        .{ marker, adapter_id, reason.name() },
+    );
+    return true;
+}
+
 fn handleD3D11RecoveryRequest(allocator: std.mem.Allocator, fb_width: c_int, fb_height: c_int) void {
     if (comptime gpu.active == .d3d11) {
         const request = gpu.Context.takeRecoveryRequest() orelse return;
         const status = request.status;
+        var adapter_buf: [64]u8 = undefined;
+        const adapter_id = gpu.Context.adapterFallbackIdentity(&adapter_buf) orelse "unknown-adapter";
         render_diagnostics.log(
             "gpu-backend=d3d11 recovery requested action={s} policy_state={s} operation={s} fallback_candidate_reason={s} dxgi_kind={s} requires_device_recreate={} automatic_fallback=false default_unchanged=true",
             .{
@@ -1677,6 +1709,16 @@ fn handleD3D11RecoveryRequest(allocator: std.mem.Allocator, fb_width: c_int, fb_
             );
             if (recreate.succeeded) {
                 restoreD3D11DeviceRecreateResources(allocator);
+            } else if (recreate.fallback_candidate) {
+                const marker_written = recordD3D11FallbackCandidate(
+                    allocator,
+                    adapter_id,
+                    recreate.fallbackMarkerReason(),
+                );
+                render_diagnostics.log(
+                    "gpu-backend=d3d11 recovery recreate failed escalated policy_state=fallback_candidate fallback_candidate={} fallback_candidate_reason={s} marker_written={} automatic_fallback=false default_unchanged=true",
+                    .{ recreate.fallback_candidate, recreate.fallbackReasonName(), marker_written },
+                );
             }
         }
         applyUiEffect(UiEffect.repaint);

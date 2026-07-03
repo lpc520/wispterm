@@ -63,6 +63,7 @@ pub const FallbackReason = enum {
     invalid_call,
     present_failed,
     resize_failed,
+    recreate_failed,
     render_target_failed,
 
     pub fn name(self: FallbackReason) []const u8 {
@@ -72,6 +73,7 @@ pub const FallbackReason = enum {
             .invalid_call => "invalid_call",
             .present_failed => "present_failed",
             .resize_failed => "resize_failed",
+            .recreate_failed => "recreate_failed",
             .render_target_failed => "render_target_failed",
         };
     }
@@ -167,6 +169,18 @@ pub const Policy = struct {
         requires_recreate: bool,
     ) Status {
         return self.latchFailure(operation, reason, .other, requires_recreate);
+    }
+
+    pub fn noteRecreateFailed(self: *Policy) Status {
+        self.status_value = .{
+            .state = .fallback_candidate,
+            .operation = self.status_value.operation orelse .present,
+            .reason = .recreate_failed,
+            .dxgi_kind = self.status_value.dxgi_kind,
+            .requires_device_recreate = false,
+        };
+        self.recovery_pending = false;
+        return self.status_value;
     }
 
     fn latchFailure(
@@ -298,4 +312,19 @@ test "D3D11 present policy records render-target creation failures" {
     try std.testing.expectEqualStrings("fallback_candidate", status.stateName());
     try std.testing.expectEqualStrings("render_target_failed", status.reasonName());
     try std.testing.expectEqualStrings("resize_target", status.operationName());
+}
+
+test "D3D11 present policy escalates failed recreate to fallback candidate once" {
+    var policy = Policy.init(800, 600);
+    _ = policy.noteDxgiFailure(.present, core.DXGI_ERROR_DEVICE_REMOVED);
+    _ = policy.takeRecoveryRequest() orelse return error.MissingRecoveryRequest;
+
+    const status = policy.noteRecreateFailed();
+
+    try std.testing.expectEqual(State.fallback_candidate, status.state);
+    try std.testing.expectEqual(FallbackReason.recreate_failed, status.reason);
+    try std.testing.expect(!status.requires_device_recreate);
+    try std.testing.expect(status.fallbackCandidate());
+    try std.testing.expectEqual(Action.fallback_candidate, policy.frameAction(800, 600));
+    try std.testing.expect(policy.takeRecoveryRequest() == null);
 }

@@ -8,6 +8,7 @@ param(
     [int]$WindowWidth = 1240,
     [int]$WindowHeight = 780,
     [switch]$RecreateSmoke,
+    [switch]$RecreateFailureSmoke,
     [switch]$RapidResizeSmoke,
     [switch]$FallbackMarkerSmoke,
     [switch]$KeepOpen
@@ -721,16 +722,22 @@ $oldRenderDiagnostics = $env:WISPTERM_RENDER_DIAGNOSTICS
 $oldUiSmoke = $env:WISPTERM_D3D11_UI_SMOKE
 $oldOffscreenSmoke = $env:WISPTERM_D3D11_OFFSCREEN_SMOKE
 $oldRecreateSmoke = $env:WISPTERM_D3D11_RECREATE_SMOKE
+$oldRecreateFailureSmoke = $env:WISPTERM_D3D11_RECREATE_FAILURE_SMOKE
 $oldFallbackMarkerSmoke = $env:WISPTERM_D3D11_FALLBACK_MARKER_SMOKE
 
 $env:APPDATA = $appDataDir
 $env:WISPTERM_RENDER_DIAGNOSTICS = "1"
 $env:WISPTERM_D3D11_UI_SMOKE = "1"
 $env:WISPTERM_D3D11_OFFSCREEN_SMOKE = "1"
-if ($RecreateSmoke) {
+if ($RecreateSmoke -and !$RecreateFailureSmoke) {
     $env:WISPTERM_D3D11_RECREATE_SMOKE = "1"
 } else {
     Remove-Item Env:WISPTERM_D3D11_RECREATE_SMOKE -ErrorAction SilentlyContinue
+}
+if ($RecreateFailureSmoke) {
+    $env:WISPTERM_D3D11_RECREATE_FAILURE_SMOKE = "1"
+} else {
+    Remove-Item Env:WISPTERM_D3D11_RECREATE_FAILURE_SMOKE -ErrorAction SilentlyContinue
 }
 if ($FallbackMarkerSmoke) {
     $env:WISPTERM_D3D11_FALLBACK_MARKER_SMOKE = "1"
@@ -765,6 +772,70 @@ try {
     Start-Sleep -Milliseconds 900
     Send-Escape
     Start-Sleep -Milliseconds 900
+
+    if ($RecreateFailureSmoke) {
+        $diagText = Wait-ForDiagnosticText $diagnosticPath "gpu-backend=d3d11 recovery recreate failed escalated .*fallback_candidate_reason=recreate_failed" 12
+        Start-Sleep -Milliseconds 900
+        $diagText = if (Test-Path -LiteralPath $diagnosticPath) { Get-Content -LiteralPath $diagnosticPath -Raw } else { "" }
+        $stateText = if (Test-Path -LiteralPath $statePath) { Get-Content -LiteralPath $statePath -Raw } else { "" }
+        $proc.Refresh()
+
+        $recoveryRequestCount = [regex]::Matches($diagText, "gpu-backend=d3d11 recovery requested action=recreate_device").Count
+        $recreateAttemptCount = [regex]::Matches($diagText, "gpu-backend=d3d11 recovery recreate attempt attempted=true").Count
+        $forcedFailureCount = [regex]::Matches($diagText, "gpu-backend=d3d11 device recreate forced failure for smoke").Count
+        $failureSmokeRequestCount = [regex]::Matches($diagText, "d3d11-recreate-failure-smoke requested failed device recreate").Count
+        $escalatedCount = [regex]::Matches($diagText, "gpu-backend=d3d11 recovery recreate failed escalated .*fallback_candidate_reason=recreate_failed").Count
+        $markerRecordedCount = [regex]::Matches($diagText, "gpu-backend=d3d11 fallback marker recorded .*reason=recreate_failed").Count
+        $resourceRestoreCount = [regex]::Matches($diagText, "gpu-backend=d3d11 resource recreate restored").Count
+        $recreateSuccessCount = [regex]::Matches($diagText, "gpu-backend=d3d11 recovery recreate attempt attempted=true succeeded=true").Count
+        $hasD3D11FallbackMarkerState = $stateText -match "d3d11-fallback = d3d11:v1;kind=fallback_candidate;.*reason=recreate_failed"
+
+        $pass = [bool](
+            !$proc.HasExited -and
+            $recoveryRequestCount -eq 1 -and
+            $recreateAttemptCount -eq 1 -and
+            $forcedFailureCount -eq 1 -and
+            $failureSmokeRequestCount -eq 1 -and
+            $escalatedCount -eq 1 -and
+            $markerRecordedCount -eq 1 -and
+            $resourceRestoreCount -eq 0 -and
+            $recreateSuccessCount -eq 0 -and
+            $hasD3D11FallbackMarkerState
+        )
+
+        $result = [ordered]@{
+            pass = $pass
+            mode = "recreate_failure"
+            shell = $Shell
+            exe = $ExePath
+            config = $configPath
+            diagnostic_log = $diagnosticPath
+            state_path = $statePath
+            diagnostics = [ordered]@{
+                process_alive = [bool](!$proc.HasExited)
+                recovery_request_count = $recoveryRequestCount
+                recreate_attempt_count = $recreateAttemptCount
+                forced_failure_count = $forcedFailureCount
+                failure_smoke_request_count = $failureSmokeRequestCount
+                escalated_count = $escalatedCount
+                marker_recorded_count = $markerRecordedCount
+                resource_restore_count = $resourceRestoreCount
+                recreate_success_count = $recreateSuccessCount
+                d3d11_fallback_marker_state = [bool]$hasD3D11FallbackMarkerState
+                automatic_fallback = $false
+                default_unchanged = $true
+            }
+        }
+
+        $json = $result | ConvertTo-Json -Depth 5
+        $json | Set-Content -LiteralPath $metricsPath -Encoding UTF8
+        $json
+
+        if (!$pass) {
+            throw "D3D11 recreate-failure smoke failed. Inspect metrics=$metricsPath and diagnostic_log=$diagnosticPath"
+        }
+        return
+    }
 
     Send-AltDigit 0x31
     Start-Sleep -Milliseconds 450
@@ -1108,5 +1179,6 @@ try {
     $env:WISPTERM_D3D11_UI_SMOKE = $oldUiSmoke
     $env:WISPTERM_D3D11_OFFSCREEN_SMOKE = $oldOffscreenSmoke
     $env:WISPTERM_D3D11_RECREATE_SMOKE = $oldRecreateSmoke
+    $env:WISPTERM_D3D11_RECREATE_FAILURE_SMOKE = $oldRecreateFailureSmoke
     $env:WISPTERM_D3D11_FALLBACK_MARKER_SMOKE = $oldFallbackMarkerSmoke
 }
