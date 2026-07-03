@@ -261,6 +261,9 @@ such as `local-physical`, `rdp`, `virtual-machine`, `hybrid-gpu`,
 proven from collected facts. The collector does not block environments and does
 not change fallback policy. The durable ledger format is documented in
 [windows-native-d3d11-environment-matrix.md](windows-native-d3d11-environment-matrix.md).
+After collecting one or more environment packages, run
+`debug\summarize-d3d11-environment-matrix.ps1` to emit a consolidated
+`matrix-ledger.md` / `matrix-ledger.json` for PR or issue review.
 
 To exercise the controlled Phase V device-recreate path, run the same smoke
 with `-RecreateSmoke` after building the D3D11 executable:
