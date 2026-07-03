@@ -16,6 +16,7 @@ const web_search = @import("../../research/web_search.zig");
 const web_read = @import("../../research/web_read.zig");
 const pubmed = @import("../../research/pubmed.zig");
 const ai_chat_types = @import("types.zig");
+const ai_loop_store = @import("../loop/store.zig");
 const platform_agent_prompt = @import("../../platform/agent_prompt.zig");
 
 const title_log = std.log.scoped(.ai_title);
@@ -870,6 +871,22 @@ fn toolAsk(ctx: *anyopaque, question: []const u8, options: []const ai_chat_types
     return session.askUser(question, options);
 }
 
+fn toolScheduleContinuation(
+    _: *anyopaque,
+    schedule: ai_chat_types.ScheduleContext,
+    delay_ms: i64,
+    message: []const u8,
+) !u32 {
+    const store = ai_loop_store.active() orelse return error.NoScheduler;
+    const info = try store.registerContinuation(
+        delay_ms,
+        message,
+        .{ .session_id = schedule.session_id, .model = schedule.model, .title = schedule.title },
+        std.time.milliTimestamp(),
+    );
+    return info.id;
+}
+
 fn toolContextFromRequest(request: *ChatRequest) ai_chat_types.ToolContext {
     var settings = ai_chat.currentAgentSettings();
     settings.dynamic_tools = request.dynamic_tools;
@@ -891,6 +908,7 @@ fn toolContextFromRequest(request: *ChatRequest) ai_chat_types.ToolContext {
             .model = request.model,
             .title = request.schedule_title,
         } else null,
+        .schedule_continuation = toolScheduleContinuation,
         .write_context_surface_id = request.write_context_surface_id,
         .write_context_surface_id_len = request.write_context_surface_id_len,
         .approve = toolApprove,

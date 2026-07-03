@@ -25,6 +25,7 @@ const terminal_tools = @import("terminal.zig");
 const agent_sessions = @import("sessions.zig");
 const tool_access = @import("access.zig");
 const agent_files = @import("files.zig");
+const agent_schedule = @import("schedule.zig");
 const agent_exec = @import("exec.zig");
 const agent_dynamic = @import("dynamic.zig");
 const agent_mcp = @import("mcp.zig");
@@ -120,6 +121,9 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         var opts_buf: [16]types.QuestionOption = undefined;
         const options = parseAskOptions(args.value, &opts_buf);
         return askUserTool(ctx, question, options);
+    }
+    if (std.mem.eql(u8, call.name, "continue_later")) {
+        return agent_schedule.run(ctx, call.arguments);
     }
     if (std.mem.eql(u8, call.name, "ssh_profile_save")) {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
