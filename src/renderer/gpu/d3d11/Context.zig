@@ -90,12 +90,30 @@ pub const DeviceRecreatePreparation = struct {
 pub const DeviceRecreateResult = struct {
     attempted: bool = false,
     succeeded: bool = false,
+    fallback_candidate: bool = false,
+    fallback_reason: present_policy.FallbackReason = .none,
     width: i32 = 0,
     height: i32 = 0,
     error_name: []const u8 = "none",
 
     pub fn failed(self: DeviceRecreateResult) bool {
         return self.attempted and !self.succeeded;
+    }
+
+    pub fn fallbackReasonName(self: DeviceRecreateResult) []const u8 {
+        return self.fallback_reason.name();
+    }
+
+    pub fn fallbackMarkerReason(self: DeviceRecreateResult) fallback_marker.Reason {
+        return switch (self.fallback_reason) {
+            .none => .unknown,
+            .device_lost => .device_lost,
+            .invalid_call => .invalid_call,
+            .present_failed => .present_failed,
+            .resize_failed => .resize_failed,
+            .recreate_failed => .recreate_failed,
+            .render_target_failed => .render_target_failed,
+        };
     }
 };
 
@@ -170,6 +188,7 @@ const State = struct {
 };
 
 pub threadlocal var state: ?State = null;
+threadlocal var force_recreate_failure_for_smoke = false;
 pub threadlocal var gl: GlTable = .{};
 
 const GlTable = @import("GlTable.zig").GlTable;
@@ -668,17 +687,34 @@ pub fn recreateDevice(width: i32, height: i32) DeviceRecreateResult {
         .height = target_height,
     };
 
+    if (force_recreate_failure_for_smoke) {
+        force_recreate_failure_for_smoke = false;
+        const status = self.policy.noteRecreateFailed();
+        render_diagnostics.log(
+            "gpu-backend=d3d11 device recreate forced failure for smoke error=smoke_forced_recreate_failed swapchain={}x{} policy_state={s} fallback_candidate={} fallback_candidate_reason={s} automatic_fallback=false default_unchanged=true",
+            .{ target_width, target_height, status.stateName(), status.fallbackCandidate(), status.reasonName() },
+        );
+        var failed_result = result_base;
+        failed_result.error_name = "smoke_forced_recreate_failed";
+        failed_result.fallback_candidate = status.fallbackCandidate();
+        failed_result.fallback_reason = status.reason;
+        return failed_result;
+    }
+
     var old = state.?;
     state = null;
     old.deinit();
 
     const next = createStateForWindow(hwnd, target_width, target_height) catch |err| {
+        const failed_status = old.policy.noteRecreateFailed();
         render_diagnostics.log(
-            "gpu-backend=d3d11 device recreate failed error={s} swapchain={}x{} automatic_fallback=false default_unchanged=true",
-            .{ @errorName(err), target_width, target_height },
+            "gpu-backend=d3d11 device recreate failed error={s} swapchain={}x{} policy_state={s} fallback_candidate={} fallback_candidate_reason={s} automatic_fallback=false default_unchanged=true",
+            .{ @errorName(err), target_width, target_height, failed_status.stateName(), failed_status.fallbackCandidate(), failed_status.reasonName() },
         );
         var failed_result = result_base;
         failed_result.error_name = @errorName(err);
+        failed_result.fallback_candidate = failed_status.fallbackCandidate();
+        failed_result.fallback_reason = failed_status.reason;
         return failed_result;
     };
 
@@ -698,6 +734,17 @@ pub fn requestDeviceRecreateForSmoke() bool {
     const status = state.?.policy.noteBackendFailure(.present, .device_lost, true);
     render_diagnostics.log(
         "gpu-backend=d3d11 recreate smoke latched policy_state={s} fallback_candidate_reason={s} requires_device_recreate={}",
+        .{ status.stateName(), status.reasonName(), status.requires_device_recreate },
+    );
+    return status.requires_device_recreate;
+}
+
+pub fn requestFailedDeviceRecreateForSmoke() bool {
+    if (state == null) return false;
+    force_recreate_failure_for_smoke = true;
+    const status = state.?.policy.noteBackendFailure(.present, .device_lost, true);
+    render_diagnostics.log(
+        "gpu-backend=d3d11 recreate failure smoke latched policy_state={s} fallback_candidate_reason={s} requires_device_recreate={}",
         .{ status.stateName(), status.reasonName(), status.requires_device_recreate },
     );
     return status.requires_device_recreate;
@@ -752,4 +799,18 @@ test "D3D11 context device recreate reports no attempt when uninitialized" {
     try std.testing.expect(!result.succeeded);
     try std.testing.expect(!result.failed());
     try std.testing.expectEqualStrings("not_initialized", result.error_name);
+}
+
+test "D3D11 context recreate result reports fallback reason names" {
+    const result = DeviceRecreateResult{
+        .attempted = true,
+        .fallback_candidate = true,
+        .fallback_reason = .recreate_failed,
+        .error_name = "smoke_forced_recreate_failed",
+    };
+
+    try std.testing.expect(result.failed());
+    try std.testing.expect(result.fallback_candidate);
+    try std.testing.expectEqualStrings("recreate_failed", result.fallbackReasonName());
+    try std.testing.expectEqual(fallback_marker.Reason.recreate_failed, result.fallbackMarkerReason());
 }

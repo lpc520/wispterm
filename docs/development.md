@@ -194,6 +194,20 @@ recreate request, a successful single-shot device/swapchain recreate attempt,
 and restored feature resources. It still leaves automatic fallback and the
 Windows default backend unchanged.
 
+To exercise the failed-recreate escalation path, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\debug\test-d3d11-normal-session.ps1 -RecreateFailureSmoke
+```
+
+This sets `WISPTERM_D3D11_RECREATE_FAILURE_SMOKE=1`, asks the backend to latch
+one recreate-class recovery request, injects a synthetic failed recreate, and
+verifies that diagnostics escalate it to a `recreate_failed` fallback candidate
+exactly once. The smoke also verifies a version+adapter-scoped
+`d3d11-fallback` marker is written to the isolated smoke profile state file,
+that feature resources are not reported as restored after the forced failure,
+and that automatic fallback plus the Windows default backend remain unchanged.
+
 To add rapid resize stress evidence to the same D3D11 session smoke, use:
 
 ```powershell

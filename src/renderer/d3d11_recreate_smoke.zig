@@ -12,9 +12,12 @@ const gpu = @import("gpu/gpu.zig");
 const render_diagnostics = @import("../render_diagnostics.zig");
 
 const ENV_NAME = "WISPTERM_D3D11_RECREATE_SMOKE";
+const FAILURE_ENV_NAME = "WISPTERM_D3D11_RECREATE_FAILURE_SMOKE";
 
 threadlocal var checked_env = false;
 threadlocal var enabled_cache = false;
+threadlocal var checked_failure_env = false;
+threadlocal var failure_enabled_cache = false;
 threadlocal var fired = false;
 
 fn parseEnabledValue(value: []const u8) bool {
@@ -40,12 +43,33 @@ fn enabled() bool {
     return enabled_cache;
 }
 
+fn failureEnabled() bool {
+    if (comptime gpu.active != .d3d11) return false;
+    if (checked_failure_env) return failure_enabled_cache;
+    checked_failure_env = true;
+
+    const value = std.process.getEnvVarOwned(std.heap.page_allocator, FAILURE_ENV_NAME) catch {
+        failure_enabled_cache = false;
+        return failure_enabled_cache;
+    };
+    defer std.heap.page_allocator.free(value);
+
+    failure_enabled_cache = parseEnabledValue(value);
+    return failure_enabled_cache;
+}
+
 pub fn maybeRequest() void {
     if (comptime gpu.active != .d3d11) return;
     fallback_marker_smoke.maybeRun();
-    if (!enabled() or fired) return;
+    if (!(enabled() or failureEnabled()) or fired) return;
     fired = true;
-    if (gpu.Context.requestDeviceRecreateForSmoke()) {
+    if (failureEnabled()) {
+        if (gpu.Context.requestFailedDeviceRecreateForSmoke()) {
+            render_diagnostics.log("d3d11-recreate-failure-smoke requested failed device recreate", .{});
+        } else {
+            render_diagnostics.log("d3d11-recreate-failure-smoke request skipped backend_unavailable=true", .{});
+        }
+    } else if (gpu.Context.requestDeviceRecreateForSmoke()) {
         render_diagnostics.log("d3d11-recreate-smoke requested device recreate", .{});
     } else {
         render_diagnostics.log("d3d11-recreate-smoke request skipped backend_unavailable=true", .{});

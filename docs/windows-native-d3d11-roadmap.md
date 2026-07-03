@@ -76,6 +76,11 @@ not in-process renderer switching: explicit `d3d11` continues to honor the
 user's build/runtime choice and only reports a warning when a matching marker is
 present, while a future Windows `auto` default can use a version+adapter-scoped
 `d3d11-fallback` marker to choose OpenGL without changing the current default.
+The failed-recreate escalation path now has an opt-in `-RecreateFailureSmoke`
+mode: it injects one synthetic recreate failure, verifies the policy transitions
+to a `recreate_failed` fallback candidate exactly once, persists a
+version+adapter-scoped `d3d11-fallback` marker in the isolated smoke profile,
+and still reports `automatic_fallback=false` / `default_unchanged=true`.
 
 The Phase IV normal-session evidence gate is the checked-in Windows GUI smoke:
 
@@ -106,12 +111,18 @@ stress evidence in the normal-session run.
 
 The fallback marker policy is intentionally policy-only at this stage. It
 defines marker format, persistence, stale-version/adapter handling, explicit
-backend behavior, and the future-auto dry-run decision surface, but it does not
-write markers from live failures and does not change renderer selection.
+backend behavior, and the future-auto dry-run decision surface, but marker
+writes are still evidence for next launch/future-auto only and do not change
+renderer selection.
 Add `-FallbackMarkerSmoke` to the normal-session smoke to write a synthetic
 marker in the isolated smoke profile and verify marker persistence plus the
 explicit/current-auto/future-auto decision surface without triggering automatic
 fallback.
+
+Add `-RecreateFailureSmoke` to the same smoke to exercise the failed-recreate
+escalation path. This mode is intentionally a diagnostics/state-file proof: it
+does not attempt same-process OpenGL fallback, does not change Windows `auto`,
+and treats the persisted marker as next-launch/future-auto evidence only.
 
 ## Ghostty Comparison
 
