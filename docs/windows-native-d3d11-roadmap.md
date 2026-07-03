@@ -87,6 +87,13 @@ explorer, previews, assistant panel, command palette, startup shortcuts,
 Settings, Skill Center, and background image rendering while verifying
 `gpu-backend=opengl` diagnostics and the absence of D3D11 recovery/probe/marker
 activity.
+D3D11 environment diagnostics are now collected on startup: the backend logs
+adapter description, vendor/device/subsystem/revision, dedicated/shared memory,
+adapter flags, output count, feature level, and swap effect, while the Win32
+host logs remote-session state, process session id, monitor count, mixed-DPI
+state, primary DPI, and system DPI. The normal-session smoke verifies both
+lines so later RDP/VM/hybrid-GPU/multi-monitor matrix runs have a stable JSON
+and log surface.
 
 The Phase IV normal-session evidence gate is the checked-in Windows GUI smoke:
 
@@ -134,6 +141,11 @@ Add `-Backend opengl` after a default `zig build` to run the OpenGL fallback
 normal-session smoke. This is the Phase V proof that the compatibility renderer
 still supports the same core user-visible workflow on the native-render
 integration branch.
+
+The D3D11 normal-session smoke also gates the environment-diagnostics surface:
+`d3d11_environment` and `windows_environment` must be true in the emitted JSON.
+This still only reports and verifies environment facts; it does not classify or
+block any environment yet.
 
 ## Ghostty Comparison
 

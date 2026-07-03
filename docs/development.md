@@ -176,6 +176,10 @@ screenshots, writes JSON metrics under
 `zig-out\d3d11-normal-session-smoke\`, and verifies that
 `render-diagnostic.log` contains `gpu-backend=d3d11 present=dxgi`, D3D11 init
 details for swap effect / adapter / fallback reason / healthy policy state, a
+D3D11 environment line for adapter description, vendor/device/subsystem,
+revision, memory sizes, output count, feature level, and swap effect, a Win32
+environment line for remote session, session id, monitor count, mixed-DPI state,
+primary DPI, and system DPI, a
 successful `d3d11-ui-smoke` probe, an offscreen round-trip marker, and no D3D11
 recovery request in the healthy path. It is a Phase IV and Phase V
 diagnostics/policy/recovery-coordination evidence tool only; it does not change

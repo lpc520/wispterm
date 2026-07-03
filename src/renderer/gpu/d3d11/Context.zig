@@ -130,6 +130,7 @@ const State = struct {
     vertex_shader: ?*anyopaque = null,
     pixel_shader: ?*anyopaque = null,
     adapter: AdapterInfo = .{},
+    feature_level: u32 = 0,
     policy: present_policy.Policy,
     width: i32,
     height: i32,
@@ -195,11 +196,26 @@ const GlTable = @import("GlTable.zig").GlTable;
 
 const AdapterInfo = struct {
     available: bool = false,
+    description: [128]u16 = [_]u16{0} ** 128,
     vendor_id: u32 = 0,
     device_id: u32 = 0,
+    sub_sys_id: u32 = 0,
+    revision: u32 = 0,
+    dedicated_video_memory: usize = 0,
+    dedicated_system_memory: usize = 0,
+    shared_system_memory: usize = 0,
     luid_low: u32 = 0,
     luid_high: i32 = 0,
     flags: u32 = 0,
+    output_count: u32 = 0,
+
+    fn descriptionUtf8(self: *const AdapterInfo, buf: []u8) []const u8 {
+        if (!self.available or buf.len == 0) return "";
+        const end = std.mem.indexOfScalar(u16, &self.description, 0) orelse self.description.len;
+        if (end == 0) return "";
+        const written = std.unicode.utf16LeToUtf8(buf, self.description[0..end]) catch return "unavailable";
+        return buf[0..written];
+    }
 };
 
 const SwapchainCreateResult = struct {
@@ -236,6 +252,7 @@ fn createStateForWindow(hwnd: HWND, width: i32, height: i32) InitError!State {
 
     var device: ?*anyopaque = null;
     var context: ?*anyopaque = null;
+    var feature_level: u32 = 0;
     if (create_device(
         null,
         core.D3D_DRIVER_TYPE_HARDWARE,
@@ -245,7 +262,7 @@ fn createStateForWindow(hwnd: HWND, width: i32, height: i32) InitError!State {
         0,
         core.D3D11_SDK_VERSION,
         &device,
-        null,
+        &feature_level,
         &context,
     ) < 0 or device == null or context == null) return error.DeviceCreateFailed;
     errdefer {
@@ -262,6 +279,7 @@ fn createStateForWindow(hwnd: HWND, width: i32, height: i32) InitError!State {
         .context = context.?,
         .swapchain = swapchain_result.swapchain,
         .adapter = swapchain_result.adapter,
+        .feature_level = feature_level,
         .policy = present_policy.Policy.init(width, height),
         .width = width,
         .height = height,
@@ -339,16 +357,38 @@ fn queryAdapterInfo(adapter: *anyopaque) AdapterInfo {
 
     return .{
         .available = true,
+        .description = desc.description,
         .vendor_id = desc.vendor_id,
         .device_id = desc.device_id,
+        .sub_sys_id = desc.sub_sys_id,
+        .revision = desc.revision,
+        .dedicated_video_memory = desc.dedicated_video_memory,
+        .dedicated_system_memory = desc.dedicated_system_memory,
+        .shared_system_memory = desc.shared_system_memory,
         .luid_low = desc.adapter_luid.low_part,
         .luid_high = desc.adapter_luid.high_part,
         .flags = desc.flags,
+        .output_count = countAdapterOutputs(adapter1),
     };
+}
+
+fn countAdapterOutputs(adapter1: *anyopaque) u32 {
+    const enum_outputs = core.comCall(adapter1, core.slot.DXGIAdapter1_EnumOutputs, *const fn (*anyopaque, u32, *?*anyopaque) callconv(.winapi) HRESULT);
+    var count: u32 = 0;
+    while (count < 32) : (count += 1) {
+        var output: ?*anyopaque = null;
+        const hr = enum_outputs(adapter1, count, &output);
+        if (hr == core.DXGI_ERROR_NOT_FOUND) return count;
+        if (hr < 0 or output == null) return count;
+        core.comRelease(output.?);
+    }
+    return count;
 }
 
 fn logBackendInit(self: *const State) void {
     if (self.adapter.available) {
+        var desc_buf: [256]u8 = undefined;
+        const adapter_description = self.adapter.descriptionUtf8(&desc_buf);
         render_diagnostics.log(
             "gpu-backend=d3d11 present=dxgi swapchain={}x{} swap_effect={s} adapter_vendor=0x{x} adapter_device=0x{x} adapter_luid={x}:{x} adapter_flags=0x{x} fallback_reason=none policy_state={s} fallback_candidate=false",
             .{
@@ -363,10 +403,33 @@ fn logBackendInit(self: *const State) void {
                 self.policy.status().stateName(),
             },
         );
+        render_diagnostics.log(
+            "gpu-backend=d3d11 environment adapter_description=\"{s}\" vendor_id=0x{x} device_id=0x{x} subsys_id=0x{x} revision={} dedicated_video_memory={} dedicated_system_memory={} shared_system_memory={} adapter_luid={x}:{x} adapter_flags=0x{x} output_count={} feature_level={s} swap_effect={s}",
+            .{
+                adapter_description,
+                self.adapter.vendor_id,
+                self.adapter.device_id,
+                self.adapter.sub_sys_id,
+                self.adapter.revision,
+                self.adapter.dedicated_video_memory,
+                self.adapter.dedicated_system_memory,
+                self.adapter.shared_system_memory,
+                @as(u32, @bitCast(self.adapter.luid_high)),
+                self.adapter.luid_low,
+                self.adapter.flags,
+                self.adapter.output_count,
+                core.d3dFeatureLevelName(self.feature_level),
+                core.dxgiSwapEffectName(core.DXGI_SWAP_EFFECT_FLIP_DISCARD),
+            },
+        );
     } else {
         render_diagnostics.log(
             "gpu-backend=d3d11 present=dxgi swapchain={}x{} swap_effect={s} adapter=unknown fallback_reason=none policy_state={s} fallback_candidate=false",
             .{ self.width, self.height, core.dxgiSwapEffectName(core.DXGI_SWAP_EFFECT_FLIP_DISCARD), self.policy.status().stateName() },
+        );
+        render_diagnostics.log(
+            "gpu-backend=d3d11 environment adapter_description=\"unknown\" output_count=0 feature_level={s} swap_effect={s}",
+            .{ core.d3dFeatureLevelName(self.feature_level), core.dxgiSwapEffectName(core.DXGI_SWAP_EFFECT_FLIP_DISCARD) },
         );
     }
 }
@@ -813,4 +876,13 @@ test "D3D11 context recreate result reports fallback reason names" {
     try std.testing.expect(result.fallback_candidate);
     try std.testing.expectEqualStrings("recreate_failed", result.fallbackReasonName());
     try std.testing.expectEqual(fallback_marker.Reason.recreate_failed, result.fallbackMarkerReason());
+}
+
+test "D3D11 adapter info converts UTF-16 descriptions for diagnostics" {
+    var info = AdapterInfo{ .available = true };
+    const text = std.unicode.utf8ToUtf16LeStringLiteral("Test Adapter");
+    @memcpy(info.description[0..text.len], text);
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("Test Adapter", info.descriptionUtf8(&buf));
 }

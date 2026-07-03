@@ -211,6 +211,7 @@ pub fn hresultBits(value: HRESULT) u32 {
 
 pub const S_OK: HRESULT = 0;
 pub const DXGI_ERROR_INVALID_CALL: HRESULT = hresult(0x887A0001);
+pub const DXGI_ERROR_NOT_FOUND: HRESULT = hresult(0x887A0002);
 pub const DXGI_ERROR_DEVICE_REMOVED: HRESULT = hresult(0x887A0005);
 pub const DXGI_ERROR_DEVICE_HUNG: HRESULT = hresult(0x887A0006);
 pub const DXGI_ERROR_DEVICE_RESET: HRESULT = hresult(0x887A0007);
@@ -234,6 +235,13 @@ pub const D3D_DRIVER_TYPE_UNKNOWN: u32 = 0;
 pub const D3D_DRIVER_TYPE_HARDWARE: u32 = 1;
 pub const D3D11_SDK_VERSION: u32 = 7;
 pub const D3D11_CREATE_DEVICE_BGRA_SUPPORT: u32 = 0x20;
+pub const D3D_FEATURE_LEVEL_9_1: u32 = 0x9100;
+pub const D3D_FEATURE_LEVEL_9_2: u32 = 0x9200;
+pub const D3D_FEATURE_LEVEL_9_3: u32 = 0x9300;
+pub const D3D_FEATURE_LEVEL_10_0: u32 = 0xa000;
+pub const D3D_FEATURE_LEVEL_10_1: u32 = 0xa100;
+pub const D3D_FEATURE_LEVEL_11_0: u32 = 0xb000;
+pub const D3D_FEATURE_LEVEL_11_1: u32 = 0xb100;
 pub const D3D11_USAGE_DEFAULT: u32 = 0;
 pub const D3D11_USAGE_STAGING: u32 = 3;
 pub const D3D11_USAGE_DYNAMIC: u32 = 2;
@@ -297,6 +305,19 @@ pub fn dxgiFailureRequiresDeviceRecreate(hr: HRESULT) bool {
 pub fn dxgiSwapEffectName(value: u32) []const u8 {
     return switch (value) {
         DXGI_SWAP_EFFECT_FLIP_DISCARD => "flip_discard",
+        else => "unknown",
+    };
+}
+
+pub fn d3dFeatureLevelName(value: u32) []const u8 {
+    return switch (value) {
+        D3D_FEATURE_LEVEL_9_1 => "9_1",
+        D3D_FEATURE_LEVEL_9_2 => "9_2",
+        D3D_FEATURE_LEVEL_9_3 => "9_3",
+        D3D_FEATURE_LEVEL_10_0 => "10_0",
+        D3D_FEATURE_LEVEL_10_1 => "10_1",
+        D3D_FEATURE_LEVEL_11_0 => "11_0",
+        D3D_FEATURE_LEVEL_11_1 => "11_1",
         else => "unknown",
     };
 }
@@ -461,6 +482,7 @@ pub const slot = struct {
 
     // IDXGIAdapter1 (IDXGIObject + EnumOutputs(7) GetDesc(8)
     // CheckInterfaceSupport(9) → GetDesc1(10))
+    pub const DXGIAdapter1_EnumOutputs: usize = 7;
     pub const DXGIAdapter1_GetDesc1: usize = 10;
 
     // IDXGIDeviceSubObject: GetDevice(7)
@@ -723,6 +745,10 @@ test "DXGI HRESULT failure classification names device loss signals" {
     try std.testing.expect(dxgiFailureRequiresDeviceRecreate(DXGI_ERROR_DEVICE_RESET));
     try std.testing.expect(!dxgiFailureRequiresDeviceRecreate(DXGI_ERROR_INVALID_CALL));
     try std.testing.expectEqualStrings("flip_discard", dxgiSwapEffectName(DXGI_SWAP_EFFECT_FLIP_DISCARD));
+    try std.testing.expectEqual(@as(u32, 0x887A0002), hresultBits(DXGI_ERROR_NOT_FOUND));
+    try std.testing.expectEqualStrings("11_0", d3dFeatureLevelName(D3D_FEATURE_LEVEL_11_0));
+    try std.testing.expectEqualStrings("11_1", d3dFeatureLevelName(D3D_FEATURE_LEVEL_11_1));
+    try std.testing.expectEqualStrings("unknown", d3dFeatureLevelName(0));
 }
 
 test "D3D11_TEXTURE2D_DESC matches the documented 44-byte layout" {

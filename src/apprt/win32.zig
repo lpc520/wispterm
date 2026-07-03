@@ -536,6 +536,7 @@ const WAIT_TIMEOUT: DWORD = 0x00000102;
 const INFINITE: DWORD = 0xFFFFFFFF;
 
 extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
+extern "kernel32" fn ProcessIdToSessionId(dwProcessId: DWORD, pSessionId: *DWORD) callconv(.winapi) BOOL;
 extern "kernel32" fn SetHandleInformation(hObject: windows.HANDLE, dwMask: DWORD, dwFlags: DWORD) callconv(.winapi) BOOL;
 
 extern "kernel32" fn CreatePipe(
@@ -723,6 +724,7 @@ extern "user32" fn GetSystemMetrics(nIndex: INT) callconv(.winapi) INT;
 const SM_CXSIZEFRAME: INT = 32;
 const SM_CYSIZEFRAME: INT = 33;
 const SM_CXPADDEDBORDER: INT = 92;
+const SM_REMOTESESSION: INT = 0x1000;
 
 // IsZoomed (maximized check)
 extern "user32" fn IsZoomed(hWnd: HWND) callconv(.winapi) BOOL;
@@ -1389,15 +1391,43 @@ fn currentSystemDpi() u32 {
     return if (dpi == 0) 96 else dpi;
 }
 
+const MonitorTopologySummary = struct {
+    count: u32 = 0,
+    primary_dpi_x: UINT = 0,
+    primary_dpi_y: UINT = 0,
+    first_dpi_x: UINT = 0,
+    first_dpi_y: UINT = 0,
+    mixed_dpi: bool = false,
+
+    fn note(self: *MonitorTopologySummary, primary: bool, dx: UINT, dy: UINT) void {
+        if (self.count == 0) {
+            self.first_dpi_x = dx;
+            self.first_dpi_y = dy;
+        } else if (dx != self.first_dpi_x or dy != self.first_dpi_y) {
+            self.mixed_dpi = true;
+        }
+        if (primary) {
+            self.primary_dpi_x = dx;
+            self.primary_dpi_y = dy;
+        }
+        self.count += 1;
+    }
+};
+
 /// EnumDisplayMonitors callback: log every monitor's bounds + effective DPI.
 /// Used to record the full multi-monitor topology when diagnostics start, so
 /// the high-vs-low DPI pair behind drag-between-monitors glitches is visible.
-fn logMonitorEnumProc(hmon: HMONITOR, _: ?HDC, _: *RECT, _: LPARAM) callconv(.winapi) BOOL {
+fn logMonitorEnumProc(hmon: HMONITOR, _: ?HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
     var mi = MONITORINFO{};
     if (GetMonitorInfoW(hmon, &mi) == 0) return 1;
     var dx: UINT = 0;
     var dy: UINT = 0;
     _ = GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &dx, &dy);
+    const primary = (mi.dwFlags & 1) != 0; // MONITORINFOF_PRIMARY
+    if (data != 0) {
+        const summary: *MonitorTopologySummary = @ptrFromInt(@as(usize, @intCast(data)));
+        summary.note(primary, dx, dy);
+    }
     render_diagnostics.log(
         "monitor-enum rcMonitor=({},{} {}x{}) rcWork=({},{} {}x{}) dpi={}x{} primary={}",
         .{
@@ -1406,7 +1436,7 @@ fn logMonitorEnumProc(hmon: HMONITOR, _: ?HDC, _: *RECT, _: LPARAM) callconv(.wi
             mi.rcWork.left,                         mi.rcWork.top,
             mi.rcWork.right - mi.rcWork.left,       mi.rcWork.bottom - mi.rcWork.top,
             dx,                                     dy,
-            (mi.dwFlags & 1) != 0, // MONITORINFOF_PRIMARY
+            primary,
         },
     );
     return 1;
@@ -1416,7 +1446,22 @@ fn logMonitorEnumProc(hmon: HMONITOR, _: ?HDC, _: *RECT, _: LPARAM) callconv(.wi
 /// diagnostics are enabled.
 pub fn logDisplayTopology() void {
     if (!render_diagnostics.enabled()) return;
-    _ = EnumDisplayMonitors(null, null, &logMonitorEnumProc, 0);
+    var summary = MonitorTopologySummary{};
+    _ = EnumDisplayMonitors(null, null, &logMonitorEnumProc, @intCast(@intFromPtr(&summary)));
+    var session_id: DWORD = 0;
+    const have_session_id = ProcessIdToSessionId(GetCurrentProcessId(), &session_id) != 0;
+    render_diagnostics.log(
+        "windows-environment remote_session={} session_id={} monitor_count={} mixed_dpi={} primary_dpi={}x{} system_dpi={}",
+        .{
+            GetSystemMetrics(SM_REMOTESESSION) != 0,
+            if (have_session_id) session_id else 0,
+            summary.count,
+            summary.mixed_dpi,
+            summary.primary_dpi_x,
+            summary.primary_dpi_y,
+            currentSystemDpi(),
+        },
+    );
 }
 
 /// Log the monitor the given window currently sits on, tagged with `tag`
