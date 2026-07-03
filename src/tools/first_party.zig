@@ -37,6 +37,7 @@ const static_definitions = [_]Definition{
     .{ .name = "terminal_repl_exec", .label = "terminal_repl_exec", .description = "Send text to an already-open interactive REPL or agent app.", .category = .terminal },
     .{ .name = "terminal_answer_prompt", .label = "terminal_answer_prompt", .description = "Answer an approval prompt in an agent terminal surface.", .category = .terminal },
     .{ .name = "ask_user", .label = "ask_user", .description = "Ask the user a blocking multiple-choice question.", .category = .agent },
+    .{ .name = "continue_later", .label = "continue_later", .description = "Schedule this Agent session to continue a long-running task later.", .category = .agent },
     .{ .name = "read_file", .label = "read_file", .description = "Read a local or remote text file.", .category = .file },
     .{ .name = "copy_file", .label = "copy_file", .description = "Copy a file between local, WSL, and SSH contexts.", .category = .file },
     .{ .name = "write_file", .label = "write_file", .description = "Create or overwrite a local or remote text file.", .category = .file },
@@ -267,6 +268,7 @@ test "first_party_tools: active definitions include webread and the local comman
     const local_name = platform_process.localCommandToolName();
 
     try std.testing.expect(catalogContains(defs, "webread"));
+    try std.testing.expect(catalogContains(defs, "continue_later"));
     try std.testing.expect(catalogContains(defs, local_name));
     try std.testing.expectEqual(@as(?bool, true), catalogDisableable("webread"));
     try std.testing.expectEqual(@as(?bool, true), catalogDisableable(local_name));

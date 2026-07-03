@@ -52,6 +52,19 @@ pub const McpTool = struct {
     server_args: []const []const u8 = &.{},
 };
 
+pub const ScheduleContext = struct {
+    session_id: []const u8,
+    model: []const u8,
+    title: []const u8,
+};
+
+pub const ScheduleContinuationFn = *const fn (
+    ctx: *anyopaque,
+    schedule: ScheduleContext,
+    delay_ms: i64,
+    message: []const u8,
+) anyerror!u32;
+
 // AgentPermission lives in agent/config.zig (extracted so config.zig
 // stays out of the ai_chat dependency graph). Re-export the single source of truth.
 pub const AgentPermission = @import("../../agent/config.zig").AgentPermission;
@@ -346,6 +359,8 @@ pub const ToolContext = struct {
     settings: AgentSettings,
     copilot: bool = false,
     reply_context: ?OwnedReplyContext = null,
+    schedule_context: ?ScheduleContext = null,
+    schedule_continuation: ?ScheduleContinuationFn = null,
     write_context_surface_id: [64]u8 = undefined,
     write_context_surface_id_len: usize = 0,
 
@@ -373,6 +388,11 @@ pub const ToolContext = struct {
     }
     pub fn askUser(self: *const ToolContext, question: []const u8, options: []const QuestionOption) AskResult {
         return self.ask(self.ctx, question, options);
+    }
+    pub fn scheduleContinuation(self: *const ToolContext, delay_ms: i64, message: []const u8) !u32 {
+        const schedule = self.schedule_context orelse return error.NoScheduleContext;
+        const callback = self.schedule_continuation orelse return error.NoScheduler;
+        return callback(self.ctx, schedule, delay_ms, message);
     }
     pub fn sshConnectionForSurface(self: *const ToolContext, surface_id: []const u8) ?SshConnection {
         const host = self.tool_host orelse return null;

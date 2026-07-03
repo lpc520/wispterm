@@ -705,6 +705,7 @@ pub fn builtinToolNameReserved(name: []const u8) bool {
         "terminal_repl_exec",
         "terminal_answer_prompt",
         "ask_user",
+        "continue_later",
         "read_file",
         "copy_file",
         "write_file",
@@ -754,18 +755,22 @@ fn mcpToolNameSeenBefore(tools: []const McpToolSpec, index: usize) bool {
 // the schema text is never duplicated across protocols.
 //
 // `Ctx` is the emitter's context type; `emit` receives `(ctx, name, description,
-// properties)` for every active tool, in order.
+// properties, required)` for every active tool, in order.
 fn forEachToolSpec(
     comptime Ctx: type,
     ctx: Ctx,
     opts: ToolSpecOpts,
-    comptime emit: fn (Ctx, []const u8, []const u8, []const u8) anyerror!void,
+    comptime emit: fn (Ctx, []const u8, []const u8, []const u8, []const []const u8) anyerror!void,
 ) !void {
     const Filtered = struct {
         fn emitTool(c: Ctx, o: ToolSpecOpts, name: []const u8, description: []const u8, properties: []const u8) anyerror!void {
+            try emitToolWithRequired(c, o, name, description, properties, &.{});
+        }
+
+        fn emitToolWithRequired(c: Ctx, o: ToolSpecOpts, name: []const u8, description: []const u8, properties: []const u8, required: []const []const u8) anyerror!void {
             if (o.toolset == .subagent and !subagentToolAllowed(name)) return;
             if (first_party_tools.isKnown(name) and first_party_tools.isDisabledName(o.disabled_first_party_tools, name)) return;
-            try emit(c, name, description, properties);
+            try emit(c, name, description, properties, required);
         }
     };
     try Filtered.emitTool(ctx, opts, "terminal_list", "List WispTerm terminal surfaces visible to the agent, including the current agent-selected write context. Before any terminal write, use terminal_select to choose the intended surface_id; use focused=true only as a default hint.", "{}");
@@ -782,6 +787,7 @@ fn forEachToolSpec(
     try Filtered.emitTool(ctx, opts, "terminal_repl_exec", "Send code or text to the selected already-open interactive REPL/app terminal without shell syntax. The surface_id must match the current terminal_select context. Use repl=r for R, repl=python for Python, repl=codex for Codex, repl=claude_code for Claude Code, or repl=plain for raw text input. For Codex and Claude Code, this waits until the app settles, requests approval/input, reports completion/failure, or reaches timeout_ms.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Selected surface id from terminal_select.\"},\"repl\":{\"type\":\"string\",\"description\":\"r, python, codex, claude_code, or plain\"},\"code\":{\"type\":\"string\",\"description\":\"Code or plain text to submit. To send a control key instead, set code to exactly one of <ctrl-c>, <ctrl-d>, <ctrl-u>, <esc>, <enter> — e.g. to interrupt a stuck command or leave a `>` continuation prompt.\"},\"timeout_ms\":{\"type\":\"integer\"}}");
     try Filtered.emitTool(ctx, opts, "terminal_answer_prompt", "Answer a Claude Code or Codex confirmation/approval prompt in a terminal surface. Reads the on-screen options and sends the correct keystroke. Prefer this over terminal_repl_exec to confirm or reject an agent approval menu. Only acts when a prompt is awaiting input; otherwise it reports the screen and sends nothing.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Optional surface id; defaults to the focused terminal.\"},\"answer\":{\"type\":\"string\",\"description\":\"approve (the plain Yes), approve_all (Yes + allow all / don't ask again), reject (No / cancel), enter, esc, or an explicit option digit 1-9.\"}}");
     try Filtered.emitTool(ctx, opts, "ask_user", "Ask the user a single multiple-choice question and block until they answer. Use when you reach a genuine decision you should not guess (which target, which of several matches, a risky direction). Provide 2 or more options; the user may also type a custom free-text answer. Returns the user's choice. The question is shown as a card in the chat and, when the request came from WeChat, pushed there too.", "{\"question\":{\"type\":\"string\",\"description\":\"The question to ask. One sentence.\"},\"options\":{\"type\":\"array\",\"description\":\"Two or more answer options.\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\",\"description\":\"Short option label.\"},\"description\":{\"type\":\"string\",\"description\":\"Optional one-line explanation of the option.\"}},\"required\":[\"label\"]}}}");
+    try Filtered.emitToolWithRequired(ctx, opts, "continue_later", "Schedule this same Agent or Copilot session to continue later. Use when a terminal command, SSH command, Codex/Claude Code run, or REPL task is still running and immediate polling would waste tokens or risk duplicate side effects. At wake time WispTerm submits message back into this session; the message should inspect progress with terminal_snapshot before acting.", "{\"delay\":{\"type\":\"string\",\"description\":\"Required positive interval: integer plus s, m, h, or d, e.g. 30m, 2h, 1d.\"},\"message\":{\"type\":\"string\",\"description\":\"Optional follow-up prompt. Defaults to continuing the previous task and checking terminal_snapshot first.\"}}", &.{"delay"});
     try Filtered.emitTool(ctx, opts, "read_file", "Read a local, WSL, or SSH text file. Returns numbered lines. Set surface_id to an open terminal surface to read there; omitted surface_id follows the selected terminal context, or local when none is selected. Relative paths resolve against that surface cwd or the agent working directory.", "{\"path\":{\"type\":\"string\",\"description\":\"File path. Absolute, or relative to the selected surface cwd / working directory.\"},\"surface_id\":{\"type\":\"string\",\"description\":\"Optional terminal surface id (from terminal_list). Omit to use the selected terminal context, or local when none is selected.\"},\"offset\":{\"type\":\"integer\",\"description\":\"Optional 1-based first line to return.\"},\"limit\":{\"type\":\"integer\",\"description\":\"Optional maximum number of lines to return.\"}}");
     try Filtered.emitTool(ctx, opts, "copy_file", "Copy a binary/artifact file between local workspace, WSL, and SSH without pasting shell commands into a terminal. Pull mode: omit dest_surface_id and dest_path to copy source_path into local wispterm-files and return local_path, useful before send_attachment. Push mode: set dest_surface_id to an open WSL or SSH terminal to copy a local/Weixin/workspace file to that environment. Relative source paths resolve against source_surface_id cwd or the agent working directory; relative destination paths resolve against dest_surface_id cwd or the agent working directory.", "{\"source_path\":{\"type\":\"string\",\"description\":\"Path to the source file. Relative paths resolve against source_surface_id cwd, or the agent working directory when source_surface_id is omitted.\"},\"source_surface_id\":{\"type\":\"string\",\"description\":\"Optional source terminal id from terminal_list. SSH pulls via scp; WSL uses a host-accessible WSL path; omitted means local.\"},\"dest_surface_id\":{\"type\":\"string\",\"description\":\"Optional destination terminal id from terminal_list. Use an SSH or WSL surface to send a local file there. Omit to copy into local wispterm-files.\"},\"dest_path\":{\"type\":\"string\",\"description\":\"Optional destination file path. Relative paths resolve against destination surface cwd, or the agent working directory for local destinations. If omitted, uses dest_name or the source basename.\"},\"dest_name\":{\"type\":\"string\",\"description\":\"Optional safe destination filename. In pull mode it is placed inside wispterm-files. Must not contain path separators.\"}}");
     try Filtered.emitTool(ctx, opts, "write_file", "Create or overwrite a local, WSL, or SSH text file with exact content. Shows a diff and (unless permission is full) asks for approval. Set surface_id to an open terminal surface to write there; omitted surface_id follows the selected terminal context, or local when none is selected. Relative paths resolve against that surface cwd or the agent working directory.", "{\"path\":{\"type\":\"string\",\"description\":\"File path. Absolute, or relative to the selected surface cwd / working directory.\"},\"content\":{\"type\":\"string\",\"description\":\"Full file content to write.\"},\"surface_id\":{\"type\":\"string\",\"description\":\"Optional terminal surface id. Omit to use the selected terminal context, or local when none is selected.\"}}");
@@ -828,9 +834,10 @@ const ToolNameCollectorForTesting = struct {
     allocator: std.mem.Allocator,
     names: std.ArrayListUnmanaged([]const u8) = .empty,
 
-    fn emit(self: *ToolNameCollectorForTesting, name: []const u8, description: []const u8, properties: []const u8) !void {
+    fn emit(self: *ToolNameCollectorForTesting, name: []const u8, description: []const u8, properties: []const u8, required: []const []const u8) !void {
         _ = description;
         _ = properties;
+        _ = required;
         try self.names.append(self.allocator, name);
     }
 };
@@ -853,7 +860,7 @@ const ToolSchemaEmitter = struct {
     out: *std.ArrayListUnmanaged(u8),
     first: bool = true,
 
-    fn emit(self: *ToolSchemaEmitter, name: []const u8, description: []const u8, properties: []const u8) !void {
+    fn emit(self: *ToolSchemaEmitter, name: []const u8, description: []const u8, properties: []const u8, required: []const []const u8) !void {
         if (!self.first) try self.out.append(self.allocator, ',');
         self.first = false;
         try self.out.appendSlice(self.allocator, "{\"type\":\"function\",\"function\":{\"name\":");
@@ -862,6 +869,7 @@ const ToolSchemaEmitter = struct {
         try appendJsonString(self.allocator, self.out, description);
         try self.out.appendSlice(self.allocator, ",\"parameters\":{\"type\":\"object\",\"properties\":");
         try self.out.appendSlice(self.allocator, properties);
+        try appendSchemaRequired(self.allocator, self.out, required);
         try self.out.appendSlice(self.allocator, ",\"additionalProperties\":false}}}");
     }
 };
@@ -871,7 +879,7 @@ const ResponseToolSchemaEmitter = struct {
     out: *std.ArrayListUnmanaged(u8),
     first: bool = true,
 
-    fn emit(self: *ResponseToolSchemaEmitter, name: []const u8, description: []const u8, properties: []const u8) !void {
+    fn emit(self: *ResponseToolSchemaEmitter, name: []const u8, description: []const u8, properties: []const u8, required: []const []const u8) !void {
         if (!self.first) try self.out.append(self.allocator, ',');
         self.first = false;
         try self.out.appendSlice(self.allocator, "{\"type\":\"function\",\"name\":");
@@ -880,6 +888,7 @@ const ResponseToolSchemaEmitter = struct {
         try appendJsonString(self.allocator, self.out, description);
         try self.out.appendSlice(self.allocator, ",\"parameters\":{\"type\":\"object\",\"properties\":");
         try self.out.appendSlice(self.allocator, properties);
+        try appendSchemaRequired(self.allocator, self.out, required);
         try self.out.appendSlice(self.allocator, ",\"additionalProperties\":false}}");
     }
 };
@@ -889,7 +898,7 @@ const AnthropicToolEmitter = struct {
     out: *std.ArrayListUnmanaged(u8),
     first: bool = true,
 
-    fn emit(self: *AnthropicToolEmitter, name: []const u8, description: []const u8, properties: []const u8) !void {
+    fn emit(self: *AnthropicToolEmitter, name: []const u8, description: []const u8, properties: []const u8, required: []const []const u8) !void {
         if (!self.first) try self.out.append(self.allocator, ',');
         self.first = false;
         try self.out.appendSlice(self.allocator, "{\"name\":");
@@ -899,9 +908,20 @@ const AnthropicToolEmitter = struct {
         // input_schema reuses the SAME JSON Schema object the OpenAI `parameters` uses.
         try self.out.appendSlice(self.allocator, ",\"input_schema\":{\"type\":\"object\",\"properties\":");
         try self.out.appendSlice(self.allocator, properties);
+        try appendSchemaRequired(self.allocator, self.out, required);
         try self.out.appendSlice(self.allocator, ",\"additionalProperties\":false}}");
     }
 };
+
+fn appendSchemaRequired(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), required: []const []const u8) !void {
+    if (required.len == 0) return;
+    try out.appendSlice(allocator, ",\"required\":[");
+    for (required, 0..) |name, i| {
+        if (i > 0) try out.append(allocator, ',');
+        try appendJsonString(allocator, out, name);
+    }
+    try out.append(allocator, ']');
+}
 
 fn appendToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), opts: ToolSpecOpts) !void {
     try out.appendSlice(allocator, ",\"tools\":[");
@@ -1869,6 +1889,10 @@ test "MCP tool whose name collides with a builtin is not advertised" {
     try std.testing.expect(std.mem.indexOf(u8, json, "shadow attempt") == null);
 }
 
+test "continue_later is a reserved builtin tool name" {
+    try std.testing.expect(builtinToolNameReserved("continue_later"));
+}
+
 test "disabled first-party list does not hide dynamic binary tools" {
     const a = std.testing.allocator;
     const disabled = [_][]const u8{"agent_docx_review"};
@@ -2156,9 +2180,9 @@ test "subagentToolAllowed accepts exactly the research tools" {
     };
     for (allowed) |name| try std.testing.expect(subagentToolAllowed(name));
     const denied = [_][]const u8{
-        "subagent",       "memory_save",        "ssh_session_exec", "write_file",
-        "edit_file",      "tab_new",            "tab_close",        "terminal_select",
-        "terminal_focus", "terminal_repl_exec",
+        "subagent",        "continue_later", "memory_save",        "ssh_session_exec",
+        "write_file",      "edit_file",      "tab_new",            "tab_close",
+        "terminal_select", "terminal_focus", "terminal_repl_exec",
     };
     for (denied) |name| try std.testing.expect(!subagentToolAllowed(name));
 }
@@ -2177,6 +2201,7 @@ test "subagent toolset restricts tool schemas to research tools" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"terminal_snapshot\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"wispterm_docs\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"subagent\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"continue_later\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"memory_save\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"ssh_session_exec\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"write_file\"") == null);
@@ -2203,6 +2228,18 @@ test "ask_user appears in the full tool schema with question and options" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"options\"") != null);
 }
 
+test "continue_later appears in the full tool schema with delay and message" {
+    const a = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try appendToolSchemas(a, &out, .{ .include_memory = false });
+    const json = out.items;
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"continue_later\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"delay\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"message\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"required\":[\"delay\"]") != null);
+}
+
 test "ask_user is absent from the subagent tool schema" {
     const a = std.testing.allocator;
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -2219,6 +2256,7 @@ test "subagent toolset gating applies to all three protocol emitters" {
     try appendResponseToolSchemas(a, &responses_out, .{ .include_memory = true, .toolset = .subagent });
     try std.testing.expect(std.mem.indexOf(u8, responses_out.items, "\"websearch\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, responses_out.items, "\"name\":\"subagent\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, responses_out.items, "\"name\":\"continue_later\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, responses_out.items, "\"write_file\"") == null);
 
     var anthropic_out: std.ArrayListUnmanaged(u8) = .empty;
@@ -2226,5 +2264,6 @@ test "subagent toolset gating applies to all three protocol emitters" {
     try appendAnthropicTools(a, &anthropic_out, .{ .include_memory = true, .toolset = .subagent });
     try std.testing.expect(std.mem.indexOf(u8, anthropic_out.items, "\"websearch\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, anthropic_out.items, "\"name\":\"subagent\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, anthropic_out.items, "\"name\":\"continue_later\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, anthropic_out.items, "\"write_file\"") == null);
 }

@@ -924,7 +924,7 @@ fn unixSessionExecTool(ctx: *ToolContext, kind: UnixSessionKind, surface_id: []c
     if (host.surfaceSnapshot(host.ctx, ctx.allocator, surface.id, surface.ptr) catch null) |guard_snapshot| {
         defer ctx.allocator.free(guard_snapshot);
         if (agentCommandStillRunning(guard_snapshot)) {
-            return std.fmt.allocPrint(ctx.allocator, "A previous command is still running in this {s} terminal. Do not start another command. Wait and re-check with terminal_snapshot, or interrupt it first with terminal_repl_exec repl=plain code=<ctrl-c>.", .{kind.label()});
+            return allocStillRunningBusyGuard(ctx.allocator, kind.label());
         }
     }
 
@@ -960,11 +960,15 @@ fn unixSessionExecTool(ctx: *ToolContext, kind: UnixSessionKind, surface_id: []c
 /// it as "still running, do not re-issue" with recovery hints, so the model
 /// waits/re-checks instead of re-running the command (which duplicates side
 /// effects, e.g. a second git clone).
+fn allocStillRunningBusyGuard(allocator: std.mem.Allocator, label: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "A previous command is still running in this {s} terminal. Do not start another command. Use continue_later to re-check with terminal_snapshot after a sensible delay, or interrupt it first with terminal_repl_exec repl=plain code=<ctrl-c>.", .{label});
+}
+
 fn allocStillRunningTimeout(allocator: std.mem.Allocator, label: []const u8, elapsed_s: i64, snapshot: ?[]const u8) ![]u8 {
     if (snapshot) |text| {
-        return std.fmt.allocPrint(allocator, "The {s} command has not returned after {d}s; it is most likely still running. Do NOT re-issue it. Re-check later with terminal_snapshot, or interrupt with terminal_repl_exec repl=plain code=<ctrl-c>.\nLatest snapshot:\n{s}", .{ label, elapsed_s, text });
+        return std.fmt.allocPrint(allocator, "The {s} command has not returned after {d}s; it is most likely still running. Do NOT re-issue it. Use continue_later to re-check with terminal_snapshot after a sensible delay, or interrupt with terminal_repl_exec repl=plain code=<ctrl-c>.\nLatest snapshot:\n{s}", .{ label, elapsed_s, text });
     }
-    return std.fmt.allocPrint(allocator, "The {s} command has not returned after {d}s; it is most likely still running. Do NOT re-issue it. Re-check later with terminal_snapshot, or interrupt with terminal_repl_exec repl=plain code=<ctrl-c>.", .{ label, elapsed_s });
+    return std.fmt.allocPrint(allocator, "The {s} command has not returned after {d}s; it is most likely still running. Do NOT re-issue it. Use continue_later to re-check with terminal_snapshot after a sensible delay, or interrupt with terminal_repl_exec repl=plain code=<ctrl-c>.", .{ label, elapsed_s });
 }
 
 fn waitForSentinelResult(
@@ -1439,8 +1443,27 @@ test "agent exec timeout message says still running, do not re-issue" {
     defer allocator.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "still running") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "Do NOT re-issue") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "continue_later") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "Use continue_later to re-check with terminal_snapshot after a sensible delay") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "code=<ctrl-c>") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "Cloning into 'x'...") != null);
+
+    const no_snapshot_msg = try allocStillRunningTimeout(allocator, "SSH", 60, null);
+    defer allocator.free(no_snapshot_msg);
+    try std.testing.expect(std.mem.indexOf(u8, no_snapshot_msg, "still running") != null);
+    try std.testing.expect(std.mem.indexOf(u8, no_snapshot_msg, "Do NOT re-issue") != null);
+    try std.testing.expect(std.mem.indexOf(u8, no_snapshot_msg, "Use continue_later to re-check with terminal_snapshot after a sensible delay") != null);
+    try std.testing.expect(std.mem.indexOf(u8, no_snapshot_msg, "code=<ctrl-c>") != null);
+}
+
+test "agent exec busy guard message points at continue_later" {
+    const allocator = std.testing.allocator;
+    const msg = try allocStillRunningBusyGuard(allocator, "SSH");
+    defer allocator.free(msg);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "previous command is still running") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "continue_later") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "terminal_snapshot") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "code=<ctrl-c>") != null);
 }
 
 test "agent exec sentinel ignores the echoed command line" {

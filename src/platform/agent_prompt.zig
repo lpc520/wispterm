@@ -69,7 +69,7 @@ const common_tools_after_wsl =
     \\- In line REPLs (Python/R/Node), type raw code as a human would; bare expressions auto-display, so send `1+1`, not print wrappers.
     \\- surface_id accepts `focused`.
     \\- Do not paste shell commands into Codex or Claude Code; send user text.
-    \\- A slow session/exec command is usually still running; wait, then re-check with `terminal_snapshot`.
+    \\- A slow session/exec command is usually still running. Do not re-run it. If waiting is better than immediate polling, call `continue_later` with a delay such as 30m and a message that checks `terminal_snapshot` first.
     \\- For a stuck terminal (`>` prompt, unclosed quote, hung command, pager), send `terminal_repl_exec repl=plain code=<ctrl-c>` (or `<ctrl-u>`/`<esc>`/`<ctrl-d>`).
     \\- Read terminal snapshots from the bottom; if stale/truncated, re-read with `terminal_snapshot`.
     \\- Answer Claude Code/Codex approval menus with `terminal_answer_prompt`; never blind-press unseen prompts.
@@ -172,6 +172,15 @@ test "platform agent prompt teaches stuck-terminal interrupt recovery" {
         const p = defaultSystemPromptForOs(os);
         try std.testing.expect(std.mem.indexOf(u8, p, "code=<ctrl-c>") != null);
         try std.testing.expect(std.mem.indexOf(u8, p, "still running") != null);
+    }
+}
+
+test "platform agent prompt teaches continue_later for long-running work" {
+    for ([_]std.Target.Os.Tag{ .windows, .linux, .macos }) |os| {
+        const p = defaultSystemPromptForOs(os);
+        try std.testing.expect(std.mem.indexOf(u8, p, "continue_later") != null);
+        try std.testing.expect(std.mem.indexOf(u8, p, "terminal_snapshot") != null);
+        try std.testing.expect(std.mem.indexOf(u8, p, "Do not re-run") != null);
     }
 }
 
