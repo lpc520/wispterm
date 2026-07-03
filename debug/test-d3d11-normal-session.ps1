@@ -961,6 +961,8 @@ try {
             $diagText -match "adapter=unknown"
         )
     )
+    $hasD3D11Environment = $diagText -match "gpu-backend=d3d11 environment .*vendor_id=0x[0-9a-fA-F]+.*device_id=0x[0-9a-fA-F]+.*subsys_id=0x[0-9a-fA-F]+.*revision=[0-9]+.*dedicated_video_memory=[0-9]+.*dedicated_system_memory=[0-9]+.*shared_system_memory=[0-9]+.*adapter_flags=0x[0-9a-fA-F]+.*output_count=[0-9]+.*feature_level=([0-9_]+|unknown).*swap_effect=flip_discard"
+    $hasWindowsEnvironment = $diagText -match "windows-environment remote_session=(true|false) session_id=[0-9]+ monitor_count=[0-9]+ mixed_dpi=(true|false) primary_dpi=[0-9]+x[0-9]+ system_dpi=[0-9]+"
     $hasD3D11PolicyHealthy = $diagText -match "gpu-backend=d3d11 present=dxgi .*policy_state=healthy.*fallback_candidate=false"
     $hasD3D11RecoveryRequested = $diagText -match "gpu-backend=d3d11 recovery requested"
     $hasD3D11RecreateSmokeRequest = $diagText -match "d3d11-recreate-smoke requested device recreate"
@@ -985,9 +987,9 @@ try {
         (!$hasD3D11FallbackMarkerSmoke -and !$hasD3D11FallbackMarkerState)
     }
     $backendExpectation = if ($isD3D11Backend) {
-        ($hasD3D11Present -and $hasD3D11InitDetails -and $hasD3D11PolicyHealthy)
+        ($hasD3D11Present -and $hasD3D11InitDetails -and $hasD3D11Environment -and $hasWindowsEnvironment -and $hasD3D11PolicyHealthy)
     } else {
-        ($hasOpenGLBackend -and $hasOpenGLHostPresent -and !$hasD3D11Present -and !$hasD3D11InitDetails -and !$hasD3D11PolicyHealthy)
+        ($hasOpenGLBackend -and $hasOpenGLHostPresent -and $hasWindowsEnvironment -and !$hasD3D11Present -and !$hasD3D11InitDetails -and !$hasD3D11Environment -and !$hasD3D11PolicyHealthy)
     }
     $probeExpectation = if ($isD3D11Backend) {
         ($hasUiProbe -and $hasOffscreen)
@@ -1175,6 +1177,8 @@ try {
             opengl_host_present = [bool]$hasOpenGLHostPresent
             d3d11_present = [bool]$hasD3D11Present
             d3d11_init_details = [bool]$hasD3D11InitDetails
+            d3d11_environment = [bool]$hasD3D11Environment
+            windows_environment = [bool]$hasWindowsEnvironment
             d3d11_policy_healthy = [bool]$hasD3D11PolicyHealthy
             d3d11_resize_events = $d3d11ResizeEventCount
             d3d11_rapid_resize_diagnostics = [bool]$rapidResizeDiagnostic
