@@ -88,9 +88,9 @@ jobs:
           $portableCompatConPty = "zig-out\dist\portable-compat\conpty.dll"
           $portableCompatConsoleHost = "zig-out\dist\portable-compat\OpenConsole.exe"
           $portableCompatPluginSkills = "zig-out\dist\portable-compat\plugins\skills"
-          $portableNoWebViewExe = "zig-out\dist\portable-no-webview\wispterm.exe"
-          $portableNoWebViewVersion = "zig-out\dist\portable-no-webview\version.txt"
-          $portableNoWebViewPluginSkills = "zig-out\dist\portable-no-webview\plugins\skills"
+          $portableNativeD3D11Exe = "zig-out\dist\portable-native-d3d11\wispterm.exe"
+          $portableNativeD3D11Version = "zig-out\dist\portable-native-d3d11\version.txt"
+          $portableNativeD3D11PluginSkills = "zig-out\dist\portable-native-d3d11\plugins\skills"
           $skillFiles = @(
             "plugins\skills\inspect-computer-config\SKILL.md",
             "plugins\skills\inspect-computer-config\scripts\inspect_computer_config.py"
@@ -132,19 +132,19 @@ jobs:
             throw "Portable compat plugin skills directory not found: $portableCompatPluginSkills"
           }
 
-          if (!(Test-Path $portableNoWebViewExe)) {
-            throw "Portable no-WebView executable not found: $portableNoWebViewExe"
+          if (!(Test-Path $portableNativeD3D11Exe)) {
+            throw "Portable native D3D11 executable not found: $portableNativeD3D11Exe"
           }
 
-          if (!(Test-Path $portableNoWebViewVersion)) {
-            throw "Portable no-WebView version file not found: $portableNoWebViewVersion"
+          if (!(Test-Path $portableNativeD3D11Version)) {
+            throw "Portable native D3D11 version file not found: $portableNativeD3D11Version"
           }
 
-          if (!(Test-Path $portableNoWebViewPluginSkills -PathType Container)) {
-            throw "Portable no-WebView plugin skills directory not found: $portableNoWebViewPluginSkills"
+          if (!(Test-Path $portableNativeD3D11PluginSkills -PathType Container)) {
+            throw "Portable native D3D11 plugin skills directory not found: $portableNativeD3D11PluginSkills"
           }
 
-          foreach ($distDir in @("zig-out\dist\portable", "zig-out\dist\portable-compat", "zig-out\dist\portable-no-webview")) {
+          foreach ($distDir in @("zig-out\dist\portable", "zig-out\dist\portable-compat", "zig-out\dist\portable-native-d3d11")) {
             foreach ($skillFile in $skillFiles) {
               $path = Join-Path $distDir $skillFile
               if (!(Test-Path $path)) {
@@ -169,7 +169,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $portableAsset = "wispterm-windows-portable-$tag.zip"
           $portableCompatAsset = "wispterm-windows-portable-compat-$tag.zip"
-          $portableNoWebViewAsset = "wispterm-windows-portable-no-webview-$tag.zip"
+          $portableNativeD3D11Asset = "wispterm-windows-portable-native-d3d11-$tag.zip"
           $debugAsset = "wispterm-windows-debug-$tag.zip"
 
           if (Test-Path $portableAsset) {
@@ -178,14 +178,14 @@ jobs:
           if (Test-Path $portableCompatAsset) {
             Remove-Item $portableCompatAsset -Force
           }
-          if (Test-Path $portableNoWebViewAsset) {
-            Remove-Item $portableNoWebViewAsset -Force
+          if (Test-Path $portableNativeD3D11Asset) {
+            Remove-Item $portableNativeD3D11Asset -Force
           }
           if (Test-Path $debugAsset) { Remove-Item $debugAsset -Force }
 
           Compress-Archive -Path zig-out\dist\portable\* -DestinationPath $portableAsset -Force
           Compress-Archive -Path zig-out\dist\portable-compat\* -DestinationPath $portableCompatAsset -Force
-          Compress-Archive -Path zig-out\dist\portable-no-webview\* -DestinationPath $portableNoWebViewAsset -Force
+          Compress-Archive -Path zig-out\dist\portable-native-d3d11\* -DestinationPath $portableNativeD3D11Asset -Force
           Compress-Archive -Path zig-out\dist\portable-debug\* -DestinationPath $debugAsset -Force
 
       - name: Upload portable artifact
@@ -202,11 +202,11 @@ jobs:
           path: wispterm-windows-portable-compat-${{ github.ref_name }}.zip
           if-no-files-found: error
 
-      - name: Upload portable no-WebView artifact
+      - name: Upload portable native D3D11 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wispterm-windows-portable-no-webview-${{ github.ref_name }}
-          path: wispterm-windows-portable-no-webview-${{ github.ref_name }}.zip
+          name: wispterm-windows-portable-native-d3d11-${{ github.ref_name }}
+          path: wispterm-windows-portable-native-d3d11-${{ github.ref_name }}.zip
           if-no-files-found: error
 
       - name: Upload diagnostic artifact
@@ -224,7 +224,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $portableAsset = "wispterm-windows-portable-$tag.zip"
           $portableCompatAsset = "wispterm-windows-portable-compat-$tag.zip"
-          $portableNoWebViewAsset = "wispterm-windows-portable-no-webview-$tag.zip"
+          $portableNativeD3D11Asset = "wispterm-windows-portable-native-d3d11-$tag.zip"
           $debugAsset = "wispterm-windows-debug-$tag.zip"
 
           if (!(Test-Path $portableAsset)) {
@@ -233,8 +233,8 @@ jobs:
           if (!(Test-Path $portableCompatAsset)) {
             throw "Portable compat release asset not found: $portableCompatAsset"
           }
-          if (!(Test-Path $portableNoWebViewAsset)) {
-            throw "Portable no-WebView release asset not found: $portableNoWebViewAsset"
+          if (!(Test-Path $portableNativeD3D11Asset)) {
+            throw "Portable native D3D11 release asset not found: $portableNativeD3D11Asset"
           }
           if (!(Test-Path $debugAsset)) {
             throw "Diagnostic release asset not found: $debugAsset"
@@ -242,14 +242,14 @@ jobs:
 
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $portableAsset $portableCompatAsset $portableNoWebViewAsset $debugAsset --repo $env:GITHUB_REPOSITORY --clobber
+            gh release upload $tag $portableAsset $portableCompatAsset $portableNativeD3D11Asset $debugAsset --repo $env:GITHUB_REPOSITORY --clobber
           } else {
             $assetNotes = @(
               "Windows assets included in this release:",
               "",
-              "- Portable: lightweight zip archive containing wispterm.exe",
-              "- Portable compat: zip archive for older Windows 10 machines - bundles WebView2Loader.dll for the embedded browser plus a modern ConPTY (conpty.dll + OpenConsole.exe) so TUI apps like Codex and Claude Code get mouse scrolling and scrollbars",
-              "- Portable no-WebView: zip archive containing wispterm.exe, built with embedded WebView2 disabled",
+              "- Portable: default OpenGL zip archive containing wispterm.exe",
+              "- Portable compat: OpenGL zip archive for older Windows 10 machines - bundles WebView2Loader.dll for the embedded browser plus a modern ConPTY (conpty.dll + OpenConsole.exe) so TUI apps like Codex and Claude Code get mouse scrolling and scrollbars",
+              "- Portable native D3D11: feedback zip archive using the Windows native D3D11 renderer; use the default Portable asset if you hit rendering issues",
               "- Diagnostic (debug): console build with on-disk logging + crash reports for troubleshooting (ReleaseSafe). See docs/windows-debug-build.md.",
               "",
               "The unsigned IExpress setup executable is not published because Windows Defender can quarantine it as a false positive. Use one of the portable zip assets for now."
@@ -267,7 +267,7 @@ jobs:
               $notes = $assetNotes
             }
 
-            gh release create $tag $portableAsset $portableCompatAsset $portableNoWebViewAsset $debugAsset `
+            gh release create $tag $portableAsset $portableCompatAsset $portableNativeD3D11Asset $debugAsset `
               --repo $env:GITHUB_REPOSITORY `
               --verify-tag `
               --generate-notes `
