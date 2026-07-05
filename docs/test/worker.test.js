@@ -46,8 +46,9 @@ test("latestDownloadKey maps public latest download URLs to R2 keys", () => {
   );
 });
 
-test("latestDownloadKey rejects unknown or nested download paths", () => {
+test("latestDownloadKey rejects unknown, retired, or nested download paths", () => {
   assert.equal(latestDownloadKey("/downloads/latest/private.zip"), null);
   assert.equal(latestDownloadKey("/downloads/latest/nested/file.zip"), null);
   assert.equal(latestDownloadKey("/downloads/old/wispterm-windows-portable.zip"), null);
+  assert.equal(latestDownloadKey("/downloads/latest/wispterm-windows-portable-no-webview.zip"), null);
 });

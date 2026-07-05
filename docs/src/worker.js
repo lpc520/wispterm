@@ -3,7 +3,6 @@ export const ONLINE_TTL_MS = 2 * 60 * 1000;
 const LATEST_DOWNLOADS = new Set([
   "wispterm-windows-portable.zip",
   "wispterm-windows-portable-compat.zip",
-  "wispterm-windows-portable-no-webview.zip",
   "wispterm-macos-aarch64.dmg",
   "wispterm-macos-x86_64.dmg",
   "wispterm-linux-x86_64.AppImage",

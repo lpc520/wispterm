@@ -51,7 +51,6 @@ jobs:
 
           upload_first 'wispterm-windows-portable-[0-9v]*.zip' 'wispterm-windows-portable.zip' 'application/zip'
           upload_first 'wispterm-windows-portable-compat-[0-9v]*.zip' 'wispterm-windows-portable-compat.zip' 'application/zip'
-          upload_first 'wispterm-windows-portable-no-webview-[0-9v]*.zip' 'wispterm-windows-portable-no-webview.zip' 'application/zip'
           upload_first 'wispterm-macos-aarch64-[0-9v]*.dmg' 'wispterm-macos-aarch64.dmg' 'application/x-apple-diskimage'
           upload_first 'wispterm-macos-x86_64-[0-9v]*.dmg' 'wispterm-macos-x86_64.dmg' 'application/x-apple-diskimage'
           upload_first 'WispTerm-*-x86_64.AppImage' 'wispterm-linux-x86_64.AppImage' 'application/octet-stream'
