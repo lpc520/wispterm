@@ -39,6 +39,7 @@ const overlay_keys = @import("overlay_keys.zig");
 const overlay_state = @import("overlays/state.zig");
 const confirm_modals = @import("overlays/confirm_modals.zig");
 const settings_page = @import("overlays/settings_page.zig");
+const settings_page_layout = @import("overlays/settings_page_layout.zig");
 const toasts = @import("overlays/toasts.zig");
 const ssh_profiles = @import("overlays/ssh_profiles.zig");
 const ssh_profiles_layout = @import("overlays/ssh_profiles_layout.zig");
@@ -1979,7 +1980,8 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     }
 
     const layout = commandPaletteLayout(window_width, window_height, top_offset);
-    const box_y = @round(window_height - layout.box_top_px - layout.box_h);
+    const text_h = overlayTextHeight();
+    const chrome = command_palette_layout.panelChrome(layout, window_width, window_height);
 
     const bg = AppWindow.g_theme.background;
     const fg = AppWindow.g_theme.foreground;
@@ -1994,9 +1996,9 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     const selected_bg = mixColor(bg, accent, 0.50);
     const selected_border = mixColor(accent, fg, 0.16);
 
-    ui_pipeline.fillQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.22);
-    renderRoundedQuadAlpha(layout.box_x - 1, box_y - 1, layout.box_w + 2, layout.box_h + 2, 9, border_color, 0.42);
-    renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 8, panel_color, 0.98);
+    ui_pipeline.fillQuadAlpha(chrome.scrim.x, chrome.scrim.y, chrome.scrim.w, chrome.scrim.h, .{ 0.0, 0.0, 0.0 }, 0.22);
+    renderRoundedQuadAlpha(chrome.border.x, chrome.border.y, chrome.border.w, chrome.border.h, 9, border_color, 0.42);
+    renderRoundedQuadAlpha(chrome.panel.x, chrome.panel.y, chrome.panel.w, chrome.panel.h, 8, panel_color, 0.98);
 
     const pad_x: f32 = 24;
     const title_y = textYFromTop(window_height, layout.box_top_px + 16);
@@ -2010,26 +2012,24 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
         renderTitlebarText(chip, chip_x, title_y, mixColor(fg, accent, 0.20));
     }
 
-    const filter_x = @round(layout.box_x + pad_x);
-    const filter_box_y = @round(window_height - (layout.box_top_px + layout.header_h + layout.filter_h));
-    const filter_w = layout.box_w - pad_x * 2;
-    renderRoundedQuadAlpha(filter_x - 1, filter_box_y - 1, filter_w + 2, layout.filter_h + 2, 6, field_border, 0.42);
-    renderRoundedQuadAlpha(filter_x, filter_box_y, filter_w, layout.filter_h, 5, field_color, 0.92);
+    const filter_chrome = command_palette_layout.fieldChrome(layout, window_height, pad_x, text_h);
+    renderRoundedQuadAlpha(filter_chrome.border.x, filter_chrome.border.y, filter_chrome.border.w, filter_chrome.border.h, 6, field_border, 0.42);
+    renderRoundedQuadAlpha(filter_chrome.field.x, filter_chrome.field.y, filter_chrome.field.w, filter_chrome.field.h, 5, field_color, 0.92);
 
-    const filter_text_y = rowTextY(filter_box_y, layout.filter_h);
+    const filter_text_y = filter_chrome.text_y;
     if (commandPaletteIsHistoryMode()) {
         const filter = commandPaletteFilter();
         if (filter.len > 0) {
-            renderTitlebarTextLimited(filter, filter_x + 12, filter_text_y, fg, filter_w - 24);
+            renderTitlebarTextLimited(filter, filter_chrome.field.x + 12, filter_text_y, fg, filter_chrome.field.w - 24);
         } else {
-            renderTitlebarTextLimited(i18n.s().cmd_palette_history_search_placeholder, filter_x + 12, filter_text_y, dim, filter_w - 24);
+            renderTitlebarTextLimited(i18n.s().cmd_palette_history_search_placeholder, filter_chrome.field.x + 12, filter_text_y, dim, filter_chrome.field.w - 24);
         }
     } else {
         const filter = commandPaletteFilter();
         if (filter.len > 0) {
-            renderTitlebarTextLimited(filter, filter_x + 12, filter_text_y, fg, filter_w - 24);
+            renderTitlebarTextLimited(filter, filter_chrome.field.x + 12, filter_text_y, fg, filter_chrome.field.w - 24);
         } else {
-            renderTitlebarTextLimited(i18n.s().cmd_palette_filter_placeholder, filter_x + 12, filter_text_y, dim, filter_w - 24);
+            renderTitlebarTextLimited(i18n.s().cmd_palette_filter_placeholder, filter_chrome.field.x + 12, filter_text_y, dim, filter_chrome.field.w - 24);
         }
     }
 
@@ -2037,7 +2037,7 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
         const selectable = if (history_view) |v| v.rowCount() else 0;
         if (history_view == null or selectable == 0) {
             const empty_text = i18n.s().cmd_palette_no_sessions;
-            const empty_y = @round(window_height - layout.row_top_px - layout.row_h + (layout.row_h - overlayTextHeight()) / 2);
+            const empty_y = command_palette_layout.emptyTextY(layout, window_height, text_h);
             renderTitlebarText(empty_text, layout.box_x + (layout.box_w - measureTitlebarText(empty_text)) / 2, empty_y, muted);
         } else {
             const view = history_view.?;
@@ -2049,9 +2049,8 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
             while (display_row < layout.rendered_rows) : (display_row += 1) {
                 const item_idx = first_item + display_row;
                 if (item_idx >= view.items.len) break;
-                const row_top = @round(layout.row_top_px + @as(f32, @floatFromInt(display_row)) * layout.row_h);
-                const row_y = @round(window_height - row_top - layout.row_h);
-                const text_y = rowTextY(row_y, layout.row_h);
+                const slot = command_palette_layout.rowSlot(layout, window_height, display_row, text_h);
+                const text_y = slot.text_y;
                 switch (view.items[item_idx]) {
                     .header => |b| {
                         const label = historyBucketLabel(b);
@@ -2061,8 +2060,8 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
                         const row = g_command_palette_history_rows[view.filtered[ord]];
                         const selected = ord == selected_ord;
                         if (selected) {
-                            renderRoundedQuadAlpha(layout.box_x + 12, row_y + 4, layout.box_w - 24, layout.row_h - 8, 5, selected_border, 0.38);
-                            renderRoundedQuadAlpha(layout.box_x + 13, row_y + 5, layout.box_w - 26, layout.row_h - 10, 4, selected_bg, 0.78);
+                            renderRoundedQuadAlpha(slot.selected_border.x, slot.selected_border.y, slot.selected_border.w, slot.selected_border.h, 5, selected_border, 0.38);
+                            renderRoundedQuadAlpha(slot.selected_fill.x, slot.selected_fill.y, slot.selected_fill.w, slot.selected_fill.h, 4, selected_bg, 0.78);
                         }
                         const row_title_color = if (selected) fg else mixColor(bg, fg, 0.86);
                         const meta_color = if (selected) mixColor(fg, accent, 0.08) else mixColor(bg, fg, 0.54);
@@ -2090,7 +2089,7 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
         rebuildPaletteScratch();
         if (g_palette_scratch_len == 0) {
             const empty_text = "No matching results";
-            const empty_y = @round(window_height - layout.row_top_px - layout.row_h + (layout.row_h - overlayTextHeight()) / 2);
+            const empty_y = command_palette_layout.emptyTextY(layout, window_height, text_h);
             renderTitlebarText(empty_text, layout.box_x + (layout.box_w - measureTitlebarText(empty_text)) / 2, empty_y, muted);
         } else {
             const first_row = commandPaletteFirstVisibleIndex(layout.rendered_rows);
@@ -2101,17 +2100,16 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
                 const item = g_palette_scratch[item_idx];
                 const selected = item_idx == commandPaletteState().selected;
 
-                const row_top = @round(layout.row_top_px + @as(f32, @floatFromInt(display_row)) * layout.row_h);
-                const row_y = @round(window_height - row_top - layout.row_h);
+                const slot = command_palette_layout.rowSlot(layout, window_height, display_row, text_h);
                 if (selected) {
-                    renderRoundedQuadAlpha(layout.box_x + 12, row_y + 4, layout.box_w - 24, layout.row_h - 8, 5, selected_border, 0.38);
-                    renderRoundedQuadAlpha(layout.box_x + 13, row_y + 5, layout.box_w - 26, layout.row_h - 10, 4, selected_bg, 0.78);
+                    renderRoundedQuadAlpha(slot.selected_border.x, slot.selected_border.y, slot.selected_border.w, slot.selected_border.h, 5, selected_border, 0.38);
+                    renderRoundedQuadAlpha(slot.selected_fill.x, slot.selected_fill.y, slot.selected_fill.w, slot.selected_fill.h, 4, selected_bg, 0.78);
                 }
 
                 const row_title_color = if (selected) fg else mixColor(bg, fg, 0.86);
                 const shortcut_color = if (selected) mixColor(fg, accent, 0.08) else mixColor(bg, fg, 0.54);
 
-                const text_y = rowTextY(row_y, layout.row_h);
+                const text_y = slot.text_y;
                 const title_x = @round(layout.box_x + pad_x + 2);
 
                 switch (item) {
@@ -2197,15 +2195,6 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     // and the mouse wheel.
     const total_results = commandPaletteResultCount();
     if (total_results > layout.rendered_rows and layout.rendered_rows > 0) {
-        const total_f: f32 = @floatFromInt(total_results);
-        const vis_f: f32 = @floatFromInt(layout.rendered_rows);
-        const track_h = layout.row_h * vis_f;
-        const track_top_px = layout.row_top_px;
-        const sb_w: f32 = 3;
-        const sb_x = layout.box_x + layout.box_w - sb_w - 7;
-        const track_gl_y = @round(window_height - track_top_px - track_h);
-        ui_pipeline.fillQuadAlpha(sb_x, track_gl_y, sb_w, track_h, mixColor(bg, fg, 0.25), 0.30);
-
         // History mode windows over display items (rows + group headers), so the
         // thumb must track the same item-index window the list render uses, not the
         // raw-ordinal window commandPaletteFirstVisibleIndex assumes.
@@ -2215,16 +2204,14 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
             const selected_ord = if (selectable == 0) 0 else @min(commandPaletteState().history_selected, selectable - 1);
             break :blk historyWindowStart(v.items.len, layout.rendered_rows, historySelectedItemIndex(v, selected_ord));
         } else commandPaletteFirstVisibleIndex(layout.rendered_rows);
-        const thumb_h = @max(24.0, @round(track_h * vis_f / total_f));
-        const max_scroll_f: f32 = @floatFromInt(total_results - layout.rendered_rows);
-        const scroll_f: f32 = @floatFromInt(first_row);
-        const thumb_offset = if (max_scroll_f > 0) @round((track_h - thumb_h) * (scroll_f / max_scroll_f)) else 0;
-        const thumb_gl_y = @round(window_height - (track_top_px + thumb_offset) - thumb_h);
-        ui_pipeline.fillQuadAlpha(sb_x, thumb_gl_y, sb_w, thumb_h, accent, 0.55);
+        if (command_palette_layout.scrollbar(layout, window_height, total_results, first_row)) |sb| {
+            ui_pipeline.fillQuadAlpha(sb.track.x, sb.track.y, sb.track.w, sb.track.h, mixColor(bg, fg, 0.25), 0.30);
+            ui_pipeline.fillQuadAlpha(sb.thumb.x, sb.thumb.y, sb.thumb.w, sb.thumb.h, accent, 0.55);
+        }
     }
 
     const footer = if (commandPaletteIsHistoryMode()) i18n.s().cmd_palette_footer_history else i18n.s().cmd_palette_footer;
-    renderTitlebarTextLimited(footer, layout.box_x + pad_x, rowTextY(box_y, layout.footer_h), muted, layout.box_w - pad_x * 2);
+    renderTitlebarTextLimited(footer, layout.box_x + pad_x, command_palette_layout.footerTextY(layout, window_height, text_h), muted, layout.box_w - pad_x * 2);
 }
 
 // ============================================================================
@@ -6228,21 +6215,7 @@ const SettingsAction = settings_page.Action;
 const SETTINGS_THEME_ROW = settings_page.SETTINGS_THEME_ROW;
 const SETTINGS_CONTROL_ROW_START = settings_page.SETTINGS_CONTROL_ROW_START;
 const SETTINGS_ROW_COUNT = settings_page.SETTINGS_ROW_COUNT;
-
-const SettingsLayout = struct {
-    box_x: f32,
-    box_top_px: f32,
-    box_w: f32,
-    box_h: f32,
-    header_h: f32,
-    footer_h: f32,
-    row_top_px: f32,
-    row_h: f32,
-    /// Number of rows that fit in the box for the current window height.
-    visible_rows: usize,
-    /// Index of the first rendered row (scroll offset).
-    scroll: usize,
-};
+const SettingsLayout = settings_page_layout.Layout;
 
 pub fn settingsPageVisible() bool {
     return settingsState().visible;
@@ -6278,8 +6251,7 @@ pub fn settingsPageContainsPoint(xpos: f64, ypos: f64, window_width: f32, window
     const layout = settingsLayout(window_width, window_height, top_offset);
     const x: f32 = @floatCast(xpos);
     const y: f32 = @floatCast(ypos);
-    return x >= layout.box_x and x <= layout.box_x + layout.box_w and
-        y >= layout.box_top_px and y <= layout.box_top_px + layout.box_h;
+    return layout.containsPoint(x, y);
 }
 
 pub fn settingsPageExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_offset: f32) bool {
@@ -6288,46 +6260,23 @@ pub fn settingsPageExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_hei
     return true;
 }
 
-/// Number of settings rows that fit within the box for the given window height,
-/// leaving room for the header and footer. Mirrors commandPaletteRowCapacity().
 fn settingsRowCapacity(content_height: f32, base_h: f32, row_h: f32) usize {
-    const usable_h = @max(row_h, content_height - 32.0 - base_h);
-    if (usable_h <= row_h) return 1;
-    const count_f = @floor(usable_h / row_h);
-    const count: usize = @intFromFloat(@max(1.0, count_f));
-    return @min(count, SETTINGS_ROW_COUNT);
+    return settings_page_layout.rowCapacity(content_height, base_h, row_h, SETTINGS_ROW_COUNT);
 }
 
-/// First row to render so the focused row stays visible (scroll offset).
-/// Mirrors commandPaletteFirstVisibleIndex().
 fn settingsFirstVisibleRow(visible_rows: usize) usize {
-    return settingsState().firstVisibleRow(visible_rows);
+    return settings_page_layout.firstVisibleRow(settingsState().focus, visible_rows, SETTINGS_ROW_COUNT);
 }
 
 fn settingsLayout(window_width: f32, window_height: f32, top_offset: f32) SettingsLayout {
-    const content_height = @max(1, window_height - top_offset);
-    const box_w = @round(@min(@max(420, window_width - 48), 760));
-    const row_h = overlayRowHeight(42);
-    const header_h = @round(18 + overlayLineHeight() * 2 + 12);
-    const footer_h = @round(@max(52.0, overlayTextHeight() + 28.0));
-    const visible_rows = settingsRowCapacity(content_height, header_h + footer_h, row_h);
-    const scroll = settingsFirstVisibleRow(visible_rows);
-    const box_h = @round(clampOverlayBoxHeight(header_h + row_h * @as(f32, @floatFromInt(visible_rows)) + footer_h, content_height));
-    const box_x = @round(@max(16, (window_width - box_w) / 2));
-    const box_top_px = @round(top_offset + @max(16, (content_height - box_h) / 2));
-    const row_top_px = @round(box_top_px + header_h);
-    return .{
-        .box_x = box_x,
-        .box_top_px = box_top_px,
-        .box_w = box_w,
-        .box_h = box_h,
-        .header_h = header_h,
-        .footer_h = footer_h,
-        .row_top_px = row_top_px,
-        .row_h = row_h,
-        .visible_rows = visible_rows,
-        .scroll = scroll,
-    };
+    return settings_page_layout.compute(.{
+        .window_width = window_width,
+        .window_height = window_height,
+        .top_offset = top_offset,
+        .cell_height = font.g_titlebar_cell_height,
+        .focus = settingsState().focus,
+        .row_count = SETTINGS_ROW_COUNT,
+    });
 }
 
 fn settingsHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_offset: f32) ?SettingsAction {
@@ -6335,25 +6284,18 @@ fn settingsHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, 
     const x: f32 = @floatCast(xpos);
     const y: f32 = @floatCast(ypos);
 
-    const close_x = layout.box_x + layout.box_w - 62;
-    if (y >= layout.box_top_px + 18 and y < layout.box_top_px + 46 and x >= close_x and x < close_x + 44) {
+    if (layout.hitClose(x, y)) {
         return .close;
     }
 
-    if (x < layout.box_x + 18 or x > layout.box_x + layout.box_w - 18) return null;
-    if (y < layout.row_top_px) return null;
-    const visible_index: usize = @intFromFloat(@floor((y - layout.row_top_px) / layout.row_h));
-    if (visible_index >= layout.visible_rows) return null;
-    const row = visible_index + layout.scroll;
-    if (row >= SETTINGS_ROW_COUNT) return null;
+    const row = layout.rowAt(x, y) orelse return null;
     settingsState().focus = row;
 
     if (row == 0) {
-        const plus_x = layout.box_x + layout.box_w - 70;
-        const minus_x = plus_x - 42;
-        if (x >= minus_x and x < minus_x + 30) return .font_size_minus;
-        if (x >= plus_x and x < plus_x + 30) return .font_size_plus;
-        return null;
+        return switch (layout.fontControlAt(x) orelse return null) {
+            .minus => .font_size_minus,
+            .plus => .font_size_plus,
+        };
     }
 
     if (row == SETTINGS_THEME_ROW) {
@@ -6532,13 +6474,8 @@ fn languageSettingText(setting: i18n.LanguageSetting) []const u8 {
 }
 
 fn renderSettingsRow(layout: SettingsLayout, window_height: f32, row: usize, title: []const u8, value: []const u8, hint: []const u8, clickable: bool, selected: bool) void {
-    // Skip rows scrolled out of view above or below the visible window.
-    if (row < layout.scroll) return;
-    const visible_index = row - layout.scroll;
-    if (visible_index >= layout.visible_rows) return;
-    const row_y = @round(@as(f32, @floatFromInt(visible_index)) * layout.row_h);
-    const y_top_px = layout.row_top_px + row_y;
-    const gl_y = @round(window_height - y_top_px - layout.row_h);
+    const visible = layout.visibleRow(window_height, row) orelse return;
+    const gl_y = visible.gl_y;
     const x = layout.box_x + 18;
     const w = layout.box_w - 36;
     const bg = AppWindow.g_theme.background;

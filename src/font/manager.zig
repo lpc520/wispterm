@@ -1651,6 +1651,39 @@ pub fn clearGlyphCache(allocator: std.mem.Allocator) void {
     }
 }
 
+pub const AtlasGpuTextureRelease = struct {
+    glyph: bool = false,
+    color: bool = false,
+    icon: bool = false,
+    titlebar: bool = false,
+
+    pub fn anyReleased(self: AtlasGpuTextureRelease) bool {
+        return self.glyph or self.color or self.icon or self.titlebar;
+    }
+};
+
+fn releaseAtlasGpuTexture(atlas: anytype, texture: *gpu.Texture, modified: *usize) bool {
+    const released = texture.isValid();
+    if (released) {
+        texture.destroy();
+        texture.* = gpu.Texture.invalid();
+    }
+    if (atlas != null) modified.* = 0;
+    return released;
+}
+
+/// Release only GPU atlas textures while keeping CPU atlas/cache state intact.
+/// Used before a D3D11 device recreate so the next context can re-upload the
+/// existing CPU atlas data instead of forcing a full glyph re-rasterization.
+pub fn releaseAtlasGpuTexturesForDeviceRecreate() AtlasGpuTextureRelease {
+    return .{
+        .glyph = releaseAtlasGpuTexture(g_atlas, &g_atlas_texture, &g_atlas_modified),
+        .color = releaseAtlasGpuTexture(g_color_atlas, &g_color_atlas_texture, &g_color_atlas_modified),
+        .icon = releaseAtlasGpuTexture(g_icon_atlas, &g_icon_atlas_texture, &g_icon_atlas_modified),
+        .titlebar = releaseAtlasGpuTexture(g_titlebar_atlas, &g_titlebar_atlas_texture, &g_titlebar_atlas_modified),
+    };
+}
+
 /// Clear fallback font faces.
 pub fn clearFallbackFaces(allocator: std.mem.Allocator) void {
     var it = g_fallback_faces.iterator();

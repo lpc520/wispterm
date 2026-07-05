@@ -14,6 +14,7 @@
 //! i.e. sha256( for each regular file, in bytewise-sorted "./path" order:
 //!              <lowercase-hex sha256 of file content> + "  " + "./path" + "\n" ).
 const std = @import("std");
+const platform_atomic_file = @import("../platform/atomic_file.zig");
 const skill_scan = @import("scan.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -230,7 +231,7 @@ pub fn transferLocalToLocal(
     const final = try std.fs.path.join(allocator, &.{ dst_root_abs, name });
     defer allocator.free(final);
     std.fs.deleteTreeAbsolute(final) catch {};
-    try std.fs.renameAbsolute(staged_skill, final);
+    try platform_atomic_file.renameAbsoluteRetryingAccessDenied(staged_skill, final);
 }
 
 /// Read an absolute local file into an owned buffer (capped at `max_bytes`).

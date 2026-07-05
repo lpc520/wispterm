@@ -20,7 +20,6 @@ const agent_detector = @import("../terminal_agents/detector.zig");
 const keybind = @import("../keybind.zig");
 const Character = font.Character;
 
-pub const CaptionButtonType = enum { minimize, maximize, close };
 pub const SIDEBAR_WIDTH: f32 = 220;
 pub const SIDEBAR_MIN_WIDTH: f32 = 160;
 pub const SIDEBAR_MAX_WIDTH: f32 = 720;
@@ -90,6 +89,31 @@ fn mouseInTitlebarRange(titlebar_h: f32, left: f32, right: f32) bool {
 fn currentWindowIsMaximized() bool {
     const win = AppWindow.g_window orelse return false;
     return window_backend.isMaximized(win);
+}
+
+fn captionIconGlyph(icon: titlebar_layout.CaptionButtonIcon) font_backend.TitlebarIcon {
+    return switch (icon) {
+        .minimize => .minimize,
+        .maximize => .maximize,
+        .restore => .restore,
+        .close => .close,
+    };
+}
+
+fn captionButtonVisual(
+    kind: titlebar_layout.CaptionButtonKind,
+    rect: titlebar_layout.Rect,
+    hovered: bool,
+) titlebar_layout.CaptionButtonVisual {
+    const is_focused = if (AppWindow.g_window) |win| window_backend.isFocused(win) else false;
+    const is_maximized = currentWindowIsMaximized();
+    const is_fullscreen = if (AppWindow.g_window) |win| window_backend.isFullscreen(win) else false;
+    return titlebar_layout.captionButtonVisual(kind, rect, .{
+        .hovered = hovered,
+        .focused = is_focused,
+        .maximized = is_maximized,
+        .fullscreen = is_fullscreen,
+    });
 }
 
 pub fn sidebarMaxWidthForWindow(window_width: f32) f32 {
@@ -427,6 +451,17 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
     const bg = AppWindow.g_theme.background;
     const fg = AppWindow.g_theme.foreground;
     if (AppWindow.g_window != null) {
+        const layout = titlebar_layout.topBarLayout(
+            window_width,
+            window_height,
+            titlebar_h,
+            titlebarLeftReserved(),
+            TITLEBAR_TOGGLE_W,
+            TITLEBAR_CONFIG_W,
+            TITLEBAR_HELP_W,
+            TITLEBAR_COPILOT_W,
+            window_backend.caption_button_visual_style.width,
+        );
         const top_bg = blend(bg, fg, 0.04);
         const hover_bg = blend(bg, fg, 0.11);
         const border_color_simple = blend(bg, .{ 0.0, 0.0, 0.0 }, 0.20);
@@ -436,71 +471,67 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
         // Ghostty's apprt action/tab-view split. The top bar now only hosts the
         // sidebar toggle and native caption buttons; tab navigation is rendered by
         // renderSidebar below.
-        ui_pipeline.fillQuad(0, tb_top, window_width, titlebar_h, top_bg);
-        ui_pipeline.fillQuad(0, tb_top, window_width, 1, border_color_simple);
+        ui_pipeline.fillQuad(0, layout.top_y, window_width, titlebar_h, top_bg);
+        ui_pipeline.fillQuad(0, layout.top_y, window_width, 1, border_color_simple);
 
-        const toggle_x = titlebarLeftReserved();
+        const toggle_x = layout.toggle_x;
         const toggle_hovered = mouseInTitlebarRange(titlebar_h, toggle_x, toggle_x + TITLEBAR_TOGGLE_W);
         if (toggle_hovered) {
-            ui_pipeline.fillQuad(toggle_x, tb_top, TITLEBAR_TOGGLE_W, titlebar_h, hover_bg);
+            ui_pipeline.fillQuad(toggle_x, layout.top_y, TITLEBAR_TOGGLE_W, titlebar_h, hover_bg);
         }
         if (font.icon_face != null) {
             if (font.loadIconGlyph(0xE700)) |ch| {
-                renderIconGlyph(ch, toggle_x, tb_top, TITLEBAR_TOGGLE_W, titlebar_h, icon_color, 1.0);
+                renderIconGlyph(ch, toggle_x, layout.top_y, TITLEBAR_TOGGLE_W, titlebar_h, icon_color, 1.0);
             } else {
-                renderFallbackMenuIcon(toggle_x, tb_top, TITLEBAR_TOGGLE_W, titlebar_h, icon_color);
+                renderFallbackMenuIcon(toggle_x, layout.top_y, TITLEBAR_TOGGLE_W, titlebar_h, icon_color);
             }
         } else {
-            renderFallbackMenuIcon(toggle_x, tb_top, TITLEBAR_TOGGLE_W, titlebar_h, icon_color);
+            renderFallbackMenuIcon(toggle_x, layout.top_y, TITLEBAR_TOGGLE_W, titlebar_h, icon_color);
         }
 
-        const top_caption_btn_w = window_backend.caption_button_visual_style.width;
-        const top_caption_area_w: f32 = top_caption_btn_w * 3;
-        const top_btn_h: f32 = titlebar_h;
         const top_hovered: window_backend.CaptionButton = if (AppWindow.g_window) |w| window_backend.hoveredCaptionButton(w) else .none;
 
-        const top_caption_start = window_width - top_caption_area_w;
-        const config_x = top_caption_start - TITLEBAR_CONFIG_W;
+        const config_x = layout.config_x;
         if (TITLEBAR_CONFIG_W > 0) {
             const config_hovered = mouseInTitlebarRange(titlebar_h, config_x, config_x + TITLEBAR_CONFIG_W);
             if (config_hovered) {
-                ui_pipeline.fillQuad(config_x, tb_top, TITLEBAR_CONFIG_W, titlebar_h, hover_bg);
+                ui_pipeline.fillQuad(config_x, layout.top_y, TITLEBAR_CONFIG_W, titlebar_h, hover_bg);
             }
             if (font.icon_face != null) {
                 if (font.loadIconGlyph(0xE713)) |ch| {
-                    renderIconGlyph(ch, config_x, tb_top, TITLEBAR_CONFIG_W, titlebar_h, icon_color, 1.0);
+                    renderIconGlyph(ch, config_x, layout.top_y, TITLEBAR_CONFIG_W, titlebar_h, icon_color, 1.0);
                 } else {
-                    renderFallbackGearIcon(config_x, tb_top, TITLEBAR_CONFIG_W, titlebar_h, icon_color);
+                    renderFallbackGearIcon(config_x, layout.top_y, TITLEBAR_CONFIG_W, titlebar_h, icon_color);
                 }
             } else {
-                renderFallbackGearIcon(config_x, tb_top, TITLEBAR_CONFIG_W, titlebar_h, icon_color);
+                renderFallbackGearIcon(config_x, layout.top_y, TITLEBAR_CONFIG_W, titlebar_h, icon_color);
             }
         }
 
-        const help_x = config_x - TITLEBAR_HELP_W;
+        const help_x = layout.help_x;
         if (TITLEBAR_HELP_W > 0) {
             const help_hovered = mouseInTitlebarRange(titlebar_h, help_x, help_x + TITLEBAR_HELP_W);
             if (help_hovered) {
-                ui_pipeline.fillQuad(help_x, tb_top, TITLEBAR_HELP_W, titlebar_h, hover_bg);
+                ui_pipeline.fillQuad(help_x, layout.top_y, TITLEBAR_HELP_W, titlebar_h, hover_bg);
             }
             if (font.icon_face != null) {
                 if (font.loadIconGlyph(0xEDA7)) |ch| {
-                    renderIconGlyph(ch, help_x, tb_top, TITLEBAR_HELP_W, titlebar_h, icon_color, 1.0);
+                    renderIconGlyph(ch, help_x, layout.top_y, TITLEBAR_HELP_W, titlebar_h, icon_color, 1.0);
                 } else {
-                    renderFallbackHelpIcon(help_x, tb_top, TITLEBAR_HELP_W, titlebar_h, icon_color);
+                    renderFallbackHelpIcon(help_x, layout.top_y, TITLEBAR_HELP_W, titlebar_h, icon_color);
                 }
             } else {
-                renderFallbackHelpIcon(help_x, tb_top, TITLEBAR_HELP_W, titlebar_h, icon_color);
+                renderFallbackHelpIcon(help_x, layout.top_y, TITLEBAR_HELP_W, titlebar_h, icon_color);
             }
         }
 
-        const copilot_x = help_x - TITLEBAR_COPILOT_W;
+        const copilot_x = layout.copilot_x;
         if (TITLEBAR_COPILOT_W > 0) {
             const copilot_open = AppWindow.aiCopilotVisible();
             const copilot_usable = AppWindow.isActiveTabTerminal();
             const copilot_hovered = mouseInTitlebarRange(titlebar_h, copilot_x, copilot_x + TITLEBAR_COPILOT_W);
             if (copilot_hovered and copilot_usable) {
-                ui_pipeline.fillQuad(copilot_x, tb_top, TITLEBAR_COPILOT_W, titlebar_h, hover_bg);
+                ui_pipeline.fillQuad(copilot_x, layout.top_y, TITLEBAR_COPILOT_W, titlebar_h, hover_bg);
             }
             const copilot_tint = if (!copilot_usable)
                 blend(bg, fg, 0.30) // dimmed: no terminal target
@@ -508,19 +539,18 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
                 blend(bg, AppWindow.g_theme.cursor_color, 0.85) // active
             else
                 icon_color;
-            renderFallbackCopilotIcon(copilot_x, tb_top, TITLEBAR_COPILOT_W, titlebar_h, copilot_tint);
+            renderFallbackCopilotIcon(copilot_x, layout.top_y, TITLEBAR_COPILOT_W, titlebar_h, copilot_tint);
         }
 
         if (tab.activeTab()) |active_tab| {
             const title = active_tab.getTitle();
-            const text_y = tb_top + (titlebar_h - font.g_titlebar_cell_height) / 2;
-            const text_x = titlebarLeftReserved() + TITLEBAR_TOGGLE_W + 10;
-            _ = renderTextLimited(title, text_x, text_y, blend(bg, fg, 0.90), copilot_x - text_x - 12);
+            const text_y = layout.top_y + (titlebar_h - font.g_titlebar_cell_height) / 2;
+            _ = renderTextLimited(title, layout.title_text_x, text_y, blend(bg, fg, 0.90), layout.title_text_max_w);
         }
 
-        renderCaptionButton(top_caption_start, tb_top, top_caption_btn_w, top_btn_h, .minimize, top_hovered == .minimize);
-        renderCaptionButton(top_caption_start + top_caption_btn_w, tb_top, top_caption_btn_w, top_btn_h, .maximize, top_hovered == .maximize);
-        renderCaptionButton(top_caption_start + top_caption_btn_w * 2, tb_top, top_caption_btn_w, top_btn_h, .close, top_hovered == .close);
+        renderCaptionButton(captionButtonVisual(.minimize, layout.caption_buttons.minimize, top_hovered == .minimize));
+        renderCaptionButton(captionButtonVisual(.maximize, layout.caption_buttons.maximize, top_hovered == .maximize));
+        renderCaptionButton(captionButtonVisual(.close, layout.caption_buttons.close, top_hovered == .close));
 
         {
             const is_focused = if (AppWindow.g_window) |w| window_backend.isFocused(w) else false;
@@ -1020,10 +1050,10 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
     const btn_h: f32 = titlebar_h;
     const hovered: window_backend.CaptionButton = if (AppWindow.g_window) |w| window_backend.hoveredCaptionButton(w) else .none;
 
-    const caption_start = window_width - caption_area_w;
-    renderCaptionButton(caption_start, tb_top, caption_btn_w, btn_h, .minimize, hovered == .minimize);
-    renderCaptionButton(caption_start + caption_btn_w, tb_top, caption_btn_w, btn_h, .maximize, hovered == .maximize);
-    renderCaptionButton(caption_start + caption_btn_w * 2, tb_top, caption_btn_w, btn_h, .close, hovered == .close);
+    const caption_rects = titlebar_layout.captionButtonRects(window_width, tb_top, btn_h, caption_btn_w);
+    renderCaptionButton(captionButtonVisual(.minimize, caption_rects.minimize, hovered == .minimize));
+    renderCaptionButton(captionButtonVisual(.maximize, caption_rects.maximize, hovered == .maximize));
+    renderCaptionButton(captionButtonVisual(.close, caption_rects.close, hovered == .close));
 
     // --- Focus border: 1px accent border when window is focused (matches Explorer/DWM) ---
     {
@@ -1070,19 +1100,26 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
     ui_pipeline.fillQuad(0, 0, sidebar_w, side_h, sidebar_bg);
     ui_pipeline.fillQuad(sidebar_w - 1, 0, if (resize_hovered) 2 else 1, side_h, edge_color);
 
-    const header_top_px = titlebar_h;
     const header_h = sidebarHeaderHeight();
     const row_h_full = sidebarRowHeight();
-    const header_y = window_height - header_top_px - header_h;
     const plus_btn_w: f32 = 42;
-    const plus_x = sidebar_w - plus_btn_w - 6;
-    const plus_hovered = mouseInRect(plus_x, header_top_px, plus_btn_w, header_h);
+    const header = titlebar_layout.sidebarHeaderLayout(
+        window_height,
+        titlebar_h,
+        sidebar_w,
+        header_h,
+        14,
+        plus_btn_w,
+        6,
+        font.g_titlebar_cell_height,
+    );
+    const plus_hovered = mouseInRect(header.plus_x, header.top_px, header.plus_w, header.plus_h);
     if (plus_hovered) {
-        ui_pipeline.fillQuad(plus_x, header_y + 4, plus_btn_w, header_h - 8, hover_bg);
+        ui_pipeline.fillQuad(header.plus_x, header.plus_y + 4, header.plus_w, header.plus_h - 8, hover_bg);
     }
-    _ = renderTextLimited("Tabs", 14, header_y + (header_h - font.g_titlebar_cell_height) / 2, header_text, sidebar_w - plus_btn_w - 26);
-    renderPlusIcon(plus_x, header_y, plus_btn_w, header_h, text_active);
-    ui_pipeline.fillQuad(0, header_y, sidebar_w, 1, border_color);
+    _ = renderTextLimited("Tabs", header.title_x, header.title_y, header_text, header.title_max_w);
+    renderPlusIcon(header.plus_x, header.plus_y, header.plus_w, header.plus_h, text_active);
+    ui_pipeline.fillQuad(0, header.rule_y, sidebar_w, 1, border_color);
 
     const now_ms = std.time.milliTimestamp();
     const dt: f32 = if (tab.g_last_frame_time_ms > 0)
@@ -1091,7 +1128,6 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
         0.016;
     tab.g_last_frame_time_ms = now_ms;
 
-    const list_top_px = titlebar_h + header_h + 6;
     for (0..tab.MAX_TABS) |tab_idx| {
         tab.g_tab_text_x_start[tab_idx] = 0;
         tab.g_tab_text_x_end[tab_idx] = 0;
@@ -1101,33 +1137,24 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
 
     const number_x: f32 = 14;
     const number_w = sidebarTabNumberWidth();
-    const title_x = number_x + number_w + 8;
 
     for (0..tab.g_tab_count) |tab_idx| {
-        const row_top_px = list_top_px + @as(f32, @floatFromInt(tab_idx)) * row_h_full;
-        if (row_top_px >= window_height) break;
-        const row_h = @min(row_h_full, window_height - row_top_px);
-        const row_y = window_height - row_top_px - row_h;
+        const base_row = titlebar_layout.sidebarTabRowLayout(
+            window_height,
+            titlebar_h,
+            header_h,
+            row_h_full,
+            sidebar_w,
+            tab_idx,
+            number_x,
+            number_w,
+            tab.TAB_CLOSE_BTN_W,
+            font.g_titlebar_cell_height,
+            false,
+            0,
+            false,
+        ) orelse break;
         const is_active = tab_idx == active_tab_state.g_active_tab;
-
-        const row_hovered = mouseInRect(0, row_top_px, sidebar_w, row_h);
-
-        if (is_active) {
-            ui_pipeline.fillQuad(0, row_y, sidebar_w, row_h, active_bg);
-            ui_pipeline.fillQuad(0, row_y + 6, 3, row_h - 12, AppWindow.g_theme.cursor_color);
-        } else if (row_hovered) {
-            ui_pipeline.fillQuad(0, row_y, sidebar_w, row_h, hover_bg);
-        }
-
-        if (tab.g_tab_count > 1) {
-            if (row_hovered) {
-                tab.g_tab_close_opacity[tab_idx] = @min(1.0, tab.g_tab_close_opacity[tab_idx] + tab.TAB_CLOSE_FADE_SPEED * dt);
-            } else {
-                tab.g_tab_close_opacity[tab_idx] = @max(0.0, tab.g_tab_close_opacity[tab_idx] - tab.TAB_CLOSE_FADE_SPEED * dt);
-            }
-        } else {
-            tab.g_tab_close_opacity[tab_idx] = 0;
-        }
 
         if (tab.g_tabs[tab_idx]) |tb| {
             if (tb.focusedSurface()) |surface| {
@@ -1142,21 +1169,6 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
             }
         }
 
-        var prefix_buf: [8]u8 = undefined;
-        const prefix = std.fmt.bufPrint(&prefix_buf, "{d}", .{tab_idx + 1}) catch "";
-        const text_y = row_y + (row_h - font.g_titlebar_cell_height) / 2;
-        _ = renderTextLimited(prefix, number_x, text_y, if (is_active) text_active else muted, number_w);
-
-        const title = if (tab.g_tab_rename_active and tab_idx == tab.g_tab_rename_idx)
-            tab.g_tab_rename_buf[0..tab.g_tab_rename_len]
-        else if (tab.g_tabs[tab_idx]) |t|
-            t.getTitle()
-        else
-            "New Tab";
-
-        const close_opacity = tab.g_tab_close_opacity[tab_idx];
-        const close_btn_x = sidebar_w - tab.TAB_CLOSE_BTN_W - 4;
-        var right_content_x = close_btn_x - titlebar_layout.SIDEBAR_STATUS_CLOSE_GAP;
         // Use aggregate of all panes' visible states so the sidebar badge
         // reflects the most attention-worthy agent across all split panes,
         // not just the focused one.
@@ -1194,68 +1206,124 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
             break :blk agent_detector.Detection{};
         } else agent_detector.Detection{};
         const show_agent_badge = detection.visible();
-        var agent_badge_x: f32 = 0;
         var agent_badge_w: f32 = 0;
         if (show_agent_badge) {
             const badge_text_w = titlebarTextWidth(detection.badge());
             agent_badge_w = @max(@as(f32, 18), badge_text_w + 10);
-            const badge_layout = titlebar_layout.sidebarStatusBadgeLayout(close_btn_x, agent_badge_w);
-            agent_badge_x = badge_layout.x;
-            right_content_x = badge_layout.next_right_content_x;
         }
 
         const bell_opacity: f32 = if (tab.g_tabs[tab_idx]) |t| (if (t.focusedSurface()) |s| s.bell_opacity else 0) else 0;
         const show_bell = bell_opacity > 0.01;
-        const bell_x = right_content_x - 20;
-        if (show_bell) right_content_x = bell_x - 4;
+        const row = titlebar_layout.sidebarTabRowLayout(
+            window_height,
+            titlebar_h,
+            header_h,
+            row_h_full,
+            sidebar_w,
+            tab_idx,
+            number_x,
+            number_w,
+            tab.TAB_CLOSE_BTN_W,
+            font.g_titlebar_cell_height,
+            show_agent_badge,
+            agent_badge_w,
+            show_bell,
+        ) orelse base_row;
 
-        const title_max_w = right_content_x - title_x - 8;
-        const title_color = if (is_active) text_active else text_inactive;
-        const text_end = renderTextLimited(title, title_x, text_y, title_color, title_max_w);
+        const row_hovered = mouseInRect(0, row.row_top_px, sidebar_w, row.row_h);
+
+        if (tab.g_tab_count > 1) {
+            if (row_hovered) {
+                tab.g_tab_close_opacity[tab_idx] = @min(1.0, tab.g_tab_close_opacity[tab_idx] + tab.TAB_CLOSE_FADE_SPEED * dt);
+            } else {
+                tab.g_tab_close_opacity[tab_idx] = @max(0.0, tab.g_tab_close_opacity[tab_idx] - tab.TAB_CLOSE_FADE_SPEED * dt);
+            }
+        } else {
+            tab.g_tab_close_opacity[tab_idx] = 0;
+        }
+
+        const visual = titlebar_layout.sidebarTabVisual(.{
+            .row = row,
+            .active = is_active,
+            .hovered = row_hovered,
+            .tab_count = tab.g_tab_count,
+            .close_opacity = tab.g_tab_close_opacity[tab_idx],
+            .mouse_x = mouseX(),
+            .close_btn_w = tab.TAB_CLOSE_BTN_W,
+        });
+
+        if (visual.draw_active_background) {
+            ui_pipeline.fillQuad(0, row.row_y, sidebar_w, row.row_h, active_bg);
+            ui_pipeline.fillQuad(row.active_marker_x, row.active_marker_y, row.active_marker_w, row.active_marker_h, AppWindow.g_theme.cursor_color);
+        } else if (visual.draw_hover_background) {
+            ui_pipeline.fillQuad(0, row.row_y, sidebar_w, row.row_h, hover_bg);
+        }
+
+        var prefix_buf: [8]u8 = undefined;
+        const prefix = std.fmt.bufPrint(&prefix_buf, "{d}", .{tab_idx + 1}) catch "";
+        const number_color = switch (visual.number_tone) {
+            .active => text_active,
+            .inactive => text_inactive,
+            .muted => muted,
+        };
+        _ = renderTextLimited(prefix, row.number_x, row.text_y, number_color, row.number_w);
+
+        const title = if (tab.g_tab_rename_active and tab_idx == tab.g_tab_rename_idx)
+            tab.g_tab_rename_buf[0..tab.g_tab_rename_len]
+        else if (tab.g_tabs[tab_idx]) |t|
+            t.getTitle()
+        else
+            "New Tab";
+
+        const close_opacity = visual.close_opacity;
+        const title_color = switch (visual.title_tone) {
+            .active => text_active,
+            .inactive => text_inactive,
+            .muted => muted,
+        };
+        const text_end = renderTextLimited(title, row.title_x, row.text_y, title_color, row.title_max_w);
 
         if (tab.g_tab_rename_active and tab_idx == tab.g_tab_rename_idx and AppWindow.g_cursor_blink_visible) {
-            ui_pipeline.fillQuad(@min(text_end + 1, title_x + title_max_w), text_y, 1, font.g_titlebar_cell_height, text_active);
+            ui_pipeline.fillQuad(@min(text_end + 1, row.title_x + row.title_max_w), row.text_y, 1, font.g_titlebar_cell_height, text_active);
         }
 
         if (show_bell) {
-            renderBellEmoji(bell_x, text_y, bell_opacity);
+            renderBellEmoji(row.bell_x, row.text_y, bell_opacity);
         }
         if (show_agent_badge) {
-            _ = renderAgentBadge(detection, agent_badge_x, text_y, is_active);
+            _ = renderAgentBadge(detection, row.badge_x, row.text_y, is_active);
         }
 
-        if (close_opacity > 0.01 and tab.g_tab_count > 1) {
-            const close_hovered = row_hovered and blk: {
-                const mx = mouseX() orelse break :blk false;
-                break :blk mx >= close_btn_x and mx < close_btn_x + tab.TAB_CLOSE_BTN_W;
-            };
-            const raw_color = if (close_hovered) text_active else muted;
+        if (visual.draw_close) {
+            const raw_color = if (visual.close_hovered) text_active else muted;
             const close_color = [3]f32{
                 raw_color[0] * close_opacity + sidebar_bg[0] * (1 - close_opacity),
                 raw_color[1] * close_opacity + sidebar_bg[1] * (1 - close_opacity),
                 raw_color[2] * close_opacity + sidebar_bg[2] * (1 - close_opacity),
             };
-            if (close_hovered) {
-                ui_pipeline.fillQuad(close_btn_x + 6, row_y + 10, 20, 20, blend(bg, fg, 0.14));
+            if (visual.draw_close_hover_background) {
+                ui_pipeline.fillQuad(row.close_hover_x, row.close_hover_y, row.close_hover_w, row.close_hover_h, blend(bg, fg, 0.14));
             }
-            renderCloseIcon(close_btn_x, row_y, tab.TAB_CLOSE_BTN_W, row_h, close_color);
+            renderCloseIcon(row.close_x, row.row_y, tab.TAB_CLOSE_BTN_W, row.row_h, close_color);
         }
 
-        tab.g_tab_text_x_start[tab_idx] = title_x;
+        tab.g_tab_text_x_start[tab_idx] = row.title_x;
         tab.g_tab_text_x_end[tab_idx] = text_end;
-        tab.g_tab_text_y_start[tab_idx] = row_top_px;
-        tab.g_tab_text_y_end[tab_idx] = row_top_px + row_h;
+        tab.g_tab_text_y_start[tab_idx] = row.row_top_px;
+        tab.g_tab_text_y_end[tab_idx] = row.row_top_px + row.row_h;
     }
 }
 
 /// Draw a native caption button with hover support.
-/// Each button is 46×40px with a 10×10 icon centered inside.
 /// Platform/window provides the concrete colors and metrics.
-pub fn renderCaptionButton(x: f32, y: f32, w: f32, h: f32, btn_type: CaptionButtonType, hovered: bool) void {
+pub fn renderCaptionButton(button: titlebar_layout.CaptionButtonVisual) void {
+    const rect = button.rect;
+    if (rect.w <= 0 or rect.h <= 0) return;
+
     const visual = window_backend.caption_button_visual_style;
     // Draw hover background, respecting the 1px focus border on edges
-    if (hovered) {
-        const hover_bg = switch (btn_type) {
+    if (button.hovered) {
+        const hover_bg = switch (button.kind) {
             .close => visual.close_hover_background,
             else => [3]f32{
                 @min(1.0, AppWindow.g_theme.background[0] + visual.hover_background_delta),
@@ -1263,42 +1331,26 @@ pub fn renderCaptionButton(x: f32, y: f32, w: f32, h: f32, btn_type: CaptionButt
                 @min(1.0, AppWindow.g_theme.background[2] + visual.hover_background_delta),
             },
         };
-        // Close button is at the window edge; inset by the focus border.
-        if (btn_type == .close) {
-            const is_focused = if (AppWindow.g_window) |win| window_backend.isFocused(win) else false;
-            const is_maximized = currentWindowIsMaximized();
-            const b: f32 = if (is_focused and !is_maximized) 1 else 0;
-            ui_pipeline.fillQuad(x, y + b, w - b, h - b, hover_bg);
-        } else {
-            ui_pipeline.fillQuad(x, y, w, h, hover_bg);
-        }
+        const hover = button.hover_rect;
+        ui_pipeline.fillQuad(hover.x, hover.y, hover.w, hover.h, hover_bg);
     }
 
-    const icon_color: [3]f32 = if (hovered) visual.hover_icon_color else visual.icon_color;
-
-    // Check if window is maximized or fullscreen (for restore icon)
-    const is_maximized = currentWindowIsMaximized();
-    const is_fullscreen = if (AppWindow.g_window) |win| window_backend.isFullscreen(win) else false;
-
-    const icon_codepoint = font_backend.titlebarIconGlyph(switch (btn_type) {
-        .close => .close,
-        .maximize => if (is_maximized or is_fullscreen) .restore else .maximize,
-        .minimize => .minimize,
-    });
+    const icon_color: [3]f32 = if (button.hovered) visual.hover_icon_color else visual.icon_color;
+    const icon_codepoint = font_backend.titlebarIconGlyph(captionIconGlyph(button.icon));
 
     // Try rendering from the platform caption icon font.
     if (font.icon_face != null) {
         if (font.loadIconGlyph(icon_codepoint)) |ch| {
-            renderIconGlyph(ch, x, y, w, h, icon_color, 1.0);
+            renderIconGlyph(ch, rect.x, rect.y, rect.w, rect.h, icon_color, 1.0);
             return;
         }
     }
 
     // Fallback: quad-based icons
-    const cx = x + w / 2;
-    const cy = y + h / 2;
+    const cx = rect.x + rect.w / 2;
+    const cy = rect.y + rect.h / 2;
 
-    switch (btn_type) {
+    switch (button.icon) {
         .close => {
             const size: f32 = 5;
             const steps: usize = 32;
@@ -1319,6 +1371,22 @@ pub fn renderCaptionButton(x: f32, y: f32, w: f32, h: f32, btn_type: CaptionButt
             ui_pipeline.fillQuad(cx - size, cy - size, size * 2, t, icon_color); // bottom
             ui_pipeline.fillQuad(cx - size, cy - size, t, size * 2, icon_color); // left
             ui_pipeline.fillQuad(cx + size - t, cy - size, t, size * 2, icon_color); // right
+        },
+        .restore => {
+            const size: f32 = 4.5;
+            const t: f32 = 1;
+            const offset: f32 = 3;
+            const back_x = cx - size + offset;
+            const back_y = cy - size + offset;
+            ui_pipeline.fillQuad(back_x, back_y + size * 2 - t, size * 2, t, icon_color);
+            ui_pipeline.fillQuad(back_x + size * 2 - t, back_y, t, size * 2, icon_color);
+
+            const front_x = cx - size - offset / 2;
+            const front_y = cy - size - offset / 2;
+            ui_pipeline.fillQuad(front_x, front_y + size * 2 - t, size * 2, t, icon_color);
+            ui_pipeline.fillQuad(front_x, front_y, size * 2, t, icon_color);
+            ui_pipeline.fillQuad(front_x, front_y, t, size * 2, icon_color);
+            ui_pipeline.fillQuad(front_x + size * 2 - t, front_y, t, size * 2, icon_color);
         },
         .minimize => {
             const size: f32 = 5;

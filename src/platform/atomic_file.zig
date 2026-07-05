@@ -3,6 +3,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const WINDOWS_RENAME_RETRY_ATTEMPTS: u8 = 20;
+const WINDOWS_RENAME_RETRY_DELAY_NS: u64 = 10 * std.time.ns_per_ms;
+
 pub const WriteOptions = struct {
     mode: std.fs.File.Mode = std.fs.File.default_mode,
     sync_file: bool = false,
@@ -34,6 +37,28 @@ pub fn writeFileReplaceSafeWithOptions(path: []const u8, data: []const u8, optio
     if (options.sync_parent_dir) syncParentDir(path);
 }
 
+/// Rename an absolute path, retrying the short-lived Windows AccessDenied
+/// window that can appear after files or directories were just closed.
+pub fn renameAbsoluteRetryingAccessDenied(old_path: []const u8, new_path: []const u8) !void {
+    if (builtin.os.tag != .windows) {
+        try std.fs.renameAbsolute(old_path, new_path);
+        return;
+    }
+
+    var attempts: u8 = 0;
+    while (true) : (attempts += 1) {
+        std.fs.renameAbsolute(old_path, new_path) catch |err| switch (err) {
+            error.AccessDenied => {
+                if (attempts >= WINDOWS_RENAME_RETRY_ATTEMPTS) return err;
+                std.Thread.sleep(WINDOWS_RENAME_RETRY_DELAY_NS);
+                continue;
+            },
+            else => return err,
+        };
+        return;
+    }
+}
+
 fn renameIntoPlaceReplaceSafe(atomic: *std.fs.AtomicFile) !void {
     if (builtin.os.tag != .windows) {
         try atomic.renameIntoPlace();
@@ -44,14 +69,35 @@ fn renameIntoPlaceReplaceSafe(atomic: *std.fs.AtomicFile) !void {
     while (true) : (attempts += 1) {
         atomic.renameIntoPlace() catch |err| switch (err) {
             error.AccessDenied => {
-                if (attempts >= 20) return err;
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                if (attempts >= WINDOWS_RENAME_RETRY_ATTEMPTS) return err;
+                std.Thread.sleep(WINDOWS_RENAME_RETRY_DELAY_NS);
                 continue;
             },
             else => return err,
         };
         return;
     }
+}
+
+test "platform atomic file retry helper renames absolute directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const stage = try std.fs.path.join(std.testing.allocator, &.{ root, "stage" });
+    defer std.testing.allocator.free(stage);
+    const final = try std.fs.path.join(std.testing.allocator, &.{ root, "final" });
+    defer std.testing.allocator.free(final);
+
+    try tmp.dir.makePath("stage");
+    try tmp.dir.writeFile(.{ .sub_path = "stage/file.txt", .data = "ok" });
+
+    try renameAbsoluteRetryingAccessDenied(stage, final);
+
+    const got = try tmp.dir.readFileAlloc(std.testing.allocator, "final/file.txt", 8);
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings("ok", got);
 }
 
 fn syncParentDir(path: []const u8) void {

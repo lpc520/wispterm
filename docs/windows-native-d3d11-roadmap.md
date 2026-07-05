@@ -22,6 +22,211 @@ OpenGL renderer and then copied into the DXGI swapchain. This roadmap changes
 that into a real `d3d11` backend that draws cells, glyphs, emoji, UI, images,
 and render targets directly with Direct3D 11.
 
+## Current Branch Status
+
+On the `windows-native-render` integration branch, the opt-in D3D11 backend is a
+real native renderer path, not merely OpenGL frames presented through DXGI. The
+branch has backend/present/shader diagnostics for `gpu-backend=d3d11`, a D3D11
+swapchain, HLSL shader plumbing, terminal grid rendering, D3D11 off-screen
+framebuffers, off-screen render-target round-trip smoke coverage, backend-neutral
+UI pipeline smoke coverage, and the Phase IV UI/auxiliary parity evidence set.
+
+The explicit Phase IV slices covered by fast-suite layout/policy tests and
+source guards are: titlebar/tabs/sidebar/caption-button layout, startup overlay,
+file explorer, settings page, background image layout, image preview layout, QR
+panel layout, assistant conversation panel layout, command palette layout, skill
+center layout, markdown preview layout, and backend-specific
+post-process/custom shader policy. Supplemental user-visible panels such as the
+port-forwarding renderer are also guarded as backend-neutral when they already
+fit the same shared draw-context shape.
+
+Phase IV UI parity evidence is complete on this branch: the guarded layout/policy
+slices cover the explicit user-visible renderer surfaces, and the checked-in
+normal-session smoke now proves a real D3D11 WispTerm session with the tab
+chrome, sidebar, file explorer, background image, Markdown/image previews,
+Copilot assistant sidebar, command palette, startup shortcuts overlay, Settings
+page, Skill Center, D3D11 present diagnostics, UI probe, and offscreen
+round-trip marker. This does not make D3D11 product-default-ready yet: Phase V
+hardening has started with backend-owned present/device-loss diagnostics and a
+pure D3D11 present policy that latches `needs_recreate` / `fallback_candidate`
+state from classified DXGI failures. The host now consumes a single-shot D3D11
+recovery request and records whether the requested action is device recreation
+or fallback-candidate handling, but actual device recreation, automatic fallback
+policy, environment validation, and Phase VI default migration remain blocked
+until fallback coverage is proven. Windows `auto` still must not default to
+D3D11 on this branch. This hardening slice adds the first controlled
+device-recreate preparation path: when the backend latches a recreate-class
+failure, the host releases D3D11-owned pipelines, auxiliary render targets,
+background/post-process resources, font atlas GPU textures, and backend
+backbuffer/RTV/phase2 shader resources, then logs that preparation. Actual
+device/swapchain recreation has now started as a controlled single-shot attempt:
+after recreate-class failure preparation, the backend can rebuild its D3D11
+device, immediate context, swapchain, backbuffer, and minimal shader resources
+for the same HWND/current framebuffer size, then the host restores the
+backend-neutral feature pipelines and reloadable auxiliary resources. Automatic
+fallback, environment validation, and Phase VI default migration are still
+intentionally separate work. The normal-session smoke has an opt-in
+`-RecreateSmoke` mode that latches one recreate-class request and verifies the
+successful recreate/restore diagnostics without changing the healthy path. It
+also has an opt-in `-RapidResizeSmoke` mode that drives a burst of real Win32
+resizes, restores the baseline window size, and verifies the session remains
+nonblank with D3D11 resize diagnostics and no resize/present failure lines.
+Window-state hardening has started too: `-WindowStateSmoke` drives maximize,
+restore, minimize, and restore-from-minimize through real Win32 state APIs,
+then verifies visible screenshots, baseline-size restoration, D3D11 resize
+diagnostics, and no present/resize failures. Fullscreen startup coverage is now
+separate and explicit: `-FullscreenStartupSmoke` writes `fullscreen = true` into
+the isolated smoke config, verifies the startup fullscreen path renders nonblank
+with fullscreen diagnostics, exits fullscreen through Alt+Enter, restores the
+baseline window rectangle, and checks D3D11 resize diagnostics without
+present/resize failures. The native D3D11 fallback topology is now defined as
+next-launch/future-auto policy, not in-process renderer switching: explicit
+`d3d11` continues to honor the user's build/runtime choice and only reports a
+warning when a matching marker is present, while a future Windows `auto` default
+can use a version+adapter-scoped `d3d11-fallback` marker to choose OpenGL
+without changing the current default.
+The failed-recreate escalation path now has an opt-in `-RecreateFailureSmoke`
+mode: it injects one synthetic recreate failure, verifies the policy transitions
+to a `recreate_failed` fallback candidate exactly once, persists a
+version+adapter-scoped `d3d11-fallback` marker in the isolated smoke profile,
+and still reports `automatic_fallback=false` / `default_unchanged=true`.
+The Windows OpenGL fallback path now has explicit normal-session evidence too:
+`-Backend opengl` reuses the same screenshot workflow for tabs, sidebar, file
+explorer, previews, assistant panel, command palette, startup shortcuts,
+Settings, Skill Center, and background image rendering while verifying
+`gpu-backend=opengl` diagnostics and the absence of D3D11 recovery/probe/marker
+activity.
+D3D11 environment diagnostics are now collected on startup: the backend logs
+adapter description, vendor/device/subsystem/revision, dedicated/shared memory,
+adapter flags, output count, feature level, and swap effect, while the Win32
+host logs remote-session state, process session id, monitor count, mixed-DPI
+state, primary DPI, and system DPI. The normal-session smoke verifies both
+lines so later RDP/VM/hybrid-GPU/multi-monitor matrix runs have a stable JSON
+and log surface. A dedicated environment smoke collector now wraps the
+normal-session smoke and emits a timestamped evidence package with
+`environment.json`, the raw normal-session JSON, copied screenshots, adapter
+facts, Win32 session facts, monitor topology, and explicit policy fields stating
+that no environment classification, blocking, default change, or automatic
+fallback was applied.
+Long-run coverage is now an opt-in normal-session extension too:
+`-SoakMinutes <minutes>` keeps the D3D11 window active after the first terminal
+capture, sends a shell output burst when the shell is recognized, alternates
+tab switches with small Win32 resize/restore cycles for the requested duration,
+captures periodic screenshots plus a final restored-size screenshot, and
+requires nonblank captures, process liveness, D3D11 resize diagnostics, and no
+present/resize failure lines. This is Phase V reliability evidence only; it
+does not change Windows `auto`, fallback policy, or renderer selection.
+
+The Phase IV normal-session evidence gate is the checked-in Windows GUI smoke:
+
+```powershell
+zig build -Dgpu-backend=d3d11
+powershell -NoProfile -ExecutionPolicy Bypass -File .\debug\test-d3d11-normal-session.ps1
+```
+
+It launches a real visible D3D11 WispTerm session, captures screenshots while
+switching active tabs, validating tab text, the `+` icon, active/inactive tab
+states, and the close-hover affordance, then toggling the tab sidebar, file
+explorer, and command palette. It also generates a high-contrast background
+image, verifies that it is visible through the initial screenshot, opens
+Markdown and image preview panes from a temporary File Explorer fixture, opens
+the Copilot assistant sidebar with a temporary AI profile, opens the startup
+shortcuts overlay from the Command Center, opens the Settings page from the
+titlebar gear and the Skill Center from the Command Center, then verifies the
+render-diagnostics log for D3D11 present, init details (swap effect, adapter or
+unknown-adapter fallback, fallback reason, and healthy D3D11 policy state), UI
+probe, offscreen round-trip markers, and the absence of a D3D11 recovery
+request in the healthy smoke path. This is runtime evidence for the Phase IV
+exit criteria and the first Phase V diagnostics/policy/recovery-coordination
+slice; it is not a device-recreation or automatic fallback substitute and does
+not change the Windows default backend.
+
+Add `-RapidResizeSmoke` to the same command to include Phase V rapid-resize
+stress evidence in the normal-session run.
+
+Add `-WindowStateSmoke` to the same command to include Phase V maximize,
+restore, minimize, and restore-from-minimize evidence.
+
+Add `-FullscreenStartupSmoke` by itself to verify the Phase V fullscreen startup
+path and exit-to-windowed restore evidence. This mode is intentionally separate
+from the normal-session UI parity flow because it launches from a different
+config state.
+
+Add `-SoakMinutes 20` to the normal-session smoke to record Phase V long-run
+evidence. Shorter values are useful for script validation, but release/default
+migration evidence should use a meaningful duration such as 20 minutes and keep
+the emitted screenshots and JSON with the environment matrix artifact.
+
+The Phase VI entry checklist and rollback constraints live in
+[windows-native-d3d11-default-gate.md](windows-native-d3d11-default-gate.md).
+Do not start the Windows `auto` default migration until that gate is satisfied
+with current evidence.
+
+The fallback marker policy is intentionally policy-only at this stage. It
+defines marker format, persistence, stale-version/adapter handling, explicit
+backend behavior, and the future-auto dry-run decision surface, but marker
+writes are still evidence for next launch/future-auto only and do not change
+renderer selection.
+Add `-FallbackMarkerSmoke` to the normal-session smoke to write a synthetic
+marker in the isolated smoke profile and verify marker persistence plus the
+explicit/current-auto/future-auto decision surface without triggering automatic
+fallback.
+
+Add `-AutoDryRunSmoke` to the normal-session smoke to verify the future-auto
+selector explanation surface without writing a marker. It must prove current
+Windows `auto` still selects OpenGL, future Windows `auto` would select D3D11
+when eligible, a matching marker would make future-auto select OpenGL, explicit
+`d3d11` ignores the marker with warning semantics, explicit `opengl` remains
+OpenGL, and stale markers are ignored.
+
+Add `-RecreateFailureSmoke` to the same smoke to exercise the failed-recreate
+escalation path. This mode is intentionally a diagnostics/state-file proof: it
+does not attempt same-process OpenGL fallback, does not change Windows `auto`,
+and treats the persisted marker as next-launch/future-auto evidence only.
+
+Add `-Backend opengl` after a default `zig build` to run the OpenGL fallback
+normal-session smoke. This is the Phase V proof that the compatibility renderer
+still supports the same core user-visible workflow on the native-render
+integration branch.
+
+The D3D11 normal-session smoke also gates the environment-diagnostics surface:
+`d3d11_environment` and `windows_environment` must be true in the emitted JSON.
+This still only reports and verifies environment facts; it does not classify or
+block any environment yet.
+
+Add the environment collector when recording Phase V matrix evidence:
+
+```powershell
+zig build -Dgpu-backend=d3d11
+powershell -NoProfile -ExecutionPolicy Bypass -File .\debug\test-d3d11-environment-smoke.ps1
+```
+
+The default output root is `zig-out\d3d11-env-smoke\<timestamp>\`. Each run
+contains `environment.json`, `matrix-summary.md`, `normal-session\`, and
+`screenshots\`. Pass `-MatrixClass <class>` to label evidence for RDP, VM, hybrid-GPU,
+weak-integrated-GPU, single-monitor, multi-monitor same-DPI, and mixed-DPI
+environments; use `-RequireMatrixClass` only when the requested class can be
+proved from collected facts. Skipped or unavailable environments must be
+recorded as missing evidence rather than treated as passing. Use
+`debug\summarize-d3d11-environment-matrix.ps1` to aggregate packages into a
+reviewable `matrix-ledger.md` / `matrix-ledger.json` and a
+`matrix-collection-plan.md` / `matrix-collection-plan.json` for the remaining
+non-recorded classes. The ledger format lives in
+[windows-native-d3d11-environment-matrix.md](windows-native-d3d11-environment-matrix.md).
+Use `debug\audit-d3d11-default-gate.ps1` after collecting the smoke and matrix
+artifacts to generate a read-only `default-gate-audit.md` /
+`default-gate-audit.json`. The audit checks existing evidence against the
+Phase VI entry gate, keeps missing evidence incomplete, and does not run smokes,
+write fallback markers, or alter renderer selection.
+If a shorter soak is explicitly accepted by an operator, store its
+`accepted-partial-soak-summary.json` under `zig-out\d3d11-accepted-soak\`; the
+audit reports that evidence as `accepted` rather than an automated `pass`.
+If unavailable environment classes are explicitly accepted by an operator, list
+them under `KNOWN_ISSUES.md` heading
+`Accepted D3D11 Phase V Environment Matrix Gaps`; the audit reports those
+matrix rows and the environment-ledger gate as `accepted`, not as recorded
+evidence.
+
 ## Ghostty Comparison
 
 Ghostty is still the architectural reference for the renderer boundary. Its

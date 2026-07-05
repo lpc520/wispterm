@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const platform_atomic_file = @import("../platform/atomic_file.zig");
 const process_runner = @import("../process_runner.zig");
 const tool_registry = @import("registry.zig");
 
@@ -172,7 +173,7 @@ pub fn installToolPackageWithSource(
     defer allocator.free(manifest_path);
     try writeFileAbsolute(manifest_path, manifest_json);
 
-    std.fs.renameAbsolute(staging, target) catch |err| switch (err) {
+    platform_atomic_file.renameAbsoluteRetryingAccessDenied(staging, target) catch |err| switch (err) {
         error.PathAlreadyExists => return error.ToolAlreadyExists,
         else => return err,
     };
