@@ -85,6 +85,11 @@ Use `Resume` to open a real terminal tab on the same target. WispTerm first
 checks the original project directory recorded in the history file; if that
 directory is missing, resume stops instead of falling back to `$HOME`.
 
+The selected history row also supports local handoff actions: press `D` to
+download the provider's raw history file, `M` to export the parsed transcript as
+Markdown, or `A` to attach the transcript as a collapsed Copilot context card
+for a follow-up question.
+
 ## In-context Copilot Sidebar
 
 Press `Ctrl+Shift+A` (`Cmd+Shift+A` on macOS) on a terminal tab to toggle a
