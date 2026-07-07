@@ -299,6 +299,7 @@ test {
     _ = @import("terminal_agents/sessions/provider_reasonix.zig");
     _ = @import("terminal_agents/sessions/source.zig");
     _ = @import("terminal_agents/sessions/cache.zig");
+    _ = @import("memory_digest/types.zig");
     _ = @import("skill/scan.zig");
     _ = @import("skill/install.zig");
     _ = @import("ssh/error.zig");
