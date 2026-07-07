@@ -1,16 +1,42 @@
 //! Dev CLI: run one local memory-digest scan against the real machine.
 //! Build: zig build memory-digest -Dtarget=aarch64-macos
-//! Run:   ./zig-out/bin/wispterm-memory-digest
+//! Run:   ./zig-out/bin/wispterm-memory-digest [--profile <name>] [--raw]
 //! ponytail: macOS/HOME-based dev tool; the app's scheduler (M2) is the
 //! real cross-platform entry point.
 const std = @import("std");
 const dirs = @import("../platform/dirs.zig");
+const llm = @import("llm.zig");
+const profile_codec = @import("../renderer/overlays/profile_codec.zig");
+const profile_store = @import("../assistant/profile/store.zig");
 const run_mod = @import("run.zig");
+
+const Args = struct {
+    profile_name: []const u8 = "",
+    raw: bool = false,
+};
+
+fn parseArgs(argv: []const [:0]u8) Args {
+    var args: Args = .{};
+    var i: usize = 1;
+    while (i < argv.len) : (i += 1) {
+        if (std.mem.eql(u8, argv[i], "--raw")) {
+            args.raw = true;
+        } else if (std.mem.eql(u8, argv[i], "--profile") and i + 1 < argv.len) {
+            i += 1;
+            args.profile_name = argv[i];
+        }
+    }
+    return args;
+}
 
 pub fn main() !void {
     var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .{};
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
+
+    const argv = try std.process.argsAlloc(gpa);
+    defer std.process.argsFree(gpa, argv);
+    const args = parseArgs(argv);
 
     const home = try std.process.getEnvVarOwned(gpa, "HOME");
     defer gpa.free(home);
@@ -26,6 +52,33 @@ pub fn main() !void {
     const memory_root = try dirs.memoryDir(gpa);
     defer gpa.free(memory_root);
 
+    // Profiles are large fixed-buffer records (~98KB each); heap-allocate
+    // rather than putting them on the stack.
+    const profiles = try gpa.alloc(profile_codec.AiProfile, 16);
+    defer gpa.free(profiles);
+    const profile_count = profile_store.loadProfiles(gpa, profiles);
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+
+    var client: llm.Client = undefined;
+    var completer: ?llm.Completer = null;
+    var model_label: []const u8 = "";
+
+    if (!args.raw and profile_count > 0) {
+        const idx = llm.pickProfile(profiles, profile_count, args.profile_name).?;
+        const picked_name = profile_codec.aiProfileField(&profiles[idx], .name);
+        if (args.profile_name.len != 0 and !std.mem.eql(u8, picked_name, args.profile_name)) {
+            std.debug.print("memory-digest: profile \"{s}\" not found, falling back to \"{s}\"\n", .{ args.profile_name, picked_name });
+        }
+        const cfg = try llm.configFromProfile(arena_state.allocator(), &profiles[idx]);
+        client = .{ .config = cfg };
+        completer = client.completer();
+        model_label = cfg.model;
+    } else if (!args.raw) {
+        std.debug.print("memory-digest: no AI profiles configured, running raw (no LLM summaries)\n", .{});
+    }
+
     const summary = try run_mod.runOnce(gpa, .{
         .roots = .{
             .claude_projects_dir = claude_dir,
@@ -37,9 +90,11 @@ pub fn main() !void {
         // ponytail: dev CLI hardcodes UTC+8; the app injects the real
         // offset when the M2 scheduler lands.
         .tz_offset_seconds = 8 * 3600,
+        .completer = completer,
+        .model_label = model_label,
     });
     std.debug.print(
-        "memory-digest: {d} sessions with new messages, {d} daily files written under {s}\n",
-        .{ summary.sessions_collected, summary.days_written, memory_root },
+        "memory-digest: {d} sessions with new messages, {d} daily files written, {d} summarized, {d} failed, under {s}\n",
+        .{ summary.sessions_collected, summary.days_written, summary.sessions_summarized, summary.sessions_failed, memory_root },
     );
 }

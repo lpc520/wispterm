@@ -1,10 +1,15 @@
 //! One digest run (M1, spec §15): collect local sessions, bucket by local
 //! day, write daily listings + index, then persist cursors. The cursor file
 //! only advances after artifacts were written successfully (spec §6).
+//! Task 7 adds the LLM map/reduce stage (spec §8/§9/§13) when
+//! `Options.completer` is set; with it null the M1 raw-listing path is
+//! unchanged.
 const std = @import("std");
 const ai_types = @import("../terminal_agents/sessions/types.zig");
 const collector = @import("collector.zig");
 const cursors_mod = @import("cursors.zig");
+const digest = @import("digest.zig");
+const llm = @import("llm.zig");
 const store = @import("store.zig");
 const types = @import("types.zig");
 
@@ -15,11 +20,18 @@ pub const Options = struct {
     tz_offset_seconds: i32 = 0,
     /// 0 = unlimited (tests); default 7 per spec §6/§12.
     backfill_days: u32 = 7,
+    /// null = M1 raw-listing path (no LLM calls); set = map+reduce every
+    /// session/day through this completer (spec §8/§9).
+    completer: ?llm.Completer = null,
+    model_label: []const u8 = "",
+    max_chars_per_message: usize = 2000,
 };
 
 pub const Summary = struct {
     sessions_collected: usize = 0,
     days_written: usize = 0,
+    sessions_summarized: usize = 0,
+    sessions_failed: usize = 0,
 };
 
 pub fn runOnce(gpa: std.mem.Allocator, opts: Options) !Summary {
@@ -42,10 +54,14 @@ pub fn runOnce(gpa: std.mem.Allocator, opts: Options) !Summary {
     var collected = try collector.collectLocal(gpa, opts.roots, &cur, min_mtime_ns);
     defer collected.deinit();
 
+    if (opts.completer) |completer| {
+        return runOnceWithLlm(gpa, arena, opts, completer, &collected, &cur, cursors_path);
+    }
+
     // M1: cursor advancement is unconditional here (equivalent to the old
     // emit()-time advancement) — a real artifact-write failure below still
     // returns an error before saveToPath, so the cursor file itself never
-    // moves. Task 7 makes this per-session conditional on LLM success.
+    // moves.
     for (collected.sessions) |s| {
         try advanceCursor(&cur, s);
     }
@@ -94,6 +110,143 @@ pub fn runOnce(gpa: std.mem.Allocator, opts: Options) !Summary {
     };
 }
 
+/// Builds the "provider:session_id" key SummaryStore/old_summary lookups use.
+fn summaryKey(arena: std.mem.Allocator, provider: types.DigestProvider, session_id: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(arena, "{s}:{s}", .{ @tagName(provider), session_id });
+}
+
+/// Map+reduce path (spec §8/§9/§13): summarize each collected session (only
+/// advancing its cursor and entering it into the daily listing on success),
+/// save the summary store immediately, then reduce each active day's full
+/// merged session list into projects/highlights/timeline and write those
+/// back. The cursor file is saved last, after every reduce succeeds.
+fn runOnceWithLlm(
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    opts: Options,
+    completer: llm.Completer,
+    collected: *collector.Result,
+    cur: *cursors_mod.Set,
+    cursors_path: []const u8,
+) !Summary {
+    const state_dir = try std.fs.path.join(arena, &.{ opts.memory_root, "state" });
+    const summaries_path = try std.fs.path.join(arena, &.{ state_dir, "session_summaries.json" });
+
+    var summaries = try store.SummaryStore.loadFromPath(gpa, summaries_path);
+    defer summaries.deinit();
+
+    const map_opts = digest.MapOptions{ .max_chars_per_message = opts.max_chars_per_message };
+
+    // Per-session map stage. Only sessions that summarize successfully
+    // advance their cursor and get a daily entry; the rest are silently
+    // retried on the next run (spec §13). `summarized_dates`/`summarized_paths`
+    // track each entry's day bucket and project_path in lockstep with
+    // `summarized` (store.DailySession has no room for either).
+    var summarized: std.ArrayListUnmanaged(store.DailySession) = .empty;
+    var summarized_dates: std.ArrayListUnmanaged([]const u8) = .empty;
+    var summarized_paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    var sessions_summarized: usize = 0;
+    var sessions_failed: usize = 0;
+
+    for (collected.sessions) |s| {
+        const key = try summaryKey(arena, s.provider, s.session_id);
+        const old_summary = if (summaries.find(key)) |rec| rec.summary else null;
+
+        const result = digest.summarizeSession(arena, gpa, completer, s, old_summary, map_opts) catch |err| {
+            std.log.warn("memory_digest: map failed for {s} ({s}): {s}", .{ @tagName(s.provider), s.session_id, @errorName(err) });
+            sessions_failed += 1;
+            continue;
+        };
+
+        try advanceCursor(cur, s);
+        sessions_summarized += 1;
+
+        const date_key = ai_types.dateKeyFromMs(lastActivityMs(s, opts.now_ms), opts.tz_offset_seconds);
+        var date_buf: [10]u8 = undefined;
+        const date = try arena.dupe(u8, store.formatDate(date_key, &date_buf));
+
+        try summaries.put(.{
+            .key = key,
+            .date = date,
+            .summary = result.summary,
+            .topics = result.topics,
+            .outcome = result.outcome,
+            .artifacts = result.artifacts,
+        });
+
+        var slug_buf: [64]u8 = undefined;
+        try summarized.append(arena, .{
+            .provider = @tagName(s.provider),
+            .source_id = s.source_id,
+            .session_id = s.session_id,
+            .project = try arena.dupe(u8, types.projectSlug(s.project_path, &slug_buf)),
+            .title = s.title,
+            .message_count_new = @intCast(s.new_messages.len),
+            .summary = result.summary,
+            .topics = result.topics,
+            .outcome = result.outcome,
+            .artifacts = result.artifacts,
+        });
+        try summarized_dates.append(arena, date);
+        try summarized_paths.append(arena, s.project_path);
+    }
+
+    // Map results are persisted before reduce runs at all (spec §13): a
+    // reduce failure below must not lose already-summarized sessions.
+    try summaries.saveToPath(gpa, summaries_path);
+
+    // Bucket only the successfully-summarized sessions by day; a session
+    // that failed map stays out of every daily/reduce artifact this run
+    // (spec §13) and is retried next time since its cursor did not move.
+    var day_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (summarized_dates.items) |date| {
+        const already = for (day_keys.items) |d| {
+            if (std.mem.eql(u8, d, date)) break true;
+        } else false;
+        if (!already) try day_keys.append(arena, date);
+    }
+
+    for (day_keys.items) |date| {
+        var entries: std.ArrayListUnmanaged(store.DailySession) = .empty;
+        for (summarized.items, 0..) |s, i| {
+            if (std.mem.eql(u8, summarized_dates.items[i], date)) try entries.append(arena, s);
+        }
+
+        const merged = try mergeDailyWithExisting(arena, opts.memory_root, date, entries.items);
+
+        const reduced = digest.reduceDay(arena, gpa, completer, date, merged) catch {
+            return error.ReduceFailed;
+        };
+
+        try store.writeDaily(gpa, opts.memory_root, .{
+            .date = date,
+            .generated_at = opts.now_ms,
+            .sessions = merged,
+            .model = opts.model_label,
+            .projects = reduced.projects,
+            .highlights = reduced.highlights,
+        });
+
+        for (reduced.timelines) |tl| {
+            try store.upsertTimelineEntry(gpa, opts.memory_root, tl.slug, tl.entry);
+            const project_path = for (summarized.items, 0..) |sm, i| {
+                if (std.mem.eql(u8, sm.project, tl.slug)) break summarized_paths.items[i];
+            } else "";
+            try store.upsertProject(gpa, opts.memory_root, tl.slug, project_path, date);
+        }
+    }
+
+    try writeIndexFromDisk(gpa, arena, opts.memory_root, opts.now_ms);
+    try cur.saveToPath(gpa, cursors_path);
+
+    return .{
+        .sessions_collected = collected.sessions.len,
+        .days_written = day_keys.items.len,
+        .sessions_summarized = sessions_summarized,
+        .sessions_failed = sessions_failed,
+    };
+}
+
 /// Merge this run's new-session entries for a day with whatever is already
 /// on disk for that date, so a same-day rerun never wipes an earlier run's
 /// entries (spec §9: daily files are cumulative for the day, not per-run).
@@ -112,6 +265,10 @@ fn mergeDailyWithExisting(
         project: []const u8 = "",
         title: []const u8 = "",
         message_count_new: u32 = 0,
+        summary: []const u8 = "",
+        topics: []const []const u8 = &.{},
+        outcome: []const u8 = "unknown",
+        artifacts: []const store.Artifact = &.{},
     };
     const DailyShape = struct { sessions: []const ExistingShape = &.{} };
 
@@ -143,6 +300,10 @@ fn mergeDailyWithExisting(
         if (match_idx) |i| {
             used[i] = true;
             const n = new_entries[i];
+            // A rerun that skipped this session (map failure, or the M1
+            // no-LLM path) sends an empty summary; keep the prior one rather
+            // than clobbering it (spec §13 map results are cumulative too).
+            const keep_old_summary = n.summary.len == 0;
             try merged.append(arena, .{
                 .provider = n.provider,
                 .source_id = n.source_id,
@@ -150,6 +311,10 @@ fn mergeDailyWithExisting(
                 .project = n.project,
                 .title = n.title,
                 .message_count_new = old.message_count_new + n.message_count_new,
+                .summary = if (keep_old_summary) old.summary else n.summary,
+                .topics = if (keep_old_summary) old.topics else n.topics,
+                .outcome = if (keep_old_summary) old.outcome else n.outcome,
+                .artifacts = if (keep_old_summary) old.artifacts else n.artifacts,
             });
         } else {
             try merged.append(arena, .{
@@ -159,6 +324,10 @@ fn mergeDailyWithExisting(
                 .project = old.project,
                 .title = old.title,
                 .message_count_new = old.message_count_new,
+                .summary = old.summary,
+                .topics = old.topics,
+                .outcome = old.outcome,
+                .artifacts = old.artifacts,
             });
         }
     }
@@ -439,4 +608,198 @@ test "memory_digest_run: same-day rerun merges daily entries instead of overwrit
         const count_idx = std.mem.indexOf(u8, after_abc, "\"message_count_new\"").?;
         try std.testing.expect(std.mem.indexOf(u8, after_abc[count_idx .. count_idx + 30], "3") != null);
     }
+}
+
+// ---- LLM-backed runOnce tests (Task 7) ----
+
+const REDUCE_JSON =
+    \\{"projects":[{"slug":"project","summary":"完成了修复","session_refs":[]}],
+    \\"highlights":["修复了测试"],
+    \\"timeline":[{"slug":"project","summary":"当天进展","events":[{"type":"progress","text":"修好了失败的测试","refs":[]}]}]}
+;
+
+const MAP_JSON =
+    \\{"summary":"修复了失败的测试","topics":["testing"],"outcome":"completed","artifacts":[]}
+;
+
+/// Routes map vs reduce calls by shape (map's user_text carries the
+/// 【新增对话】 marker from digest.buildFinalUserText/buildRollingUserText;
+/// reduce's is a compact JSON array with no such marker), and within map
+/// calls routes per-session by a marker string in the transcript content so
+/// one session can be made to fail deterministically while another succeeds.
+const RoutingStub = struct {
+    map_response: []const u8,
+    reduce_response: []const u8,
+    garbage_marker: []const u8 = "",
+    map_calls: usize = 0,
+    reduce_calls: usize = 0,
+
+    fn completer(self: *RoutingStub) llm.Completer {
+        return .{ .ctx = self, .completeFn = complete };
+    }
+
+    fn complete(ctx: *anyopaque, gpa: std.mem.Allocator, system_prompt: []const u8, user_text: []const u8) anyerror![]u8 {
+        _ = system_prompt;
+        const self: *RoutingStub = @ptrCast(@alignCast(ctx));
+        const is_map = std.mem.indexOf(u8, user_text, "【新增对话】") != null;
+        if (is_map) {
+            self.map_calls += 1;
+            if (self.garbage_marker.len != 0 and std.mem.indexOf(u8, user_text, self.garbage_marker) != null) {
+                return gpa.dupe(u8, "garbage, not json");
+            }
+            return gpa.dupe(u8, self.map_response);
+        }
+        self.reduce_calls += 1;
+        return gpa.dupe(u8, self.reduce_response);
+    }
+};
+
+fn writeFixtures(tmp: std.testing.TmpDir) !void {
+    try tmp.dir.makePath("claude/proj-a");
+    var d = try tmp.dir.openDir("claude/proj-a", .{});
+    defer d.close();
+    try d.writeFile(.{ .sub_path = "claude-abc.jsonl", .data = CLAUDE_JSONL });
+}
+
+test "memory_digest_run: llm path writes summaries, projects, highlights and timeline" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    try writeFixtures(tmp);
+
+    const claude_root = try std.fs.path.join(allocator, &.{ root, "claude" });
+    defer allocator.free(claude_root);
+    const memory_root = try std.fs.path.join(allocator, &.{ root, "memory" });
+    defer allocator.free(memory_root);
+
+    var stub = RoutingStub{ .map_response = MAP_JSON, .reduce_response = REDUCE_JSON };
+    const opts: Options = .{
+        .roots = .{ .claude_projects_dir = claude_root },
+        .memory_root = memory_root,
+        .now_ms = 1783500000000,
+        .tz_offset_seconds = 8 * 3600,
+        .backfill_days = 0,
+        .completer = stub.completer(),
+        .model_label = "test-model",
+    };
+
+    const first = try runOnce(allocator, opts);
+    try std.testing.expectEqual(@as(usize, 1), first.sessions_summarized);
+    try std.testing.expectEqual(@as(usize, 0), first.sessions_failed);
+
+    const daily = try tmp.dir.readFileAlloc(allocator, "memory/daily/2026-05-31.json", 1 << 20);
+    defer allocator.free(daily);
+    try std.testing.expect(std.mem.indexOf(u8, daily, "\"summary\": \"修复了失败的测试\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, daily, "\"完成了修复\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, daily, "\"修复了测试\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, daily, "\"model\": \"test-model\"") != null);
+
+    const timeline = try tmp.dir.readFileAlloc(allocator, "memory/projects/project/timeline.json", 1 << 20);
+    defer allocator.free(timeline);
+    try std.testing.expect(std.mem.indexOf(u8, timeline, "\"2026-05-31\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, timeline, "修好了失败的测试") != null);
+
+    const summaries = try tmp.dir.readFileAlloc(allocator, "memory/state/session_summaries.json", 1 << 20);
+    defer allocator.free(summaries);
+    try std.testing.expect(std.mem.indexOf(u8, summaries, "\"claude:claude-abc\"") != null);
+
+    const map_calls_after_first = stub.map_calls;
+    const reduce_calls_after_first = stub.reduce_calls;
+
+    // Second run: no new messages → collector yields nothing → zero LLM calls.
+    const second = try runOnce(allocator, opts);
+    try std.testing.expectEqual(@as(usize, 0), second.sessions_collected);
+    try std.testing.expectEqual(map_calls_after_first, stub.map_calls);
+    try std.testing.expectEqual(reduce_calls_after_first, stub.reduce_calls);
+}
+
+test "memory_digest_run: map failure withholds cursor and daily entry, other sessions unaffected" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+
+    try tmp.dir.makePath("claude/proj-a");
+    {
+        var d = try tmp.dir.openDir("claude/proj-a", .{});
+        defer d.close();
+        try d.writeFile(.{ .sub_path = "claude-abc.jsonl", .data = CLAUDE_JSONL });
+    }
+    try tmp.dir.makePath("claude/proj-b");
+    {
+        var d = try tmp.dir.openDir("claude/proj-b", .{});
+        defer d.close();
+        try d.writeFile(.{ .sub_path = "claude-def.jsonl", .data = CLAUDE_JSONL_DEF });
+    }
+
+    const claude_root = try std.fs.path.join(allocator, &.{ root, "claude" });
+    defer allocator.free(claude_root);
+    const memory_root = try std.fs.path.join(allocator, &.{ root, "memory" });
+    defer allocator.free(memory_root);
+
+    // claude-def's transcript contains "Second session" (see CLAUDE_JSONL_DEF
+    // below) — route that session's map calls to garbage so it always fails.
+    var stub = RoutingStub{ .map_response = MAP_JSON, .reduce_response = REDUCE_JSON, .garbage_marker = "Second session" };
+    const opts: Options = .{
+        .roots = .{ .claude_projects_dir = claude_root },
+        .memory_root = memory_root,
+        .now_ms = 1783500000000,
+        .tz_offset_seconds = 8 * 3600,
+        .backfill_days = 0,
+        .completer = stub.completer(),
+        .model_label = "test-model",
+    };
+
+    const first = try runOnce(allocator, opts);
+    try std.testing.expectEqual(@as(usize, 1), first.sessions_summarized);
+    try std.testing.expectEqual(@as(usize, 1), first.sessions_failed);
+
+    const daily = try tmp.dir.readFileAlloc(allocator, "memory/daily/2026-05-31.json", 1 << 20);
+    defer allocator.free(daily);
+    try std.testing.expect(std.mem.indexOf(u8, daily, "\"claude-abc\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, daily, "\"claude-def\"") == null);
+
+    // Third run (no fixture changes): claude-def's cursor never advanced, so
+    // it is re-collected and re-attempted.
+    const third = try runOnce(allocator, opts);
+    try std.testing.expectEqual(@as(usize, 1), third.sessions_collected);
+    try std.testing.expectEqual(@as(usize, 0), third.sessions_summarized);
+    try std.testing.expectEqual(@as(usize, 1), third.sessions_failed);
+}
+
+test "memory_digest_run: reduce failure returns error but keeps summaries and withholds cursors" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    try writeFixtures(tmp);
+
+    const claude_root = try std.fs.path.join(allocator, &.{ root, "claude" });
+    defer allocator.free(claude_root);
+    const memory_root = try std.fs.path.join(allocator, &.{ root, "memory" });
+    defer allocator.free(memory_root);
+
+    var stub = RoutingStub{ .map_response = MAP_JSON, .reduce_response = "garbage, not json" };
+    const opts: Options = .{
+        .roots = .{ .claude_projects_dir = claude_root },
+        .memory_root = memory_root,
+        .now_ms = 1783500000000,
+        .tz_offset_seconds = 8 * 3600,
+        .backfill_days = 0,
+        .completer = stub.completer(),
+        .model_label = "test-model",
+    };
+
+    try std.testing.expectError(error.ReduceFailed, runOnce(allocator, opts));
+
+    const summaries = try tmp.dir.readFileAlloc(allocator, "memory/state/session_summaries.json", 1 << 20);
+    defer allocator.free(summaries);
+    try std.testing.expect(std.mem.indexOf(u8, summaries, "\"claude:claude-abc\"") != null);
+
+    const cursors_result = tmp.dir.readFileAlloc(allocator, "memory/state/cursors.json", 1 << 20);
+    try std.testing.expectError(error.FileNotFound, cursors_result);
 }
