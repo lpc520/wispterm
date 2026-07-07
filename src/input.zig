@@ -1949,8 +1949,12 @@ threadlocal var g_ai_transcript_selecting: bool = false;
 threadlocal var g_ai_transcript_select_chat: ?*AppWindow.ai_chat.Session = null;
 threadlocal var g_ai_transcript_select_auto_copy: bool = false;
 threadlocal var g_ai_transcript_select_panel: AiTranscriptPanel = .active_chat;
-threadlocal var g_port_forwarding_suppress_command_char: ?u21 = null;
-threadlocal var g_skill_center_suppress_command_char: ?u21 = null;
+const CommandCharSuppressors = struct {
+    port_forwarding: ?u21 = null,
+    skill_center: ?u21 = null,
+    ai_history: ?u21 = null,
+};
+threadlocal var command_char_suppressors: CommandCharSuppressors = .{};
 pub threadlocal var g_sidebar_resize_hover: bool = false; // Mouse is over the sidebar resize edge
 pub threadlocal var g_sidebar_resize_dragging: bool = false; // Currently dragging the sidebar edge
 pub threadlocal var g_explorer_resize_hover: bool = false; // Mouse is over the file explorer resize edge
@@ -2755,6 +2759,11 @@ fn dispatchChar(ev: platform_input.CharEvent) ui_effect.UiEffect {
         tab.handleRenameChar(ev.codepoint);
         return .none;
     }
+    if (command_char_suppressors.ai_history) |codepoint| {
+        const suppress = !ev.ctrl and !ev.alt and !ev.super and ev.codepoint == codepoint;
+        command_char_suppressors.ai_history = null;
+        if (suppress) return .none;
+    }
     if (assistant_conversation.current(aiCopilotFocused())) |target| {
         if (!ev.ctrl and !ev.alt) {
             AppWindow.resetCursorBlink();
@@ -2774,9 +2783,9 @@ fn dispatchChar(ev: platform_input.CharEvent) ui_effect.UiEffect {
         return .none;
     }
     if (AppWindow.activeSkillCenter() != null) {
-        if (g_skill_center_suppress_command_char) |codepoint| {
+        if (command_char_suppressors.skill_center) |codepoint| {
             const suppress = !ev.ctrl and !ev.alt and !ev.super and ev.codepoint == codepoint;
-            g_skill_center_suppress_command_char = null;
+            command_char_suppressors.skill_center = null;
             if (suppress) return .none;
         }
         if (!ev.ctrl and !ev.alt and !ev.super) {
@@ -2785,9 +2794,9 @@ fn dispatchChar(ev: platform_input.CharEvent) ui_effect.UiEffect {
         return .none;
     }
     if (AppWindow.activePortForwarding() != null) {
-        if (g_port_forwarding_suppress_command_char) |codepoint| {
+        if (command_char_suppressors.port_forwarding) |codepoint| {
             const suppress = !ev.ctrl and !ev.alt and !ev.super and ev.codepoint == codepoint;
-            g_port_forwarding_suppress_command_char = null;
+            command_char_suppressors.port_forwarding = null;
             if (suppress) return .none;
         }
         if (!ev.ctrl and !ev.alt and !ev.super) {
@@ -3337,6 +3346,21 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
                 _ = AppWindow.aiHistoryScanLocalNow();
                 return .none;
             },
+            0x44 => if (plain and !ev.shift and !search_focused) {
+                _ = AppWindow.aiHistoryDownloadSelectedRaw();
+                command_char_suppressors.ai_history = 'd';
+                return .none;
+            },
+            0x4D => if (plain and !ev.shift and !search_focused) {
+                _ = AppWindow.aiHistoryExportSelectedMarkdown();
+                command_char_suppressors.ai_history = 'm';
+                return .none;
+            },
+            0x41 => if (plain and !ev.shift and !search_focused) {
+                _ = AppWindow.aiHistoryAttachSelectedToCopilot();
+                command_char_suppressors.ai_history = 'a';
+                return .none;
+            },
             else => {},
         }
         return .none;
@@ -3398,13 +3422,13 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
             },
             0x4E => if (plain and !ev.shift) {
                 if (!overlay_active and AppWindow.portForwardingOpenNew()) {
-                    g_port_forwarding_suppress_command_char = 'n';
+                    command_char_suppressors.port_forwarding = 'n';
                 }
                 return .none;
             },
             0x45 => if (plain and !ev.shift) {
                 if (!overlay_active and AppWindow.portForwardingOpenEdit()) {
-                    g_port_forwarding_suppress_command_char = 'e';
+                    command_char_suppressors.port_forwarding = 'e';
                 }
                 return .none;
             },
@@ -3534,7 +3558,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
                 // SDL text-input mode also fires a 'g' CHAR event after this
                 // key-down; suppress it so it doesn't land in the now-active
                 // URL field. (Only 'G' opens a text field, so only it suppresses.)
-                g_skill_center_suppress_command_char = 'g';
+                command_char_suppressors.skill_center = 'g';
                 return .none;
             },
             0x41 => if (plain and !ev.shift and picking) { // 'A' select-all

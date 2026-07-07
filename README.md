@@ -167,6 +167,9 @@ Use `keybind = clear` before custom bindings if you want to remove all defaults 
 | Move selected AI History session | Up / Down in AI History | Up / Down in AI History |
 | Resume selected AI History session | Enter in AI History | Enter in AI History |
 | Preview selected AI History transcript | Space in AI History | Space in AI History |
+| Download selected AI History raw file | **D** in AI History | **D** in AI History |
+| Export selected AI History transcript as Markdown | **M** in AI History | **M** in AI History |
+| Attach selected AI History transcript to Copilot | **A** in AI History | **A** in AI History |
 | Refresh local AI History scan | **R** in local AI History | **R** in local AI History |
 | Edit AI Chat input cursor | Left/Right/Home/End/Delete/Backspace | Left/Right/Home/End/Delete/Backspace |
 | Stop in-flight AI Chat or Agent request | **Esc** in AI Chat while working | **Esc** in AI Chat while working |

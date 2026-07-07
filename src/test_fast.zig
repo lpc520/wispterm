@@ -25,6 +25,43 @@ test "input ssh download surfaces missing connection and helper probe failures" 
     try std.testing.expect(std.mem.indexOf(u8, input_source, "\"SSH helper unavailable\"") != null);
 }
 
+test "input routes AI History selected action shortcuts through AppWindow actions" {
+    const source = @embedFile("input.zig");
+    try std.testing.expect(std.mem.indexOf(u8, source, "aiHistoryDownloadSelectedRaw") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "aiHistoryExportSelectedMarkdown") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "aiHistoryAttachSelectedToCopilot") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "!search_focused") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "command_char_suppressors.ai_history") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "command_char_suppressors.ai_history = 'd'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "command_char_suppressors.ai_history = 'm'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "command_char_suppressors.ai_history = 'a'") != null);
+    const dispatch_char = source[std.mem.indexOf(u8, source, "fn dispatchChar") orelse return error.MissingDispatchChar ..];
+    const suppress_index = std.mem.indexOf(u8, dispatch_char, "if (command_char_suppressors.ai_history)") orelse return error.MissingAiHistorySuppressor;
+    const assistant_index = std.mem.indexOf(u8, dispatch_char, "if (assistant_conversation.current(aiCopilotFocused()))") orelse return error.MissingAssistantCharRoute;
+    try std.testing.expect(suppress_index < assistant_index);
+}
+
+test "AI History action transcript loader reuses ready preview before target snapshot" {
+    const source = @embedFile("AppWindow.zig");
+    const start = std.mem.indexOf(u8, source, "fn loadAiHistoryTranscriptForAction(") orelse return error.MissingLoader;
+    const rest = source[start..];
+    const end = std.mem.indexOf(u8, rest, "fn cloneAiHistoryTranscriptMessages(") orelse return error.MissingLoaderEnd;
+    const body = rest[0..end];
+
+    const target_snapshot = std.mem.indexOf(u8, body, "aiHistoryTargetSnapshot") orelse return error.MissingTargetSnapshot;
+    const lock = std.mem.indexOf(u8, body, "session.mutex.lock()") orelse return error.MissingPreviewLock;
+    const ready = std.mem.indexOf(u8, body, "session.transcript_state == .ready") orelse return error.MissingReadyPreviewBranch;
+    const provider = std.mem.indexOf(u8, body, "session.transcript_provider") orelse return error.MissingPreviewProviderCheck;
+    const clone = std.mem.indexOf(u8, body, "cloneAiHistoryTranscriptMessages(allocator, session.transcript)") orelse return error.MissingPreviewClone;
+    const unlock = std.mem.indexOf(u8, body, "session.mutex.unlock()") orelse return error.MissingPreviewUnlock;
+
+    try std.testing.expect(lock < ready);
+    try std.testing.expect(ready < provider);
+    try std.testing.expect(provider < clone);
+    try std.testing.expect(clone < unlock);
+    try std.testing.expect(unlock < target_snapshot);
+}
+
 test "assistant conversation input routing owns keyboard target lookup" {
     const routing_source = @embedFile("input/assistant_conversation.zig");
     try std.testing.expect(std.mem.indexOf(u8, routing_source, "activeAiChat()") != null);
@@ -299,6 +336,7 @@ test {
     _ = @import("terminal_agents/sessions/provider_reasonix.zig");
     _ = @import("terminal_agents/sessions/source.zig");
     _ = @import("terminal_agents/sessions/cache.zig");
+    _ = @import("terminal_agents/sessions/markdown.zig");
     _ = @import("memory_digest/types.zig");
     _ = @import("memory_digest/provider_wispterm.zig");
     _ = @import("memory_digest/cursors.zig");

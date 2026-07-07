@@ -1727,6 +1727,29 @@ pub const Session = struct {
         self.ensureSkillSuggestionsForInputLocked();
     }
 
+    pub fn appendContextCard(self: *Session, title_text: []const u8, body: []const u8, collapsed: bool) !void {
+        const content = try std.fmt.allocPrint(self.allocator, "### {s}\n\n{s}", .{ title_text, body });
+        var history_change: ?PendingHistoryChange = null;
+        self.mutex.lock();
+        errdefer {
+            self.mutex.unlock();
+            self.allocator.free(content);
+        }
+        if (self.closing.load(.acquire)) return error.SessionClosing;
+        if (self.request_inflight) return error.SessionBusy;
+        try self.messages.append(self.allocator, .{
+            .role = .user,
+            .content = content,
+            .is_context_summary = true,
+            .content_collapsed = collapsed,
+            .persist_to_history = true,
+        });
+        history_change = self.captureHistoryChangeLocked();
+        self.setStatusLocked("Ready");
+        self.mutex.unlock();
+        self.notifyHistoryChange(history_change);
+    }
+
     /// If the composer is selected (select-all) and non-empty, return a copy of
     /// the input text and clear the composer. Returns null otherwise (e.g. when
     /// only a read-only transcript selection is active).
@@ -9087,6 +9110,80 @@ test "is_context_summary messages are collapsible" {
     try std.testing.expect(session.messages.items[0].content_collapsed);
     session.toggleToolMessageCollapsed(0);
     try std.testing.expect(!session.messages.items[0].content_collapsed);
+}
+
+test "ai chat appendContextCard stores collapsed persisted user context" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(allocator, "Copilot", "https://example.test", "k", "model", "system", "disabled", "low", "false", "true");
+    defer session.deinit();
+
+    var capture = TestHistoryHookCapture{};
+    defer capture.deinit();
+    g_test_history_hook_capture = &capture;
+    defer g_test_history_hook_capture = null;
+    session.setHistoryChangeHook(testHistoryHookCaptureCallback);
+
+    try session.appendContextCard("AI History: Codex sess-1", "## User\n\nstatus?", true);
+
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
+        const msg = session.messages.items[0];
+        try std.testing.expectEqual(Role.user, msg.role);
+        try std.testing.expect(msg.is_context_summary);
+        try std.testing.expect(msg.content_collapsed);
+        try std.testing.expect(msg.persist_to_history);
+        try std.testing.expect(std.mem.indexOf(u8, msg.content, "AI History: Codex sess-1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, msg.content, "status?") != null);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expect(capture.event != null);
+    try std.testing.expectEqual(@as(usize, 1), capture.event.?.record.messages.len);
+    const record_msg = capture.event.?.record.messages[0];
+    try std.testing.expectEqual(.user, record_msg.role);
+    try std.testing.expect(std.mem.indexOf(u8, record_msg.content, "AI History: Codex sess-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, record_msg.content, "status?") != null);
+}
+
+test "ai chat appendContextCard rejects busy session without changing state" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(allocator, "Copilot", "https://example.test", "k", "model", "system", "disabled", "low", "false", "true");
+    defer session.deinit();
+
+    {
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        try session.messages.append(allocator, .{
+            .role = .user,
+            .content = try allocator.dupe(u8, "existing"),
+        });
+        session.request_inflight = true;
+        session.setStatusLocked("Thinking...");
+    }
+
+    try std.testing.expectError(error.SessionBusy, session.appendContextCard("AI History: Codex sess-1", "## User\n\nstatus?", true));
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
+    try std.testing.expectEqualStrings("existing", session.messages.items[0].content);
+    try std.testing.expectEqualStrings("Thinking...", session.status());
+}
+
+test "ai chat appendContextCard rejects closing session without appending" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(allocator, "Copilot", "https://example.test", "k", "model", "system", "disabled", "low", "false", "true");
+    defer session.deinit();
+
+    session.closing.store(true, .release);
+
+    try std.testing.expectError(error.SessionClosing, session.appendContextCard("AI History: Codex sess-1", "## User\n\nstatus?", true));
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    try std.testing.expectEqual(@as(usize, 0), session.messages.items.len);
 }
 
 test "applySummaryResult collapses pre-switch messages into one summary card" {

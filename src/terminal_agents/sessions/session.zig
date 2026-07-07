@@ -616,6 +616,18 @@ pub const Session = struct {
         self.transcript_scroll = 0;
     }
 
+    pub fn replaceTranscriptFromMessages(self: *Session, provider: types.ProviderId, messages: []types.TranscriptMessage) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.clearTranscript();
+        self.transcript_generation +%= 1;
+        self.transcript = messages;
+        self.transcript_provider = provider;
+        self.transcript_state = .ready;
+        self.transcript_status = "Transcript ready";
+        self.transcript_scroll = 0;
+    }
+
     /// Adjust the transcript preview scroll offset by `delta` visual lines,
     /// saturating at the top. The high end is clamped by the renderer against
     /// the wrapped content height. Callers must hold `mutex`.
@@ -683,6 +695,14 @@ pub const Session = struct {
             visible_index += 1;
         }
         return null;
+    }
+
+    /// Self-locks; callers must not already hold `session.mutex`.
+    pub fn selectedMetadataClone(self: *Session, allocator: std.mem.Allocator) ?types.SessionMeta {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const selected = self.selectedVisible() orelse return null;
+        return cloneMetadata(allocator, selected) catch null;
     }
 
     pub fn setCategory(self: *Session, category: types.CategoryFilter) void {
@@ -2103,6 +2123,82 @@ test "ai_history_session: metadata filter controls visible rows" {
     try std.testing.expectEqual(@as(usize, 1), session.visibleCount());
     const selected = session.selectedVisible() orelse return error.ExpectedSelectedSession;
     try std.testing.expectEqualStrings("b", selected.session_id);
+}
+
+test "ai_history_session: selectedMetadataClone owns selected row strings" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+
+    const rows = [_]types.SessionMeta{.{
+        .provider = .codex,
+        .session_id = "s1",
+        .title = "Title",
+        .project_dir = "/work",
+        .source_path = "/tmp/s1.jsonl",
+        .resume_kind = .codex_resume,
+    }};
+    try session.replaceRows(&rows);
+
+    const cloned = session.selectedMetadataClone(allocator) orelse return error.MissingClone;
+    defer freeMetadata(allocator, cloned);
+
+    try session.replaceRows(&.{});
+    try std.testing.expectEqualStrings("s1", cloned.session_id);
+    try std.testing.expectEqualStrings("/tmp/s1.jsonl", cloned.source_path);
+}
+
+test "ai_history_session: replaceTranscriptFromMessages installs ready transcript" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+
+    const old_messages = try allocator.alloc(types.TranscriptMessage, 1);
+    old_messages[0] = .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "old"),
+    };
+    session.replaceTranscriptFromMessages(.codex, old_messages);
+
+    const messages = try allocator.alloc(types.TranscriptMessage, 1);
+    messages[0] = .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "ready"),
+    };
+
+    session.replaceTranscriptFromMessages(.codex, messages);
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    try std.testing.expectEqual(TranscriptState.ready, session.transcript_state);
+    try std.testing.expectEqual(types.ProviderId.codex, session.transcript_provider.?);
+    try std.testing.expectEqualStrings("ready", session.transcript[0].content);
+}
+
+test "ai_history_session: replaceTranscriptFromMessages invalidates stale async publish" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+
+    const old_generation = session.transcript_generation;
+    const replacement = try allocator.alloc(types.TranscriptMessage, 1);
+    replacement[0] = .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "replacement"),
+    };
+    session.replaceTranscriptFromMessages(.codex, replacement);
+
+    const stale = try allocator.alloc(types.TranscriptMessage, 1);
+    stale[0] = .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "stale"),
+    };
+    session.publishTranscript(old_generation, .codex, stale);
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    try std.testing.expectEqual(old_generation +% 1, session.transcript_generation);
+    try std.testing.expectEqualStrings("replacement", session.transcript[0].content);
 }
 
 test "ai_history_session: loading selected transcript stores and clears owned messages" {
