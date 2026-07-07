@@ -26,6 +26,23 @@ const PROMPT_B_SYSTEM =
     \\不要输出 JSON，不要复述任何密钥、token 或其他敏感凭证。
 ;
 
+const PROMPT_REDUCE_SYSTEM =
+    \\你是一名开发日志归纳员。你会收到当天多个开发会话的紧凑摘要（每条含 project/title/
+    \\summary/outcome）。请按项目（project）分组归纳，并生成当天的整体亮点和各项目的时间线。
+    \\要求：
+    \\- 不得复述任何密钥、token 或其他敏感凭证（如遇 [REDACTED] 标记，原样保留即可）。
+    \\- 只输出合法 JSON，不要输出任何 JSON 之外的文字或代码块围栏。
+    \\- JSON 结构必须是：{"projects":[{"slug":"…","summary":"…","session_refs":["…"]}],"highlights":["…"],"timeline":[{"slug":"…","summary":"…","events":[{"type":"progress|decision|problem|todo","text":"…","refs":["…"]}]}]}
+    \\- timeline 必须是数组（每个元素对应一个项目），不要用以 slug 为键的对象。
+;
+
+const PROMPT_HIGHLIGHTS_SYSTEM =
+    \\你是一名开发日志归纳员。你会收到当天各项目的摘要。请只生成当天的整体亮点列表。
+    \\要求：
+    \\- 只输出合法 JSON，不要输出任何 JSON 之外的文字或代码块围栏。
+    \\- JSON 结构必须是：{"highlights":["…"]}
+;
+
 pub const MapOptions = struct {
     max_chars_per_message: usize = 2000,
     input_budget_chars: usize = 24_000,
@@ -248,6 +265,205 @@ fn dupeResult(arena: std.mem.Allocator, parsed: JsonMapResult) !MapResult {
     };
 }
 
+// ---- Reduce stage (daily report + timelines, spec §8/§9 rollup) ----
+
+/// Sessions above this count are bucketed by project (one LLM call per
+/// project) plus one small highlights-only synthesis call, instead of a
+/// single call with everything inlined.
+const REDUCE_BUCKET_THRESHOLD = 50;
+
+pub const ProjectTimeline = struct { slug: []const u8, entry: store.TimelineEntry };
+
+pub const ReduceResult = struct {
+    projects: []const store.DailyProject,
+    highlights: []const []const u8,
+    timelines: []const ProjectTimeline,
+};
+
+/// project/title/summary/outcome only — the compact input fed to the reduce
+/// prompt via `std.json.Stringify.valueAlloc` (never hand-built).
+const SessionCompact = struct {
+    project: []const u8,
+    title: []const u8,
+    summary: []const u8,
+    outcome: []const u8,
+};
+
+const JsonReduceEvent = struct {
+    type: []const u8 = "",
+    text: []const u8 = "",
+    refs: []const []const u8 = &.{},
+};
+const JsonReduceTimeline = struct {
+    slug: []const u8 = "",
+    summary: []const u8 = "",
+    events: []const JsonReduceEvent = &.{},
+};
+const JsonReduceProject = struct {
+    slug: []const u8 = "",
+    summary: []const u8 = "",
+    session_refs: []const []const u8 = &.{},
+};
+const JsonReduceResult = struct {
+    projects: []const JsonReduceProject = &.{},
+    highlights: []const []const u8 = &.{},
+    timeline: []const JsonReduceTimeline = &.{},
+};
+const JsonHighlightsOnly = struct {
+    highlights: []const []const u8 = &.{},
+};
+
+/// Sends `user_text` to the completer, parses leniently as `T`, and retries
+/// once (with the parse error appended) on failure. `error.ReduceFailed` on
+/// a second bad response. Mirrors summarizeSession's retry-once flow.
+fn completeAndParse(arena: std.mem.Allocator, gpa: std.mem.Allocator, completer: llm.Completer, comptime T: type, system_prompt: []const u8, user_text: []const u8) !T {
+    var raw = try completer.complete(gpa, system_prompt, user_text);
+    defer gpa.free(raw);
+
+    return parseJsonObjectLenient(arena, T, raw) catch |err| {
+        const retry_text = try std.fmt.allocPrint(gpa, "{s}\n（上次输出无法解析为 JSON：{s}。请只输出合法 JSON。）", .{ user_text, @errorName(err) });
+        defer gpa.free(retry_text);
+        const retry_raw = try completer.complete(gpa, system_prompt, retry_text);
+        gpa.free(raw);
+        raw = retry_raw;
+        return parseJsonObjectLenient(arena, T, raw) catch return error.ReduceFailed;
+    };
+}
+
+/// Renders `sessions` as the compact `[{project,title,summary,outcome}, …]`
+/// JSON array the reduce prompt expects.
+fn compactSessionsJson(gpa: std.mem.Allocator, sessions: []const store.DailySession) ![]u8 {
+    var compact = try gpa.alloc(SessionCompact, sessions.len);
+    defer gpa.free(compact);
+    for (sessions, 0..) |s, i| {
+        compact[i] = .{ .project = s.project, .title = s.title, .summary = s.summary, .outcome = s.outcome };
+    }
+    return std.json.Stringify.valueAlloc(gpa, compact, .{});
+}
+
+/// Fills in `session_refs` for a parsed project/timeline entry when the LLM
+/// omitted it, using the session_ids of every session under `slug`.
+fn sessionRefsForSlug(arena: std.mem.Allocator, sessions: []const store.DailySession, slug: []const u8) ![]const []const u8 {
+    var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (sessions) |s| {
+        if (std.mem.eql(u8, s.project, slug)) try refs.append(arena, s.session_id);
+    }
+    return refs.toOwnedSlice(arena);
+}
+
+/// Dupes a parsed reduce result into `arena`, backfilling `session_refs` from
+/// `sessions` wherever the LLM left them empty.
+fn dupeReduceResult(arena: std.mem.Allocator, parsed: JsonReduceResult, date: []const u8, sessions: []const store.DailySession) !ReduceResult {
+    const projects = try arena.alloc(store.DailyProject, parsed.projects.len);
+    for (parsed.projects, 0..) |p, i| {
+        const slug = try arena.dupe(u8, p.slug);
+        var refs = p.session_refs;
+        if (refs.len == 0) refs = try sessionRefsForSlug(arena, sessions, slug);
+        const duped_refs = try arena.alloc([]const u8, refs.len);
+        for (refs, 0..) |r, j| duped_refs[j] = try arena.dupe(u8, r);
+        projects[i] = .{ .slug = slug, .summary = try arena.dupe(u8, p.summary), .session_refs = duped_refs };
+    }
+
+    const highlights = try arena.alloc([]const u8, parsed.highlights.len);
+    for (parsed.highlights, 0..) |h, i| highlights[i] = try arena.dupe(u8, h);
+
+    const timelines = try arena.alloc(ProjectTimeline, parsed.timeline.len);
+    for (parsed.timeline, 0..) |t, i| {
+        const slug = try arena.dupe(u8, t.slug);
+        const events = try arena.alloc(store.TimelineEvent, t.events.len);
+        for (t.events, 0..) |e, j| {
+            const event_refs = try arena.alloc([]const u8, e.refs.len);
+            for (e.refs, 0..) |r, k| event_refs[k] = try arena.dupe(u8, r);
+            events[j] = .{ .type = try arena.dupe(u8, e.type), .text = try arena.dupe(u8, e.text), .refs = event_refs };
+        }
+        const session_refs = try sessionRefsForSlug(arena, sessions, slug);
+        timelines[i] = .{ .slug = slug, .entry = .{
+            .date = try arena.dupe(u8, date),
+            .summary = try arena.dupe(u8, t.summary),
+            .events = events,
+            .session_refs = session_refs,
+        } };
+    }
+
+    return .{ .projects = projects, .highlights = highlights, .timelines = timelines };
+}
+
+/// One reduce call over `sessions` (assumed to already fit the prompt): builds
+/// the compact JSON input, calls the completer, parses (with retry), and
+/// dupes the result into `arena`.
+fn reduceOnce(arena: std.mem.Allocator, gpa: std.mem.Allocator, completer: llm.Completer, date: []const u8, sessions: []const store.DailySession) !ReduceResult {
+    const input_json = try compactSessionsJson(gpa, sessions);
+    defer gpa.free(input_json);
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const parsed = try completeAndParse(arena_state.allocator(), gpa, completer, JsonReduceResult, PROMPT_REDUCE_SYSTEM, input_json);
+    return dupeReduceResult(arena, parsed, date, sessions);
+}
+
+/// >50-session path: buckets sessions by project (one reduce call per
+/// bucket), then makes one small highlights-only call over the per-project
+/// summaries to synthesize the day's overall highlights.
+fn reduceBucketed(arena: std.mem.Allocator, gpa: std.mem.Allocator, completer: llm.Completer, date: []const u8, sessions: []const store.DailySession) !ReduceResult {
+    // Partition session indices by project slug (stable, contiguous runs).
+    const order = try gpa.alloc(usize, sessions.len);
+    defer gpa.free(order);
+    for (order, 0..) |*o, i| o.* = i;
+    std.mem.sort(usize, order, sessions, struct {
+        fn less(ctx: []const store.DailySession, a: usize, b: usize) bool {
+            return std.mem.order(u8, ctx[a].project, ctx[b].project) == .lt;
+        }
+    }.less);
+
+    var grouped = try gpa.alloc(store.DailySession, sessions.len);
+    defer gpa.free(grouped);
+    for (order, 0..) |o, i| grouped[i] = sessions[o];
+
+    var all_projects: std.ArrayListUnmanaged(store.DailyProject) = .empty;
+    var all_timelines: std.ArrayListUnmanaged(ProjectTimeline) = .empty;
+
+    var i: usize = 0;
+    while (i < grouped.len) {
+        var j = i + 1;
+        while (j < grouped.len and std.mem.eql(u8, grouped[j].project, grouped[i].project)) : (j += 1) {}
+        const bucket = try reduceOnce(arena, gpa, completer, date, grouped[i..j]);
+        try all_projects.appendSlice(arena, bucket.projects);
+        try all_timelines.appendSlice(arena, bucket.timelines);
+        i = j;
+    }
+
+    // Small synthesis call: feed each project's summary back in to produce
+    // the day's overall highlights.
+    const HighlightInput = struct { slug: []const u8, summary: []const u8 };
+    var highlight_inputs = try gpa.alloc(HighlightInput, all_projects.items.len);
+    defer gpa.free(highlight_inputs);
+    for (all_projects.items, 0..) |p, k| highlight_inputs[k] = .{ .slug = p.slug, .summary = p.summary };
+
+    const highlights_input_json = try std.json.Stringify.valueAlloc(gpa, highlight_inputs, .{});
+    defer gpa.free(highlights_input_json);
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const parsed_highlights = try completeAndParse(arena_state.allocator(), gpa, completer, JsonHighlightsOnly, PROMPT_HIGHLIGHTS_SYSTEM, highlights_input_json);
+
+    const highlights = try arena.alloc([]const u8, parsed_highlights.highlights.len);
+    for (parsed_highlights.highlights, 0..) |h, k| highlights[k] = try arena.dupe(u8, h);
+
+    return .{ .projects = all_projects.items, .highlights = highlights, .timelines = all_timelines.items };
+}
+
+/// Builds the daily report (per-project summaries + overall highlights) and
+/// per-project timeline entries for `date` from `sessions`' map-stage
+/// summaries (spec §8/§9). Sessions above `REDUCE_BUCKET_THRESHOLD` are
+/// bucketed by project to keep each LLM call's input bounded; otherwise one
+/// call covers everything.
+pub fn reduceDay(arena: std.mem.Allocator, gpa: std.mem.Allocator, completer: llm.Completer, date: []const u8, sessions: []const store.DailySession) !ReduceResult {
+    if (sessions.len > REDUCE_BUCKET_THRESHOLD) {
+        return reduceBucketed(arena, gpa, completer, date, sessions);
+    }
+    return reduceOnce(arena, gpa, completer, date, sessions);
+}
+
 // ---- Tests ----
 
 const StubCompleter = struct {
@@ -454,4 +670,151 @@ test "memory_digest_digest: UTF-8 truncation snaps to char boundaries" {
     try std.testing.expect(std.unicode.utf8ValidateSlice(sent) == true);
     // Verify the truncation marker is present
     try std.testing.expect(std.mem.indexOf(u8, sent, "…[截断]…") != null);
+}
+
+// ---- Reduce stage tests ----
+
+fn testDailySession(project: []const u8, session_id: []const u8, title: []const u8, summary: []const u8, outcome: []const u8) store.DailySession {
+    return .{
+        .provider = "claude",
+        .source_id = "local",
+        .session_id = session_id,
+        .project = project,
+        .title = title,
+        .message_count_new = 1,
+        .summary = summary,
+        .outcome = outcome,
+    };
+}
+
+test "memory_digest_digest: reduceDay parses projects, highlights and timelines" {
+    var stub = StubCompleter{ .responses = &.{
+        \\{"projects":[{"slug":"phantty","summary":"做了 A","session_refs":["s1","s2"]},{"slug":"other","summary":"做了 B","session_refs":["s3"]}],
+        \\"highlights":["完成了 A","推进了 B"],
+        \\"timeline":[{"slug":"phantty","summary":"当天进展","events":[{"type":"progress","text":"实现功能","refs":["s1"]}]},
+        \\{"slug":"other","summary":"另一天","events":[]}]}
+    } };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const sessions = [_]store.DailySession{
+        testDailySession("phantty", "s1", "t1", "sum1", "completed"),
+        testDailySession("phantty", "s2", "t2", "sum2", "completed"),
+        testDailySession("other", "s3", "t3", "sum3", "in_progress"),
+    };
+
+    const result = try reduceDay(arena.allocator(), std.testing.allocator, stub.completer(), "2026-07-07", &sessions);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.calls);
+
+    try std.testing.expectEqual(@as(usize, 2), result.projects.len);
+    try std.testing.expectEqualStrings("phantty", result.projects[0].slug);
+    try std.testing.expectEqualStrings("做了 A", result.projects[0].summary);
+    try std.testing.expectEqual(@as(usize, 2), result.projects[0].session_refs.len);
+    try std.testing.expectEqualStrings("s1", result.projects[0].session_refs[0]);
+    try std.testing.expectEqualStrings("other", result.projects[1].slug);
+
+    try std.testing.expectEqual(@as(usize, 2), result.highlights.len);
+    try std.testing.expectEqualStrings("完成了 A", result.highlights[0]);
+
+    try std.testing.expectEqual(@as(usize, 2), result.timelines.len);
+    try std.testing.expectEqualStrings("phantty", result.timelines[0].slug);
+    try std.testing.expectEqualStrings("2026-07-07", result.timelines[0].entry.date);
+    try std.testing.expectEqualStrings("当天进展", result.timelines[0].entry.summary);
+    try std.testing.expectEqual(@as(usize, 1), result.timelines[0].entry.events.len);
+    try std.testing.expectEqualStrings("progress", result.timelines[0].entry.events[0].type);
+    try std.testing.expectEqualStrings("实现功能", result.timelines[0].entry.events[0].text);
+}
+
+test "memory_digest_digest: reduceDay buckets over 50 sessions by project and synthesizes highlights" {
+    var stub = StubCompleter{ .responses = &.{
+        \\{"projects":[{"slug":"proj-a","summary":"a 项目总结","session_refs":[]}],
+        \\"highlights":[],"timeline":[{"slug":"proj-a","summary":"a 时间线","events":[]}]}
+        ,
+        \\{"projects":[{"slug":"proj-b","summary":"b 项目总结","session_refs":[]}],
+        \\"highlights":[],"timeline":[{"slug":"proj-b","summary":"b 时间线","events":[]}]}
+        ,
+        \\{"highlights":["整体亮点"]}
+    } };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = std.testing.allocator;
+
+    var sessions = try gpa.alloc(store.DailySession, 60);
+    defer gpa.free(sessions);
+    var slug_bufs: [60][16]u8 = undefined;
+    var id_bufs: [60][16]u8 = undefined;
+    for (0..60) |i| {
+        const project = if (i < 30) "proj-a" else "proj-b";
+        const slug = try std.fmt.bufPrint(&slug_bufs[i], "{s}", .{project});
+        const id = try std.fmt.bufPrint(&id_bufs[i], "s{d}", .{i});
+        sessions[i] = testDailySession(slug, id, "t", "sum", "completed");
+    }
+
+    const result = try reduceDay(arena.allocator(), gpa, stub.completer(), "2026-07-07", sessions);
+
+    try std.testing.expect(stub.calls >= 3);
+    try std.testing.expectEqual(@as(usize, 2), result.timelines.len);
+
+    var seen_a = false;
+    var seen_b = false;
+    for (result.timelines) |tl| {
+        if (std.mem.eql(u8, tl.slug, "proj-a")) seen_a = true;
+        if (std.mem.eql(u8, tl.slug, "proj-b")) seen_b = true;
+    }
+    try std.testing.expect(seen_a);
+    try std.testing.expect(seen_b);
+
+    try std.testing.expectEqual(@as(usize, 1), result.highlights.len);
+    try std.testing.expectEqualStrings("整体亮点", result.highlights[0]);
+}
+
+test "memory_digest_digest: reduceDay retries once on parse failure then succeeds" {
+    var stub = StubCompleter{ .responses = &.{
+        "not json",
+        \\{"projects":[{"slug":"phantty","summary":"s","session_refs":[]}],"highlights":[],"timeline":[]}
+    } };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const sessions = [_]store.DailySession{testDailySession("phantty", "s1", "t", "sum", "completed")};
+    const result = try reduceDay(arena.allocator(), std.testing.allocator, stub.completer(), "2026-07-07", &sessions);
+
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqual(@as(usize, 1), result.projects.len);
+}
+
+test "memory_digest_digest: reduceDay fails ReduceFailed after second bad response" {
+    var stub = StubCompleter{ .responses = &.{ "garbage one", "garbage two" } };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const sessions = [_]store.DailySession{testDailySession("phantty", "s1", "t", "sum", "completed")};
+    const result = reduceDay(arena.allocator(), std.testing.allocator, stub.completer(), "2026-07-07", &sessions);
+
+    try std.testing.expectError(error.ReduceFailed, result);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+}
+
+test "memory_digest_digest: reduceDay backfills session_refs when the LLM omits them" {
+    var stub = StubCompleter{ .responses = &.{
+        \\{"projects":[{"slug":"phantty","summary":"s"}],"highlights":[],"timeline":[{"slug":"phantty","summary":"t","events":[]}]}
+    } };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const sessions = [_]store.DailySession{
+        testDailySession("phantty", "s1", "t1", "sum1", "completed"),
+        testDailySession("phantty", "s2", "t2", "sum2", "completed"),
+    };
+    const result = try reduceDay(arena.allocator(), std.testing.allocator, stub.completer(), "2026-07-07", &sessions);
+
+    try std.testing.expectEqual(@as(usize, 1), result.projects.len);
+    try std.testing.expectEqual(@as(usize, 2), result.projects[0].session_refs.len);
+    try std.testing.expectEqualStrings("s1", result.projects[0].session_refs[0]);
+    try std.testing.expectEqualStrings("s2", result.projects[0].session_refs[1]);
+
+    try std.testing.expectEqual(@as(usize, 1), result.timelines.len);
+    try std.testing.expectEqual(@as(usize, 2), result.timelines[0].entry.session_refs.len);
+    try std.testing.expectEqualStrings("s1", result.timelines[0].entry.session_refs[0]);
 }
