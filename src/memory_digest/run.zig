@@ -9,6 +9,7 @@ const ai_types = @import("../terminal_agents/sessions/types.zig");
 const collector = @import("collector.zig");
 const cursors_mod = @import("cursors.zig");
 const digest = @import("digest.zig");
+const dirs = @import("../platform/dirs.zig");
 const llm = @import("llm.zig");
 const store = @import("store.zig");
 const types = @import("types.zig");
@@ -33,6 +34,53 @@ pub const Summary = struct {
     sessions_summarized: usize = 0,
     sessions_failed: usize = 0,
 };
+
+/// Owning bundle for `defaultLocalRoots`'s three gpa-allocated paths, freed
+/// together via `deinit`.
+pub const OwnedLocalRoots = struct {
+    claude_projects_dir: []const u8,
+    codex_sessions_dir: []const u8,
+    wispterm_sessions_dir: []const u8,
+
+    pub fn roots(self: *const OwnedLocalRoots) collector.LocalRoots {
+        return .{
+            .claude_projects_dir = self.claude_projects_dir,
+            .codex_sessions_dir = self.codex_sessions_dir,
+            .wispterm_sessions_dir = self.wispterm_sessions_dir,
+        };
+    }
+
+    pub fn deinit(self: *const OwnedLocalRoots, gpa: std.mem.Allocator) void {
+        gpa.free(self.claude_projects_dir);
+        gpa.free(self.codex_sessions_dir);
+        gpa.free(self.wispterm_sessions_dir);
+    }
+};
+
+/// Assembles the three real local session roots (Claude/.claude/projects,
+/// Codex/.codex/sessions, WispTerm's own agent-history/sessions), matching
+/// scan_main.zig's dev-CLI wiring exactly so both entry points scan the same
+/// on-disk sources. Shared here so the M2 scheduler doesn't drift from the
+/// CLI's root assembly.
+pub fn defaultLocalRoots(gpa: std.mem.Allocator) !OwnedLocalRoots {
+    const home = try std.process.getEnvVarOwned(gpa, "HOME");
+    defer gpa.free(home);
+
+    const claude_dir = try std.fs.path.join(gpa, &.{ home, ".claude", "projects" });
+    errdefer gpa.free(claude_dir);
+    const codex_dir = try std.fs.path.join(gpa, &.{ home, ".codex", "sessions" });
+    errdefer gpa.free(codex_dir);
+    const agent_history_dir = try dirs.agentHistoryDir(gpa);
+    defer gpa.free(agent_history_dir);
+    const wispterm_dir = try std.fs.path.join(gpa, &.{ agent_history_dir, "sessions" });
+    errdefer gpa.free(wispterm_dir);
+
+    return .{
+        .claude_projects_dir = claude_dir,
+        .codex_sessions_dir = codex_dir,
+        .wispterm_sessions_dir = wispterm_dir,
+    };
+}
 
 pub fn runOnce(gpa: std.mem.Allocator, opts: Options) !Summary {
     var arena_state = std.heap.ArenaAllocator.init(gpa);

@@ -38,17 +38,8 @@ pub fn main() !void {
     defer std.process.argsFree(gpa, argv);
     const args = parseArgs(argv);
 
-    const home = try std.process.getEnvVarOwned(gpa, "HOME");
-    defer gpa.free(home);
-
-    const claude_dir = try std.fs.path.join(gpa, &.{ home, ".claude", "projects" });
-    defer gpa.free(claude_dir);
-    const codex_dir = try std.fs.path.join(gpa, &.{ home, ".codex", "sessions" });
-    defer gpa.free(codex_dir);
-    const agent_history_dir = try dirs.agentHistoryDir(gpa);
-    defer gpa.free(agent_history_dir);
-    const wispterm_dir = try std.fs.path.join(gpa, &.{ agent_history_dir, "sessions" });
-    defer gpa.free(wispterm_dir);
+    const local_roots = try run_mod.defaultLocalRoots(gpa);
+    defer local_roots.deinit(gpa);
     const memory_root = try dirs.memoryDir(gpa);
     defer gpa.free(memory_root);
 
@@ -80,11 +71,7 @@ pub fn main() !void {
     }
 
     const summary = try run_mod.runOnce(gpa, .{
-        .roots = .{
-            .claude_projects_dir = claude_dir,
-            .codex_sessions_dir = codex_dir,
-            .wispterm_sessions_dir = wispterm_dir,
-        },
+        .roots = local_roots.roots(),
         .memory_root = memory_root,
         .now_ms = std.time.milliTimestamp(),
         // ponytail: dev CLI hardcodes UTC+8; the app injects the real
