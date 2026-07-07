@@ -586,9 +586,9 @@ pub fn spawnAiChatTab(
 
 pub fn spawnAiChatSession(allocator: std.mem.Allocator, session: *ai_chat.Session) bool {
     if (g_tab_count >= MAX_TABS) return false;
-    installAiChatHistoryHook(session);
 
     const t = allocator.create(TabState) catch return false;
+    installAiChatHistoryHook(session);
     t.kind = .ai_chat;
     t.tree = .empty;
     t.focused = .root;
@@ -2081,6 +2081,24 @@ test "tab: spawnAiChatSession creates active ai chat tab from owned session" {
     try std.testing.expectEqual(@as(usize, 1), g_tab_count);
     try std.testing.expect(activeAiChat() != null);
     try std.testing.expectEqualStrings("Copilot", activeAiChat().?.title());
+}
+
+test "tab: spawnAiChatSession returns false without taking ownership when tabs are full" {
+    const allocator = std.testing.allocator;
+    resetTestTabGlobals();
+    defer resetTestTabGlobals();
+
+    const session = try ai_chat.Session.init(allocator, "Copilot", "https://example.test", "k", "model", "system", "disabled", "low", "false", "true");
+
+    g_tab_count = MAX_TABS;
+    active_tab_state.g_active_tab = 3;
+
+    try std.testing.expect(!spawnAiChatSession(allocator, session));
+    try std.testing.expectEqual(@as(usize, MAX_TABS), g_tab_count);
+    try std.testing.expectEqual(@as(usize, 3), active_tab_state.g_active_tab);
+    try std.testing.expect(session.history_on_change == null);
+
+    session.deinit();
 }
 
 test "tab: restoreTab routes ai_history through the restore hook" {
