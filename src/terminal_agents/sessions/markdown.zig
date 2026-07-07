@@ -3,6 +3,16 @@ const types = @import("types.zig");
 
 pub const ExportOptions = struct {};
 
+pub const ContextResult = struct {
+    markdown: []u8,
+    truncated: bool,
+
+    pub fn deinit(self: *ContextResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.markdown);
+        self.truncated = false;
+    }
+};
+
 pub fn allocMarkdownExport(
     allocator: std.mem.Allocator,
     meta: types.SessionMeta,
@@ -13,6 +23,56 @@ pub fn allocMarkdownExport(
     errdefer out.deinit(allocator);
 
     try appendHeader(allocator, &out, meta);
+
+    var wrote_message = false;
+    for (messages) |msg| {
+        if (std.mem.trim(u8, msg.content, " \t\r\n").len == 0) continue;
+        try appendMessage(allocator, &out, msg.role, msg.content);
+        wrote_message = true;
+    }
+    if (!wrote_message) try out.appendSlice(allocator, "_No transcript messages._\n");
+
+    return out.toOwnedSlice(allocator);
+}
+
+pub fn allocCopilotContext(
+    allocator: std.mem.Allocator,
+    meta: types.SessionMeta,
+    messages: []const types.TranscriptMessage,
+    max_bytes: usize,
+) !ContextResult {
+    const full = try allocMarkdownExport(allocator, meta, messages, .{});
+    if (full.len <= max_bytes) {
+        return .{ .markdown = full, .truncated = false };
+    }
+    allocator.free(full);
+
+    var best_start = messages.len;
+    var start = messages.len;
+    while (start > 0) {
+        start -= 1;
+        const candidate = try allocMarkdownExportWithNotice(allocator, meta, messages[start..], true);
+        const fits = candidate.len <= max_bytes;
+        allocator.free(candidate);
+        if (!fits) break;
+        best_start = start;
+    }
+
+    const markdown = try allocMarkdownExportWithNotice(allocator, meta, messages[best_start..], true);
+    return .{ .markdown = markdown, .truncated = true };
+}
+
+fn allocMarkdownExportWithNotice(
+    allocator: std.mem.Allocator,
+    meta: types.SessionMeta,
+    messages: []const types.TranscriptMessage,
+    truncated: bool,
+) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try appendHeader(allocator, &out, meta);
+    if (truncated) try out.appendSlice(allocator, "_Transcript truncated; showing the most recent messages._\n\n");
 
     var wrote_message = false;
     for (messages) |msg| {
@@ -79,6 +139,39 @@ fn roleHeading(role: types.MessageRole) []const u8 {
         .system => "System",
         .tool => "Tool",
     };
+}
+
+pub fn rawDownloadFilename(meta: types.SessionMeta, out: []u8) []const u8 {
+    const provider = sanitizedProviderLabel(meta.provider);
+    const base = std.fs.path.basename(meta.source_path);
+    var tmp: [256]u8 = undefined;
+    const raw = std.fmt.bufPrint(&tmp, "{s}-{s}-{s}", .{ provider, meta.session_id, base }) catch provider;
+    return sanitizeFilename(raw, out);
+}
+
+fn sanitizedProviderLabel(provider: types.ProviderId) []const u8 {
+    return switch (provider) {
+        .codex => "codex",
+        .claude => "claude-code",
+        .reasonix => "reasonix",
+    };
+}
+
+fn sanitizeFilename(raw: []const u8, out: []u8) []const u8 {
+    if (out.len == 0) return "";
+    var n: usize = 0;
+    var last_dash = false;
+    for (raw) |ch| {
+        if (n >= out.len) break;
+        const ok = std.ascii.isAlphanumeric(ch) or ch == '.' or ch == '_' or ch == '-';
+        const next = if (ok) std.ascii.toLower(ch) else '-';
+        if (next == '-' and last_dash) continue;
+        out[n] = next;
+        n += 1;
+        last_dash = next == '-';
+    }
+    while (n > 0 and out[n - 1] == '-') n -= 1;
+    return out[0..n];
 }
 
 test "ai history markdown export includes metadata and role sections" {
@@ -173,4 +266,44 @@ test "ai history markdown export collapses metadata whitespace to one line" {
     try std.testing.expect(std.mem.indexOf(u8, markdown, "- Title: Fix metadata heading\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, markdown, "- Project: /work/ wispterm\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, markdown, "- Source: /home/me/.codex/sessions/ sess-4.jsonl\n") != null);
+}
+
+test "ai history copilot context truncates oversized transcripts from the front" {
+    const allocator = std.testing.allocator;
+    const meta = types.SessionMeta{
+        .provider = .reasonix,
+        .session_id = "sess-3",
+        .title = "Long chat",
+        .source_path = "/home/me/.reasonix/sessions/events.jsonl",
+        .resume_kind = .reasonix_resume,
+    };
+    const messages = [_]types.TranscriptMessage{
+        .{ .role = .user, .content = "old prompt that should drop" },
+        .{ .role = .assistant, .content = "old answer that should drop" },
+        .{ .role = .user, .content = "recent prompt" },
+        .{ .role = .assistant, .content = "recent answer" },
+    };
+
+    var result = try allocCopilotContext(allocator, meta, &messages, 260);
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.truncated);
+    try std.testing.expect(std.mem.indexOf(u8, result.markdown, "Transcript truncated") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.markdown, "recent prompt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.markdown, "recent answer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.markdown, "old prompt that should drop") == null);
+}
+
+test "ai history raw download filename sanitizes provider session and basename" {
+    var buf: [160]u8 = undefined;
+    const meta = types.SessionMeta{
+        .provider = .claude,
+        .session_id = "session:bad/id",
+        .title = "Ignored",
+        .source_path = "/home/me/.claude/projects/original file.jsonl",
+        .resume_kind = .claude_resume,
+    };
+
+    const name = rawDownloadFilename(meta, &buf);
+    try std.testing.expectEqualStrings("claude-code-session-bad-id-original-file.jsonl", name);
 }
