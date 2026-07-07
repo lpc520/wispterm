@@ -3092,14 +3092,6 @@ fn loadAiHistoryTranscriptForAction(
     session: *ai_history_session.Session,
     meta: ai_history_types.SessionMeta,
 ) ?[]ai_history_types.TranscriptMessage {
-    session.mutex.lock();
-    if (session.transcript_state == .ready and session.transcript_provider != null and session.transcript_provider.? == meta.provider) {
-        const cloned = cloneAiHistoryTranscriptMessages(allocator, session.transcript) catch null;
-        session.mutex.unlock();
-        return cloned;
-    }
-    session.mutex.unlock();
-
     const target = aiHistoryTargetSnapshot(session.source.target) orelse return null;
     const messages: []ai_history_types.TranscriptMessage = switch (target) {
         .local => ai_history_session.loadLocalTranscript(allocator, meta) catch return null,
@@ -3331,14 +3323,14 @@ pub fn aiHistoryDownloadSelectedRaw() bool {
         .wsl => {
             const bytes = readWslAiHistoryRaw(allocator, meta.source_path) catch |err| {
                 log.warn("failed to read WSL AI history raw file {s}: {}", .{ meta.source_path, err });
-                return showAiHistoryActionToast("Raw download failed");
+                return showAiHistoryActionToast("WSL raw download failed");
             };
             defer allocator.free(bytes);
             return writeAiHistoryRawDownload(path, bytes);
         },
         .ssh => |ssh| {
             const conn = overlays.aiHistorySshConnection(ssh.profile_name) orelse {
-                return showAiHistoryActionToast("Raw download failed");
+                return showAiHistoryActionToast("SSH profile unavailable");
             };
             if (!file_explorer.downloadRemotePathToPath(meta.source_path, path, filename, &conn, false)) {
                 return showAiHistoryActionToast("Raw download failed");
@@ -3414,9 +3406,7 @@ pub fn aiHistoryAttachSelectedToCopilot() bool {
     };
     defer context.deinit(allocator);
 
-    const target = ensureAiHistoryCopilotTarget() orelse {
-        return showAiHistoryActionToast("Attach failed");
-    };
+    const target = ensureAiHistoryCopilotTarget() orelse return true;
     const title_text = std.fmt.allocPrint(
         allocator,
         "AI History: {s} {s}",
@@ -3429,7 +3419,12 @@ pub fn aiHistoryAttachSelectedToCopilot() bool {
 
     target.appendContextCard(title_text, context.markdown, true) catch |err| {
         log.warn("failed to attach AI history context to Copilot for {s}: {}", .{ meta.session_id, err });
-        return showAiHistoryActionToast("Attach failed");
+        const message = switch (err) {
+            error.SessionBusy => "Copilot is busy",
+            error.SessionClosing => "Copilot session is closing",
+            else => "Attach failed",
+        };
+        return showAiHistoryActionToast(message);
     };
 
     if (context.truncated) {
@@ -3556,10 +3551,18 @@ fn ensureActiveCopilotSession() ?*ai_chat.Session {
 fn ensureAiHistoryCopilotTarget() ?*ai_chat.Session {
     if (activeAiChat()) |session| return session;
     if (activeCopilotSessionForInput()) |session| return session;
-    const allocator = g_allocator orelse return null;
-    const session = makeCopilotSession() orelse return null;
+    const allocator = g_allocator orelse {
+        _ = showAiHistoryActionToast("Attach failed");
+        return null;
+    };
+    const session = makeCopilotSession() orelse {
+        overlays.openAiConfigForMissingCopilotApi();
+        _ = showAiHistoryActionToast("Configure a Copilot profile first");
+        return null;
+    };
     if (!tab.spawnAiChatSession(allocator, session)) {
         session.deinit();
+        _ = showAiHistoryActionToast("Attach failed");
         return null;
     }
     clearUiStateOnTabChange();
