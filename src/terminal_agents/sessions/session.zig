@@ -620,6 +620,7 @@ pub const Session = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.clearTranscript();
+        self.transcript_generation +%= 1;
         self.transcript = messages;
         self.transcript_provider = provider;
         self.transcript_state = .ready;
@@ -696,6 +697,7 @@ pub const Session = struct {
         return null;
     }
 
+    /// Self-locks; callers must not already hold `session.mutex`.
     pub fn selectedMetadataClone(self: *Session, allocator: std.mem.Allocator) ?types.SessionMeta {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -2151,6 +2153,13 @@ test "ai_history_session: replaceTranscriptFromMessages installs ready transcrip
     var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
     defer session.deinit();
 
+    const old_messages = try allocator.alloc(types.TranscriptMessage, 1);
+    old_messages[0] = .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "old"),
+    };
+    session.replaceTranscriptFromMessages(.codex, old_messages);
+
     const messages = try allocator.alloc(types.TranscriptMessage, 1);
     messages[0] = .{
         .role = .assistant,
@@ -2164,6 +2173,32 @@ test "ai_history_session: replaceTranscriptFromMessages installs ready transcrip
     try std.testing.expectEqual(TranscriptState.ready, session.transcript_state);
     try std.testing.expectEqual(types.ProviderId.codex, session.transcript_provider.?);
     try std.testing.expectEqualStrings("ready", session.transcript[0].content);
+}
+
+test "ai_history_session: replaceTranscriptFromMessages invalidates stale async publish" {
+    const allocator = std.testing.allocator;
+    var session = Session.init(allocator, .{ .id = "local", .name = "Local", .target = .local });
+    defer session.deinit();
+
+    const old_generation = session.transcript_generation;
+    const replacement = try allocator.alloc(types.TranscriptMessage, 1);
+    replacement[0] = .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "replacement"),
+    };
+    session.replaceTranscriptFromMessages(.codex, replacement);
+
+    const stale = try allocator.alloc(types.TranscriptMessage, 1);
+    stale[0] = .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "stale"),
+    };
+    session.publishTranscript(old_generation, .codex, stale);
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    try std.testing.expectEqual(old_generation +% 1, session.transcript_generation);
+    try std.testing.expectEqualStrings("replacement", session.transcript[0].content);
 }
 
 test "ai_history_session: loading selected transcript stores and clears owned messages" {
