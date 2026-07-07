@@ -35,21 +35,20 @@ const Match = struct {
     keep: usize = 0,
 };
 
-// Longest threshold below is 64 (hex); 128 bytes is ample headroom for a
-// bounded probe. Only a probe that hits its threshold pays to extend to the
-// true end of the run — ordinary hyphenated text (paths, stack traces) never
-// gets past the probe, avoiding O(n^2) rescanning at every boundary.
+// Design: probe a bounded window first, decide whether to mask from that
+// window alone, and only walk to the run's true end once we've committed to
+// masking. The probe (<=128 bytes) is what keeps ordinary text linear —
+// hyphenated paths/stack traces never hit the mask threshold and never pay
+// the extension walk. There is no cap on the extension itself: every byte
+// the walk visits belongs to a run that ends in a consumed match, so each
+// input byte is examined by at most one such walk overall (amortized O(n)),
+// and the whole secret gets masked instead of leaking a partial tail.
+//
+// Longest threshold below is 64 (hex); 128 bytes is ample headroom for the
+// probe to reach it.
 // ponytail: fixed cap, not derived from thresholds; revisit if a longer
 // secret pattern is added.
 const PROBE_CAP = 128;
-
-// Extension is also bounded: the base64 charset includes '-'/'_', so a run of
-// ordinary hyphenated text (e.g. "ab-cd-ef-gh-" repeated) reads as one giant
-// "base64-ish" run and would otherwise make the extension loop itself
-// O(remaining length) at every boundary — reintroducing the quadratic blowup
-// this file exists to avoid. No legitimate secret is anywhere near this long,
-// so capping the extension changes no real-world behavior.
-const EXTEND_CAP = 4096;
 
 fn matchAt(text: []const u8, i: usize) ?Match {
     const rest = text[i..];
@@ -77,18 +76,27 @@ fn matchAt(text: []const u8, i: usize) ?Match {
     const probe = rest[0..@min(rest.len, PROBE_CAP)];
     const hex_probe = hexLen(probe);
     if (hex_probe >= 64) {
-        const extend_limit = @min(rest.len, EXTEND_CAP);
+        // Genuine hex run: walk to its true end. Amortized-safe: the walk
+        // always ends in a consumed match, so each byte is visited once.
         var end = hex_probe;
-        while (end < extend_limit and std.ascii.isHex(rest[end])) end += 1;
+        while (end < rest.len and std.ascii.isHex(rest[end])) end += 1;
         return .{ .len = end };
     }
-    // Long mixed-case base64-ish run (>=40) with upper+lower+digit.
+    // Long mixed-case base64-ish run (>=40) with upper+lower+digit. The
+    // mixed-class check runs on the PROBE WINDOW BEFORE extending: ordinary
+    // hyphenated lowercase text (the O(n^2) pathology) fails here and never
+    // pays the extension walk. Extension only happens when we will mask, so
+    // it is amortized O(n) overall — and the WHOLE run gets masked, no
+    // partial-mask tail leak.
+    //
+    // Deliberate semantic: a 40+ base64 run whose first 128 bytes lack an
+    // upper/lower/digit mix is not masked even if the mix appears later.
+    // Conservative — token-like secrets mix classes early.
     const b64_probe = base64Len(probe);
-    if (b64_probe >= 40) {
-        const extend_limit = @min(rest.len, EXTEND_CAP);
+    if (b64_probe >= 40 and hasMixedClasses(probe[0..b64_probe])) {
         var end = b64_probe;
-        while (end < extend_limit and isBase64Char(rest[end])) end += 1;
-        if (hasMixedClasses(rest[0..end])) return .{ .len = end };
+        while (end < rest.len and isBase64Char(rest[end])) end += 1;
+        return .{ .len = end };
     }
     return null;
 }
@@ -193,5 +201,22 @@ test "memory_digest_redact: long hex run past probe cap is fully masked" {
     const input = "hash " ++ run ++ " end";
     const out = try redact(std.testing.allocator, input);
     defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("hash " ++ MASK ++ " end", out);
+}
+
+test "memory_digest_redact: 5000-byte hex secret is fully masked, no partial tail leak" {
+    const alloc = std.testing.allocator;
+    var run: std.ArrayListUnmanaged(u8) = .empty;
+    defer run.deinit(alloc);
+    while (run.items.len < 5000) try run.appendSlice(alloc, "0123456789abcdef");
+
+    var input: std.ArrayListUnmanaged(u8) = .empty;
+    defer input.deinit(alloc);
+    try input.appendSlice(alloc, "hash ");
+    try input.appendSlice(alloc, run.items);
+    try input.appendSlice(alloc, " end");
+
+    const out = try redact(alloc, input.items);
+    defer alloc.free(out);
     try std.testing.expectEqualStrings("hash " ++ MASK ++ " end", out);
 }
