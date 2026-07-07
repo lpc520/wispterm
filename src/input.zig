@@ -3337,6 +3337,18 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
                 _ = AppWindow.aiHistoryScanLocalNow();
                 return .none;
             },
+            0x44 => if (plain and !ev.shift and !search_focused) {
+                _ = AppWindow.aiHistoryDownloadSelectedRaw();
+                return .none;
+            },
+            0x4D => if (plain and !ev.shift and !search_focused) {
+                _ = AppWindow.aiHistoryExportSelectedMarkdown();
+                return .none;
+            },
+            0x41 => if (plain and !ev.shift and !search_focused) {
+                _ = AppWindow.aiHistoryAttachSelectedToCopilot();
+                return .none;
+            },
             else => {},
         }
         return .none;

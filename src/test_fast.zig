@@ -25,6 +25,14 @@ test "input ssh download surfaces missing connection and helper probe failures" 
     try std.testing.expect(std.mem.indexOf(u8, input_source, "\"SSH helper unavailable\"") != null);
 }
 
+test "input routes AI History selected action shortcuts through AppWindow actions" {
+    const source = @embedFile("input.zig");
+    try std.testing.expect(std.mem.indexOf(u8, source, "aiHistoryDownloadSelectedRaw") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "aiHistoryExportSelectedMarkdown") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "aiHistoryAttachSelectedToCopilot") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "!search_focused") != null);
+}
+
 test "assistant conversation input routing owns keyboard target lookup" {
     const routing_source = @embedFile("input/assistant_conversation.zig");
     try std.testing.expect(std.mem.indexOf(u8, routing_source, "activeAiChat()") != null);
