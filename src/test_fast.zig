@@ -41,6 +41,27 @@ test "input routes AI History selected action shortcuts through AppWindow action
     try std.testing.expect(suppress_index < assistant_index);
 }
 
+test "AI History action transcript loader reuses ready preview before target snapshot" {
+    const source = @embedFile("AppWindow.zig");
+    const start = std.mem.indexOf(u8, source, "fn loadAiHistoryTranscriptForAction(") orelse return error.MissingLoader;
+    const rest = source[start..];
+    const end = std.mem.indexOf(u8, rest, "fn cloneAiHistoryTranscriptMessages(") orelse return error.MissingLoaderEnd;
+    const body = rest[0..end];
+
+    const target_snapshot = std.mem.indexOf(u8, body, "aiHistoryTargetSnapshot") orelse return error.MissingTargetSnapshot;
+    const lock = std.mem.indexOf(u8, body, "session.mutex.lock()") orelse return error.MissingPreviewLock;
+    const ready = std.mem.indexOf(u8, body, "session.transcript_state == .ready") orelse return error.MissingReadyPreviewBranch;
+    const provider = std.mem.indexOf(u8, body, "session.transcript_provider") orelse return error.MissingPreviewProviderCheck;
+    const clone = std.mem.indexOf(u8, body, "cloneAiHistoryTranscriptMessages(allocator, session.transcript)") orelse return error.MissingPreviewClone;
+    const unlock = std.mem.indexOf(u8, body, "session.mutex.unlock()") orelse return error.MissingPreviewUnlock;
+
+    try std.testing.expect(lock < ready);
+    try std.testing.expect(ready < provider);
+    try std.testing.expect(provider < clone);
+    try std.testing.expect(clone < unlock);
+    try std.testing.expect(unlock < target_snapshot);
+}
+
 test "assistant conversation input routing owns keyboard target lookup" {
     const routing_source = @embedFile("input/assistant_conversation.zig");
     try std.testing.expect(std.mem.indexOf(u8, routing_source, "activeAiChat()") != null);

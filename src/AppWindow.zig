@@ -3092,6 +3092,18 @@ fn loadAiHistoryTranscriptForAction(
     session: *ai_history_session.Session,
     meta: ai_history_types.SessionMeta,
 ) ?[]ai_history_types.TranscriptMessage {
+    session.mutex.lock();
+    if (session.transcript_state == .ready and
+        session.transcript_provider != null and
+        session.transcript_provider.? == meta.provider)
+    {
+        const preview_copy = cloneAiHistoryTranscriptMessages(allocator, session.transcript) catch null;
+        session.mutex.unlock();
+        if (preview_copy) |copy| return copy;
+    } else {
+        session.mutex.unlock();
+    }
+
     const target = aiHistoryTargetSnapshot(session.source.target) orelse return null;
     const messages: []ai_history_types.TranscriptMessage = switch (target) {
         .local => ai_history_session.loadLocalTranscript(allocator, meta) catch return null,

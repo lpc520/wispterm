@@ -104,9 +104,17 @@ fn allocMarkdownExportWithNewestTail(
         out.deinit(allocator);
         return null;
     }
-    try out.appendSlice(allocator, body[body.len - tail_len ..]);
+    try out.appendSlice(allocator, body[utf8SafeTailStart(body, tail_len)..]);
     try out.appendSlice(allocator, "\n\n");
     return try out.toOwnedSlice(allocator);
+}
+
+fn utf8SafeTailStart(s: []const u8, tail_len: usize) usize {
+    var start = s.len - @min(s.len, tail_len);
+    while (start < s.len and (s[start] & 0xC0) == 0x80) {
+        start += 1;
+    }
+    return start;
 }
 
 fn newestNonEmptyMessage(messages: []const types.TranscriptMessage) ?types.TranscriptMessage {
@@ -424,6 +432,32 @@ test "ai history copilot context keeps tail of oversized latest message" {
     try std.testing.expect(result.markdown.len <= 240);
     try std.testing.expect(std.mem.indexOf(u8, result.markdown, "LATEST_TAIL_MARKER") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.markdown, "older prompt") == null);
+}
+
+test "ai history copilot context newest tail stays on utf8 boundary" {
+    const allocator = std.testing.allocator;
+    const meta = types.SessionMeta{
+        .provider = .codex,
+        .session_id = "sess-utf8-tail",
+        .title = "Utf8 Tail",
+        .source_path = "/home/me/.codex/sessions/utf8-tail.jsonl",
+        .resume_kind = .codex_resume,
+    };
+    const messages = [_]types.TranscriptMessage{
+        .{ .role = .assistant, .content = ("汉" ** 20) ++ "TAIL" },
+    };
+
+    var prefix: std.ArrayListUnmanaged(u8) = .empty;
+    defer prefix.deinit(allocator);
+    try appendHeader(allocator, &prefix, meta);
+    try prefix.appendSlice(allocator, "_Transcript truncated; showing the most recent messages._\n\n");
+    try prefix.writer(allocator).print("## {s}\n\n", .{roleHeading(.assistant)});
+
+    const markdown = (try allocMarkdownExportWithNewestTail(allocator, meta, &messages, prefix.items.len + 7)).?;
+    defer allocator.free(markdown);
+
+    try std.testing.expect(std.unicode.utf8ValidateSlice(markdown));
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "TAIL") != null);
 }
 
 test "ai history copilot context ignores trailing empty messages for newest tail" {
