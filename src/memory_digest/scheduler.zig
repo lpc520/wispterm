@@ -109,6 +109,33 @@ pub fn tick(gpa: std.mem.Allocator) void {
 
     if (!shouldRun(now_ms, tz_offset_seconds, run_after_minutes, last_run.date_key, g_app_started_ms.?)) return;
 
+    spawnRun(gpa, now_ms, tz_offset_seconds);
+}
+
+/// Manually trigger a digest run right now, bypassing the enabled/date/
+/// time-of-day/startup-delay gates in `shouldRun` (a manual trigger is an
+/// explicit user request, not a scheduled decision). Still respects the
+/// in_flight guard: if a run is already in progress, this is a no-op.
+pub fn runNow(gpa: std.mem.Allocator) void {
+    if (g_in_flight.load(.acquire)) {
+        std.log.info("memory_digest: runNow skipped, a run is already in progress", .{});
+        return;
+    }
+
+    if (g_thread) |t| {
+        t.join();
+        g_thread = null;
+    }
+
+    const now_ms = std.time.milliTimestamp();
+    const tz_offset_seconds = time_mod.localOffsetSeconds();
+    spawnRun(gpa, now_ms, tz_offset_seconds);
+}
+
+/// Shared spawn path for both the scheduled tick and the manual runNow
+/// trigger: sets in_flight, builds thread params from current settings, and
+/// spawns runThreadMain. Caller must already hold the in_flight/join guards.
+fn spawnRun(gpa: std.mem.Allocator, now_ms: i64, tz_offset_seconds: i32) void {
     g_in_flight.store(true, .release);
     const params = ThreadParams{
         .profile_name = gpa.dupe(u8, g_settings.profile_name) catch {
@@ -294,6 +321,20 @@ fn markRanToday(gpa: std.mem.Allocator, now_ms: i64, tz_offset_seconds: i32) voi
 }
 
 // ---- tests: pure decision functions only; runThreadMain is not unit tested ----
+//
+// ponytail: no test calls tick/runNow/spawnRun themselves (same as the
+// pre-existing tick, which no test here calls either). A `zig test` build
+// eagerly codegens everything reachable from an executed test body, and that
+// chain runs through std.Thread.spawn(runThreadMain) -> window_backend
+// .postWakeup() -> the macOS window backend module, whose extern fns are
+// only linked into the full app / macOS UI test binaries, not this fast
+// cross-platform suite (see src/test_fast.zig's "no App.zig/AppWindow.zig"
+// comment) -- verified locally: adding such a test breaks `zig build test`
+// with 29 undefined _wispterm_macos_window_* linker errors, while the
+// current in_flight-guard-first-line behavior for both tick and runNow is
+// otherwise identical and already covered by reading the source directly.
+// If this needs real coverage later, test it via test-full's macOS-only
+// app test binary instead of the fast suite.
 
 test "memory_digest_scheduler: parseRunAfterMinutes accepts HH:MM" {
     try std.testing.expectEqual(@as(?u16, 240), parseRunAfterMinutes("04:00"));
