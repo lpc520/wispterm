@@ -68,10 +68,12 @@ pub fn runOnce(gpa: std.mem.Allocator, opts: Options) !Summary {
             });
         }
         var date_buf: [10]u8 = undefined;
+        const date = store.formatDate(key, &date_buf);
+        const merged = try mergeDailyWithExisting(arena, opts.memory_root, date, entries.items);
         try store.writeDaily(gpa, opts.memory_root, .{
-            .date = store.formatDate(key, &date_buf),
+            .date = date,
             .generated_at = opts.now_ms,
-            .sessions = entries.items,
+            .sessions = merged,
         });
     }
 
@@ -82,6 +84,80 @@ pub fn runOnce(gpa: std.mem.Allocator, opts: Options) !Summary {
         .sessions_collected = collected.sessions.len,
         .days_written = day_keys.items.len,
     };
+}
+
+/// Merge this run's new-session entries for a day with whatever is already
+/// on disk for that date, so a same-day rerun never wipes an earlier run's
+/// entries (spec §9: daily files are cumulative for the day, not per-run).
+/// Same (provider, source_id, session_id) → sum message_count_new, keep the
+/// new title/project; old-only entries are kept; new-only entries appended.
+fn mergeDailyWithExisting(
+    arena: std.mem.Allocator,
+    memory_root: []const u8,
+    date: []const u8,
+    new_entries: []const store.DailySession,
+) ![]const store.DailySession {
+    const ExistingShape = struct {
+        provider: []const u8 = "",
+        source_id: []const u8 = "",
+        session_id: []const u8 = "",
+        project: []const u8 = "",
+        title: []const u8 = "",
+        message_count_new: u32 = 0,
+    };
+    const DailyShape = struct { sessions: []const ExistingShape = &.{} };
+
+    var existing: []const ExistingShape = &.{};
+    const dir_path = try std.fs.path.join(arena, &.{ memory_root, "daily" });
+    if (std.fs.cwd().openDir(dir_path, .{})) |d| {
+        var dir = d;
+        defer dir.close();
+        const name = try std.fmt.allocPrint(arena, "{s}.json", .{date});
+        if (dir.readFileAlloc(arena, name, 16 * 1024 * 1024)) |bytes| {
+            if (std.json.parseFromSlice(DailyShape, arena, bytes, .{
+                .ignore_unknown_fields = true,
+            })) |parsed| {
+                existing = parsed.value.sessions; // arena-owned; no deinit needed
+            } else |_| {}
+        } else |_| {}
+    } else |_| {}
+
+    var merged: std.ArrayListUnmanaged(store.DailySession) = .empty;
+    var used = try arena.alloc(bool, new_entries.len);
+    @memset(used, false);
+
+    for (existing) |old| {
+        const match_idx: ?usize = for (new_entries, 0..) |n, i| {
+            if (!used[i] and std.mem.eql(u8, n.provider, old.provider) and
+                std.mem.eql(u8, n.source_id, old.source_id) and
+                std.mem.eql(u8, n.session_id, old.session_id)) break i;
+        } else null;
+        if (match_idx) |i| {
+            used[i] = true;
+            const n = new_entries[i];
+            try merged.append(arena, .{
+                .provider = n.provider,
+                .source_id = n.source_id,
+                .session_id = n.session_id,
+                .project = n.project,
+                .title = n.title,
+                .message_count_new = old.message_count_new + n.message_count_new,
+            });
+        } else {
+            try merged.append(arena, .{
+                .provider = old.provider,
+                .source_id = old.source_id,
+                .session_id = old.session_id,
+                .project = old.project,
+                .title = old.title,
+                .message_count_new = old.message_count_new,
+            });
+        }
+    }
+    for (new_entries, 0..) |n, i| {
+        if (!used[i]) try merged.append(arena, n);
+    }
+    return merged.items;
 }
 
 fn lastActivityMs(s: types.CollectedSession, fallback_ms: i64) i64 {
@@ -115,11 +191,11 @@ fn writeIndexFromDisk(gpa: std.mem.Allocator, arena: std.mem.Allocator, memory_r
     while (try it.next()) |ent| {
         if (ent.kind != .file or !std.mem.endsWith(u8, ent.name, ".json")) continue;
         const date = try arena.dupe(u8, ent.name[0 .. ent.name.len - ".json".len]);
-        try days.append(arena, date);
         const bytes = dir.readFileAlloc(arena, ent.name, 16 * 1024 * 1024) catch continue;
         const parsed = std.json.parseFromSlice(DailyShape, arena, bytes, .{
             .ignore_unknown_fields = true,
         }) catch continue; // arena-owned; no deinit needed
+        try days.append(arena, date);
         for (parsed.value.sessions) |s| {
             const slug = if (s.project.len == 0) types.UNASSIGNED_SLUG else s.project;
             const agg: ?*ProjAgg = for (projects.items) |*p| {
@@ -147,7 +223,7 @@ fn writeIndexFromDisk(gpa: std.mem.Allocator, arena: std.mem.Allocator, memory_r
 
     const idx_projects = try arena.alloc(store.IndexProject, projects.items.len);
     for (projects.items, 0..) |p, i| {
-        idx_projects[i] = .{ .slug = p.slug, .last_active = p.last_active, .session_count = p.count };
+        idx_projects[i] = .{ .slug = p.slug, .name = p.slug, .last_active = p.last_active, .session_count = p.count };
     }
     try store.writeIndex(gpa, memory_root, .{
         .generated_at = now_ms,
@@ -253,4 +329,102 @@ test "memory_digest_run: wispterm session lands in unassigned project" {
     const index = try tmp.dir.readFileAlloc(allocator, "memory/index.json", 1 << 20);
     defer allocator.free(index);
     try std.testing.expect(std.mem.indexOf(u8, index, "\"unassigned\"") != null);
+
+    // Secrets embedded in the raw session (api_key) must never reach the
+    // daily artifact. Locate the single daily file regardless of the date
+    // bucketing (updated_at 1782311885976 lands on 2026-06-24 at both UTC
+    // and UTC+8, but list the dir to stay robust to tz assumptions).
+    var daily_dir = try tmp.dir.openDir("memory/daily", .{ .iterate = true });
+    defer daily_dir.close();
+    var daily_it = daily_dir.iterate();
+    const daily_ent = (try daily_it.next()).?;
+    const daily_bytes = try daily_dir.readFileAlloc(allocator, daily_ent.name, 1 << 20);
+    defer allocator.free(daily_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, daily_bytes, "sk-SECRET") == null);
+}
+
+const CLAUDE_JSONL_DEF =
+    \\{"sessionId":"claude-def","cwd":"/home/me/project2","timestamp":"2026-05-31T11:00:00.000Z","type":"user","message":{"role":"user","content":"Second session"}}
+    \\{"sessionId":"claude-def","cwd":"/home/me/project2","timestamp":"2026-05-31T11:01:00.000Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"On it."}]}}
+    \\
+;
+
+const CLAUDE_EXTRA_LINE =
+    \\{"sessionId":"claude-abc","cwd":"/home/me/project","timestamp":"2026-05-31T10:02:00.000Z","type":"user","message":{"role":"user","content":"And lint"}}
+    \\
+;
+
+test "memory_digest_run: same-day rerun merges daily entries instead of overwriting" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+
+    try tmp.dir.makePath("claude/proj-a");
+    {
+        var d = try tmp.dir.openDir("claude/proj-a", .{});
+        defer d.close();
+        try d.writeFile(.{ .sub_path = "claude-abc.jsonl", .data = CLAUDE_JSONL });
+    }
+
+    const claude_root = try std.fs.path.join(allocator, &.{ root, "claude" });
+    defer allocator.free(claude_root);
+    const memory_root = try std.fs.path.join(allocator, &.{ root, "memory" });
+    defer allocator.free(memory_root);
+
+    const opts: Options = .{
+        .roots = .{ .claude_projects_dir = claude_root },
+        .memory_root = memory_root,
+        .now_ms = 1783500000000,
+        .tz_offset_seconds = 8 * 3600,
+        .backfill_days = 0,
+    };
+
+    // First run: only claude-abc, message_count_new == 2.
+    _ = try runOnce(allocator, opts);
+    {
+        const daily = try tmp.dir.readFileAlloc(allocator, "memory/daily/2026-05-31.json", 1 << 20);
+        defer allocator.free(daily);
+        try std.testing.expect(std.mem.indexOf(u8, daily, "\"claude-abc\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, daily, "\"message_count_new\": 2") != null);
+    }
+
+    // Second run same day: a new session (claude-def) appears while
+    // claude-abc is idle. The rerun must not wipe claude-abc's entry.
+    try tmp.dir.makePath("claude/proj-b");
+    {
+        var d = try tmp.dir.openDir("claude/proj-b", .{});
+        defer d.close();
+        try d.writeFile(.{ .sub_path = "claude-def.jsonl", .data = CLAUDE_JSONL_DEF });
+    }
+    _ = try runOnce(allocator, opts);
+    {
+        const daily = try tmp.dir.readFileAlloc(allocator, "memory/daily/2026-05-31.json", 1 << 20);
+        defer allocator.free(daily);
+        try std.testing.expect(std.mem.indexOf(u8, daily, "\"claude-abc\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, daily, "\"claude-def\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, daily, "\"message_count_new\": 2") != null);
+    }
+
+    // Third run same day: claude-abc gets a new line. Its message_count_new
+    // must be the preserved 2 plus the new 1 == 3.
+    {
+        const appended = try std.mem.concat(allocator, u8, &.{ CLAUDE_JSONL, CLAUDE_EXTRA_LINE });
+        defer allocator.free(appended);
+        var d = try tmp.dir.openDir("claude/proj-a", .{});
+        defer d.close();
+        try d.writeFile(.{ .sub_path = "claude-abc.jsonl", .data = appended });
+    }
+    _ = try runOnce(allocator, opts);
+    {
+        const daily = try tmp.dir.readFileAlloc(allocator, "memory/daily/2026-05-31.json", 1 << 20);
+        defer allocator.free(daily);
+        try std.testing.expect(std.mem.indexOf(u8, daily, "\"claude-def\"") != null);
+        // Find claude-abc's session block and check its message_count_new is 3.
+        const abc_idx = std.mem.indexOf(u8, daily, "\"claude-abc\"").?;
+        const after_abc = daily[abc_idx..];
+        const count_idx = std.mem.indexOf(u8, after_abc, "\"message_count_new\"").?;
+        try std.testing.expect(std.mem.indexOf(u8, after_abc[count_idx .. count_idx + 30], "3") != null);
+    }
 }

@@ -82,7 +82,8 @@ fn collectCodex(ctx: *Ctx, root: []const u8) !void {
     defer dir.close();
     var walker = try dir.walk(ctx.gpa);
     defer walker.deinit();
-    while (try walker.next()) |ent| {
+    while (true) {
+        const ent = (walker.next() catch break) orelse break;
         if (ent.kind != .file or !std.mem.endsWith(u8, ent.basename, ".jsonl")) continue;
         const path = try std.fs.path.join(ctx.alloc, &.{ root, ent.path });
         try collectJsonlFile(ctx, .codex, path, ent.dir, ent.basename);

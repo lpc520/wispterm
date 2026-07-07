@@ -25,6 +25,7 @@ pub const Daily = struct {
 
 pub const IndexProject = struct {
     slug: []const u8,
+    name: []const u8,
     last_active: []const u8,
     session_count: u32,
 };
@@ -114,7 +115,7 @@ test "memory_digest_store: writeIndex lands at root" {
     try writeIndex(allocator, root, .{
         .generated_at = 1,
         .days = &.{"2026-07-07"},
-        .projects = &.{.{ .slug = "phantty", .last_active = "2026-07-07", .session_count = 3 }},
+        .projects = &.{.{ .slug = "phantty", .name = "phantty", .last_active = "2026-07-07", .session_count = 3 }},
     });
     const bytes = try tmp.dir.readFileAlloc(allocator, "index.json", 1 << 20);
     defer allocator.free(bytes);

@@ -3,8 +3,6 @@
 const std = @import("std");
 const ai_types = @import("../terminal_agents/sessions/types.zig");
 
-pub const SCHEMA_VERSION: u32 = 1;
-
 /// Providers the digest scans. Superset of the AI-history browser's
 /// ProviderId: adds WispTerm's own copilot history.
 pub const DigestProvider = enum {
@@ -72,9 +70,7 @@ pub fn projectSlug(path: []const u8, buf: []u8) []const u8 {
         out_len -= 1;
     }
     // Trim leading dash and shift content left
-    var start: usize = 0;
     if (out_len > 0 and buf[0] == '-') {
-        start = 1;
         std.mem.copyForwards(u8, buf[0 .. out_len - 1], buf[1..out_len]);
         out_len -= 1;
     }
