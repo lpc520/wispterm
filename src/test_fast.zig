@@ -31,6 +31,14 @@ test "input routes AI History selected action shortcuts through AppWindow action
     try std.testing.expect(std.mem.indexOf(u8, source, "aiHistoryExportSelectedMarkdown") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "aiHistoryAttachSelectedToCopilot") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "!search_focused") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "command_char_suppressors.ai_history") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "command_char_suppressors.ai_history = 'd'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "command_char_suppressors.ai_history = 'm'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "command_char_suppressors.ai_history = 'a'") != null);
+    const dispatch_char = source[std.mem.indexOf(u8, source, "fn dispatchChar") orelse return error.MissingDispatchChar ..];
+    const suppress_index = std.mem.indexOf(u8, dispatch_char, "if (command_char_suppressors.ai_history)") orelse return error.MissingAiHistorySuppressor;
+    const assistant_index = std.mem.indexOf(u8, dispatch_char, "if (assistant_conversation.current(aiCopilotFocused()))") orelse return error.MissingAssistantCharRoute;
+    try std.testing.expect(suppress_index < assistant_index);
 }
 
 test "assistant conversation input routing owns keyboard target lookup" {
