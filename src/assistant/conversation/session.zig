@@ -1713,6 +1713,27 @@ pub const Session = struct {
         self.ensureSkillSuggestionsForInputLocked();
     }
 
+    pub fn appendContextCard(self: *Session, title_text: []const u8, body: []const u8, collapsed: bool) !void {
+        const content = try std.fmt.allocPrint(self.allocator, "### {s}\n\n{s}", .{ title_text, body });
+        var history_change: ?PendingHistoryChange = null;
+        self.mutex.lock();
+        errdefer {
+            self.mutex.unlock();
+            self.allocator.free(content);
+        }
+        try self.messages.append(self.allocator, .{
+            .role = .user,
+            .content = content,
+            .is_context_summary = true,
+            .content_collapsed = collapsed,
+            .persist_to_history = true,
+        });
+        history_change = self.captureHistoryChangeLocked();
+        self.setStatusLocked("Ready");
+        self.mutex.unlock();
+        self.notifyHistoryChange(history_change);
+    }
+
     /// If the composer is selected (select-all) and non-empty, return a copy of
     /// the input text and clear the composer. Returns null otherwise (e.g. when
     /// only a read-only transcript selection is active).
@@ -9029,6 +9050,25 @@ test "is_context_summary messages are collapsible" {
     try std.testing.expect(session.messages.items[0].content_collapsed);
     session.toggleToolMessageCollapsed(0);
     try std.testing.expect(!session.messages.items[0].content_collapsed);
+}
+
+test "ai chat appendContextCard stores collapsed persisted user context" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(allocator, "Copilot", "https://example.test", "k", "model", "system", "disabled", "low", "false", "true");
+    defer session.deinit();
+
+    try session.appendContextCard("AI History: Codex sess-1", "## User\n\nstatus?", true);
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
+    const msg = session.messages.items[0];
+    try std.testing.expectEqual(Role.user, msg.role);
+    try std.testing.expect(msg.is_context_summary);
+    try std.testing.expect(msg.content_collapsed);
+    try std.testing.expect(msg.persist_to_history);
+    try std.testing.expect(std.mem.indexOf(u8, msg.content, "AI History: Codex sess-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg.content, "status?") != null);
 }
 
 test "applySummaryResult collapses pre-switch messages into one summary card" {
