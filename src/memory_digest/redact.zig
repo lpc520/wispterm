@@ -65,9 +65,21 @@ fn matchAt(text: []const u8, i: usize) ?Match {
     for (KV_KEYS) |key| {
         if (std.ascii.startsWithIgnoreCase(rest, key)) {
             var j = key.len;
+            // Tolerate the key name's own closing quote, e.g. `"password":`
+            // — the opening quote before `password` is outside `rest` and
+            // already satisfied the boundary check in `redact`.
+            if (j < rest.len and (rest[j] == '"' or rest[j] == '\'')) j += 1;
             if (j >= rest.len or (rest[j] != '=' and rest[j] != ':')) continue;
             j += 1;
             if (j < rest.len and rest[j] == ' ') j += 1;
+            if (j < rest.len and (rest[j] == '"' or rest[j] == '\'')) {
+                const quote = rest[j];
+                const keep = j + 1; // include the opening quote verbatim
+                const close_rel = std.mem.indexOfScalarPos(u8, rest, keep, quote) orelse continue;
+                const inner_len = close_rel - keep;
+                if (inner_len >= 4) return .{ .len = close_rel, .keep = keep };
+                continue;
+            }
             const tail = nonSpaceLen(rest[j..]);
             if (tail >= 4) return .{ .len = j + tail, .keep = j };
         }
@@ -150,6 +162,10 @@ test "memory_digest_redact: table-driven positive and negative cases" {
         .{ .in = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload", .expect_masked = true },
         .{ .in = "password=hunter22 login", .expect_masked = true },
         .{ .in = "token: ZXhhbXBsZQ== done", .expect_masked = true },
+        .{ .in = "password=\"hunter22\"", .expect_masked = true },
+        .{ .in = "\"password\": \"hunter22\"", .expect_masked = true },
+        .{ .in = "\"token\": \"abcd1234\"", .expect_masked = true },
+        .{ .in = "token: 'abcd1234'", .expect_masked = true },
         .{ .in = "hash 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef end", .expect_masked = true },
         .{ .in = "jwt AbC1dEf2GhI3jKl4MnO5pQr6StU7vWx8Yz90AbC1 sig", .expect_masked = true },
         // Negatives:
@@ -158,6 +174,8 @@ test "memory_digest_redact: table-driven positive and negative cases" {
         .{ .in = "commit 74707cdfd1b3f4b21c9a8e5d6f7a8b9c0d1e2f3a fixed it", .expect_masked = false }, // 40-hex git SHA
         .{ .in = "the token was expired", .expect_masked = false }, // no = or :
         .{ .in = "password= ", .expect_masked = false }, // empty value
+        .{ .in = "password=\"\"", .expect_masked = false }, // empty quoted value
+        .{ .in = "\"note\": \"hi\"", .expect_masked = false }, // not a KV key
         .{ .in = "plain text with nothing", .expect_masked = false },
     };
     for (cases) |case| {
@@ -175,6 +193,12 @@ test "memory_digest_redact: keeps key prefix and masks value" {
     const out = try redact(std.testing.allocator, "password=hunter22 rest");
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("password=" ++ MASK ++ " rest", out);
+}
+
+test "memory_digest_redact: quoted KV value keeps quotes, masks only the inner value" {
+    const out = try redact(std.testing.allocator, "password=\"hunter22\" x");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("password=\"" ++ MASK ++ "\" x", out);
 }
 
 test "memory_digest_redact: masks whole prefixed key" {

@@ -155,6 +155,17 @@ pub fn summarizeSession(
     const lines = try buildLines(gpa, sess.new_messages, opts.max_chars_per_message);
     defer freeLines(gpa, lines);
 
+    // Nothing left after filtering meta/empty messages: no-op, no LLM call
+    // (spec: an all-meta transcript has nothing to summarize).
+    if (lines.len == 0) {
+        return .{
+            .summary = try arena.dupe(u8, old_summary orelse ""),
+            .topics = &.{},
+            .outcome = "unknown",
+            .artifacts = &.{},
+        };
+    }
+
     // Split into chunks that fit the input budget, cutting on message
     // boundaries. A chunk always contains at least one line even if that
     // single line exceeds the budget on its own.
@@ -250,6 +261,19 @@ fn buildFinalUserText(gpa: std.mem.Allocator, old_summary: ?[]const u8, rolling:
     return out.toOwnedSlice(gpa);
 }
 
+const VALID_OUTCOMES = [_][]const u8{ "completed", "in_progress", "abandoned", "unknown" };
+const VALID_EVENT_TYPES = [_][]const u8{ "progress", "decision", "problem", "todo" };
+
+/// The LLM's `outcome`/event `type` fields are free text; clamp anything
+/// outside the closed enum to a safe default rather than let it flow into
+/// stored JSON unchecked.
+fn clampEnum(value: []const u8, valid: []const []const u8, default: []const u8) []const u8 {
+    for (valid) |v| {
+        if (std.mem.eql(u8, value, v)) return value;
+    }
+    return default;
+}
+
 fn dupeResult(arena: std.mem.Allocator, parsed: JsonMapResult) !MapResult {
     const topics = try arena.alloc([]const u8, parsed.topics.len);
     for (parsed.topics, 0..) |t, i| topics[i] = try arena.dupe(u8, t);
@@ -260,7 +284,7 @@ fn dupeResult(arena: std.mem.Allocator, parsed: JsonMapResult) !MapResult {
     return .{
         .summary = try arena.dupe(u8, parsed.summary),
         .topics = topics,
-        .outcome = try arena.dupe(u8, parsed.outcome),
+        .outcome = try arena.dupe(u8, clampEnum(parsed.outcome, &VALID_OUTCOMES, "unknown")),
         .artifacts = artifacts,
     };
 }
@@ -374,7 +398,7 @@ fn dupeReduceResult(arena: std.mem.Allocator, parsed: JsonReduceResult, date: []
         for (t.events, 0..) |e, j| {
             const event_refs = try arena.alloc([]const u8, e.refs.len);
             for (e.refs, 0..) |r, k| event_refs[k] = try arena.dupe(u8, r);
-            events[j] = .{ .type = try arena.dupe(u8, e.type), .text = try arena.dupe(u8, e.text), .refs = event_refs };
+            events[j] = .{ .type = try arena.dupe(u8, clampEnum(e.type, &VALID_EVENT_TYPES, "progress")), .text = try arena.dupe(u8, e.text), .refs = event_refs };
         }
         const session_refs = try sessionRefsForSlug(arena, sessions, slug);
         timelines[i] = .{ .slug = slug, .entry = .{
@@ -670,6 +694,53 @@ test "memory_digest_digest: UTF-8 truncation snaps to char boundaries" {
     try std.testing.expect(std.unicode.utf8ValidateSlice(sent) == true);
     // Verify the truncation marker is present
     try std.testing.expect(std.mem.indexOf(u8, sent, "…[截断]…") != null);
+}
+
+test "memory_digest_digest: all-meta transcript is a no-op, zero LLM calls" {
+    var stub = StubCompleter{ .responses = &.{"unused"} };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var messages = [_]ai_types.TranscriptMessage{
+        .{ .role = .user, .content = "ignored", .kind = .meta },
+        .{ .role = .assistant, .content = "", .kind = .meta },
+    };
+    const result = try summarizeSession(arena.allocator(), std.testing.allocator, stub.completer(), testSession(&messages), "old summary", .{});
+
+    try std.testing.expectEqual(@as(usize, 0), stub.calls);
+    try std.testing.expectEqualStrings("old summary", result.summary);
+    try std.testing.expectEqual(@as(usize, 0), result.topics.len);
+    try std.testing.expectEqualStrings("unknown", result.outcome);
+    try std.testing.expectEqual(@as(usize, 0), result.artifacts.len);
+}
+
+test "memory_digest_digest: out-of-enum outcome is clamped to unknown" {
+    var stub = StubCompleter{ .responses = &.{
+        \\{"summary":"s","topics":[],"outcome":"done","artifacts":[]}
+    } };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var messages = [_]ai_types.TranscriptMessage{
+        .{ .role = .user, .content = "hi" },
+    };
+    const result = try summarizeSession(arena.allocator(), std.testing.allocator, stub.completer(), testSession(&messages), null, .{});
+    try std.testing.expectEqualStrings("unknown", result.outcome);
+}
+
+test "memory_digest_digest: reduceDay clamps out-of-enum event type to progress" {
+    var stub = StubCompleter{ .responses = &.{
+        \\{"projects":[{"slug":"phantty","summary":"s","session_refs":[]}],
+        \\"highlights":[],"timeline":[{"slug":"phantty","summary":"t","events":[{"type":"bogus","text":"x","refs":[]}]}]}
+    } };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const sessions = [_]store.DailySession{testDailySession("phantty", "s1", "t1", "sum1", "completed")};
+    const result = try reduceDay(arena.allocator(), std.testing.allocator, stub.completer(), "2026-07-07", &sessions);
+
+    try std.testing.expectEqual(@as(usize, 1), result.timelines[0].entry.events.len);
+    try std.testing.expectEqualStrings("progress", result.timelines[0].entry.events[0].type);
 }
 
 // ---- Reduce stage tests ----

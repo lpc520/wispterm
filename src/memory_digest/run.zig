@@ -206,6 +206,17 @@ fn runOnceWithLlm(
         if (!already) try day_keys.append(arena, date);
     }
 
+    // Phase 1: merge + reduce every day WITHOUT writing anything. A reduce
+    // failure on any single day must not leave an earlier day's daily file
+    // written with no matching cursor advance — a rerun would then re-merge
+    // that day and double-count message_count_new (spec §13 must be atomic
+    // across the whole multi-day run, not just within one day).
+    const DayResult = struct {
+        date: []const u8,
+        merged: []const store.DailySession,
+        reduced: digest.ReduceResult,
+    };
+    var day_results: std.ArrayListUnmanaged(DayResult) = .empty;
     for (day_keys.items) |date| {
         var entries: std.ArrayListUnmanaged(store.DailySession) = .empty;
         for (summarized.items, 0..) |s, i| {
@@ -218,21 +229,40 @@ fn runOnceWithLlm(
             return error.ReduceFailed;
         };
 
+        try day_results.append(arena, .{ .date = date, .merged = merged, .reduced = reduced });
+    }
+
+    // Phase 2: every reduce succeeded — now write dailies, timeline/project
+    // upserts, index, and finally cursors.
+    for (day_results.items) |dr| {
         try store.writeDaily(gpa, opts.memory_root, .{
-            .date = date,
+            .date = dr.date,
             .generated_at = opts.now_ms,
-            .sessions = merged,
+            .sessions = dr.merged,
             .model = opts.model_label,
-            .projects = reduced.projects,
-            .highlights = reduced.highlights,
+            .projects = dr.reduced.projects,
+            .highlights = dr.reduced.highlights,
         });
 
-        for (reduced.timelines) |tl| {
+        // Slug allowlist (Item 1): transcripts are untrusted, and `tl.slug`
+        // comes from the LLM's parsed reduce output. Only slugs that this
+        // day's own merged sessions actually produced (via
+        // types.projectSlug) are legal path components; anything else
+        // (e.g. prompt-injected "../../.." or "") is dropped rather than
+        // path-joined into `projects/<slug>/`.
+        for (dr.reduced.timelines) |tl| {
+            const known = for (dr.merged) |s| {
+                if (std.mem.eql(u8, s.project, tl.slug)) break true;
+            } else false;
+            if (!known) {
+                std.log.warn("memory-digest: dropping timeline for unknown slug '{s}'", .{tl.slug});
+                continue;
+            }
             try store.upsertTimelineEntry(gpa, opts.memory_root, tl.slug, tl.entry);
             const project_path = for (summarized.items, 0..) |sm, i| {
                 if (std.mem.eql(u8, sm.project, tl.slug)) break summarized_paths.items[i];
             } else "";
-            try store.upsertProject(gpa, opts.memory_root, tl.slug, project_path, date);
+            try store.upsertProject(gpa, opts.memory_root, tl.slug, project_path, dr.date);
         }
     }
 
@@ -802,4 +832,182 @@ test "memory_digest_run: reduce failure returns error but keeps summaries and wi
 
     const cursors_result = tmp.dir.readFileAlloc(allocator, "memory/state/cursors.json", 1 << 20);
     try std.testing.expectError(error.FileNotFound, cursors_result);
+}
+
+// A reduce response whose timeline carries one legit slug ("project", which
+// matches CLAUDE_JSONL's project_path-derived slug) and one prompt-injected
+// path-traversal slug that must never be path-joined into projects/<slug>/.
+const REDUCE_JSON_WITH_EVIL_SLUG =
+    \\{"projects":[{"slug":"project","summary":"完成了修复","session_refs":[]}],
+    \\"highlights":["修复了测试"],
+    \\"timeline":[
+    \\{"slug":"project","summary":"当天进展","events":[{"type":"progress","text":"合法时间线","refs":[]}]},
+    \\{"slug":"../evil","summary":"注入","events":[{"type":"progress","text":"不应落盘","refs":[]}]}
+    \\]}
+;
+
+test "memory_digest_run: unknown/path-traversal timeline slug is dropped, valid slug still written" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    try writeFixtures(tmp);
+
+    const claude_root = try std.fs.path.join(allocator, &.{ root, "claude" });
+    defer allocator.free(claude_root);
+    const memory_root = try std.fs.path.join(allocator, &.{ root, "memory" });
+    defer allocator.free(memory_root);
+
+    var stub = RoutingStub{ .map_response = MAP_JSON, .reduce_response = REDUCE_JSON_WITH_EVIL_SLUG };
+    const opts: Options = .{
+        .roots = .{ .claude_projects_dir = claude_root },
+        .memory_root = memory_root,
+        .now_ms = 1783500000000,
+        .tz_offset_seconds = 8 * 3600,
+        .backfill_days = 0,
+        .completer = stub.completer(),
+        .model_label = "test-model",
+    };
+
+    _ = try runOnce(allocator, opts);
+
+    // The valid slug's timeline is written as usual.
+    const timeline = try tmp.dir.readFileAlloc(allocator, "memory/projects/project/timeline.json", 1 << 20);
+    defer allocator.free(timeline);
+    try std.testing.expect(std.mem.indexOf(u8, timeline, "合法时间线") != null);
+
+    // No directory or file named "evil" exists anywhere under the memory
+    // root — neither as memory/evil, memory/projects/evil, nor resolved via
+    // ".." out of memory/projects/<something>/../evil.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("memory/projects/evil", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("memory/evil", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("evil", .{}));
+}
+
+// Same project cwd as CLAUDE_JSONL ("/home/me/project" → slug "project") so
+// both days' merged sessions share the slug the RoutingStub's REDUCE_JSON
+// fixture claims — this test is about atomicity across days, not the slug
+// allowlist (covered separately above).
+const CLAUDE_JSONL_DAY2 =
+    \\{"sessionId":"claude-day2","cwd":"/home/me/project","timestamp":"2026-06-01T09:00:00.000Z","type":"user","message":{"role":"user","content":"day two work"}}
+    \\{"sessionId":"claude-day2","cwd":"/home/me/project","timestamp":"2026-06-01T09:01:00.000Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}
+    \\
+;
+
+/// Routes map responses to REDUCE_JSON-shaped output always, but for reduce
+/// calls: succeeds if the compact sessions JSON mentions `good_date_marker`,
+/// otherwise returns garbage twice (forcing digest.reduceDay's retry-once to
+/// also fail) so ONE specific day's reduce is made to fail deterministically
+/// while the other day's reduce succeeds.
+const DateRoutingStub = struct {
+    good_date_marker: []const u8,
+    map_calls: usize = 0,
+    reduce_calls: usize = 0,
+
+    fn completer(self: *DateRoutingStub) llm.Completer {
+        return .{ .ctx = self, .completeFn = complete };
+    }
+
+    fn complete(ctx: *anyopaque, gpa: std.mem.Allocator, system_prompt: []const u8, user_text: []const u8) anyerror![]u8 {
+        _ = system_prompt;
+        const self: *DateRoutingStub = @ptrCast(@alignCast(ctx));
+        const is_map = std.mem.indexOf(u8, user_text, "【新增对话】") != null;
+        if (is_map) {
+            self.map_calls += 1;
+            return gpa.dupe(u8, MAP_JSON);
+        }
+        self.reduce_calls += 1;
+        if (std.mem.indexOf(u8, user_text, self.good_date_marker) != null) {
+            return gpa.dupe(u8, REDUCE_JSON);
+        }
+        return gpa.dupe(u8, "garbage, not json");
+    }
+};
+
+fn writeTwoDayFixtures(tmp: std.testing.TmpDir) !void {
+    try tmp.dir.makePath("claude/proj-a");
+    {
+        var d = try tmp.dir.openDir("claude/proj-a", .{});
+        defer d.close();
+        try d.writeFile(.{ .sub_path = "claude-abc.jsonl", .data = CLAUDE_JSONL });
+    }
+    try tmp.dir.makePath("claude/proj-b");
+    {
+        var d = try tmp.dir.openDir("claude/proj-b", .{});
+        defer d.close();
+        try d.writeFile(.{ .sub_path = "claude-day2.jsonl", .data = CLAUDE_JSONL_DAY2 });
+    }
+}
+
+test "memory_digest_run: one day's reduce failure blocks writes for every day in the run" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    try writeTwoDayFixtures(tmp);
+
+    const claude_root = try std.fs.path.join(allocator, &.{ root, "claude" });
+    defer allocator.free(claude_root);
+    const memory_root = try std.fs.path.join(allocator, &.{ root, "memory" });
+    defer allocator.free(memory_root);
+
+    // claude-abc lands on 2026-05-31, claude-day2 on 2026-06-01. Make
+    // 2026-06-01's reduce call succeed and 2026-05-31's fail (the "success"
+    // stub only recognizes its own date marker in the compact sessions JSON).
+    var stub = DateRoutingStub{ .good_date_marker = "2026-06-01" };
+    const opts: Options = .{
+        .roots = .{ .claude_projects_dir = claude_root },
+        .memory_root = memory_root,
+        .now_ms = 1783500000000,
+        .tz_offset_seconds = 8 * 3600,
+        .backfill_days = 0,
+        .completer = stub.completer(),
+        .model_label = "test-model",
+    };
+
+    try std.testing.expectError(error.ReduceFailed, runOnce(allocator, opts));
+
+    // Neither day's daily file was written — the failing day's reduce ran
+    // before ANY write phase started (day order in day_keys is insertion
+    // order from summarized_dates, so whichever day is processed first is
+    // irrelevant: no partial write is acceptable either way).
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("memory/daily/2026-05-31.json", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("memory/daily/2026-06-01.json", .{}));
+
+    // Map results are still persisted (both sessions summarized successfully
+    // at the map stage before reduce ran).
+    const summaries = try tmp.dir.readFileAlloc(allocator, "memory/state/session_summaries.json", 1 << 20);
+    defer allocator.free(summaries);
+    try std.testing.expect(std.mem.indexOf(u8, summaries, "\"claude:claude-abc\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summaries, "\"claude:claude-day2\"") != null);
+
+    // Cursors were not saved.
+    const cursors_result = tmp.dir.readFileAlloc(allocator, "memory/state/cursors.json", 1 << 20);
+    try std.testing.expectError(error.FileNotFound, cursors_result);
+
+    // Rerun with a stub where every reduce call succeeds: both dailies are
+    // now written, and message_count_new is NOT inflated by the earlier
+    // failed attempt (each session was only merged once, since nothing was
+    // ever written to disk for either day on the first attempt).
+    var stub2 = RoutingStub{ .map_response = MAP_JSON, .reduce_response = REDUCE_JSON };
+    const opts2: Options = .{
+        .roots = .{ .claude_projects_dir = claude_root },
+        .memory_root = memory_root,
+        .now_ms = 1783500000000,
+        .tz_offset_seconds = 8 * 3600,
+        .backfill_days = 0,
+        .completer = stub2.completer(),
+        .model_label = "test-model",
+    };
+    _ = try runOnce(allocator, opts2);
+
+    const daily1 = try tmp.dir.readFileAlloc(allocator, "memory/daily/2026-05-31.json", 1 << 20);
+    defer allocator.free(daily1);
+    try std.testing.expect(std.mem.indexOf(u8, daily1, "\"message_count_new\": 2") != null);
+
+    const daily2 = try tmp.dir.readFileAlloc(allocator, "memory/daily/2026-06-01.json", 1 << 20);
+    defer allocator.free(daily2);
+    try std.testing.expect(std.mem.indexOf(u8, daily2, "\"message_count_new\": 2") != null);
 }
