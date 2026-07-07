@@ -35,7 +35,7 @@
 
 ## 4. 架构总览
 
-复用现有 `src/terminal_agents/sessions/` 采集层（与"AI 会话历史"浏览器同一套），新增 `src/memory/` 引擎：
+复用现有 `src/terminal_agents/sessions/` 采集层（与"AI 会话历史"浏览器同一套），新增 `src/memory_digest/` 引擎（不叫 `memory`——`src/agent/memory.zig` 已被 agent 的"记住用户事实"工具占用）：
 
 ```
 ┌─ 复用（terminal_agents/sessions/）──────────────────────┐
@@ -45,7 +45,7 @@
 │ cache.zig     FileStamp{size, mtime_ns} 模式               │
 └──────────────────────────────────────────────────────────┘
                           │
-┌─ 新增（src/memory/）────▼────────────────────────────────┐
+┌─ 新增（src/memory_digest/）────▼────────────────────────────────┐
 │ collector.zig   枚举 源×provider，按游标找新增/变更会话     │
 │ provider_wispterm.zig  解析 agent-history（新 provider）    │
 │ redact.zig      脱敏                                       │
@@ -101,15 +101,16 @@ NormalizedMessage { role, text, ts: ?i64, tool_name: ?[]const u8 }
       "source_id": "ssh:hk",
       "provider": "claude",
       "file": "/root/.claude/projects/x/uuid.jsonl",
-      "stamp": { "size": 12345, "mtime_ns": 1780000000000 },
-      "processed_bytes": 12345
+      "size": 12345,
+      "mtime_ns": 1780000000000,
+      "processed_messages": 42
     }
   ]
 }
 ```
 
-- 判定"有新内容"：`FileStamp` 不匹配（复用 `cache.stampMatches` 语义）。
-- JSONL 源（claude/codex）记录 `processed_bytes`，增量只解析尾部新行；若 `size < processed_bytes`（文件被改写/截断），游标归零整文件重处理。WispTerm 的整文件 JSON 无法字节续读，记录 `processed_message_count`，按消息下标增量。
+- 判定"有新内容"：`FileStamp(size+mtime_ns)` 不匹配（复用 `cache.stampMatches` 语义）。
+- 增量单位统一为**已处理消息数**（`processed_messages`）：文件变更时整文件重解析，只取下标 ≥ processed_messages 的新消息。解析是本地 CPU 操作、成本可忽略（贵的是 LLM）；字节级尾读（processed_bytes）留作 M3 对远程大文件的优化。若重解析后总消息数 < processed_messages（文件被改写/截断），视为重写，从 0 重处理。
 - **游标只在该会话归纳成功后推进**；失败不推进，下次重跑。
 - 每个源独立超时（SSH 默认 15s/命令）；源不可达 → 跳过并记入 runs.json，不阻塞其他源。
 - 回填上限：首次启用或长期未跑时，只处理 `updated_at >= today - backfill_days`（默认 7 天）的会话，更早的显式标记为 skipped 并 `log` 到 runs.json（不做静默截断）。
@@ -308,7 +309,7 @@ memory/
 
 | 期 | 内容 | 出口标准 |
 |----|------|----------|
-| M1 | `src/memory/` 骨架：collector（仅 local）+ provider_wispterm + 归一化 + cursors + store（daily 仅落"原始会话清单"无 LLM） | 本机跑通，daily JSON 里能看到三源当天会话列表 |
+| M1 | `src/memory_digest/` 骨架：collector（仅 local）+ provider_wispterm + 归一化 + cursors + store（daily 仅落"原始会话清单"无 LLM） | 本机跑通，daily JSON 里能看到三源当天会话列表 |
 | M2 | 脱敏 + LLM map/reduce + 调度 + 配置项 | 每日自动产出真实日报与项目时间线 |
 | M3 | 远程源（WSL/SSH via ScannerHost）+ 回填/补跑 + runs.json 成本报表 | 多环境增量稳定运行一周 |
 | M4 | WispTerm 写入端补 cwd/ts；命令面板手动触发入口 | 新会话项目归属正确 |
