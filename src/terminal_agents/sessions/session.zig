@@ -13,6 +13,7 @@ const i18n = @import("../../i18n.zig");
 pub const LoadState = enum { idle, scanning, ready, failed };
 pub const TranscriptState = enum { idle, loading, ready, failed };
 pub const MAX_METADATA_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_REMOTE_METADATA_PREFIX_BYTES: usize = MAX_METADATA_FILE_BYTES - 4096;
 pub const MAX_SCAN_METADATA_FILES: usize = 256;
 pub const MAX_SCAN_METADATA_BYTES: u64 = 48 * 1024 * 1024;
 
@@ -1083,7 +1084,7 @@ pub fn providerFindCommand(provider: types.ProviderId, root: []const u8, out: []
     const reasonix_filter = if (provider == .reasonix) " ! -name '*.events.jsonl'" else "";
     // GNU find: emit "mtime<TAB>size<TAB>path", newest first, capped. The \t and \n
     // are literal escapes for find -printf (single-quoted so the shell preserves them).
-    return std.fmt.bufPrint(out, "find {s} -type f -name '*.jsonl'{s} -size -2048k -printf '%T@\\t%s\\t%p\\n' 2>/dev/null | sort -rn | head -500", .{ quoted, reasonix_filter }) catch error.CommandTooLong;
+    return std.fmt.bufPrint(out, "find {s} -type f -name '*.jsonl'{s} -printf '%T@\\t%s\\t%p\\n' 2>/dev/null | sort -rn | head -500", .{ quoted, reasonix_filter }) catch error.CommandTooLong;
 }
 
 /// Fallback for environments without GNU `find -printf` (e.g. BSD): path-only,
@@ -1094,7 +1095,7 @@ pub fn providerFindCommandPlain(provider: types.ProviderId, root: []const u8, ou
     var quoted_buf: [1024]u8 = undefined;
     const quoted = remote_file.shellQuote(&quoted_buf, find_root) orelse return error.CommandTooLong;
     const reasonix_filter = if (provider == .reasonix) " ! -name '*.events.jsonl'" else "";
-    return std.fmt.bufPrint(out, "find {s} -type f -name '*.jsonl'{s} -size -2048k | head -500", .{ quoted, reasonix_filter }) catch error.CommandTooLong;
+    return std.fmt.bufPrint(out, "find {s} -type f -name '*.jsonl'{s} | head -500", .{ quoted, reasonix_filter }) catch error.CommandTooLong;
 }
 
 fn providerFindRoot(provider: types.ProviderId, root: []const u8, out: []u8) ![]const u8 {
@@ -1137,6 +1138,12 @@ pub fn remoteCatCommand(path: []const u8, out: []u8) ![]const u8 {
     var quoted_buf: [1024]u8 = undefined;
     const quoted = remote_file.shellQuote(&quoted_buf, path) orelse return error.CommandTooLong;
     return std.fmt.bufPrint(out, "cat {s}", .{quoted}) catch error.CommandTooLong;
+}
+
+pub fn remoteHeadCommand(path: []const u8, byte_count: usize, out: []u8) ![]const u8 {
+    var quoted_buf: [1024]u8 = undefined;
+    const quoted = remote_file.shellQuote(&quoted_buf, path) orelse return error.CommandTooLong;
+    return std.fmt.bufPrint(out, "head -c {d} {s}", .{ byte_count, quoted }) catch error.CommandTooLong;
 }
 
 pub fn remoteOptionalCatCommand(path: []const u8, out: []u8) ![]const u8 {
@@ -1425,10 +1432,6 @@ const LocalScan = struct {
             self.warning_count += 1;
             return;
         };
-        if (stat.size > MAX_METADATA_FILE_BYTES) {
-            self.warning_count += 1;
-            return;
-        }
 
         const source_path = try std.fs.path.join(self.allocator, &.{ abs_dir, name });
         errdefer self.allocator.free(source_path);
@@ -1449,8 +1452,9 @@ const LocalScan = struct {
         var budget_exceeded = false;
 
         for (self.candidates.items) |candidate| {
+            const read_size = @min(candidate.size, @as(u64, MAX_METADATA_FILE_BYTES));
             if (parsed_files >= self.budget.max_files or
-                parsed_bytes + candidate.size > self.budget.max_bytes)
+                parsed_bytes + read_size > self.budget.max_bytes)
             {
                 budget_exceeded = true;
                 continue;
@@ -1458,7 +1462,7 @@ const LocalScan = struct {
 
             try self.scanCandidate(candidate);
             parsed_files += 1;
-            parsed_bytes += candidate.size;
+            parsed_bytes += read_size;
             if (self.emitter.aborted) break;
         }
 
@@ -1485,19 +1489,26 @@ const LocalScan = struct {
         };
         defer file.close();
 
-        const bytes = file.readToEndAlloc(self.allocator, MAX_METADATA_FILE_BYTES) catch {
+        const read_limit_u64 = @min(candidate.size, @as(u64, MAX_METADATA_FILE_BYTES));
+        const read_limit: usize = @intCast(read_limit_u64);
+        const buffer = self.allocator.alloc(u8, read_limit) catch return error.OutOfMemory;
+        defer self.allocator.free(buffer);
+        const read_len = file.readAll(buffer) catch {
             self.warning_count += 1;
             return;
         };
-        defer self.allocator.free(bytes);
+        const bytes = buffer[0..read_len];
+        const partial = candidate.size > read_limit_u64;
 
-        const meta = (switch (candidate.provider) {
+        var meta = (switch (candidate.provider) {
             .codex => codex_provider.parseMetadata(self.allocator, candidate.path, bytes),
             .claude => claude_provider.parseMetadata(self.allocator, candidate.path, bytes),
             .reasonix => self.parseReasonixMetadata(candidate, bytes),
         }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
         };
+        applyStampMetadataFallback(&meta, .{ .size = candidate.size, .mtime_ns = candidate.mtime }, partial);
+        if (partial) self.warning_count += 1;
         if (!metadataHasUsableSignal(meta)) {
             freeMetadata(self.allocator, meta);
             self.warning_count += 1;
@@ -1646,12 +1657,16 @@ const RemoteScan = struct {
             }
         }
 
-        var cat_buf: [2048]u8 = undefined;
-        const cat_cmd = remoteCatCommand(path, cat_buf[0..]) catch {
+        const use_prefix = stamp.size == 0 or stamp.size > MAX_METADATA_FILE_BYTES;
+        var read_buf: [2048]u8 = undefined;
+        const command = (if (use_prefix)
+            remoteHeadCommand(path, MAX_REMOTE_METADATA_PREFIX_BYTES, read_buf[0..])
+        else
+            remoteCatCommand(path, read_buf[0..])) catch {
             self.warning_count += 1;
             return;
         };
-        const bytes = self.host.exec(self.host.ctx, self.allocator, cat_cmd) catch |err| switch (err) {
+        const bytes = self.host.exec(self.host.ctx, self.allocator, command) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
                 self.warning_count += 1;
@@ -1663,14 +1678,18 @@ const RemoteScan = struct {
             self.warning_count += 1;
             return;
         }
+        const partial = stamp.size > MAX_METADATA_FILE_BYTES or
+            (stamp.size == 0 and bytes.len >= MAX_REMOTE_METADATA_PREFIX_BYTES);
 
-        const meta = (switch (provider) {
+        var meta = (switch (provider) {
             .codex => codex_provider.parseMetadata(self.allocator, path, bytes),
             .claude => claude_provider.parseMetadata(self.allocator, path, bytes),
             .reasonix => self.parseReasonixMetadata(path, bytes),
         }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
         };
+        applyStampMetadataFallback(&meta, stamp, partial);
+        if (partial) self.warning_count += 1;
         if (!metadataHasUsableSignal(meta)) {
             freeMetadata(self.allocator, meta);
             self.warning_count += 1;
@@ -1757,6 +1776,21 @@ fn reasonixSidecarPath(allocator: std.mem.Allocator, source_path: []const u8, su
 
 fn metadataHasUsableSignal(meta: types.SessionMeta) bool {
     return meta.session_id.len > 0 and meta.message_count > 0;
+}
+
+fn applyStampMetadataFallback(meta: *types.SessionMeta, stamp: ai_history_cache.FileStamp, partial: bool) void {
+    if (partial) meta.scan_status = .partial;
+    const mtime_ms = stampMtimeMs(stamp);
+    if (mtime_ms <= 0) return;
+    if (meta.created_at_ms == 0) meta.created_at_ms = mtime_ms;
+    if (mtime_ms > meta.last_active_at_ms) meta.last_active_at_ms = mtime_ms;
+}
+
+fn stampMtimeMs(stamp: ai_history_cache.FileStamp) i64 {
+    if (stamp.mtime_ns <= 0) return 0;
+    const ms = @divFloor(stamp.mtime_ns, @as(i128, std.time.ns_per_ms));
+    if (ms > std.math.maxInt(i64)) return std.math.maxInt(i64);
+    return @intCast(ms);
 }
 
 pub fn cloneMetadata(allocator: std.mem.Allocator, meta: types.SessionMeta) !types.SessionMeta {
@@ -2235,12 +2269,16 @@ test "ai_history_session: loading selected transcript stores and clears owned me
 test "ai_history_session: remote provider find command quotes root" {
     var out: [512]u8 = undefined;
     try std.testing.expectEqualStrings(
-        "find '/home/me/it'\\''s/.codex' -type f -name '*.jsonl' -size -2048k -printf '%T@\\t%s\\t%p\\n' 2>/dev/null | sort -rn | head -500",
+        "find '/home/me/it'\\''s/.codex' -type f -name '*.jsonl' -printf '%T@\\t%s\\t%p\\n' 2>/dev/null | sort -rn | head -500",
         try providerFindCommand(.codex, "/home/me/it's/.codex", &out),
     );
     try std.testing.expectEqualStrings(
-        "find '/home/me/it'\\''s/.codex' -type f -name '*.jsonl' -size -2048k | head -500",
+        "find '/home/me/it'\\''s/.codex' -type f -name '*.jsonl' | head -500",
         try providerFindCommandPlain(.codex, "/home/me/it's/.codex", &out),
+    );
+    try std.testing.expectEqualStrings(
+        "head -c 2093056 '/home/me/it'\\''s/.codex/sessions/big.jsonl'",
+        try remoteHeadCommand("/home/me/it's/.codex/sessions/big.jsonl", MAX_REMOTE_METADATA_PREFIX_BYTES, &out),
     );
 }
 
@@ -2265,6 +2303,59 @@ test "ai_history_session: remote scan uses fake host JSONL bytes" {
     try std.testing.expectEqualStrings("code-remote", result.rows[2].session_id);
     try std.testing.expectEqualStrings("/home/me/reasonix-project", result.rows[2].project_dir);
     try std.testing.expectEqualStrings("Remote Reasonix", result.rows[2].summary);
+}
+
+test "ai_history_session: remote scan keeps oversized codex metadata from prefix" {
+    const allocator = std.testing.allocator;
+
+    const Host = struct {
+        saw_head: bool = false,
+        const path = "/home/me/.codex/sessions/2026/07/08/rollout-big.jsonl";
+        const mtime_s: i128 = 1783508460;
+        const jsonl =
+            \\{"type":"session_meta","timestamp":"2026-07-08T10:00:00Z","payload":{"id":"codex-big","cwd":"/home/me/project"}}
+            \\{"type":"response_item","timestamp":"2026-07-08T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Large remote July session"}]}}
+            \\
+        ;
+
+        fn exec(ctx: *anyopaque, alloc: std.mem.Allocator, command: []const u8) anyerror![]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.eql(u8, command, remote_file.wslHomeCommand())) return try alloc.dupe(u8, "/home/me\n");
+            if (std.mem.startsWith(u8, command, "find")) {
+                if (std.mem.indexOf(u8, command, "/home/me/.codex") != null) {
+                    return try std.fmt.allocPrint(alloc, "{d}.0\t{d}\t{s}\n", .{ mtime_s, MAX_METADATA_FILE_BYTES + 16, path });
+                }
+                return try alloc.dupe(u8, "");
+            }
+            if (std.mem.startsWith(u8, command, "head -c ")) {
+                self.saw_head = true;
+                return try alloc.dupe(u8, jsonl);
+            }
+            if (std.mem.startsWith(u8, command, "cat ")) return error.UnexpectedCat;
+            return error.UnexpectedCommand;
+        }
+
+        fn host(self: *@This()) RemoteExecHost {
+            return .{ .ctx = self, .exec = exec };
+        }
+    };
+
+    var host_state = Host{};
+    const result = try scanRemoteFilesystem(allocator, .{
+        .id = "wsl",
+        .name = "WSL",
+        .target = .{ .wsl = .{} },
+        .providers = .{ .codex = true, .claude = false, .reasonix = false },
+    }, host_state.host());
+    defer freeScanResult(allocator, result);
+
+    try std.testing.expect(host_state.saw_head);
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqualStrings("codex-big", result.rows[0].session_id);
+    try std.testing.expectEqualStrings("Large remote July session", result.rows[0].title);
+    try std.testing.expectEqual(types.ScanStatus.partial, result.rows[0].scan_status);
+    try std.testing.expectEqual(@as(i64, @intCast(Host.mtime_s * 1000)), result.rows[0].last_active_at_ms);
+    try std.testing.expectEqual(@as(u32, 1), result.warning_count);
 }
 
 test "ai_history_session: remote transcript loads from fake host" {
@@ -2635,6 +2726,41 @@ test "ai_history_session: scanLocalFilesystem reads codex and claude jsonl files
     }
     try std.testing.expectEqual(@as(usize, 1), codex_count);
     try std.testing.expectEqual(@as(usize, 1), claude_count);
+}
+
+test "ai_history_session: scanLocalFilesystem keeps oversized codex metadata from prefix" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".codex/sessions");
+    const prefix =
+        \\{"type":"session_meta","timestamp":"2026-07-08T10:00:00Z","payload":{"id":"codex-big","cwd":"/tmp/project"}}
+        \\{"type":"response_item","timestamp":"2026-07-08T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Large July session"}]}}
+        \\
+    ;
+    const file_len = MAX_METADATA_FILE_BYTES + 16;
+    const bytes = try allocator.alloc(u8, file_len);
+    defer allocator.free(bytes);
+    @memcpy(bytes[0..prefix.len], prefix);
+    @memset(bytes[prefix.len..], 'x');
+    try tmp.dir.writeFile(.{ .sub_path = ".codex/sessions/big.jsonl", .data = bytes });
+
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &home_buf);
+    const result = try scanLocalFilesystem(allocator, .{
+        .id = "local",
+        .name = "Local",
+        .target = .local,
+        .providers = .{ .codex = true, .claude = false, .reasonix = false },
+    }, home);
+    defer freeScanResult(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqualStrings("codex-big", result.rows[0].session_id);
+    try std.testing.expectEqualStrings("Large July session", result.rows[0].title);
+    try std.testing.expectEqual(types.ScanStatus.partial, result.rows[0].scan_status);
+    try std.testing.expectEqual(@as(u32, 1), result.warning_count);
 }
 
 test "ai_history_session: scanLocalFilesystem reads reasonix sessions with sidecars" {
