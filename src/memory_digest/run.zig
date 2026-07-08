@@ -16,6 +16,8 @@ const remote = @import("remote.zig");
 const store = @import("store.zig");
 const types = @import("types.zig");
 
+pub const DEFAULT_INPUT_BUDGET_CHARS = digest.DEFAULT_INPUT_BUDGET_CHARS;
+
 /// One WSL/SSH remote source to collect from alongside local roots (spec §6,
 /// M3). `source_id` becomes CollectedSession.source_id and thus flows into
 /// cursors, summaryKey and daily/aliases.
@@ -36,6 +38,7 @@ pub const Options = struct {
     completer: ?llm.Completer = null,
     model_label: []const u8 = "",
     max_chars_per_message: usize = 2000,
+    input_budget_chars: usize = DEFAULT_INPUT_BUDGET_CHARS,
     /// Points at the llm.Client's running total_usage (spec M5 Task 1 B.3),
     /// read into the RunRecord written at the end of this run. null (stub
     /// completers, M1 raw path, tests) records zero usage.
@@ -458,7 +461,10 @@ fn runOnceWithLlm(
         const key = try summaryKey(arena, s.source_id, s.provider, s.session_id);
         const old_summary = try findOldSummary(arena, &summaries, s.source_id, s.provider, s.session_id, key);
 
-        var map_opts = digest.MapOptions{ .max_chars_per_message = opts.max_chars_per_message };
+        var map_opts = digest.MapOptions{
+            .max_chars_per_message = opts.max_chars_per_message,
+            .input_budget_chars = opts.input_budget_chars,
+        };
         var progress_bridge = MapProgressBridge{
             .sink = opts.progress_sink orelse undefined,
             .base_detail = progress_detail,

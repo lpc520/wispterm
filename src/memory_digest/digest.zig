@@ -45,9 +45,11 @@ const PROMPT_HIGHLIGHTS_SYSTEM =
     \\- JSON 结构必须是：{"highlights":["…"]}
 ;
 
+pub const DEFAULT_INPUT_BUDGET_CHARS = 96_000;
+
 pub const MapOptions = struct {
     max_chars_per_message: usize = 2000,
-    input_budget_chars: usize = 24_000,
+    input_budget_chars: usize = DEFAULT_INPUT_BUDGET_CHARS,
     progress_sink: ?MapProgressSink = null,
 };
 

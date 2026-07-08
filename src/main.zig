@@ -204,6 +204,7 @@ pub fn main() !void {
         .scan_remote = cfg.@"memory-digest-scan-remote",
         .backfill_days = cfg.@"memory-digest-backfill-days",
         .max_chars = cfg.@"memory-digest-max-chars",
+        .input_budget_chars = cfg.@"memory-digest-input-budget-chars",
     });
 
     // Resolve UI language (explicit config > system locale > en) before any
