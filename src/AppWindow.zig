@@ -3813,15 +3813,15 @@ fn readLocalAiHistoryRaw(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (std.fs.path.isAbsolute(path)) {
         const file = try std.fs.openFileAbsolute(path, .{});
         defer file.close();
-        return try file.readToEndAlloc(allocator, ai_history_session.MAX_METADATA_FILE_BYTES);
+        return try file.readToEndAlloc(allocator, ai_history_session.MAX_TRANSCRIPT_FILE_BYTES);
     }
-    return try std.fs.cwd().readFileAlloc(allocator, path, ai_history_session.MAX_METADATA_FILE_BYTES);
+    return try std.fs.cwd().readFileAlloc(allocator, path, ai_history_session.MAX_TRANSCRIPT_FILE_BYTES);
 }
 
 fn readWslAiHistoryRaw(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     var command_buf: [2048]u8 = undefined;
     const command = try ai_history_session.remoteCatCommand(path, command_buf[0..]);
-    return remote_file.wslExec(allocator, command) orelse error.RemoteExecFailed;
+    return remote_file.wslExecCapped(allocator, command, ai_history_session.MAX_TRANSCRIPT_FILE_BYTES) orelse error.RemoteExecFailed;
 }
 
 fn syncWindowTitlebarHeight(win: *window_backend.Window) f32 {

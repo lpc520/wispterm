@@ -13,6 +13,7 @@ const i18n = @import("../../i18n.zig");
 pub const LoadState = enum { idle, scanning, ready, failed };
 pub const TranscriptState = enum { idle, loading, ready, failed };
 pub const MAX_METADATA_FILE_BYTES = 2 * 1024 * 1024;
+pub const MAX_TRANSCRIPT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_REMOTE_METADATA_PREFIX_BYTES: usize = MAX_METADATA_FILE_BYTES - 4096;
 pub const MAX_SCAN_METADATA_FILES: usize = 256;
 pub const MAX_SCAN_METADATA_BYTES: u64 = 48 * 1024 * 1024;
@@ -127,9 +128,12 @@ pub const WslScannerHost = struct {
         return try scanRemoteFilesystemSink(allocator, source, host, self.cache, sink);
     }
 
-    fn loadTranscript(ctx: *anyopaque, allocator: std.mem.Allocator, meta: types.SessionMeta) ![]types.TranscriptMessage {
-        const host = RemoteExecHost{ .ctx = ctx, .exec = exec };
-        return try loadRemoteTranscript(allocator, host, meta);
+    fn loadTranscript(_: *anyopaque, allocator: std.mem.Allocator, meta: types.SessionMeta) ![]types.TranscriptMessage {
+        var command_buf: [2048]u8 = undefined;
+        const command = try remoteCatCommand(meta.source_path, command_buf[0..]);
+        const bytes = remote_file.wslExecCapped(allocator, command, MAX_TRANSCRIPT_FILE_BYTES) orelse return error.RemoteExecFailed;
+        defer allocator.free(bytes);
+        return try parseTranscriptBytes(allocator, meta.provider, bytes);
     }
 };
 
@@ -157,8 +161,12 @@ pub const SshScannerHost = struct {
     }
 
     fn loadTranscript(ctx: *anyopaque, allocator: std.mem.Allocator, meta: types.SessionMeta) ![]types.TranscriptMessage {
-        const host = RemoteExecHost{ .ctx = ctx, .exec = exec };
-        return try loadRemoteTranscript(allocator, host, meta);
+        const self: *SshScannerHost = @ptrCast(@alignCast(ctx));
+        var command_buf: [2048]u8 = undefined;
+        const command = try remoteCatCommand(meta.source_path, command_buf[0..]);
+        const bytes = try remote_file.sshExecCaptureCapped(allocator, self.conn, command, MAX_TRANSCRIPT_FILE_BYTES);
+        defer allocator.free(bytes);
+        return try parseTranscriptBytes(allocator, meta.provider, bytes);
     }
 };
 
@@ -1065,11 +1073,15 @@ pub fn loadLocalTranscript(allocator: std.mem.Allocator, meta: types.SessionMeta
     const bytes = if (std.fs.path.isAbsolute(meta.source_path)) blk: {
         const file = try std.fs.openFileAbsolute(meta.source_path, .{});
         defer file.close();
-        break :blk try file.readToEndAlloc(allocator, MAX_METADATA_FILE_BYTES);
-    } else try std.fs.cwd().readFileAlloc(allocator, meta.source_path, MAX_METADATA_FILE_BYTES);
+        break :blk try file.readToEndAlloc(allocator, MAX_TRANSCRIPT_FILE_BYTES);
+    } else try std.fs.cwd().readFileAlloc(allocator, meta.source_path, MAX_TRANSCRIPT_FILE_BYTES);
     defer allocator.free(bytes);
 
-    return switch (meta.provider) {
+    return try parseTranscriptBytes(allocator, meta.provider, bytes);
+}
+
+fn parseTranscriptBytes(allocator: std.mem.Allocator, provider: types.ProviderId, bytes: []const u8) ![]types.TranscriptMessage {
+    return switch (provider) {
         .codex => try codex_provider.parseTranscript(allocator, bytes),
         .claude => try claude_provider.parseTranscript(allocator, bytes),
         .reasonix => try reasonix_provider.parseTranscript(allocator, bytes),
@@ -1244,11 +1256,7 @@ pub fn loadRemoteTranscript(allocator: std.mem.Allocator, host: RemoteExecHost, 
     const bytes = try host.exec(host.ctx, allocator, command);
     defer allocator.free(bytes);
 
-    return switch (meta.provider) {
-        .codex => try codex_provider.parseTranscript(allocator, bytes),
-        .claude => try claude_provider.parseTranscript(allocator, bytes),
-        .reasonix => try reasonix_provider.parseTranscript(allocator, bytes),
-    };
+    return try parseTranscriptBytes(allocator, meta.provider, bytes);
 }
 
 pub fn freeScanResult(allocator: std.mem.Allocator, result: ScanResult) void {
@@ -2375,6 +2383,48 @@ test "ai_history_session: remote transcript loads from fake host" {
     try std.testing.expectEqual(@as(usize, 1), messages.len);
     try std.testing.expectEqual(types.MessageRole.user, messages[0].role);
     try std.testing.expectEqualStrings("Fix remote renderer", messages[0].content);
+}
+
+test "ai_history_session: local transcript reads past metadata prefix limit" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".codex/sessions");
+    const first =
+        \\{"type":"session_meta","timestamp":"2026-07-08T10:00:00Z","payload":{"id":"codex-big","cwd":"/tmp/project"}}
+        \\{"type":"response_item","timestamp":"2026-07-08T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Prompt before cap"}]}}
+        \\
+    ;
+    const tail =
+        \\{"type":"response_item","timestamp":"2026-07-08T10:02:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Reply after cap"}]}}
+        \\
+    ;
+    const file_len = MAX_METADATA_FILE_BYTES + tail.len + 16;
+    const bytes = try allocator.alloc(u8, file_len);
+    defer allocator.free(bytes);
+    @memcpy(bytes[0..first.len], first);
+    @memset(bytes[first.len .. MAX_METADATA_FILE_BYTES + 16], ' ');
+    @memcpy(bytes[MAX_METADATA_FILE_BYTES + 16 ..][0..tail.len], tail);
+    try tmp.dir.writeFile(.{ .sub_path = ".codex/sessions/big-transcript.jsonl", .data = bytes });
+
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try tmp.dir.realpath(".", &home_buf);
+    const path = try std.fs.path.join(allocator, &.{ home, ".codex/sessions/big-transcript.jsonl" });
+    defer allocator.free(path);
+
+    const messages = try loadLocalTranscript(allocator, .{
+        .provider = .codex,
+        .session_id = "codex-big",
+        .title = "Big",
+        .source_path = path,
+        .resume_kind = .codex_resume,
+    });
+    defer freeTranscript(allocator, .codex, messages);
+
+    try std.testing.expectEqual(@as(usize, 2), messages.len);
+    try std.testing.expectEqualStrings("Prompt before cap", messages[0].content);
+    try std.testing.expectEqualStrings("Reply after cap", messages[1].content);
 }
 
 test "ai_history_session: replace rows preserves existing state on allocation failure" {
