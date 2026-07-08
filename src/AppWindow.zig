@@ -5081,11 +5081,18 @@ fn syncMemoryDigestToast() void {
     const msg = switch (progress.stage) {
         .queued => "Memory digest queued",
         .scanning => "Memory digest: scanning chat logs",
-        .summarizing => std.fmt.bufPrint(
-            &buf,
-            "Memory digest: summarizing {d}/{d} ({d} failed)",
-            .{ progress.sessions_done, progress.sessions_total, progress.sessions_failed },
-        ) catch "Memory digest: summarizing sessions",
+        .summarizing => if (progress.detail().len != 0)
+            std.fmt.bufPrint(
+                &buf,
+                "Memory digest: summarizing {s} ({d}/{d} done, {d} failed)",
+                .{ progress.detail(), progress.sessions_done, progress.sessions_total, progress.sessions_failed },
+            ) catch "Memory digest: summarizing sessions"
+        else
+            std.fmt.bufPrint(
+                &buf,
+                "Memory digest: summarizing {d}/{d} ({d} failed)",
+                .{ progress.sessions_done, progress.sessions_total, progress.sessions_failed },
+            ) catch "Memory digest: summarizing sessions",
         .finalizing => "Memory digest: writing digest files",
         .success => std.fmt.bufPrint(
             &buf,
@@ -5140,6 +5147,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
         .scan_remote = cfg.@"memory-digest-scan-remote",
         .backfill_days = cfg.@"memory-digest-backfill-days",
         .max_chars = cfg.@"memory-digest-max-chars",
+        .input_budget_chars = cfg.@"memory-digest-input-budget-chars",
     });
 
     if (g_window == null) return;

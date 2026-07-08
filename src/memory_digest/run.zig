@@ -16,6 +16,8 @@ const remote = @import("remote.zig");
 const store = @import("store.zig");
 const types = @import("types.zig");
 
+pub const DEFAULT_INPUT_BUDGET_CHARS = digest.DEFAULT_INPUT_BUDGET_CHARS;
+
 /// One WSL/SSH remote source to collect from alongside local roots (spec §6,
 /// M3). `source_id` becomes CollectedSession.source_id and thus flows into
 /// cursors, summaryKey and daily/aliases.
@@ -36,6 +38,7 @@ pub const Options = struct {
     completer: ?llm.Completer = null,
     model_label: []const u8 = "",
     max_chars_per_message: usize = 2000,
+    input_budget_chars: usize = DEFAULT_INPUT_BUDGET_CHARS,
     /// Points at the llm.Client's running total_usage (spec M5 Task 1 B.3),
     /// read into the RunRecord written at the end of this run. null (stub
     /// completers, M1 raw path, tests) records zero usage.
@@ -52,6 +55,7 @@ pub const Progress = union(enum) {
         total: usize,
         completed: usize,
         failed: usize,
+        detail: []const u8 = "",
     },
     finalizing,
 };
@@ -88,6 +92,43 @@ const CountingCompleter = struct {
         const self: *CountingCompleter = @ptrCast(@alignCast(ctx));
         self.count += 1;
         return self.inner.complete(gpa, system_prompt, user_text);
+    }
+};
+
+const MapProgressBridge = struct {
+    sink: ProgressSink,
+    base_detail: []const u8,
+    total: usize,
+    completed: usize,
+    failed: usize,
+    detail_buf: [192]u8 = undefined,
+
+    fn progressSink(self: *MapProgressBridge) digest.MapProgressSink {
+        return .{ .ctx = self, .onProgressFn = onProgress };
+    }
+
+    fn onProgress(ctx: *anyopaque, progress: digest.MapProgress) void {
+        const self: *MapProgressBridge = @ptrCast(@alignCast(ctx));
+        const stage = if (progress.rolling) "rolling" else "final";
+        const detail = std.fmt.bufPrint(&self.detail_buf, "{s} chunk {d}/{d} {d}B", .{
+            self.base_detail,
+            progress.chunk_index,
+            progress.chunk_total,
+            progress.prompt_bytes,
+        }) catch self.base_detail;
+        std.log.warn("memory_digest: summarizing {s} chunk={d}/{d} stage={s} prompt_bytes={d}", .{
+            self.base_detail,
+            progress.chunk_index,
+            progress.chunk_total,
+            stage,
+            progress.prompt_bytes,
+        });
+        self.sink.notify(.{ .summarizing = .{
+            .total = self.total,
+            .completed = self.completed,
+            .failed = self.failed,
+            .detail = detail,
+        } });
     }
 };
 
@@ -375,8 +416,6 @@ fn runOnceWithLlm(
     var summaries = try store.SummaryStore.loadFromPath(gpa, summaries_path);
     defer summaries.deinit();
 
-    const map_opts = digest.MapOptions{ .max_chars_per_message = opts.max_chars_per_message };
-
     // Per-session map stage. Only sessions that summarize successfully
     // advance their cursor and get a daily entry; the rest are silently
     // retried on the next run (spec §13). `summarized_dates`/`summarized_paths`/
@@ -398,9 +437,44 @@ fn runOnceWithLlm(
         } });
     }
 
-    for (collected) |s| {
+    for (collected, 0..) |s, i| {
+        const progress_detail = if (opts.progress_sink != null)
+            try std.fmt.allocPrint(arena, "{d}/{d} {s}/{s}:{s}", .{
+                i + 1,
+                collected.len,
+                s.source_id,
+                @tagName(s.provider),
+                s.session_id,
+            })
+        else
+            "";
+        if (opts.progress_sink) |sink| {
+            std.log.warn("memory_digest: summarizing {s} file={s} messages={d}", .{ progress_detail, s.source_file, s.new_messages.len });
+            sink.notify(.{ .summarizing = .{
+                .total = collected.len,
+                .completed = sessions_summarized,
+                .failed = sessions_failed,
+                .detail = progress_detail,
+            } });
+        }
+
         const key = try summaryKey(arena, s.source_id, s.provider, s.session_id);
         const old_summary = try findOldSummary(arena, &summaries, s.source_id, s.provider, s.session_id, key);
+
+        var map_opts = digest.MapOptions{
+            .max_chars_per_message = opts.max_chars_per_message,
+            .input_budget_chars = opts.input_budget_chars,
+        };
+        var progress_bridge = MapProgressBridge{
+            .sink = opts.progress_sink orelse undefined,
+            .base_detail = progress_detail,
+            .total = collected.len,
+            .completed = sessions_summarized,
+            .failed = sessions_failed,
+        };
+        if (opts.progress_sink != null) {
+            map_opts.progress_sink = progress_bridge.progressSink();
+        }
 
         const result = digest.summarizeSession(arena, gpa, completer, s, old_summary, map_opts) catch |err| {
             std.log.warn("memory_digest: map failed for {s} ({s}): {s}", .{ @tagName(s.provider), s.session_id, @errorName(err) });
@@ -410,6 +484,7 @@ fn runOnceWithLlm(
                     .total = collected.len,
                     .completed = sessions_summarized,
                     .failed = sessions_failed,
+                    .detail = progress_detail,
                 } });
             }
             continue;
@@ -422,6 +497,7 @@ fn runOnceWithLlm(
                 .total = collected.len,
                 .completed = sessions_summarized,
                 .failed = sessions_failed,
+                .detail = progress_detail,
             } });
         }
 
@@ -968,6 +1044,34 @@ const RoutingStub = struct {
     }
 };
 
+const ProgressRecorder = struct {
+    first_detail_buf: [128]u8 = undefined,
+    first_detail_len: usize = 0,
+    saw_chunk_detail: bool = false,
+
+    fn sink(self: *ProgressRecorder) ProgressSink {
+        return .{ .ctx = self, .onProgressFn = onProgress };
+    }
+
+    fn onProgress(ctx: *anyopaque, progress: Progress) void {
+        const self: *ProgressRecorder = @ptrCast(@alignCast(ctx));
+        switch (progress) {
+            .summarizing => |v| {
+                if (std.mem.indexOf(u8, v.detail, "chunk ") != null) self.saw_chunk_detail = true;
+                if (self.first_detail_len != 0 or v.detail.len == 0) return;
+                const len = @min(self.first_detail_buf.len, v.detail.len);
+                @memcpy(self.first_detail_buf[0..len], v.detail[0..len]);
+                self.first_detail_len = len;
+            },
+            else => {},
+        }
+    }
+
+    fn firstDetail(self: *const ProgressRecorder) []const u8 {
+        return self.first_detail_buf[0..self.first_detail_len];
+    }
+};
+
 fn writeFixtures(tmp: std.testing.TmpDir) !void {
     try tmp.dir.makePath("claude/proj-a");
     var d = try tmp.dir.openDir("claude/proj-a", .{});
@@ -1111,6 +1215,36 @@ test "memory_digest_run: llm_usage flows into runs.json, defaults to 0 when unse
     const parsed2 = try std.json.parseFromSlice(RunsShape, allocator, runs2, .{ .ignore_unknown_fields = true });
     defer parsed2.deinit();
     try std.testing.expectEqual(@as(u64, 0), parsed2.value.runs[0].total_tokens);
+}
+
+test "memory_digest_run: progress detail names the active session before map completes" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    try writeFixtures(tmp);
+
+    const claude_root = try std.fs.path.join(allocator, &.{ root, "claude" });
+    defer allocator.free(claude_root);
+    const memory_root = try std.fs.path.join(allocator, &.{ root, "memory" });
+    defer allocator.free(memory_root);
+
+    var stub = RoutingStub{ .map_response = MAP_JSON, .reduce_response = REDUCE_JSON };
+    var recorder = ProgressRecorder{};
+    _ = try runOnce(allocator, .{
+        .roots = .{ .claude_projects_dir = claude_root },
+        .memory_root = memory_root,
+        .now_ms = 1783500000000,
+        .tz_offset_seconds = 8 * 3600,
+        .backfill_days = 0,
+        .completer = stub.completer(),
+        .model_label = "test-model",
+        .progress_sink = recorder.sink(),
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, recorder.firstDetail(), "1/1 local/claude:claude-abc") != null);
+    try std.testing.expect(recorder.saw_chunk_detail);
 }
 
 test "memory_digest_run: map failure withholds cursor and daily entry, other sessions unaffected" {

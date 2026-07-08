@@ -204,6 +204,7 @@ pub fn main() !void {
         .scan_remote = cfg.@"memory-digest-scan-remote",
         .backfill_days = cfg.@"memory-digest-backfill-days",
         .max_chars = cfg.@"memory-digest-max-chars",
+        .input_budget_chars = cfg.@"memory-digest-input-budget-chars",
     });
 
     // Resolve UI language (explicit config > system locale > en) before any
@@ -255,6 +256,7 @@ pub fn main() !void {
     // Create the App and run (first window on main thread, spawned windows on separate threads)
     var app = try App.init(allocator, cfg);
     defer ai_chat.deinitAccessRules();
+    defer ai_chat.deinitMcpTools(allocator);
     defer app.deinit();
     ai_chat.loadAccessRules(allocator);
     // Build the MCP tool catalog from <configDir>/mcp.json + the disk catalog

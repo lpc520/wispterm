@@ -48,6 +48,7 @@ pub const Settings = struct {
     scan_remote: bool = false,
     backfill_days: u32 = 7,
     max_chars: u32 = 2000,
+    input_budget_chars: u32 = run_mod.DEFAULT_INPUT_BUDGET_CHARS,
 };
 
 pub const LastRun = struct {
@@ -111,6 +112,7 @@ pub fn updateSettings(s: Settings) void {
         .scan_remote = s.scan_remote,
         .backfill_days = s.backfill_days,
         .max_chars = s.max_chars,
+        .input_budget_chars = s.input_budget_chars,
     };
     // tick() silently `orelse return`s on a malformed run_after every 60s;
     // warn once here (config-load time) instead of spamming that silence.
@@ -194,6 +196,7 @@ fn spawnRun(gpa: std.mem.Allocator, now_ms: i64, tz_offset_seconds: i32, manual:
         },
         .backfill_days = g_settings.backfill_days,
         .max_chars = g_settings.max_chars,
+        .input_budget_chars = g_settings.input_budget_chars,
         .now_ms = now_ms,
         .tz_offset_seconds = tz_offset_seconds,
         .scan_remote = g_settings.scan_remote,
@@ -278,6 +281,7 @@ const ThreadParams = struct {
     profile_name: []const u8, // gpa-owned; freed by runThreadMain
     backfill_days: u32,
     max_chars: u32,
+    input_budget_chars: u32,
     now_ms: i64,
     tz_offset_seconds: i32,
     scan_remote: bool = false,
@@ -371,6 +375,7 @@ fn runThreadMain(gpa: std.mem.Allocator, params: ThreadParams) void {
         .tz_offset_seconds = params.tz_offset_seconds,
         .backfill_days = params.backfill_days,
         .max_chars_per_message = params.max_chars,
+        .input_budget_chars = @intCast(params.input_budget_chars),
         .completer = client.completer(),
         .model_label = cfg.model,
         .remote_sources = remote_sources,
@@ -451,7 +456,7 @@ fn onRunProgress(ctx: *anyopaque, progress: run_mod.Progress) void {
     switch (progress) {
         .scanning => setProgress(.scanning, true, .{ .detail = "Scanning chat logs" }),
         .summarizing => |v| setProgress(.summarizing, true, .{
-            .detail = "Summarizing sessions",
+            .detail = if (v.detail.len != 0) v.detail else "Summarizing sessions",
             .sessions_total = @intCast(v.total),
             .sessions_done = @intCast(v.completed),
             .sessions_failed = @intCast(v.failed),

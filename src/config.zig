@@ -31,6 +31,7 @@ const themes = @import("themes.zig");
 const i18n = @import("i18n.zig");
 
 const log = std.log.scoped(.config);
+const DEFAULT_MEMORY_DIGEST_INPUT_BUDGET_CHARS: u32 = 96_000;
 
 // ============================================================================
 // Theme
@@ -485,8 +486,11 @@ language: i18n.LanguageSetting = .auto,
 /// How many days of history to backfill when the digest first runs.
 @"memory-digest-backfill-days": u32 = 7,
 
-/// Maximum characters included in a single digest pass.
+/// Maximum characters retained from a single message before digesting.
 @"memory-digest-max-chars": u32 = 2000,
+
+/// Maximum bytes fed to one memory-digest map prompt before chunking.
+@"memory-digest-input-budget-chars": u32 = DEFAULT_MEMORY_DIGEST_INPUT_BUDGET_CHARS,
 
 /// Load an additional config file. Can be repeated. Relative paths are
 /// resolved relative to the file containing the directive. Prefix with
@@ -1142,6 +1146,11 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
     } else if (std.mem.eql(u8, key, "memory-digest-max-chars")) {
         self.@"memory-digest-max-chars" = std.fmt.parseInt(u32, value, 10) catch {
             log.warn("invalid memory-digest-max-chars: {s}", .{value});
+            return;
+        };
+    } else if (std.mem.eql(u8, key, "memory-digest-input-budget-chars")) {
+        self.@"memory-digest-input-budget-chars" = std.fmt.parseInt(u32, value, 10) catch {
+            log.warn("invalid memory-digest-input-budget-chars: {s}", .{value});
             return;
         };
     } else if (std.mem.eql(u8, key, "config-file")) {
@@ -2556,4 +2565,16 @@ test "config: memory-digest-max-chars parses and rejects invalid" {
     // Invalid value leaves the previous state untouched (still 4096).
     cfg.applyKeyValue(allocator, "memory-digest-max-chars", "nope", ".");
     try std.testing.expectEqual(@as(u32, 4096), cfg.@"memory-digest-max-chars");
+}
+
+test "config: memory-digest-input-budget-chars parses and rejects invalid" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{};
+    defer cfg.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 96_000), cfg.@"memory-digest-input-budget-chars");
+    cfg.applyKeyValue(allocator, "memory-digest-input-budget-chars", "128000", ".");
+    try std.testing.expectEqual(@as(u32, 128_000), cfg.@"memory-digest-input-budget-chars");
+    // Invalid value leaves the previous state untouched (still 128000).
+    cfg.applyKeyValue(allocator, "memory-digest-input-budget-chars", "nope", ".");
+    try std.testing.expectEqual(@as(u32, 128_000), cfg.@"memory-digest-input-budget-chars");
 }
