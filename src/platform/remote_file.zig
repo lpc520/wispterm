@@ -60,9 +60,13 @@ pub fn wslHomeCommand() []const u8 {
 
 /// Run a command inside the default WSL distro and capture stdout.
 pub fn wslExec(allocator: std.mem.Allocator, command: []const u8) ?[]u8 {
+    return wslExecCapped(allocator, command, DEFAULT_CAPTURE_MAX_BYTES);
+}
+
+pub fn wslExecCapped(allocator: std.mem.Allocator, command: []const u8, max_stdout_bytes: usize) ?[]u8 {
     const argv = pty_command.wslExecArgv(command);
     var result = process_runner.runCapture(allocator, &argv, .{
-        .max_stdout_bytes = DEFAULT_CAPTURE_MAX_BYTES,
+        .max_stdout_bytes = max_stdout_bytes,
         .max_stderr_bytes = SSH_STDERR_MAX_BYTES,
     }) catch return null;
     if (!exitedOk(result.termination)) {
@@ -90,6 +94,10 @@ pub const SshCapture = struct {
 /// so callers can surface the real ssh error. Reads both pipes concurrently to
 /// avoid a full-stderr-pipe deadlock.
 pub fn sshExecCaptureFull(allocator: std.mem.Allocator, conn: anytype, command: []const u8) !SshCapture {
+    return sshExecCaptureFullCapped(allocator, conn, command, 2 * 1024 * 1024);
+}
+
+pub fn sshExecCaptureFullCapped(allocator: std.mem.Allocator, conn: anytype, command: []const u8, max_stdout_bytes: usize) !SshCapture {
     var askpass_path: ?[]const u8 = null;
     defer if (askpass_path) |p| allocator.free(p);
     var env_map: ?std.process.EnvMap = null;
@@ -186,7 +194,7 @@ pub fn sshExecCaptureFull(allocator: std.mem.Allocator, conn: anytype, command: 
 
     const result = try process_runner.runCapture(allocator, argv_buf[0..argc], .{
         .env_map = if (env_map) |*map| map else null,
-        .max_stdout_bytes = 2 * 1024 * 1024,
+        .max_stdout_bytes = max_stdout_bytes,
         .max_stderr_bytes = SSH_STDERR_MAX_BYTES,
     });
     return .{
@@ -197,7 +205,11 @@ pub fn sshExecCaptureFull(allocator: std.mem.Allocator, conn: anytype, command: 
 }
 
 pub fn sshExecCapture(allocator: std.mem.Allocator, conn: anytype, command: []const u8) ![]u8 {
-    var cap = try sshExecCaptureFull(allocator, conn, command);
+    return sshExecCaptureCapped(allocator, conn, command, 2 * 1024 * 1024);
+}
+
+pub fn sshExecCaptureCapped(allocator: std.mem.Allocator, conn: anytype, command: []const u8, max_stdout_bytes: usize) ![]u8 {
+    var cap = try sshExecCaptureFullCapped(allocator, conn, command, max_stdout_bytes);
     if (!cap.exited_ok) {
         logSshFailure(cap.stderr);
         cap.deinit(allocator);
