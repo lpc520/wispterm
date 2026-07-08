@@ -3164,6 +3164,7 @@ pub fn aiHistoryHandleMousePress(xpos: f64, ypos: f64) bool {
         left,
         width,
         font.g_titlebar_cell_height,
+        font.g_titlebar_cell_width,
         xpos,
         ypos,
     );

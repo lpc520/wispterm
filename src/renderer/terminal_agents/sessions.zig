@@ -11,11 +11,11 @@ const ROW_H: f32 = 54;
 const PAD_X: f32 = 16;
 const SMALL_GAP: f32 = 6;
 const BUTTON_PAD_Y: f32 = 4;
+const BUTTON_PAD_X: f32 = 12;
 const BUTTON_EXTRA_H: f32 = 10;
-const RESUME_BUTTON_W: f32 = 104;
-const ACTION_BUTTON_W: f32 = 148;
-const ACTION_BUTTON_MIN_W: f32 = 96;
 const ACTION_BUTTON_GAP: f32 = 8;
+const RESUME_LABEL = "Resume";
+const ACTION_LABELS = [_][]const u8{ "Download", "Export", "Attach" };
 /// Width of the "r Retry" affordance sharing the Status value line (right-aligned).
 const RETRY_LABEL_W: f32 = 70;
 const MAX_DATE_BUCKETS: usize = 256;
@@ -186,6 +186,7 @@ pub fn interactionHitTest(
     x: f32,
     width: f32,
     cell_h: f32,
+    glyph_w: f32,
     mouse_x: f64,
     mouse_y: f64,
 ) Hit {
@@ -237,10 +238,12 @@ pub fn interactionHitTest(
     const visible_count = session.visibleCount();
     if (session.selectedVisible() != null) {
         const resume_top = resumeButtonTop(top, cell_h);
-        if (rectContains(mx, my, layout.detail_x + PAD_X, resume_top, RESUME_BUTTON_W, buttonHeight(cell_h))) {
-            return .@"resume";
+        if (detailButtonWidth(layout, RESUME_LABEL, glyph_w)) |resume_w| {
+            if (rectContains(mx, my, layout.detail_x + PAD_X, resume_top, resume_w, buttonHeight(cell_h))) {
+                return .@"resume";
+            }
         }
-        const action_hit = detailActionHit(layout, top, cell_h, mx, my);
+        const action_hit = detailActionHit(layout, top, cell_h, glyph_w, mx, my);
         if (action_hit != .none) return action_hit;
     }
 
@@ -535,19 +538,21 @@ fn renderDetail(
     y += draw.cell_h + 16;
     const resume_top = resumeButtonTop(top, draw.cell_h);
     const can_resume = selected.project_dir.len > 0;
-    draw.fillQuadAlpha(layout.detail_x + PAD_X, yFromTop(window_height, resume_top, buttonHeight(draw.cell_h)), RESUME_BUTTON_W, buttonHeight(draw.cell_h), panel_strong, 0.72);
-    _ = draw.renderTextLimited(if (can_resume) "Resume" else "Resume unavailable", layout.detail_x + PAD_X + 12, yTextFromTop(draw, window_height, y), if (can_resume) accent else muted, RESUME_BUTTON_W - 24);
+    const glyph_w = @max(draw.glyphAdvance('W'), 1);
+    if (detailButtonWidth(layout, RESUME_LABEL, glyph_w)) |resume_w| {
+        draw.fillQuadAlpha(layout.detail_x + PAD_X, yFromTop(window_height, resume_top, buttonHeight(draw.cell_h)), resume_w, buttonHeight(draw.cell_h), panel_strong, 0.72);
+        _ = draw.renderTextLimited(RESUME_LABEL, layout.detail_x + PAD_X + BUTTON_PAD_X, yTextFromTop(draw, window_height, y), if (can_resume) accent else muted, resume_w - BUTTON_PAD_X * 2);
+    }
 
     const action_top = detailActionTop(top, draw.cell_h);
     const action_h = buttonHeight(draw.cell_h);
-    if (detailActionWidth(layout)) |action_w| {
+    if (detailActionWidth(layout, glyph_w)) |action_w| {
         const action_x = layout.detail_x + PAD_X;
-        const action_labels = [_][]const u8{ "Download Raw", "Export Markdown", "Attach to Copilot" };
-        for (action_labels, 0..) |label, i| {
+        for (ACTION_LABELS, 0..) |label, i| {
             const row_top = action_top + @as(f32, @floatFromInt(i)) * (action_h + ACTION_BUTTON_GAP);
             draw.fillQuadAlpha(action_x, yFromTop(window_height, row_top, action_h), action_w, action_h, panel_strong, 0.72);
-            if (action_w > 24) {
-                _ = draw.renderTextLimited(label, action_x + 12, yTextFromTop(draw, window_height, row_top + BUTTON_PAD_Y), accent, action_w - 24);
+            if (action_w > BUTTON_PAD_X * 2) {
+                _ = draw.renderTextLimited(label, action_x + BUTTON_PAD_X, yTextFromTop(draw, window_height, row_top + BUTTON_PAD_Y), accent, action_w - BUTTON_PAD_X * 2);
             }
         }
         y = action_top + (action_h + ACTION_BUTTON_GAP) * 3 + 12;
@@ -819,16 +824,31 @@ fn detailActionTop(top: f32, cell_h: f32) f32 {
     return resumeButtonTop(top, cell_h) + buttonHeight(cell_h) + 10;
 }
 
-fn detailActionWidth(layout: Layout) ?f32 {
-    const inner = layout.detail_w - PAD_X * 2;
-    if (inner < ACTION_BUTTON_MIN_W) return null;
-    return @min(ACTION_BUTTON_W, inner);
+fn labelButtonWidth(label: []const u8, glyph_w: f32) f32 {
+    return @as(f32, @floatFromInt(label.len)) * @max(glyph_w, 1) + BUTTON_PAD_X * 2;
 }
 
-fn detailActionHit(layout: Layout, top: f32, cell_h: f32, mx: f32, my: f32) Hit {
+fn detailButtonWidth(layout: Layout, label: []const u8, glyph_w: f32) ?f32 {
+    const inner = layout.detail_w - PAD_X * 2;
+    const required = labelButtonWidth(label, glyph_w);
+    if (inner < required) return null;
+    return required;
+}
+
+fn detailActionWidth(layout: Layout, glyph_w: f32) ?f32 {
+    const inner = layout.detail_w - PAD_X * 2;
+    var required: f32 = 0;
+    for (ACTION_LABELS) |label| {
+        required = @max(required, labelButtonWidth(label, glyph_w));
+    }
+    if (inner < required) return null;
+    return required;
+}
+
+fn detailActionHit(layout: Layout, top: f32, cell_h: f32, glyph_w: f32, mx: f32, my: f32) Hit {
     const left = layout.detail_x + PAD_X;
     const h = buttonHeight(cell_h);
-    const w = detailActionWidth(layout) orelse return .none;
+    const w = detailActionWidth(layout, glyph_w) orelse return .none;
     const y0 = detailActionTop(top, cell_h);
     if (rectContains(mx, my, left, y0, w, h)) return .download_raw;
     if (rectContains(mx, my, left, y0 + h + ACTION_BUTTON_GAP, w, h)) return .export_markdown;
@@ -951,32 +971,32 @@ test "terminal agent sessions renderer: interaction hit test maps buttons and ro
     // Retry is right-aligned on the Status value line; click inside that label.
     try std.testing.expectEqual(
         Hit.refresh,
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.left_x + layout.left_w - PAD_X - RETRY_LABEL_W + 4, refreshButtonTop(top, cell_h) + 2),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.left_x + layout.left_w - PAD_X - RETRY_LABEL_W + 4, refreshButtonTop(top, cell_h) + 2),
     );
     try std.testing.expectEqual(
         Hit.@"resume",
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.detail_x + PAD_X + 4, resumeButtonTop(top, cell_h) + 2),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.detail_x + PAD_X + 4, resumeButtonTop(top, cell_h) + 2),
     );
     const action_top = detailActionTop(top, cell_h);
     try std.testing.expectEqual(
         Hit.download_raw,
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.detail_x + PAD_X + 4, action_top + 2),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.detail_x + PAD_X + 4, action_top + 2),
     );
     try std.testing.expectEqual(
         Hit.export_markdown,
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.detail_x + PAD_X + 4, action_top + buttonHeight(cell_h) + ACTION_BUTTON_GAP + 2),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.detail_x + PAD_X + 4, action_top + buttonHeight(cell_h) + ACTION_BUTTON_GAP + 2),
     );
     try std.testing.expectEqual(
         Hit.attach_copilot,
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.detail_x + PAD_X + 4, action_top + (buttonHeight(cell_h) + ACTION_BUTTON_GAP) * 2 + 2),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.detail_x + PAD_X + 4, action_top + (buttonHeight(cell_h) + ACTION_BUTTON_GAP) * 2 + 2),
     );
-    const row_hit = interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.list_x + 8, top + FILTER_H + ROW_H + 2);
+    const row_hit = interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.list_x + 8, top + FILTER_H + ROW_H + 2);
     try std.testing.expectEqual(@as(usize, 4), row_hit.row);
 
     // Clicking the Search box strip at the top of the list column focuses the query.
     try std.testing.expectEqual(
         Hit.search,
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.list_x + 8, top + 4),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.list_x + 8, top + 4),
     );
 }
 
@@ -1009,12 +1029,32 @@ test "terminal agent sessions renderer: detail button hits require selected visi
 
     try std.testing.expectEqual(
         Hit.none,
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.detail_x + PAD_X + 4, resumeButtonTop(top, cell_h) + 2),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.detail_x + PAD_X + 4, resumeButtonTop(top, cell_h) + 2),
     );
     try std.testing.expectEqual(
         Hit.none,
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.detail_x + PAD_X + 4, action_top + 2),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.detail_x + PAD_X + 4, action_top + 2),
     );
+}
+
+test "terminal agent sessions renderer: detail buttons fit action labels at large glyph widths" {
+    const glyph_w: f32 = 20;
+    const layout = Layout{
+        .left_x = 0,
+        .left_w = 0,
+        .list_x = 0,
+        .list_w = 0,
+        .detail_x = 100,
+        .detail_w = PAD_X * 2 + labelButtonWidth("Download", glyph_w),
+    };
+
+    const resume_w = detailButtonWidth(layout, RESUME_LABEL, glyph_w) orelse return error.MissingResumeWidth;
+    try std.testing.expect(resume_w >= labelButtonWidth(RESUME_LABEL, glyph_w));
+
+    const action_w = detailActionWidth(layout, glyph_w) orelse return error.MissingActionWidth;
+    for (ACTION_LABELS) |label| {
+        try std.testing.expect(action_w >= labelButtonWidth(label, glyph_w));
+    }
 }
 
 test "terminal agent sessions renderer: detail action hit ignores too-narrow inner width" {
@@ -1031,7 +1071,7 @@ test "terminal agent sessions renderer: detail action hit ignores too-narrow inn
 
     try std.testing.expectEqual(
         Hit.none,
-        detailActionHit(layout, top, cell_h, layout.detail_x + PAD_X + 0.5, detailActionTop(top, cell_h) + 2),
+        detailActionHit(layout, top, cell_h, 10, layout.detail_x + PAD_X + 0.5, detailActionTop(top, cell_h) + 2),
     );
 
     const tiny_layout = Layout{
@@ -1044,7 +1084,7 @@ test "terminal agent sessions renderer: detail action hit ignores too-narrow inn
     };
     try std.testing.expectEqual(
         Hit.none,
-        detailActionHit(tiny_layout, top, cell_h, tiny_layout.detail_x + PAD_X + 0.5, detailActionTop(top, cell_h) + 2),
+        detailActionHit(tiny_layout, top, cell_h, 10, tiny_layout.detail_x + PAD_X + 0.5, detailActionTop(top, cell_h) + 2),
     );
 
     const one_px_label_layout = Layout{
@@ -1057,7 +1097,7 @@ test "terminal agent sessions renderer: detail action hit ignores too-narrow inn
     };
     try std.testing.expectEqual(
         Hit.none,
-        detailActionHit(one_px_label_layout, top, cell_h, one_px_label_layout.detail_x + PAD_X + 0.5, detailActionTop(top, cell_h) + 2),
+        detailActionHit(one_px_label_layout, top, cell_h, 10, one_px_label_layout.detail_x + PAD_X + 0.5, detailActionTop(top, cell_h) + 2),
     );
 
     const normal_layout = Layout{
@@ -1066,11 +1106,11 @@ test "terminal agent sessions renderer: detail action hit ignores too-narrow inn
         .list_x = 0,
         .list_w = 0,
         .detail_x = 100,
-        .detail_w = PAD_X * 2 + ACTION_BUTTON_W,
+        .detail_w = PAD_X * 2 + labelButtonWidth("Download", 10),
     };
     try std.testing.expectEqual(
         Hit.download_raw,
-        detailActionHit(normal_layout, top, cell_h, normal_layout.detail_x + PAD_X + 0.5, detailActionTop(top, cell_h) + 2),
+        detailActionHit(normal_layout, top, cell_h, 10, normal_layout.detail_x + PAD_X + 0.5, detailActionTop(top, cell_h) + 2),
     );
 }
 
@@ -1183,31 +1223,31 @@ test "terminal agent sessions renderer: interaction hit test maps category rows"
     const all_y = lc.category_rows_top + lc.category_row_h * 0.5;
     try std.testing.expectEqual(
         Hit{ .category = .all },
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.left_x + 10, all_y),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.left_x + 10, all_y),
     );
 
     const codex_y = lc.category_rows_top + lc.category_row_h * 1.5;
     try std.testing.expectEqual(
         Hit{ .category = .codex },
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.left_x + 10, codex_y),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.left_x + 10, codex_y),
     );
 
     const claude_y = lc.category_rows_top + lc.category_row_h * 2.5;
     try std.testing.expectEqual(
         Hit{ .category = .claude },
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.left_x + 10, claude_y),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.left_x + 10, claude_y),
     );
 
     const reasonix_y = lc.category_rows_top + lc.category_row_h * 3.5;
     try std.testing.expectEqual(
         Hit{ .category = .reasonix },
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.left_x + 10, reasonix_y),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.left_x + 10, reasonix_y),
     );
 
     const subagent_y = lc.category_rows_top + lc.category_row_h * 4.5;
     try std.testing.expectEqual(
         Hit{ .category = .subagent },
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.left_x + 10, subagent_y),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.left_x + 10, subagent_y),
     );
 }
 
@@ -1240,20 +1280,20 @@ test "terminal agent sessions renderer: interaction hit test maps date rows" {
     const all_y = lc.date_rows_top + lc.date_row_h * 0.5;
     try std.testing.expectEqual(
         Hit{ .date = null },
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.left_x + 10, all_y),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.left_x + 10, all_y),
     );
 
     // Row 1 -> first bucket (20260602).
     const d1_y = lc.date_rows_top + lc.date_row_h * 1.5;
     try std.testing.expectEqual(
         Hit{ .date = @as(?types.DateKey, 20260602) },
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.left_x + 10, d1_y),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.left_x + 10, d1_y),
     );
 
     // Row 2 -> second bucket (20260601).
     const d2_y = lc.date_rows_top + lc.date_row_h * 2.5;
     try std.testing.expectEqual(
         Hit{ .date = @as(?types.DateKey, 20260601) },
-        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, layout.left_x + 10, d2_y),
+        interactionHitTest(session, 1000, 700, top, 0, 1000, cell_h, 10, layout.left_x + 10, d2_y),
     );
 }
