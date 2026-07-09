@@ -355,6 +355,7 @@ pub fn runOnce(gpa: std.mem.Allocator, opts: Options) !Summary {
             .date = date,
             .generated_at = opts.now_ms,
             .sessions = merged,
+            .sources = try store.aggregateSources(arena, merged),
         });
     }
 
@@ -586,6 +587,7 @@ fn runOnceWithLlm(
             .model = opts.model_label,
             .projects = dr.reduced.projects,
             .highlights = dr.reduced.highlights,
+            .sources = try store.aggregateSources(arena, dr.merged),
         });
 
         // Slug allowlist (Item 1): transcripts are untrusted, and `tl.slug`
