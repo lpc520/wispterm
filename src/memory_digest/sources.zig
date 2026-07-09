@@ -31,7 +31,9 @@ fn sshExec(ctx: *anyopaque, gpa: std.mem.Allocator, command: []const u8) anyerro
     const self: *SshCtx = @ptrCast(@alignCast(ctx));
     var cap = try remote_file.sshExecCaptureFullCapped(gpa, &self.conn, command, 2 * 1024 * 1024);
     if (!cap.exited_ok) {
-        std.log.warn("memory_digest: remote exec failed exited_ok={} stderr={s}", .{ cap.exited_ok, cap.stderr[0..@min(cap.stderr.len, 200)] });
+        const stderr_preview = cap.stderr[0..@min(cap.stderr.len, 200)];
+        const stderr_trimmed = std.mem.trimRight(u8, stderr_preview, "\r\n");
+        std.log.warn("memory_digest: remote exec failed stderr={s}", .{stderr_trimmed});
         cap.deinit(gpa);
         return error.RemoteExecFailed;
     }

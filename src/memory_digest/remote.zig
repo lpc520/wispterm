@@ -133,7 +133,10 @@ fn collectProvider(
         var cand = parseFindLine(line, provider) catch {
             // BSD find (no tabs): unsupported shape, but must not abort the
             // other providers/sources (spec §13) — record and skip the line.
-            result.no_stamps = true;
+            if (!result.no_stamps) {
+                std.log.warn("memory_digest: remote find output for {s} has no stamps (BSD find?) - recorded in detail", .{@tagName(provider)});
+                result.no_stamps = true;
+            }
             continue;
         };
         result.files_seen += 1;
@@ -191,15 +194,13 @@ const FindCandidate = struct {
 /// find on Linux remotes only; BSD/macOS remote support needs the
 /// providerFindCommandPlain two-pass fallback session.zig already has for
 /// the UI scanner — wire that in when a real BSD remote shows up).
-fn parseFindLine(line: []const u8, provider: types.DigestProvider) !FindCandidate {
+fn parseFindLine(line: []const u8, _: types.DigestProvider) !FindCandidate {
     var it = std.mem.splitScalar(u8, line, '\t');
     const first = it.next().?;
     const second = it.next() orelse {
-        std.log.warn("memory_digest: remote find output for {s} has no stamps (BSD find?) - unsupported", .{@tagName(provider)});
         return error.RemoteFindUnsupported;
     };
     const third = it.next() orelse {
-        std.log.warn("memory_digest: remote find output for {s} has no stamps (BSD find?) - unsupported", .{@tagName(provider)});
         return error.RemoteFindUnsupported;
     };
     const secs_str = std.mem.sliceTo(first, '.');
