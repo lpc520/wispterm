@@ -22,6 +22,7 @@ const agent_research = @import("research.zig");
 const knowledge = @import("knowledge.zig");
 const agent_memory_tool = @import("memory.zig");
 const agent_memory_search = @import("memory_search.zig");
+const agent_system_time = @import("system_time.zig");
 const agent_wispterm_config = @import("wispterm_config.zig");
 const terminal_tools = @import("terminal.zig");
 const agent_sessions = @import("sessions.zig");
@@ -270,6 +271,9 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         const query = tool_args.string(args.value, "query") orelse return ctx.allocator.dupe(u8, "Missing query");
         const max_results = tool_args.int(args.value, "max_results");
         return agent_research.pubMed(ctx.allocator, query, max_results);
+    }
+    if (std.mem.eql(u8, call.name, "get_system_time")) {
+        return agent_system_time.now(ctx.allocator);
     }
     if (std.mem.startsWith(u8, call.name, "memory_") and !ctx.settings.memory_enabled) {
         return ctx.allocator.dupe(u8, "Memory is disabled (ai-memory-enabled = false).");
@@ -1212,6 +1216,28 @@ test "executeToolCall memory_search returns no-match text when digest artifacts 
     });
     defer a.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "No digest match") != null);
+}
+
+test "executeToolCall get_system_time returns a local timestamp" {
+    const a = std.testing.allocator;
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = a,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .settings = .{},
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    const out = try executeToolCall(&ctx, .{
+        .id = @constCast("1"),
+        .name = @constCast("get_system_time"),
+        .arguments = @constCast("{}"),
+    });
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Current local system time:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "UTC") != null);
 }
 
 test "terminal_snapshot keeps the live screen tail when output exceeds the limit" {
