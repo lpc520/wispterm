@@ -22,7 +22,11 @@ pub fn search(ctx: *ToolContext, root: std.json.Value) ![]u8 {
         else => return err,
     };
     defer tool_args.freeStringArray(ctx.allocator, keywords);
-    if (keywords.len == 0) return ctx.allocator.dupe(u8, "Missing keywords");
+    const date = tool_args.string(root, "date");
+    if (date) |value| {
+        if (!isCalendarDate(value)) return ctx.allocator.dupe(u8, "Invalid date: expected YYYY-MM-DD");
+    }
+    if (keywords.len == 0 and date == null) return ctx.allocator.dupe(u8, "Missing keywords or date");
     const source = tool_args.string(root, "source");
     const days = tool_args.int(root, "days") orelse DEFAULT_DAYS;
 
@@ -31,16 +35,18 @@ pub fn search(ctx: *ToolContext, root: std.json.Value) ![]u8 {
     const daily_dir = try std.fs.path.join(ctx.allocator, &.{ memory_root, "daily" });
     defer ctx.allocator.free(daily_dir);
 
-    return searchDailyDir(ctx.allocator, daily_dir, keywords, source, days, std.time.milliTimestamp());
+    return searchDailyDir(ctx.allocator, daily_dir, keywords, source, date, days, std.time.milliTimestamp());
 }
 
-/// Pure core: scan daily/*.json newer than the cutoff, OR-match keywords,
-/// sort by hit count then date, format the top results as plain text.
+/// Pure core: scan daily/*.json newer than the cutoff, or one exact calendar
+/// day. Exact dates are intentionally outside the lookback window so a user
+/// can ask about older work without guessing a number of days.
 pub fn searchDailyDir(
     gpa: std.mem.Allocator,
     daily_dir: []const u8,
     keywords: []const []const u8,
     source: ?[]const u8,
+    date: ?[]const u8,
     days: u32,
     now_ms: i64,
 ) ![]u8 {
@@ -48,6 +54,14 @@ pub fn searchDailyDir(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
+    if (date) |value| {
+        if (!isCalendarDate(value)) return gpa.dupe(u8, "Invalid date: expected YYYY-MM-DD");
+    }
+    // Compatibility for older models that supplied an ISO day as a keyword.
+    // In that legacy shape date-only queries should show the whole day.
+    const inferred_date = if (date == null) isoDateKeyword(keywords) else null;
+    const requested_date = date orelse inferred_date;
+    const apply_keywords = inferred_date == null;
     const window_days: u32 = @min(if (days == 0) DEFAULT_DAYS else days, MAX_DAYS);
     const cutoff_ms = now_ms -| @as(i64, window_days) * std.time.ms_per_day;
     var cutoff_buf: [10]u8 = undefined;
@@ -70,8 +84,10 @@ pub fn searchDailyDir(
             if (ent.kind != .file) continue;
             // "YYYY-MM-DD.json" only; anything else is not a daily artifact.
             if (ent.name.len != 15 or !std.mem.endsWith(u8, ent.name, ".json")) continue;
-            const date = ent.name[0..10];
-            if (std.mem.order(u8, date, cutoff) == .lt) continue;
+            const daily_date = ent.name[0..10];
+            if (requested_date) |wanted| {
+                if (!std.mem.eql(u8, daily_date, wanted)) continue;
+            } else if (std.mem.order(u8, daily_date, cutoff) == .lt) continue;
             const bytes = dir.readFileAlloc(arena, ent.name, MAX_DAILY_BYTES) catch continue;
             const daily = std.json.parseFromSliceLeaky(digest_store.Daily, arena, bytes, .{
                 .ignore_unknown_fields = true,
@@ -90,15 +106,26 @@ pub fn searchDailyDir(
                 if (source) |src| {
                     if (std.ascii.indexOfIgnoreCase(s.source_id, src) == null) continue;
                 }
-                const hits = keywordHits(s, keywords);
-                if (hits == 0) continue;
-                try matches.append(arena, .{ .date = try arena.dupe(u8, date), .hits = hits, .s = s });
+                const hits = if (apply_keywords) keywordHits(s, keywords) else 0;
+                if (apply_keywords and hits == 0) continue;
+                try matches.append(arena, .{ .date = try arena.dupe(u8, daily_date), .hits = hits, .s = s });
             }
         }
     }
 
     if (matches.items.len == 0) {
         const scan_info = try scanLine(arena, files_scanned, source_counts.items);
+        if (requested_date) |wanted| {
+            return std.fmt.allocPrint(
+                gpa,
+                "{s}\n" ++
+                    "No digest match on {s} ({d} daily files scanned). " ++
+                    "If the work happened on a remote host, run this on an open SSH surface " ++
+                    "there via ssh_session_exec: grep -rli <keyword> ~/.claude/projects ~/.codex/sessions | head. " ++
+                    "If digest data is missing, suggest memory-digest-scan-remote=true or 'Run memory digest now'.",
+                .{ scan_info, wanted, files_scanned },
+            );
+        }
         return std.fmt.allocPrint(
             gpa,
             "{s}\n" ++
@@ -120,7 +147,10 @@ pub fn searchDailyDir(
     const shown = @min(matches.items.len, MAX_RESULTS);
     var out: std.ArrayListUnmanaged(u8) = .empty;
     const scan_info = try scanLine(arena, files_scanned, source_counts.items);
-    const header = try std.fmt.allocPrint(arena, "{s}\n{d} match(es), showing {d}:\n\n", .{ scan_info, matches.items.len, shown });
+    const header = if (requested_date) |wanted|
+        try std.fmt.allocPrint(arena, "{s}\n{d} match(es) on {s}, showing {d}:\n\n", .{ scan_info, matches.items.len, wanted, shown })
+    else
+        try std.fmt.allocPrint(arena, "{s}\n{d} match(es), showing {d}:\n\n", .{ scan_info, matches.items.len, shown });
     try out.appendSlice(arena, header);
     for (matches.items[0..shown]) |m| {
         const head = try std.fmt.allocPrint(arena, "[{s}] {s} · project: {s} · outcome: {s}\n", .{
@@ -183,6 +213,31 @@ fn keywordHits(s: digest_store.DailySession, keywords: []const []const u8) u32 {
     return hits;
 }
 
+fn isoDateKeyword(keywords: []const []const u8) ?[]const u8 {
+    for (keywords) |keyword| {
+        if (isCalendarDate(keyword)) return keyword;
+    }
+    return null;
+}
+
+fn isCalendarDate(value: []const u8) bool {
+    if (value.len != 10 or value[4] != '-' or value[7] != '-') return false;
+    for (value, 0..) |byte, i| {
+        if (i == 4 or i == 7) continue;
+        if (byte < '0' or byte > '9') return false;
+    }
+    const year = std.fmt.parseInt(u32, value[0..4], 10) catch return false;
+    const month = std.fmt.parseInt(u32, value[5..7], 10) catch return false;
+    const day = std.fmt.parseInt(u32, value[8..10], 10) catch return false;
+    if (year == 0 or month < 1 or month > 12 or day == 0) return false;
+    const month_days = [_]u32{ 31, if (isLeapYear(year)) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    return day <= month_days[month - 1];
+}
+
+fn isLeapYear(year: u32) bool {
+    return @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
+}
+
 fn fieldHas(haystack: []const u8, needle: []const u8) bool {
     return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
 }
@@ -229,7 +284,7 @@ test "memory_search: OR keywords rank by hit count, source filter, days cutoff" 
     try tmp.dir.writeFile(.{ .sub_path = old_name, .data = old_json });
 
     // OR + 排序：两词都中的 aaa-111 排在只中一词的 bbb-222 前。
-    const out = try searchDailyDir(a, daily_dir, &.{ "DESeq2", "RNA-seq" }, null, 30, now_ms);
+    const out = try searchDailyDir(a, daily_dir, &.{ "DESeq2", "RNA-seq" }, null, null, 30, now_ms);
     defer a.free(out);
     const first = std.mem.indexOf(u8, out, "aaa-111").?;
     const second = std.mem.indexOf(u8, out, "bbb-222").?;
@@ -238,7 +293,7 @@ test "memory_search: OR keywords rank by hit count, source filter, days cutoff" 
     try std.testing.expect(std.mem.indexOf(u8, out, "/root/.claude/projects/-root-rnaseq/aaa-111.jsonl") != null);
 
     // source 过滤：cpu2（小写）只留 ssh:CPU2。
-    const filtered = try searchDailyDir(a, daily_dir, &.{"DESeq2"}, "cpu2", 30, now_ms);
+    const filtered = try searchDailyDir(a, daily_dir, &.{"DESeq2"}, "cpu2", null, 30, now_ms);
     defer a.free(filtered);
     try std.testing.expect(std.mem.indexOf(u8, filtered, "aaa-111") != null);
     try std.testing.expect(std.mem.indexOf(u8, filtered, "bbb-222") == null);
@@ -255,7 +310,7 @@ test "memory_search: no match reports scanned window and fallback hint" {
     const daily_dir = try tmp.dir.realpathAlloc(a, ".");
     defer a.free(daily_dir);
 
-    const out = try searchDailyDir(a, daily_dir, &.{"nonexistent-keyword"}, null, 30, 1_720_000_000_000);
+    const out = try searchDailyDir(a, daily_dir, &.{"nonexistent-keyword"}, null, null, 30, 1_720_000_000_000);
     defer a.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "No digest match") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "ssh_session_exec") != null);
@@ -265,7 +320,38 @@ test "memory_search: no match reports scanned window and fallback hint" {
 
 test "memory_search: missing daily dir returns no-match, not error" {
     const a = std.testing.allocator;
-    const out = try searchDailyDir(a, "/nonexistent/path/for/test", &.{"x"}, null, 30, 1_720_000_000_000);
+    const out = try searchDailyDir(a, "/nonexistent/path/for/test", &.{"x"}, null, null, 30, 1_720_000_000_000);
     defer a.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "No digest match") != null);
+}
+
+test "memory_search: exact date returns the day's sessions without keywords" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const daily_dir = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(daily_dir);
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "2026-07-09.json",
+        .data =
+        \\{"schema_version":1,"date":"2026-07-09","generated_at":1,"sessions":[
+        \\{"provider":"codex","source_id":"local","session_id":"uce-1","project":"papers","title":"UCE paper","message_count_new":2,"summary":"讨论 UCE 模型","topics":["UCE"],"outcome":"completed"}]}
+        ,
+    });
+    const out = try searchDailyDir(a, daily_dir, &.{}, null, "2026-07-09", 30, 1_720_000_000_000);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "uce-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "on 2026-07-09") != null);
+
+    const legacy = try searchDailyDir(a, daily_dir, &.{"2026-07-09"}, null, null, 30, 1_720_000_000_000);
+    defer a.free(legacy);
+    try std.testing.expect(std.mem.indexOf(u8, legacy, "uce-1") != null);
+}
+
+test "memory_search: rejects impossible calendar dates" {
+    try std.testing.expect(isCalendarDate("2026-02-28"));
+    try std.testing.expect(!isCalendarDate("2026-02-29"));
+    try std.testing.expect(isCalendarDate("2024-02-29"));
+    try std.testing.expect(!isCalendarDate("2026-13-01"));
 }
