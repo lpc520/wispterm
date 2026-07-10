@@ -346,6 +346,7 @@ pub const AskResult = union(enum) {
 };
 
 fn noopNote(_: *anyopaque, _: []const u8) void {}
+fn noopProgress(_: *anyopaque, _: []const u8) void {}
 fn noopAsk(_: *anyopaque, _: []const u8, _: []const QuestionOption) AskResult {
     return .cancelled;
 }
@@ -369,6 +370,10 @@ pub const ToolContext = struct {
     /// Post a transcript note (e.g. a diff) before an approval prompt. Defaults
     /// to a no-op so test contexts need not wire it.
     note: *const fn (ctx: *anyopaque, text: []const u8) void = noopNote,
+    /// Post an ephemeral progress line to the chat card while a tool runs
+    /// (persist_to_history=false; never enters LLM context). Defaults to a
+    /// no-op so test contexts need not wire it.
+    progress: *const fn (ctx: *anyopaque, text: []const u8) void = noopProgress,
     /// Present a blocking multiple-choice question to the user (ask_user tool).
     /// Defaults to immediate cancellation so test contexts need not wire it.
     ask: *const fn (ctx: *anyopaque, question: []const u8, options: []const QuestionOption) AskResult = noopAsk,
@@ -385,6 +390,9 @@ pub const ToolContext = struct {
     }
     pub fn emitNote(self: *const ToolContext, text: []const u8) void {
         self.note(self.ctx, text);
+    }
+    pub fn emitProgress(self: *const ToolContext, text: []const u8) void {
+        self.progress(self.ctx, text);
     }
     pub fn askUser(self: *const ToolContext, question: []const u8, options: []const QuestionOption) AskResult {
         return self.ask(self.ctx, question, options);
