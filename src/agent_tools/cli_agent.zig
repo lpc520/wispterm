@@ -73,7 +73,10 @@ fn codexParseEvent(allocator: std.mem.Allocator, line: []const u8) ?Event {
     if (parsed.value != .object) return null;
     const event_type = objectString(parsed.value, "type") orelse return null;
     const item = parsed.value.object.get("item") orelse return null;
-    const item_type = objectString(item, "item_type") orelse return null;
+    // Real codex CLI (0.144.1+) puts the item's type under "type" inside the
+    // item object; older experimental builds used "item_type". Try current
+    // first, fall back to the legacy spelling.
+    const item_type = objectString(item, "type") orelse objectString(item, "item_type") orelse return null;
     if (std.mem.eql(u8, event_type, "item.completed") and std.mem.eql(u8, item_type, "agent_message")) {
         const text = objectString(item, "text") orelse return null;
         const owned = allocator.dupe(u8, text) catch return null;
@@ -328,22 +331,32 @@ test "find resolves codex and rejects unknown keys" {
 
 test "codexParseEvent extracts progress from item.started command_execution" {
     const a = std.testing.allocator;
-    const line = "{\"type\":\"item.started\",\"item\":{\"id\":\"item_1\",\"item_type\":\"command_execution\",\"command\":\"bash -lc 'ls'\",\"status\":\"in_progress\"}}";
+    const line = "{\"type\":\"item.started\",\"item\":{\"id\":\"item_0\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'ls'\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}";
     const event = codexParseEvent(a, line) orelse return error.TestExpectedEvent;
     defer if (event.progress) |p| a.free(p);
     defer if (event.final) |f| a.free(f);
     try std.testing.expect(event.final == null);
-    try std.testing.expectEqualStrings("codex: $ bash -lc 'ls'", event.progress.?);
+    try std.testing.expectEqualStrings("codex: $ /bin/zsh -lc 'ls'", event.progress.?);
 }
 
 test "codexParseEvent extracts final from item.completed agent_message" {
     const a = std.testing.allocator;
-    const line = "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_9\",\"item_type\":\"agent_message\",\"text\":\"All tests pass.\"}}";
+    const line = "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"All tests pass.\"}}";
     const event = codexParseEvent(a, line) orelse return error.TestExpectedEvent;
     defer if (event.progress) |p| a.free(p);
     defer if (event.final) |f| a.free(f);
     try std.testing.expect(event.progress == null);
     try std.testing.expectEqualStrings("All tests pass.", event.final.?);
+}
+
+test "codexParseEvent falls back to legacy item_type field for older codex builds" {
+    const a = std.testing.allocator;
+    const line = "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_9\",\"item_type\":\"agent_message\",\"text\":\"legacy format still works\"}}";
+    const event = codexParseEvent(a, line) orelse return error.TestExpectedEvent;
+    defer if (event.progress) |p| a.free(p);
+    defer if (event.final) |f| a.free(f);
+    try std.testing.expect(event.progress == null);
+    try std.testing.expectEqualStrings("legacy format still works", event.final.?);
 }
 
 test "codexParseEvent ignores unknown events, other item phases, and non-JSON lines" {
@@ -352,11 +365,11 @@ test "codexParseEvent ignores unknown events, other item phases, and non-JSON li
     try std.testing.expect(codexParseEvent(a, "") == null);
     try std.testing.expect(codexParseEvent(a, "{not json") == null);
     try std.testing.expect(codexParseEvent(a, "{\"type\":\"thread.started\",\"thread_id\":\"t1\"}") == null);
-    try std.testing.expect(codexParseEvent(a, "{\"type\":\"item.completed\",\"item\":{\"item_type\":\"reasoning\",\"text\":\"hmm\"}}") == null);
+    try std.testing.expect(codexParseEvent(a, "{\"type\":\"item.completed\",\"item\":{\"type\":\"reasoning\",\"text\":\"hmm\"}}") == null);
     // command_execution progress only fires on item.started, not completed (no dupes)
-    try std.testing.expect(codexParseEvent(a, "{\"type\":\"item.completed\",\"item\":{\"item_type\":\"command_execution\",\"command\":\"ls\",\"status\":\"completed\"}}") == null);
+    try std.testing.expect(codexParseEvent(a, "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"command_execution\",\"command\":\"ls\",\"aggregated_output\":\"\",\"exit_code\":0,\"status\":\"completed\"}}") == null);
     // agent_message only counts when completed
-    try std.testing.expect(codexParseEvent(a, "{\"type\":\"item.started\",\"item\":{\"item_type\":\"agent_message\",\"text\":\"partial\"}}") == null);
+    try std.testing.expect(codexParseEvent(a, "{\"type\":\"item.started\",\"item\":{\"type\":\"agent_message\",\"text\":\"partial\"}}") == null);
 }
 
 fn fakeApprove(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8) bool {
@@ -390,9 +403,9 @@ test "run streams progress and returns the final agent message" {
     const a = std.testing.allocator;
     const script =
         "printf '%s\\n' " ++
-        "'{\"type\":\"item.started\",\"item\":{\"item_type\":\"command_execution\",\"command\":\"ls\"}}' " ++
-        "'{\"type\":\"item.completed\",\"item\":{\"item_type\":\"agent_message\",\"text\":\"first\"}}' " ++
-        "'{\"type\":\"item.completed\",\"item\":{\"item_type\":\"agent_message\",\"text\":\"all done\"}}'";
+        "'{\"type\":\"item.started\",\"item\":{\"id\":\"item_0\",\"type\":\"command_execution\",\"command\":\"ls\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}' " ++
+        "'{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"first\"}}' " ++
+        "'{\"type\":\"item.completed\",\"item\":{\"id\":\"item_2\",\"type\":\"agent_message\",\"text\":\"all done\"}}'";
     const args = [_][]const u8{ "-c", script };
     const fake = Backend{
         .key = "fake",
