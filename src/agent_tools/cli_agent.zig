@@ -6,6 +6,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("../assistant/conversation/types.zig");
+const platform_process = @import("../platform/process.zig");
+const agent_exec = @import("exec.zig");
+const tool_output = @import("output.zig");
 
 const ToolContext = types.ToolContext;
 
@@ -85,6 +88,234 @@ fn codexParseEvent(allocator: std.mem.Allocator, line: []const u8) ?Event {
 }
 
 // ---------------------------------------------------------------------------
+// Line-streaming child runner
+// ---------------------------------------------------------------------------
+
+/// Reader-thread line collector. The thread only does I/O and line splitting;
+/// parsed events and all session calls stay on the tool worker thread
+/// (markUiDirty is threadlocal — cross-thread UI calls are a known trap).
+const LineStream = struct {
+    allocator: std.mem.Allocator,
+    file: std.fs.File,
+    mutex: std.Thread.Mutex = .{},
+    lines: std.ArrayListUnmanaged([]u8) = .empty,
+    partial: std.ArrayListUnmanaged(u8) = .empty,
+
+    fn deinit(self: *LineStream) void {
+        for (self.lines.items) |line| self.allocator.free(line);
+        self.lines.deinit(self.allocator);
+        self.partial.deinit(self.allocator);
+    }
+
+    fn readThread(self: *LineStream) void {
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = self.file.read(&buf) catch break;
+            if (n == 0) break;
+            self.push(buf[0..n]);
+        }
+        self.flushPartial();
+    }
+
+    // ponytail: `partial` is unbounded for a single line with no newline;
+    // codex event lines are bounded in practice — cap it if a backend ever
+    // streams raw unbounded output.
+    fn push(self: *LineStream, chunk: []const u8) void {
+        var rest = chunk;
+        while (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
+            const line = std.mem.concat(self.allocator, u8, &.{ self.partial.items, rest[0..nl] }) catch return;
+            self.partial.clearRetainingCapacity();
+            self.appendLine(line);
+            rest = rest[nl + 1 ..];
+        }
+        self.partial.appendSlice(self.allocator, rest) catch {};
+    }
+
+    fn flushPartial(self: *LineStream) void {
+        if (self.partial.items.len == 0) return;
+        const line = self.allocator.dupe(u8, self.partial.items) catch return;
+        self.partial.clearRetainingCapacity();
+        self.appendLine(line);
+    }
+
+    fn appendLine(self: *LineStream, line: []u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.lines.append(self.allocator, line) catch self.allocator.free(line);
+    }
+
+    /// Move all pending lines to `out`; caller owns and frees each line.
+    fn drain(self: *LineStream, out: *std.ArrayListUnmanaged([]u8)) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        out.appendSlice(self.allocator, self.lines.items) catch return;
+        self.lines.clearRetainingCapacity();
+    }
+};
+
+/// Keep a bounded raw-stdout tail for the no-final-message fallback (the
+/// useful part of a stream is at the end).
+fn appendTail(allocator: std.mem.Allocator, tail: *std.ArrayListUnmanaged(u8), line: []const u8, limit: u32) void {
+    tail.appendSlice(allocator, line) catch return;
+    tail.append(allocator, '\n') catch return;
+    const max: usize = @max(@as(usize, limit), 1);
+    if (tail.items.len > 2 * max) {
+        // no overlap: only triggered when len > 2*max
+        std.mem.copyForwards(u8, tail.items[0..max], tail.items[tail.items.len - max ..]);
+        tail.shrinkRetainingCapacity(max);
+    }
+}
+
+fn drainAndParse(ctx: *ToolContext, backend: *const Backend, stream: *LineStream, final_message: *?[]u8, tail: *std.ArrayListUnmanaged(u8)) void {
+    const allocator = ctx.allocator;
+    var drained: std.ArrayListUnmanaged([]u8) = .empty;
+    defer drained.deinit(allocator);
+    stream.drain(&drained);
+    for (drained.items) |line| {
+        defer allocator.free(line);
+        appendTail(allocator, tail, line, ctx.settings.output_limit);
+        const event = backend.parseEvent(allocator, line) orelse continue;
+        if (event.progress) |p| {
+            defer allocator.free(p);
+            ctx.emitProgress(p);
+        }
+        if (event.final) |f| {
+            if (final_message.*) |old| allocator.free(old);
+            final_message.* = f;
+        }
+    }
+}
+
+pub fn run(ctx: *ToolContext, backend: *const Backend, task: []const u8, cwd: ?[]const u8, timeout_ms: u32) ![]u8 {
+    const allocator = ctx.allocator;
+    if (ctx.isCancelled()) return allocator.dupe(u8, "Canceled.");
+    const trimmed_task = std.mem.trim(u8, task, " \t\r\n");
+    if (trimmed_task.len == 0) return allocator.dupe(u8, "Missing task");
+
+    // The backend runs with full access and cannot prompt mid-run, so both
+    // confirm AND auto permission modes gate the whole delegation up front.
+    if (ctx.settings.permission != .full) {
+        const reason = try std.fmt.allocPrint(allocator, "Delegate task to {s} with full access", .{backend.display});
+        defer allocator.free(reason);
+        if (!ctx.requestApproval("cli_agent", trimmed_task, reason)) {
+            return tool_output.deniedResult(allocator, trimmed_task, "cli_agent delegation not approved");
+        }
+    }
+
+    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, backend.exe);
+    try argv.appendSlice(allocator, backend.base_args);
+    try argv.append(allocator, trimmed_task);
+
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    child.cwd = cwd orelse ctx.settings.working_dir;
+    child.create_no_window = true;
+    child.spawn() catch |err| {
+        return std.fmt.allocPrint(allocator, "{s} CLI ({s}) not found or failed to start: {}", .{ backend.display, backend.exe, err });
+    };
+    // posix_spawn() itself returns success even when the exec inside the
+    // forked child fails (e.g. missing executable) — the real error only
+    // surfaces via the err_pipe that waitForSpawn() drains. Must check this
+    // BEFORE the poll loop below preemptively sets child.term (to dodge the
+    // ECHILD-on-double-waitpid trap), because doing so would make wait()
+    // skip waitForSpawn()'s pipe read and silently swallow the spawn error.
+    child.waitForSpawn() catch |err| {
+        // wait()'s `try waitForSpawn()` re-throws before reaching
+        // cleanupStreams() or reaping the pid, so both the stdout/stderr
+        // pipe fds and the exited fork child (it _exit(1)s after reporting)
+        // would otherwise leak; clean up ourselves.
+        if (child.stdout) |*f| f.close();
+        if (child.stderr) |*f| f.close();
+        if (builtin.os.tag != .windows) _ = platform_process.childExited(child.id, 1000);
+        return std.fmt.allocPrint(allocator, "{s} CLI ({s}) not found or failed to start: {}", .{ backend.display, backend.exe, err });
+    };
+
+    var stream = LineStream{ .allocator = allocator, .file = child.stdout.? };
+    defer stream.deinit();
+    var stderr_capture = agent_exec.CaptureOutput{
+        .allocator = allocator,
+        .file = child.stderr.?,
+        .max_bytes = ctx.settings.output_limit,
+    };
+    defer allocator.free(stderr_capture.data);
+
+    const stdout_thread = try std.Thread.spawn(.{}, LineStream.readThread, .{&stream});
+    const stderr_thread = try std.Thread.spawn(.{}, agent_exec.captureOutputThread, .{&stderr_capture});
+
+    var final_message: ?[]u8 = null;
+    defer if (final_message) |f| allocator.free(f);
+    var tail: std.ArrayListUnmanaged(u8) = .empty;
+    defer tail.deinit(allocator);
+
+    const wait_ms = @max(@min(timeout_ms, MAX_TIMEOUT_MS), 1);
+    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(wait_ms));
+    var timed_out = false;
+    var canceled = false;
+    while (true) {
+        drainAndParse(ctx, backend, &stream, &final_message, &tail);
+        switch (platform_process.childExited(child.id, 25)) {
+            .running => {},
+            .exited => |code| {
+                // Same trap as exec.runArgv: on POSIX childExited() already
+                // reaped the zombie; pre-set term so child.wait() skips its
+                // second waitpid (ECHILD aborts). Windows keeps the handle.
+                if (builtin.os.tag != .windows) child.term = .{ .Exited = @intCast(code) };
+                break;
+            },
+            .gone => {
+                if (builtin.os.tag != .windows) child.term = .{ .Unknown = 0 };
+                break;
+            },
+        }
+        if (ctx.isCancelled()) {
+            canceled = true;
+            _ = child.kill() catch {};
+            break;
+        }
+        if (std.time.milliTimestamp() >= deadline) {
+            timed_out = true;
+            _ = child.kill() catch {};
+            break;
+        }
+    }
+
+    stdout_thread.join();
+    stderr_thread.join();
+    // Lines that arrived between the last in-loop drain and thread exit.
+    drainAndParse(ctx, backend, &stream, &final_message, &tail);
+
+    const exit_code: i32 = if (timed_out or canceled) 124 else blk: {
+        const term = try child.wait();
+        break :blk switch (term) {
+            .Exited => |code| @intCast(code),
+            .Signal => |sig| -@as(i32, @intCast(sig)),
+            .Stopped => |sig| -@as(i32, @intCast(sig)),
+            .Unknown => |code| @intCast(code),
+        };
+    };
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (timed_out) try out.appendSlice(allocator, "timed_out=true\n");
+    if (canceled) try out.appendSlice(allocator, "canceled=true\n");
+    try out.print(allocator, "agent={s} exit_code={d}\n", .{ backend.key, exit_code });
+    if (final_message) |f| {
+        try out.appendSlice(allocator, f);
+    } else {
+        try out.appendSlice(allocator, "No final message parsed; raw output tail:\n");
+        try out.appendSlice(allocator, tail.items);
+    }
+    if (exit_code != 0 and stderr_capture.data.len > 0) {
+        try out.print(allocator, "\nstderr:\n{s}", .{stderr_capture.data});
+    }
+    return tool_output.truncateOwned(allocator, ctx.settings, try out.toOwnedSlice(allocator));
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -126,4 +357,172 @@ test "codexParseEvent ignores unknown events, other item phases, and non-JSON li
     try std.testing.expect(codexParseEvent(a, "{\"type\":\"item.completed\",\"item\":{\"item_type\":\"command_execution\",\"command\":\"ls\",\"status\":\"completed\"}}") == null);
     // agent_message only counts when completed
     try std.testing.expect(codexParseEvent(a, "{\"type\":\"item.started\",\"item\":{\"item_type\":\"agent_message\",\"text\":\"partial\"}}") == null);
+}
+
+fn fakeApprove(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8) bool {
+    return true;
+}
+fn fakeDeny(ctx: *anyopaque, _: []const u8, _: []const u8, _: []const u8) bool {
+    const called: *bool = @ptrCast(@alignCast(ctx));
+    called.* = true;
+    return false;
+}
+fn fakeCancelled(_: *anyopaque) bool {
+    return false;
+}
+
+const ProgressCapture = struct {
+    count: usize = 0,
+    last: [256]u8 = undefined,
+    last_len: usize = 0,
+
+    fn hook(ctx: *anyopaque, text: []const u8) void {
+        const self: *ProgressCapture = @ptrCast(@alignCast(ctx));
+        self.count += 1;
+        const n = @min(text.len, self.last.len);
+        @memcpy(self.last[0..n], text[0..n]);
+        self.last_len = n;
+    }
+};
+
+test "run streams progress and returns the final agent message" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // uses /bin/sh
+    const a = std.testing.allocator;
+    const script =
+        "printf '%s\\n' " ++
+        "'{\"type\":\"item.started\",\"item\":{\"item_type\":\"command_execution\",\"command\":\"ls\"}}' " ++
+        "'{\"type\":\"item.completed\",\"item\":{\"item_type\":\"agent_message\",\"text\":\"first\"}}' " ++
+        "'{\"type\":\"item.completed\",\"item\":{\"item_type\":\"agent_message\",\"text\":\"all done\"}}'";
+    const args = [_][]const u8{ "-c", script };
+    const fake = Backend{
+        .key = "fake",
+        .display = "Fake",
+        .exe = "/bin/sh",
+        .base_args = args[0..],
+        .parseEvent = codexParseEvent,
+    };
+    var progress = ProgressCapture{};
+    var ctx = ToolContext{
+        .allocator = a,
+        .ctx = &progress,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .settings = .{ .permission = .full },
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+        .progress = ProgressCapture.hook,
+    };
+    const out = try run(&ctx, &fake, "do the thing", null, 30_000);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "agent=fake") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "exit_code=0") != null);
+    // last agent_message wins
+    try std.testing.expect(std.mem.indexOf(u8, out, "all done") != null);
+    try std.testing.expectEqual(@as(usize, 1), progress.count);
+    try std.testing.expectEqualStrings("codex: $ ls", progress.last[0..progress.last_len]);
+}
+
+test "run falls back to the raw stdout tail when no final message parses" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // uses /bin/sh
+    const a = std.testing.allocator;
+    const args = [_][]const u8{ "-c", "printf '%s\\n' 'plain line one' 'plain line two'" };
+    const fake = Backend{
+        .key = "fake",
+        .display = "Fake",
+        .exe = "/bin/sh",
+        .base_args = args[0..],
+        .parseEvent = codexParseEvent,
+    };
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = a,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .settings = .{ .permission = .full },
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    const out = try run(&ctx, &fake, "task", null, 30_000);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "No final message parsed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "plain line two") != null);
+}
+
+test "run requires approval outside full permission and reports denial" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // uses /bin/sh
+    const a = std.testing.allocator;
+    const args = [_][]const u8{ "-c", "true" };
+    const fake = Backend{
+        .key = "fake",
+        .display = "Fake",
+        .exe = "/bin/sh",
+        .base_args = args[0..],
+        .parseEvent = codexParseEvent,
+    };
+    var approve_called = false;
+    var ctx = ToolContext{
+        .allocator = a,
+        .ctx = &approve_called,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .settings = .{ .permission = .auto },
+        .approve = fakeDeny,
+        .cancelled = fakeCancelled,
+    };
+    const out = try run(&ctx, &fake, "risky task", null, 30_000);
+    defer a.free(out);
+    try std.testing.expect(approve_called);
+    try std.testing.expect(std.mem.indexOf(u8, out, "DENIED") != null);
+}
+
+test "run reports a missing executable clearly" {
+    const a = std.testing.allocator;
+    const fake = Backend{
+        .key = "fake",
+        .display = "Fake",
+        .exe = "definitely-missing-cli-agent-binary",
+        .base_args = &.{},
+        .parseEvent = codexParseEvent,
+    };
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = a,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .settings = .{ .permission = .full },
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    const out = try run(&ctx, &fake, "task", null, 30_000);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "not found or failed to start") != null);
+}
+
+test "run kills the child on timeout and marks the result" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // uses /bin/sh
+    const a = std.testing.allocator;
+    const args = [_][]const u8{ "-c", "sleep 30" };
+    const fake = Backend{
+        .key = "fake",
+        .display = "Fake",
+        .exe = "/bin/sh",
+        .base_args = args[0..],
+        .parseEvent = codexParseEvent,
+    };
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = a,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = null,
+        .settings = .{ .permission = .full },
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    const out = try run(&ctx, &fake, "task", null, 100);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "timed_out=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "exit_code=124") != null);
 }
