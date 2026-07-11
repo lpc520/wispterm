@@ -136,6 +136,7 @@ pub fn render(
     renderSources(draw, session, layout, window_height, top, content_h, fg, muted, accent, panel_strong, line, selected_bg);
     renderList(draw, session, layout, window_height, top, fg, muted, accent, selected_bg, line);
     renderDetail(draw, session, layout, window_height, top, content_h, fg, muted, accent, panel_strong, line);
+    renderDigestNotification(draw, session, layout, window_height, top);
 }
 
 fn renderSources(
@@ -179,8 +180,27 @@ fn renderSources(
     }
 
     _ = draw.renderTextLimited("Tab / Left / Right switches source", layout.left_x + PAD_X, 12 + draw.cell_h + 6, muted, layout.left_w - PAD_X * 2);
-    _ = draw.renderTextLimited("Up / Down selects - PgUp / PgDn scrolls", layout.left_x + PAD_X, 12, muted, layout.left_w - PAD_X * 2);
+    _ = draw.renderTextLimited("D runs digest - Up / Down selects", layout.left_x + PAD_X, 12, muted, layout.left_w - PAD_X * 2);
     _ = content_h;
+}
+
+fn renderDigestNotification(draw: DrawContext, session: *const memory_center.Session, layout: Layout, window_height: f32, top: f32) void {
+    const notification = session.digestNotification() orelse return;
+    const accent: [3]f32 = switch (notification.status) {
+        .in_progress => .{ 0.56, 0.82, 1.0 },
+        .success => .{ 0.24, 1.0, 0.44 },
+        .failed => .{ 1.0, 0.30, 0.28 },
+        .skipped => .{ 1.0, 0.72, 0.28 },
+    };
+    const pad: f32 = 12;
+    const h = draw.cell_h + pad;
+    const w = @min(layout.detail_w - pad * 2, 460);
+    if (w <= 0) return;
+    const x = layout.detail_x + layout.detail_w - w - pad;
+    const y_top = @max(top + 4, window_height - h - pad);
+    draw.fillQuadAlpha(x, yFromTop(window_height, y_top, h), w, h, mixColor(draw.bg, accent, 0.16), 0.96);
+    draw.fillQuad(x, yFromTop(window_height, y_top, h), 3, h, accent);
+    _ = draw.renderTextLimited(notification.message, x + pad, yTextFromTop(draw, window_height, y_top + 6), accent, w - pad * 2);
 }
 
 fn renderList(
