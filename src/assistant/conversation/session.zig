@@ -1182,9 +1182,13 @@ pub const Session = struct {
     }
 
     /// Store an owned copy of the ACP launch command, replacing (and freeing)
-    /// any previous value. Silently no-ops on allocation failure.
+    /// any previous value. Silently no-ops on allocation failure. Takes the
+    /// session mutex: buildRequestLocked reads acp_command under it, and
+    /// applyProfileToSession can call this on a live session mid-request.
     pub fn setAcpCommand(self: *Session, command: []const u8) void {
         const copy = self.allocator.dupe(u8, command) catch return;
+        self.mutex.lock();
+        defer self.mutex.unlock();
         if (self.acp_command.len > 0) self.allocator.free(self.acp_command);
         self.acp_command = copy;
     }
