@@ -300,7 +300,10 @@ pub const Connection = struct {
         try self.writeAll(line);
     }
 
-    fn isClosing(self: *Connection) bool {
+    /// True once teardown began (`deinit`). A `terminal/wait_for_exit` handler
+    /// polls this so its blocking loop bails before `deinit` reaches the
+    /// inbound-thread join it would otherwise deadlock on.
+    pub fn isClosing(self: *Connection) bool {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
         return self.closing;
