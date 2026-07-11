@@ -907,6 +907,7 @@ fn toolContextFromRequest(request: *ChatRequest) ai_chat_types.ToolContext {
         .tool_host = request.tool_host,
         .tool_snapshot = request.tool_snapshot,
         .settings = settings,
+        .agent_instance_id = request.agent_instance_id,
         .copilot = request.copilot,
         .reply_context = request.reply_context,
         .schedule_context = if (request.schedule_session_id.len > 0) .{

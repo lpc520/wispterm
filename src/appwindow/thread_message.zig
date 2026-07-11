@@ -11,6 +11,7 @@ pub const Tag = enum(u8) {
     chatops_control,
     agent_ui_screenshot,
     agent_terminal_focus,
+    agent_terminal_reconnect,
 };
 
 pub const Decoded = struct {
@@ -29,6 +30,7 @@ fn offset(tag: Tag) u32 {
         .chatops_control => 0x57,
         .agent_ui_screenshot => 0x58,
         .agent_terminal_focus => 0x59,
+        .agent_terminal_reconnect => 0x5A,
     };
 }
 

@@ -49,7 +49,15 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         return std.fmt.allocPrint(ctx.allocator, "Tool is disabled: {s}", .{call.name});
     }
     if (std.mem.eql(u8, call.name, "terminal_list")) {
-        return terminal_tools.list(ctx);
+        const args = tool_args.parse(ctx.allocator, call.arguments);
+        defer if (args) |parsed| parsed.deinit();
+        const scope = if (args) |parsed| blk: {
+            const raw = tool_args.string(parsed.value, "scope") orelse break :blk terminal_tools.ListScope.owned;
+            if (std.ascii.eqlIgnoreCase(raw, "owned")) break :blk .owned;
+            if (std.ascii.eqlIgnoreCase(raw, "all")) break :blk .all;
+            return ctx.allocator.dupe(u8, "Invalid scope; expected owned or all.");
+        } else terminal_tools.ListScope.owned;
+        return terminal_tools.list(ctx, scope);
     }
     if (std.mem.eql(u8, call.name, "terminal_context")) {
         return terminal_tools.context(ctx);
@@ -78,6 +86,12 @@ pub fn executeToolCall(ctx: *ToolContext, call: ToolCall) ![]u8 {
         defer args.deinit();
         const surface_id = tool_args.string(args.value, "surface_id") orelse return ctx.allocator.dupe(u8, "Missing surface_id");
         return terminal_tools.focus(ctx, surface_id);
+    }
+    if (std.mem.eql(u8, call.name, "terminal_reconnect")) {
+        const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");
+        defer args.deinit();
+        const surface_id = tool_args.string(args.value, "surface_id") orelse return ctx.allocator.dupe(u8, "Missing surface_id");
+        return terminal_tools.reconnect(ctx, surface_id);
     }
     if (std.mem.eql(u8, call.name, platform_process.localCommandToolName())) {
         const args = tool_args.parse(ctx.allocator, call.arguments) orelse return ctx.allocator.dupe(u8, "Invalid tool arguments");

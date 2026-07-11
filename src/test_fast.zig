@@ -252,6 +252,7 @@ test {
     _ = @import("startup_tabs.zig");
     _ = @import("config.zig");
     _ = @import("agent/config.zig");
+    _ = @import("agent/terminal_lease.zig");
     _ = @import("agent/access.zig");
     _ = @import("agent/file_edit.zig");
     _ = @import("agent/remote_filetool.zig");
@@ -399,6 +400,7 @@ test {
     _ = @import("renderer/titlebar_layout.zig");
     _ = @import("assistant/conversation/layout.zig");
     _ = @import("assistant/conversation/types.zig");
+    _ = @import("assistant/conversation/identity.zig");
     _ = @import("assistant/profile/store.zig");
     _ = @import("assistant/sidebar/panel.zig");
     _ = @import("assistant/sidebar/hint_gate.zig");

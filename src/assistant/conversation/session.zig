@@ -32,6 +32,8 @@ const chatops_reply = @import("../../chatops/reply.zig");
 const ai_loop_store = @import("../loop/store.zig");
 const ai_loop_schedule = @import("../loop/schedule.zig");
 const first_party_tools = @import("../../tools/first_party.zig");
+const terminal_lease = @import("../../agent/terminal_lease.zig");
+const session_identity = @import("identity.zig");
 
 pub const AgentSettings = ai_chat_types.AgentSettings;
 pub const AgentPermission = ai_chat_types.AgentPermission;
@@ -210,6 +212,7 @@ pub const ChatRequest = struct {
     stream: bool,
     max_tokens: u32 = 8192,
     agent_enabled: bool,
+    agent_instance_id: terminal_lease.AgentId = 0,
     memory_enabled: bool = false,
     dynamic_tools: []const ai_chat_protocol.DynamicToolSpec = &.{},
     dynamic_binary_tools: []const ai_chat_types.DynamicBinaryTool = &.{},
@@ -443,7 +446,6 @@ var g_access_rules_storage: ?ai_agent_access.AccessRules = null;
 var g_access_rules: ?*const ai_agent_access.AccessRules = null;
 var g_default_working_dir_buf: [WORKING_DIR_MAX_BYTES]u8 = undefined;
 var g_default_working_dir_len: usize = 0;
-var g_session_id_counter = std.atomic.Value(u64).init(1);
 var g_session_resume_trigger: ?*const fn () void = null;
 var g_copilot_picker_trigger: ?*const fn () void = null;
 /// Sinks for the rendered conversation Markdown: `/export` writes a file,
@@ -842,6 +844,9 @@ fn expandTilde(allocator: std.mem.Allocator, path: []const u8, home: ?[]const u8
 
 pub fn setToolHost(host: ?ToolHost) void {
     g_tool_host = host;
+    // Tests install short-lived fake hosts. Their synthetic surface IDs must
+    // not leak ownership into the next test host.
+    if (host == null) terminal_lease.active().clear();
 }
 
 pub fn currentAgentSettings() AgentSettings {
@@ -975,6 +980,7 @@ pub const Session = struct {
     messages: std.ArrayListUnmanaged(Message) = .empty,
     session_id_buf: [64]u8 = undefined,
     session_id_len: usize = 0,
+    agent_instance_id: terminal_lease.AgentId = 0,
     composer: ai_chat_composer.Composer = .{},
     input_scroll_row: usize = 0,
     input_scroll_follow_cursor: bool = true,
@@ -1114,6 +1120,10 @@ pub const Session = struct {
 
     pub fn sessionId(self: *const Session) []const u8 {
         return self.session_id_buf[0..self.session_id_len];
+    }
+
+    pub fn agentInstanceId(self: *const Session) terminal_lease.AgentId {
+        return self.agent_instance_id;
     }
 
     pub fn setHistoryChangeHook(self: *Session, hook: ?HistoryChangeHook) void {
@@ -1341,6 +1351,7 @@ pub const Session = struct {
             thread.join();
             self.summary_thread = null;
         }
+        terminal_lease.active().releaseOwner(self.agentInstanceId());
         for (self.messages.items) |msg| {
             msg.deinit(self.allocator);
         }
@@ -4187,6 +4198,60 @@ pub const Session = struct {
         self.distill_last_suggested_turn_count = turns.len;
     }
 
+    /// Assign the sidebar's entire tab to its live Agent identity, then remove
+    /// screen data and SSH credentials from every surface it does not own.
+    /// This runs while the UI-thread snapshot is still coherent.
+    fn prepareToolSnapshotLocked(self: *Session, snapshot: *ToolSnapshot) !void {
+        const registry = terminal_lease.active();
+        registry.beginSync();
+        for (snapshot.surfaces) |surface| registry.observe(surface.id);
+        registry.finishSync();
+
+        // A split belongs to the same task as the terminal tab it was opened
+        // from. Expand an existing single-owner tab atomically; conflicting
+        // owners are left untouched rather than guessing who should win.
+        for (snapshot.surfaces) |candidate| {
+            var tab_ids: [terminal_lease.MAX_SURFACES][]const u8 = undefined;
+            var count: usize = 0;
+            var owner: terminal_lease.AgentId = 0;
+            var conflict = false;
+            for (snapshot.surfaces) |surface| {
+                if (surface.tab_index != candidate.tab_index) continue;
+                tab_ids[count] = surface.id;
+                count += 1;
+                const observed_owner = registry.owner(surface.id);
+                if (observed_owner == 0) continue;
+                if (owner == 0) {
+                    owner = observed_owner;
+                } else if (owner != observed_owner) {
+                    conflict = true;
+                }
+            }
+            if (owner != 0 and !conflict) _ = registry.claimGroup(owner, tab_ids[0..count]);
+        }
+
+        if (self.presentation().isSidebar() and self.bound_surface_id_len > 0) {
+            const bound = self.boundSurfaceId();
+            const target = agent_terminal.findSurface(snapshot.*, bound);
+            if (target) |bound_surface| {
+                var tab_ids: [terminal_lease.MAX_SURFACES][]const u8 = undefined;
+                var count: usize = 0;
+                for (snapshot.surfaces) |surface| {
+                    if (surface.tab_index != bound_surface.tab_index) continue;
+                    tab_ids[count] = surface.id;
+                    count += 1;
+                }
+                _ = registry.claimGroup(self.agentInstanceId(), tab_ids[0..count]);
+            }
+        }
+
+        for (snapshot.surfaces) |*surface| {
+            const access = registry.access(self.agentInstanceId(), surface.id);
+            surface.terminal_access = access;
+            if (access != .owned) try surface.redactForForeignAgent(self.allocator);
+        }
+    }
+
     fn buildRequestLocked(self: *Session) !*ChatRequest {
         const req = try self.allocator.create(ChatRequest);
         errdefer self.allocator.destroy(req);
@@ -4204,6 +4269,7 @@ pub const Session = struct {
                 tool_host = null;
                 break :blk null;
             };
+            if (tool_snapshot) |*snapshot| try self.prepareToolSnapshotLocked(snapshot);
         }
 
         var weixin_ctx: ?OwnedReplyContext = null;
@@ -4301,6 +4367,7 @@ pub const Session = struct {
             .stream = self.stream and !agent_enabled and self.protocol != .anthropic,
             .max_tokens = self.max_tokens,
             .agent_enabled = agent_enabled,
+            .agent_instance_id = self.agentInstanceId(),
             .memory_enabled = settings.memory_enabled,
             .dynamic_tools = dynamic_tools,
             .dynamic_binary_tools = dynamic_binary_tools,
@@ -4444,7 +4511,7 @@ pub const Session = struct {
         defer if (record_owned) agent_history.freeOwnedRecord(self.allocator, &record);
 
         const checkpoint_ms = std.time.milliTimestamp();
-        const checkpoint_counter = g_session_id_counter.fetchAdd(1, .monotonic);
+        const checkpoint_counter = session_identity.next();
         const checkpoint_id = std.fmt.allocPrint(
             self.allocator,
             "{s}-model-switch-{d}-{d}",
@@ -4477,7 +4544,8 @@ pub const Session = struct {
     }
 
     fn assignSessionId(self: *Session) void {
-        const counter = g_session_id_counter.fetchAdd(1, .monotonic);
+        const counter = session_identity.next();
+        self.agent_instance_id = counter;
         const text = std.fmt.bufPrint(&self.session_id_buf, "session-{d}-{d}", .{ std.time.milliTimestamp(), counter }) catch {
             self.copySessionId("session");
             return;
@@ -6810,8 +6878,9 @@ test "ai chat responses endpoint normalization" {
 test "ai chat default system prompt comes from platform agent prompt" {
     // Length budget: the system prompt ships on every AI API call, so this guards
     // against silent bloat. The Windows variant is the longest (it adds the WSL
-    // tool guidance); keep headroom above it for future additions.
-    try std.testing.expect(DEFAULT_SYSTEM_PROMPT.len < 4000);
+    // tool guidance plus terminal ownership/recovery rules); keep headroom
+    // above it for future additions.
+    try std.testing.expect(DEFAULT_SYSTEM_PROMPT.len < 4400);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "wispterm_docs") != null);
     try std.testing.expectEqualStrings(platform_agent_prompt.defaultSystemPrompt, DEFAULT_SYSTEM_PROMPT);
     try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "uv") != null);

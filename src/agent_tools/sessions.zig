@@ -1,6 +1,7 @@
 //! Agent session, SSH profile, and tab tool adapters.
 const std = @import("std");
 const types = @import("../assistant/conversation/types.zig");
+const terminal_lease = @import("../agent/terminal_lease.zig");
 const platform_pty_command = @import("../platform/pty_command.zig");
 const terminal_tools = @import("terminal.zig");
 const tool_output = @import("output.zig");
@@ -77,6 +78,10 @@ pub fn sshProfileConnect(ctx: *ToolContext, profile_name: []const u8) ![]u8 {
     };
     var surface_owned = true;
     errdefer if (surface_owned) surface.deinit(ctx.allocator);
+    if (ctx.agent_instance_id != 0 and !terminal_lease.active().claim(ctx.agent_instance_id, surface.id)) {
+        return ctx.allocator.dupe(u8, "Failed to reserve the newly created SSH terminal for this Agent.");
+    }
+    surface.terminal_access = .owned;
 
     const out = try std.fmt.allocPrint(
         ctx.allocator,
@@ -117,6 +122,10 @@ pub fn tabNew(ctx: *ToolContext, kind: []const u8, command: ?[]const u8) ![]u8 {
     };
     var surface_owned = true;
     errdefer if (surface_owned) surface.deinit(ctx.allocator);
+    if (ctx.agent_instance_id != 0 and !terminal_lease.active().claim(ctx.agent_instance_id, surface.id)) {
+        return ctx.allocator.dupe(u8, "Failed to reserve the newly created terminal for this Agent.");
+    }
+    surface.terminal_access = .owned;
 
     const out = try std.fmt.allocPrint(
         ctx.allocator,
@@ -140,6 +149,12 @@ pub fn tabNew(ctx: *ToolContext, kind: []const u8, command: ?[]const u8) ![]u8 {
 
 pub fn tabClose(ctx: *ToolContext, tab_index: ?usize, surface_id: ?[]const u8, title: ?[]const u8) ![]u8 {
     if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
+
+    const snapshot = terminal_tools.collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
+    defer snapshot.deinit(ctx.allocator);
+    const target_tab = resolveCloseTab(snapshot, tab_index, surface_id, title) orelse
+        return ctx.allocator.dupe(u8, "No matching terminal tab was found.");
+    if (try ensureTabWriteAccess(ctx, snapshot, target_tab)) |message| return message;
 
     var selector_buf: [256]u8 = undefined;
     const selector = if (surface_id) |id|
@@ -174,6 +189,37 @@ pub fn tabClose(ctx: *ToolContext, tab_index: ?usize, surface_id: ?[]const u8, t
         .{ closed.tab_index + 1, closed.title, closed.active_tab + 1 },
     );
     return tool_output.truncateOwned(ctx.allocator, ctx.settings, out);
+}
+
+fn resolveCloseTab(snapshot: types.ToolSnapshot, tab_index: ?usize, surface_id: ?[]const u8, title: ?[]const u8) ?usize {
+    if (tab_index) |index| return index;
+    if (surface_id) |id| return (terminal_tools.findSurface(snapshot, id) orelse return null).tab_index;
+    if (title) |raw| {
+        const needle = std.mem.trim(u8, raw, " \t\r\n");
+        if (needle.len == 0) return null;
+        for (snapshot.surfaces) |surface| {
+            if (std.ascii.eqlIgnoreCase(surface.title, needle)) return surface.tab_index;
+        }
+        var partial: ?usize = null;
+        for (snapshot.surfaces) |surface| {
+            if (std.ascii.indexOfIgnoreCase(surface.title, needle) == null) continue;
+            if (partial != null and partial.? != surface.tab_index) return null;
+            partial = surface.tab_index;
+        }
+        return partial;
+    }
+    return snapshot.active_tab;
+}
+
+fn ensureTabWriteAccess(ctx: *ToolContext, snapshot: types.ToolSnapshot, tab_index: usize) !?[]u8 {
+    var found = false;
+    for (snapshot.surfaces) |surface| {
+        if (surface.tab_index != tab_index) continue;
+        found = true;
+        if (try terminal_tools.ensureWriteAccess(ctx, surface)) |message| return message;
+    }
+    if (!found) return @as(?[]u8, try ctx.allocator.dupe(u8, "No matching terminal tab was found."));
+    return null;
 }
 
 test "ssh profile save approval text redacts password" {

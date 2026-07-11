@@ -6,6 +6,7 @@ const chatops_reply = @import("../../chatops/reply.zig");
 const agent_detector = @import("../../terminal_agents/detector.zig");
 const ai_chat_protocol = @import("protocol.zig");
 const ai_agent_access = @import("../../agent/access.zig");
+const terminal_lease = @import("../../agent/terminal_lease.zig");
 const ssh_connection = @import("../../ssh/connection.zig");
 pub const SshConnection = ssh_connection.SshConnection;
 
@@ -78,6 +79,7 @@ pub const ToolSurface = struct {
     focused: bool,
     is_ssh: bool,
     is_wsl: bool,
+    terminal_access: terminal_lease.Access = .unowned,
     ssh_connection: ?SshConnection = null,
     agent_app: agent_detector.App = .none,
     agent_state: agent_detector.State = .none,
@@ -91,11 +93,22 @@ pub const ToolSurface = struct {
         allocator.free(self.snapshot);
     }
 
+    /// The request snapshot is captured on the UI thread. Remove data a
+    /// foreign agent must not inherit before the worker starts.
+    pub fn redactForForeignAgent(self: *ToolSurface, allocator: std.mem.Allocator) !void {
+        allocator.free(self.cwd);
+        self.cwd = try allocator.dupe(u8, "");
+        allocator.free(self.snapshot);
+        self.snapshot = try allocator.dupe(u8, "");
+        self.ssh_connection = null;
+    }
+
     pub const InitMeta = struct {
         tab_index: usize,
         focused: bool,
         is_ssh: bool,
         is_wsl: bool,
+        terminal_access: terminal_lease.Access = .unowned,
         ssh_connection: ?SshConnection = null,
         agent_app: agent_detector.App = .none,
         agent_state: agent_detector.State = .none,
@@ -129,6 +142,7 @@ pub const ToolSurface = struct {
             .focused = meta.focused,
             .is_ssh = meta.is_ssh,
             .is_wsl = meta.is_wsl,
+            .terminal_access = meta.terminal_access,
             .ssh_connection = meta.ssh_connection,
             .agent_app = meta.agent_app,
             .agent_state = meta.agent_state,
@@ -155,6 +169,7 @@ pub const ToolSurface = struct {
             .focused = self.focused,
             .is_ssh = self.is_ssh,
             .is_wsl = self.is_wsl,
+            .terminal_access = self.terminal_access,
             .ssh_connection = self.ssh_connection,
             .agent_app = self.agent_app,
             .agent_state = self.agent_state,
@@ -272,6 +287,7 @@ pub const ToolHost = struct {
     sshConnectionForSurface: ?*const fn (*anyopaque, []const u8) ?SshConnection = null,
     uiScreenshot: ?*const fn (*anyopaque, std.mem.Allocator, UiScreenshotTarget, ?[]const u8, ?[]const u8) anyerror!UiScreenshotResult = null,
     focusTerminal: ?*const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!ToolSurface = null,
+    reconnectTerminal: ?*const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!ToolSurface = null,
 };
 
 pub const OwnedReplyContext = struct {
@@ -358,6 +374,9 @@ pub const ToolContext = struct {
     tool_host: ?ToolHost,
     tool_snapshot: ?ToolSnapshot,
     settings: AgentSettings,
+    /// Process-local identity for this live Agent/Copilot instance. It is
+    /// intentionally distinct from a persisted conversation session ID.
+    agent_instance_id: terminal_lease.AgentId = 0,
     copilot: bool = false,
     reply_context: ?OwnedReplyContext = null,
     schedule_context: ?ScheduleContext = null,

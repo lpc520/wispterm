@@ -1,6 +1,7 @@
 //! Agent UI screenshot tool.
 const std = @import("std");
 const types = @import("../assistant/conversation/types.zig");
+const terminal_tools = @import("terminal.zig");
 
 const ToolContext = types.ToolContext;
 const UiScreenshotTarget = types.UiScreenshotTarget;
@@ -17,7 +18,27 @@ pub fn run(ctx: *ToolContext, target_text: ?[]const u8, surface_id: ?[]const u8)
     const target = parseTarget(target_text) orelse return ctx.allocator.dupe(u8, "Invalid target; expected focused_panel or active_tab.");
     const host = ctx.tool_host orelse return ctx.allocator.dupe(u8, "No UI screenshot host is available.");
     const callback = host.uiScreenshot orelse return ctx.allocator.dupe(u8, "No UI screenshot host is available.");
-    const result = callback(host.ctx, ctx.allocator, target, surface_id, ctx.settings.working_dir) catch |err| {
+
+    // Zero is reserved for legacy unit-test/non-agent contexts. Every live
+    // Session has a runtime Agent identity and therefore takes the owned path.
+    if (ctx.agent_instance_id == 0) return capture(ctx, callback, target, surface_id);
+
+    const effective_surface_id = surface_id orelse terminal_tools.selectedWriteContext(ctx) orelse
+        return ctx.allocator.dupe(u8, "ui_screenshot requires an owned surface_id or selected terminal context.");
+    const snapshot = terminal_tools.collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
+    defer snapshot.deinit(ctx.allocator);
+    const surface = terminal_tools.resolveSurfaceId(snapshot, effective_surface_id, terminal_tools.selectedWriteContext(ctx)) orelse return terminal_tools.allocNoSurfaceError(ctx.allocator, snapshot, effective_surface_id);
+    if (try terminal_tools.ensureReadAccess(ctx, surface)) |message| return message;
+    return capture(ctx, callback, target, surface.id);
+}
+
+fn capture(
+    ctx: *ToolContext,
+    callback: *const fn (*anyopaque, std.mem.Allocator, UiScreenshotTarget, ?[]const u8, ?[]const u8) anyerror!types.UiScreenshotResult,
+    target: UiScreenshotTarget,
+    surface_id: ?[]const u8,
+) ![]u8 {
+    const result = callback(ctx.tool_host.?.ctx, ctx.allocator, target, surface_id, ctx.settings.working_dir) catch |err| {
         return std.fmt.allocPrint(ctx.allocator, "ui_screenshot failed: {s}", .{@errorName(err)});
     };
     defer result.deinit(ctx.allocator);
