@@ -194,6 +194,7 @@ const ImageBlock = ai_chat_protocol.ImageBlock;
 const ai_chat_title = @import("title.zig");
 const ToolCall = ai_chat_protocol.ToolCall;
 const ai_chat_request = @import("request.zig");
+const acp_turn = @import("acp_turn.zig");
 const web_search = @import("../../research/web_search.zig");
 const pubmed = @import("../../research/pubmed.zig");
 const agent_memory = @import("../../agent/memory.zig");
@@ -1056,6 +1057,10 @@ pub const Session = struct {
     /// ACP external-agent launch command (e.g. "npx @zed-industries/claude-code-acp"),
     /// owned; empty when the profile isn't ACP. Freed in deinit.
     acp_command: []u8 = &.{},
+    /// Live ACP external-agent connection + per-turn state, lazily created by the
+    /// first ACP turn and reused across turns; torn down in deinit. Null for
+    /// non-ACP sessions. Owned by `acp_turn`.
+    acp_state: ?*acp_turn.AcpState = null,
     system_prompt_buf: [SYSTEM_PROMPT_MAX_BYTES]u8 = undefined,
     system_prompt_len: usize = 0,
     thinking_enabled: bool = true,
@@ -1401,6 +1406,12 @@ pub const Session = struct {
         if (self.summary_thread) |thread| {
             thread.join();
             self.summary_thread = null;
+        }
+        // After the turn thread (request_thread) is joined so no ACP turn is
+        // mid-flight; AcpState.deinit joins the connection's client threads.
+        if (self.acp_state) |st| {
+            st.deinit();
+            self.acp_state = null;
         }
         terminal_lease.active().releaseOwner(self.agentInstanceId());
         for (self.messages.items) |msg| {
@@ -2848,7 +2859,10 @@ pub const Session = struct {
         self.mutex.unlock();
         if (!skill_preload_appended) self.notifyHistoryChange(history_change);
 
-        const thread = std.Thread.spawn(.{}, ai_chat_request.requestThreadMain, .{request}) catch {
+        const thread = (if (request.protocol == .acp)
+            std.Thread.spawn(.{}, acp_turn.acpTurnThreadMain, .{request})
+        else
+            std.Thread.spawn(.{}, ai_chat_request.requestThreadMain, .{request})) catch {
             request.deinit();
             self.mutex.lock();
             self.request_inflight = false;
@@ -5543,7 +5557,7 @@ fn appendOptionalOwnedBytes(
     capacity.* = new_capacity;
 }
 
-fn appendAssistantStreamDelta(session: *Session, message_idx: usize, content_delta: []const u8, reasoning_delta: []const u8) !void {
+pub fn appendAssistantStreamDelta(session: *Session, message_idx: usize, content_delta: []const u8, reasoning_delta: []const u8) !void {
     if (content_delta.len == 0 and reasoning_delta.len == 0) return;
     const allocator = session.allocator;
     if (sessionCancelled(session)) return;
