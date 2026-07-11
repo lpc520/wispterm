@@ -221,6 +221,7 @@ pub const ChatRequest = struct {
     disabled_first_party_tools: []const []const u8 = &.{},
     schedule_session_id: []u8 = &.{},
     schedule_title: []u8 = &.{},
+    acp_command: []u8 = &.{},
     copilot: bool = false,
     tool_host: ?ToolHost,
     tool_snapshot: ?ToolSnapshot,
@@ -250,6 +251,7 @@ pub const ChatRequest = struct {
         freeOwnedStringList(self.allocator, self.disabled_first_party_tools);
         if (self.schedule_session_id.len > 0) self.allocator.free(self.schedule_session_id);
         if (self.schedule_title.len > 0) self.allocator.free(self.schedule_title);
+        if (self.acp_command.len > 0) self.allocator.free(self.acp_command);
         if (self.tool_snapshot) |snapshot| snapshot.deinit(self.allocator);
         if (self.reply_context) |*ctx| ctx.deinit(self.allocator);
         if (self.subagent_profile) |profile| profile.deinit(self.allocator);
@@ -1051,6 +1053,9 @@ pub const Session = struct {
     model_buf: [128]u8 = undefined,
     model_len: usize = 0,
     protocol: ApiProtocol = .chat_completions,
+    /// ACP external-agent launch command (e.g. "npx @zed-industries/claude-code-acp"),
+    /// owned; empty when the profile isn't ACP. Freed in deinit.
+    acp_command: []u8 = &.{},
     system_prompt_buf: [SYSTEM_PROMPT_MAX_BYTES]u8 = undefined,
     system_prompt_len: usize = 0,
     thinking_enabled: bool = true,
@@ -1174,6 +1179,14 @@ pub const Session = struct {
 
     pub fn boundSurfaceId(self: *const Session) []const u8 {
         return self.bound_surface_id_buf[0..self.bound_surface_id_len];
+    }
+
+    /// Store an owned copy of the ACP launch command, replacing (and freeing)
+    /// any previous value. Silently no-ops on allocation failure.
+    pub fn setAcpCommand(self: *Session, command: []const u8) void {
+        const copy = self.allocator.dupe(u8, command) catch return;
+        if (self.acp_command.len > 0) self.allocator.free(self.acp_command);
+        self.acp_command = copy;
     }
 
     pub fn pendingImageCount(self: *const Session) usize {
@@ -1398,6 +1411,7 @@ pub const Session = struct {
         if (self.distill_candidate) |*candidate| candidate.deinit(self.allocator);
         self.freeQuestionPayloadLocked();
         self.freeQuestionAnswerLocked();
+        if (self.acp_command.len > 0) self.allocator.free(self.acp_command);
         self.allocator.destroy(self);
     }
 
@@ -4392,6 +4406,9 @@ pub const Session = struct {
         const schedule_title = try self.allocator.dupe(u8, self.title());
         var schedule_title_owned = true;
         errdefer if (schedule_title_owned) self.allocator.free(schedule_title);
+        const acp_command = try self.allocator.dupe(u8, self.acp_command);
+        var acp_command_owned = true;
+        errdefer if (acp_command_owned) self.allocator.free(acp_command);
 
         req.* = .{
             .allocator = self.allocator,
@@ -4416,6 +4433,7 @@ pub const Session = struct {
             .disabled_first_party_tools = disabled_first_party_tools,
             .schedule_session_id = schedule_session_id,
             .schedule_title = schedule_title,
+            .acp_command = acp_command,
             .copilot = self.presentation().isSidebar(),
             .tool_host = tool_host,
             .tool_snapshot = tool_snapshot,
@@ -4437,6 +4455,7 @@ pub const Session = struct {
         disabled_first_party_tools_owned = false;
         schedule_session_id_owned = false;
         schedule_title_owned = false;
+        acp_command_owned = false;
         if (self.presentation().isSidebar() and self.bound_surface_id_len > 0) {
             // Inline the write-context seed directly on ChatRequest (the field
             // layout is identical to ToolContext; terminal tool helpers operate
@@ -6347,6 +6366,31 @@ test "ai_chat: non-anthropic base url keeps chat_completions protocol" {
     );
     defer session.deinit();
     try std.testing.expectEqual(ApiProtocol.chat_completions, session.protocol);
+}
+
+test "setAcpCommand stores an owned copy and survives source mutation" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "ACP Test",
+        "https://api.example.com",
+        "secret",
+        "model-a",
+        "system",
+        "enabled",
+        "high",
+        "false",
+        "false",
+    );
+    defer session.deinit();
+
+    var buf: [32]u8 = undefined;
+    @memcpy(buf[0..4], "abcd");
+    session.setAcpCommand(buf[0..4]);
+    buf[0] = 'X'; // source mutated after set must not affect the stored copy
+    try std.testing.expectEqualStrings("abcd", session.acp_command);
+    session.setAcpCommand("second"); // second set frees the old copy (testing.allocator catches leaks)
+    try std.testing.expectEqualStrings("second", session.acp_command);
 }
 
 test "ai_chat: response protocol survives history record round trip" {

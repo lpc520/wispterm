@@ -4788,11 +4788,12 @@ fn spawnAiProfileWithAgentOverride(idx: usize, agent_override: ?[]const u8) bool
     const protocol = aiProfileField(profile, .protocol);
     const max_tokens = std.fmt.parseInt(u32, std.mem.trim(u8, aiProfileField(profile, .max_tokens), " \t"), 10) catch 8192;
     const vision_val = aiProfileField(profile, .vision);
+    const command = aiProfileField(profile, .command);
     if (base_url.len == 0 or model.len == 0) return false;
     if (!isHttpUrlish(base_url)) return false;
 
     sessionLauncherClose();
-    return AppWindow.spawnAiChatTab(name, base_url, api_key, model, protocol, system_prompt, thinking, reasoning_effort, stream_val, agent_val, max_tokens, vision_val);
+    return AppWindow.spawnAiChatTab(name, base_url, api_key, model, protocol, system_prompt, thinking, reasoning_effort, stream_val, agent_val, max_tokens, vision_val, command);
 }
 
 /// Apply profile `idx` to the given live session in place (provider/model only)
@@ -4808,9 +4809,11 @@ fn applyProfileToSession(session: *AppWindow.ai_chat.Session, idx: usize) bool {
     const protocol = aiProfileField(profile, .protocol);
     const max_tokens = std.fmt.parseInt(u32, std.mem.trim(u8, aiProfileField(profile, .max_tokens), " \t"), 10) catch 8192;
     const vision_val = aiProfileField(profile, .vision);
+    const command = aiProfileField(profile, .command);
     if (base_url.len == 0 or model.len == 0) return false;
     if (!isHttpUrlish(base_url)) return false;
     ai_chat.applyProviderProfile(session, base_url, api_key, model, protocol, thinking, reasoning_effort, max_tokens, vision_val);
+    session.setAcpCommand(command);
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
     return true;
@@ -4870,6 +4873,7 @@ pub fn makeCopilotSessionForDefaultProfile() ?*ai_chat.Session {
     const protocol = aiProfileField(profile, .protocol);
     const max_tokens = std.fmt.parseInt(u32, std.mem.trim(u8, aiProfileField(profile, .max_tokens), " \t"), 10) catch 8192;
     const vision_val = aiProfileField(profile, .vision);
+    const command = aiProfileField(profile, .command);
     if (base_url.len == 0 or model.len == 0) return null;
     if (!isHttpUrlish(base_url)) return null;
     const allocator = AppWindow.g_allocator orelse return null;
@@ -4889,6 +4893,7 @@ pub fn makeCopilotSessionForDefaultProfile() ?*ai_chat.Session {
     ) catch return null;
     session.max_tokens = max_tokens;
     session.copilot = true;
+    session.setAcpCommand(command);
     return session;
 }
 
