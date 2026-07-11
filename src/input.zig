@@ -3405,6 +3405,10 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
                 _ = AppWindow.memoryCenterReload();
                 return .none;
             },
+            0x44 => if (plain and !ev.shift) {
+                _ = AppWindow.runMemoryDigestFromCenter();
+                return .none;
+            },
             else => {},
         }
         return .none;

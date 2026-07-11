@@ -29,7 +29,6 @@ const ctl_ui_state = @import("../ctl/ui_state.zig");
 const command_palette_history_view = @import("../command/palette_history_view.zig");
 const command_palette_model = @import("../command/palette_model.zig");
 const command_registry = @import("../command/registry.zig");
-const memory_digest_scheduler = @import("../memory_digest/scheduler.zig");
 const agent_history = @import("../agent/history.zig");
 const platform_dirs = @import("../platform/dirs.zig");
 const platform_open_url = @import("../platform/open_url.zig");
@@ -782,7 +781,7 @@ fn executeCommand(action: CommandAction) void {
             }
         },
         .run_memory_digest_now => {
-            if (AppWindow.g_allocator) |gpa| memory_digest_scheduler.runNow(gpa);
+            _ = AppWindow.runMemoryDigestNow();
         },
     }
 }
@@ -6912,11 +6911,6 @@ pub fn showTransferToast(
     if (status != .in_progress) transferCancelConfirmClose();
 }
 
-pub fn showMemoryDigestToast(status: toasts.MemoryDigestStatus, message: []const u8) void {
-    toastState().memory_digest.show(status, message, std.time.milliTimestamp(), toasts.MEMORY_DIGEST_TOAST_DURATION_MS);
-    AppWindow.applyUiEffect(.repaint);
-}
-
 test "overlays: command center Settings command opens settings page" {
     commandPaletteOpen();
     defer settingsPageClose();
@@ -6955,21 +6949,10 @@ test "overlays: transfer toast state is owned by OverlayState" {
     try std.testing.expect(overlayState().toasts.transfer.clickable);
 }
 
-test "overlays: memory digest toast state is owned by OverlayState" {
-    const saved = overlayState().toasts.memory_digest;
-    defer overlayState().toasts.memory_digest = saved;
-
-    showMemoryDigestToast(.in_progress, "Digest running");
-
-    try std.testing.expect(overlayState().toasts.memory_digest.sticky);
-    try std.testing.expectEqualStrings("Digest running", overlayState().toasts.memory_digest.text().?);
-}
-
 test "overlays: sticky transfer toast does not keep render gate active forever" {
     const saved_copy = overlayState().toasts.copy;
     const saved_transfer = overlayState().toasts.transfer;
     const saved_update = overlayState().toasts.update;
-    const saved_memory_digest = overlayState().toasts.memory_digest;
     const saved_close_shortcut = close_confirm_state.deadline();
     const saved_remote_key_copied = g_remote_key_copied_until_ms;
     const saved_resize = resize.g_split_resize_overlay_until;
@@ -6978,7 +6961,6 @@ test "overlays: sticky transfer toast does not keep render gate active forever" 
         overlayState().toasts.copy = saved_copy;
         overlayState().toasts.transfer = saved_transfer;
         overlayState().toasts.update = saved_update;
-        overlayState().toasts.memory_digest = saved_memory_digest;
         close_confirm_state.setDeadline(saved_close_shortcut);
         g_remote_key_copied_until_ms = saved_remote_key_copied;
         resize.g_split_resize_overlay_until = saved_resize;
@@ -8115,34 +8097,6 @@ pub fn renderTransferToast(window_width: f32, window_height: f32) void {
     renderTitlebarTextStrongLimited(text, text_x, y, accent, layout.w - pad_h * 2);
 }
 
-pub fn renderMemoryDigestToast(window_width: f32, window_height: f32) void {
-    _ = window_height;
-    const now = std.time.milliTimestamp();
-    const toast = &toastState().memory_digest;
-    if (!toast.active(now)) return;
-    const text = toast.text() orelse return;
-
-    const pad_h: f32 = 14;
-    const pad_v: f32 = 6;
-    const line_h = font.g_titlebar_cell_height + pad_v * 2;
-    const text_width = measureTitlebarText(text);
-    const max_w = @max(220.0, window_width - 32.0);
-    const bg_w = @min(text_width + pad_h * 2, max_w);
-    const bg_x = @round(@max(12.0, window_width - bg_w - 16.0));
-    const bg_y: f32 = if (toastState().transfer.active(now)) 96 else 60;
-
-    const accent: [3]f32 = switch (toast.status) {
-        .in_progress => .{ 0.56, 0.82, 1.0 },
-        .success => .{ 0.24, 1.0, 0.44 },
-        .failed => .{ 1.0, 0.30, 0.28 },
-        .skipped => .{ 1.0, 0.72, 0.28 },
-    };
-    const bg = mixColor(AppWindow.g_theme.background, accent, 0.16);
-    ui_pipeline.fillQuadAlpha(bg_x, bg_y, bg_w, line_h, bg, 0.96);
-    ui_pipeline.fillQuadAlpha(bg_x, bg_y, 3, line_h, accent, 0.88);
-    renderTitlebarTextStrongLimited(text, bg_x + pad_h, bg_y + pad_v, accent, bg_w - pad_h * 2);
-}
-
 fn whatsNewNotes() []const u8 {
     return app_metadata.release_notes;
 }
@@ -8187,7 +8141,6 @@ pub fn anyOverlayActive(now: i64) bool {
     if (toast_state.copy.active(now)) return true;
     if (toast_state.transfer.text() != null and now < toast_state.transfer.until_ms) return true;
     if (toast_state.update.active(now)) return true;
-    if (toast_state.memory_digest.active(now)) return true;
     if (close_confirm_state.isActive(now)) return true;
     if (now < g_remote_key_copied_until_ms) return true;
     if (now < resize.g_split_resize_overlay_until) return true;
