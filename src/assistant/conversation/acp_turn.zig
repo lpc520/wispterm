@@ -37,6 +37,11 @@ pub const AcpState = struct {
     acp_session_id: []u8,
     stream_idx: ?usize,
     state_mutex: std.Thread.Mutex = .{},
+    /// Serializes concurrent `session/request_permission` handlers: Session.askUser
+    /// is a single-slot Q&A (a second concurrent question would overwrite the
+    /// first's payload and one resolve could wake both askers, cross-wiring the
+    /// answers). ACP agents ask permissions serially in practice; defensive.
+    permission_mutex: std.Thread.Mutex = .{},
 
     /// Kill the child + join every client thread (so no more handler callbacks
     /// reference this struct), then free. `conn.deinit()` MUST run first.
@@ -79,12 +84,13 @@ pub fn acpTurnThreadMain(request: *ChatRequest) void {
         return;
     };
 
-    const state = ensureState(session, request) catch |err| {
-        // ensureState leaves session.acp_state null on any failure (its own
-        // errdefer tears the partial connection down), so there is nothing to
-        // tear down here — and thus no stderr tail to attach for a handshake
-        // failure (the process is already gone); the error name carries it.
-        failTurn(session, "ACP agent 启动失败", err, null);
+    // ensureState leaves session.acp_state null on any failure (its own errdefer
+    // tears the partial connection down after capturing the stderr tail here),
+    // so there is nothing to tear down in this catch.
+    var spawn_stderr: ?[]u8 = null;
+    defer if (spawn_stderr) |s| request.allocator.free(s);
+    const state = ensureState(session, request, &spawn_stderr) catch |err| {
+        failTurn(session, "ACP agent 启动失败", err, spawn_stderr, null);
         return;
     };
 
@@ -95,7 +101,8 @@ pub fn acpTurnThreadMain(request: *ChatRequest) void {
     const params = schema.encodePromptParams(request.allocator, state.acp_session_id, prompt_text) catch return;
     defer request.allocator.free(params);
     const pending = state.conn.beginCall("session/prompt", params) catch |err| {
-        failTurn(session, "ACP prompt 发送失败", err, state);
+        failTurnFromState(session, "ACP prompt 发送失败", err, state);
+        unblockPermissionAskers(session);
         teardownState(session);
         return;
     };
@@ -117,16 +124,12 @@ pub fn acpTurnThreadMain(request: *ChatRequest) void {
 
     const result_json = pending.take(request.allocator) catch |err| {
         // Connection died mid-turn: surface stderr, drop the dead state so the
-        // NEXT user message restarts the agent (context reset).
-        failTurn(session, "ACP agent 异常退出（下一条消息将重启并重置上下文）", err, state);
-        // failTurn finalized the turn (request_inflight now false), so this
-        // stopRequest just cancels a permission askUser that may still be blocked
-        // on the dead agent — letting AcpState.deinit's inbound-thread join finish
-        // — and then resets its own transient stop flag (a no-op when idle).
-        // ponytail: covers the realistic stuck case (agent asked permission then
-        // died); the sub-µs window between spawning an inbound thread and it
-        // reaching askUser is not covered — a hang there would need a rebuild.
-        session.stopRequest();
+        // NEXT user message restarts the agent (context reset). Unblock MUST
+        // come after failTurn (failAssistantStream treats a set stop_requested
+        // as a user stop) and before teardownState (whose inbound-thread join
+        // waits on any blocked permission askUser).
+        failTurnFromState(session, "ACP agent 异常退出（下一条消息将重启并重置上下文）", err, state);
+        unblockPermissionAskers(session);
         teardownState(session);
         return;
     };
@@ -150,7 +153,9 @@ fn lastUserText(messages: []const proto.RequestMessage) ?[]const u8 {
 }
 
 /// Spawn + handshake the agent on first use; reuse a live connection after.
-fn ensureState(session: *Session, request: *ChatRequest) !*AcpState {
+/// On a post-spawn failure, `spawn_stderr` receives the agent's stderr tail
+/// (owned by `request.allocator`) so the chat error can show WHY it crashed.
+fn ensureState(session: *Session, request: *ChatRequest, spawn_stderr: *?[]u8) !*AcpState {
     if (session.acp_state) |st| {
         if (st.conn.alive()) return st;
         teardownState(session); // dead connection → rebuild below
@@ -177,7 +182,15 @@ fn ensureState(session: *Session, request: *ChatRequest) !*AcpState {
         .onRequest = onRequest,
     });
     st.conn = conn;
-    errdefer conn.deinit();
+    errdefer {
+        // Capture stderr for the error message (e.g. node's "module not found")
+        // before deinit frees it. Best effort: the stderr thread may not have
+        // fully drained yet — a truncated tail beats an error name alone.
+        if (conn.stderrTail(a)) |t| {
+            if (t.len > 0) spawn_stderr.* = t else a.free(t);
+        } else |_| {}
+        conn.deinit();
+    }
 
     {
         const params = try schema.encodeInitializeParams(a, false); // terminal capability lands in PR3
@@ -223,6 +236,25 @@ fn resolveCwdAlloc(a: std.mem.Allocator, session: *Session) ![]u8 {
     return std.process.getCwdAlloc(a);
 }
 
+/// Agent-death path: make every permission `askUser` on the dead connection —
+/// already blocked OR not yet started — return `.cancelled`, so the connection
+/// teardown's inbound-thread join cannot hang (which would wedge this turn
+/// thread and, via the next submit's request_thread join, the UI thread).
+///
+/// `stop_requested` is left set: askUser checks it at entry (late askers) and in
+/// its wait predicate (blocked askers); the next submit resets it. Unlike
+/// `stopRequest`, this never self-resets, so both orderings are covered:
+/// - asker blocked first → the broadcast (taken under question_mutex, after the
+///   store) wakes it; the predicate sees the flag → `.cancelled`.
+/// - asker arrives after → entry check / predicate sees the flag before any
+///   wait; the mutex-held broadcast makes flag-then-wait interleavings safe.
+fn unblockPermissionAskers(session: *Session) void {
+    session.stop_requested.store(true, .release);
+    session.question_mutex.lock();
+    session.question_cond.broadcast();
+    session.question_mutex.unlock();
+}
+
 /// Drop and free the session's ACP connection. `AcpState.deinit` kills the child
 /// and joins the client threads. Safe no-op when no state is stored. Does NOT
 /// touch request state, so it is safe to call mid-turn (dead-connection rebuild).
@@ -242,26 +274,23 @@ fn finalizeTurn(session: *Session, state: *AcpState, started_ms: i64) void {
     }
 }
 
-/// `failAssistantStream` with a formatted reason + the agent's stderr tail.
-fn failTurn(session: *Session, prefix: []const u8, err: anyerror, state: ?*AcpState) void {
+/// `failAssistantStream` with a formatted reason + optional agent stderr tail.
+fn failTurn(session: *Session, prefix: []const u8, err: anyerror, tail: ?[]const u8, stream_idx: ?usize) void {
     const a = session.allocator;
-    const base = std.fmt.allocPrint(a, "{s}: {s}", .{ prefix, @errorName(err) }) catch return;
-    defer a.free(base);
+    const trimmed = std.mem.trim(u8, tail orelse "", " \t\r\n");
+    const text = if (trimmed.len > 0)
+        std.fmt.allocPrint(a, "{s}: {s}\n--- agent stderr ---\n{s}", .{ prefix, @errorName(err), trimmed }) catch return
+    else
+        std.fmt.allocPrint(a, "{s}: {s}", .{ prefix, @errorName(err) }) catch return;
+    defer a.free(text);
+    ai_chat.failAssistantStream(session, stream_idx, text);
+}
 
-    var combined: ?[]u8 = null;
-    defer if (combined) |c| a.free(c);
-    if (state) |st| {
-        if (st.conn.stderrTail(a)) |tail| {
-            defer a.free(tail);
-            const trimmed = std.mem.trim(u8, tail, " \t\r\n");
-            if (trimmed.len > 0) {
-                combined = std.fmt.allocPrint(a, "{s}\n--- agent stderr ---\n{s}", .{ base, trimmed }) catch null;
-            }
-        } else |_| {}
-    }
-
-    const idx = if (state) |st| st.peekStreamIdx() else null;
-    ai_chat.failAssistantStream(session, idx, combined orelse base);
+/// `failTurn` against a live connection: grabs its stderr tail + open stream idx.
+fn failTurnFromState(session: *Session, prefix: []const u8, err: anyerror, state: *AcpState) void {
+    const tail = state.conn.stderrTail(session.allocator) catch null;
+    defer if (tail) |t| session.allocator.free(t);
+    failTurn(session, prefix, err, tail, state.peekStreamIdx());
 }
 
 // ---------------------------------------------------------------------------
@@ -345,10 +374,13 @@ fn progressCardText(allocator: std.mem.Allocator, info: schema.ToolCallInfo) ![]
 fn onRequest(ctx: *anyopaque, allocator: std.mem.Allocator, method: []const u8, params: std.json.Value) anyerror![]u8 {
     const state: *AcpState = @ptrCast(@alignCast(ctx));
     if (std.mem.eql(u8, method, "session/request_permission")) {
+        state.permission_mutex.lock();
+        defer state.permission_mutex.unlock();
         var req = try schema.parsePermissionRequest(allocator, params);
         defer req.deinit(allocator);
         var options: [8]ai_chat.QuestionOption = undefined; // ACP option lists are small (≤4 observed)
         const n = @min(req.options.len, options.len);
+        if (n == 0) return schema.encodePermissionCancelled(allocator); // nothing to select
         for (req.options[0..n], 0..) |opt, i| options[i] = .{ .label = opt.name, .description = opt.kind };
         const answer = state.session.askUser(req.title, options[0..n]);
         return switch (answer) {
@@ -448,6 +480,31 @@ fn waitForQuestion(session: *Session, timeout_ms: u64) !void {
     }
 }
 
+/// Non-deepseek base_url so no DEEPSEEK_API_KEY env pickup → empty key → no
+/// auto-title network call fires from the turn's `defer maybeAutoTitle`.
+fn newAcpTestSession(a: std.mem.Allocator) !*Session {
+    return Session.initWithProtocol(a, "acp", "https://example.invalid", "", "agent", "acp", "sys", "false", "", "false", "false");
+}
+
+/// Write `script` into the tmp dir and point the session's acp_command at it.
+fn setScriptedAgent(a: std.mem.Allocator, tmp_dir: std.fs.Dir, session: *Session, script: []const u8) !void {
+    try tmp_dir.writeFile(.{ .sub_path = "agent.sh", .data = script });
+    const script_path = try tmp_dir.realpathAlloc(a, "agent.sh");
+    defer a.free(script_path);
+    const cmd = try std.fmt.allocPrint(a, "/bin/sh {s}", .{script_path});
+    defer a.free(cmd);
+    session.setAcpCommand(cmd);
+}
+
+fn transcriptContains(session: *Session, role: proto.Role, needle: []const u8) bool {
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    for (session.messages.items) |msg| {
+        if (msg.role == role and std.mem.indexOf(u8, msg.content, needle) != null) return true;
+    }
+    return false;
+}
+
 test "acp turn streams text, shows a tool card, and round-trips a permission" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const a = std.testing.allocator;
@@ -473,17 +530,9 @@ test "acp turn streams text, shows a tool card, and round-trips a permission" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "agent.sh", .data = script });
-    const script_path = try tmp.dir.realpathAlloc(a, "agent.sh");
-    defer a.free(script_path);
-
-    // Non-deepseek base_url so no DEEPSEEK_API_KEY env pickup → empty key → no
-    // auto-title network call fires from the turn's `defer maybeAutoTitle`.
-    const session = try Session.initWithProtocol(a, "acp", "https://example.invalid", "", "agent", "acp", "sys", "false", "", "false", "false");
+    const session = try newAcpTestSession(a);
     defer session.deinit();
-    const cmd = try std.fmt.allocPrint(a, "/bin/sh {s}", .{script_path});
-    defer a.free(cmd);
-    session.setAcpCommand(cmd);
+    try setScriptedAgent(a, tmp.dir, session, script);
 
     const req = try buildAcpRequest(a, session, "please run the tests");
     var thread = try std.Thread.spawn(.{}, acpTurnThreadMain, .{req});
@@ -499,14 +548,140 @@ test "acp turn streams text, shows a tool card, and round-trips a permission" {
     // The connection is live and owned by the session; deinit tears it down.
     try std.testing.expect(session.acp_state != null);
 
-    session.mutex.lock();
-    defer session.mutex.unlock();
-    var saw_stream = false;
-    var saw_card = false;
-    for (session.messages.items) |msg| {
-        if (msg.role == .assistant and std.mem.indexOf(u8, msg.content, "hello world") != null) saw_stream = true;
-        if (msg.role == .tool and std.mem.indexOf(u8, msg.content, "[execute] run tests") != null) saw_card = true;
-    }
-    try std.testing.expect(saw_stream);
-    try std.testing.expect(saw_card);
+    try std.testing.expect(transcriptContains(session, .assistant, "hello world"));
+    try std.testing.expect(transcriptContains(session, .tool, "[execute] run tests"));
+}
+
+test "agent-death unlock cancels blocked and late askUser callers" {
+    const a = std.testing.allocator;
+    const session = try newAcpTestSession(a);
+    defer session.deinit();
+
+    // Ordering A: asker already blocked when the death path runs. Regression
+    // for askUser's wait predicate missing stop_requested (a broadcast without
+    // a resolved answer previously woke it into waiting again forever).
+    const Runner = struct {
+        session: *Session,
+        result: ai_chat.AskResult = .cancelled,
+        fn run(self: *@This()) void {
+            self.result = self.session.askUser("perm?", &.{.{ .label = "Allow" }});
+        }
+    };
+    var runner = Runner{ .session = session };
+    var thread = try std.Thread.spawn(.{}, Runner.run, .{&runner});
+    try waitForQuestion(session, 15_000);
+    unblockPermissionAskers(session);
+    thread.join();
+    try std.testing.expect(runner.result == .cancelled);
+
+    // Ordering B: asker arrives after the death path (its inbound thread was
+    // scheduled late). The persistent stop flag cancels it at entry — this is
+    // exactly what stopRequest's self-reset used to break.
+    try std.testing.expect(session.askUser("late?", &.{.{ .label = "A" }}) == .cancelled);
+}
+
+test "agent death with a pending permission does not hang the turn" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+
+    // On session/prompt: ask permission, then die WITHOUT reading the reply.
+    // The permission asker must be cancelled or the turn thread hangs in the
+    // connection teardown's inbound-thread join.
+    const script =
+        \\while IFS= read -r line; do
+        \\  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+        \\  case "$line" in
+        \\    *'"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1}}\n' "$id";;
+        \\    *'"session/new"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"s1"}}\n' "$id";;
+        \\    *'"session/prompt"'*)
+        \\      printf '%s\n' '{"jsonrpc":"2.0","id":100,"method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"t1","title":"doomed"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}'
+        \\      exit 7
+        \\      ;;
+        \\  esac
+        \\done
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const session = try newAcpTestSession(a);
+    defer session.deinit();
+    try setScriptedAgent(a, tmp.dir, session, script);
+
+    const req = try buildAcpRequest(a, session, "go");
+    var thread = try std.Thread.spawn(.{}, acpTurnThreadMain, .{req});
+    // No resolve on purpose: the death path must unblock the asker itself.
+    // A regression hangs this join (and the whole test binary — the failure mode).
+    thread.join();
+
+    try std.testing.expect(transcriptContains(session, .assistant, "异常退出"));
+    try std.testing.expect(session.acp_state == null); // dead connection dropped
+}
+
+test "concurrent permission requests serialize and each gets its own answer" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+
+    // Two back-to-back permission requests with distinct option ids. The agent
+    // verifies each reply id carries ITS OWN option id (cross-wired answers or
+    // a swallowed second question → exit 9 → no "both-ok" in the transcript).
+    const script =
+        \\while IFS= read -r line; do
+        \\  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+        \\  case "$line" in
+        \\    *'"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1}}\n' "$id";;
+        \\    *'"session/new"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"s1"}}\n' "$id";;
+        \\    *'"session/prompt"'*)
+        \\      printf '%s\n' '{"jsonrpc":"2.0","id":100,"method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"t1","title":"perm-A"},"options":[{"optionId":"allow-a","name":"Allow","kind":"allow_once"}]}}'
+        \\      printf '%s\n' '{"jsonrpc":"2.0","id":101,"method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"t2","title":"perm-B"},"options":[{"optionId":"allow-b","name":"Allow","kind":"allow_once"}]}}'
+        \\      ok=0
+        \\      n=0
+        \\      while [ "$n" -lt 2 ]; do
+        \\        IFS= read -r reply
+        \\        n=$((n+1))
+        \\        case "$reply" in
+        \\          *'"id":100'*'allow-a'*) ok=$((ok+1));;
+        \\          *'"id":101'*'allow-b'*) ok=$((ok+1));;
+        \\        esac
+        \\      done
+        \\      [ "$ok" = 2 ] || exit 9
+        \\      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"both-ok"}}}}'
+        \\      printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
+        \\      ;;
+        \\  esac
+        \\done
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const session = try newAcpTestSession(a);
+    defer session.deinit();
+    try setScriptedAgent(a, tmp.dir, session, script);
+
+    const req = try buildAcpRequest(a, session, "go");
+    var thread = try std.Thread.spawn(.{}, acpTurnThreadMain, .{req});
+
+    // Answer the two serialized questions in whatever order they surface; each
+    // asker maps option 0 to its own option id, which the agent verifies by id.
+    try waitForQuestion(session, 15_000);
+    try std.testing.expect(session.resolveQuestionOption(0));
+    try waitForQuestion(session, 15_000);
+    try std.testing.expect(session.resolveQuestionOption(0));
+    thread.join();
+
+    try std.testing.expect(transcriptContains(session, .assistant, "both-ok"));
+}
+
+test "permission request with no options answers cancelled without asking" {
+    const a = std.testing.allocator;
+    const session = try newAcpTestSession(a);
+    defer session.deinit();
+    var st = AcpState{ .allocator = a, .session = session, .conn = undefined, .acp_session_id = &.{}, .stream_idx = null };
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"sessionId":"s1","toolCall":{"toolCallId":"t1","title":"x"},"options":[]}
+    , .{});
+    defer parsed.deinit();
+    const out = try onRequest(@ptrCast(&st), a, "session/request_permission", parsed.value);
+    defer a.free(out);
+    try std.testing.expectEqualStrings("{\"outcome\":{\"outcome\":\"cancelled\"}}", out);
 }

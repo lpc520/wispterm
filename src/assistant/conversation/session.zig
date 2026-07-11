@@ -2425,7 +2425,10 @@ pub const Session = struct {
 
         self.question_mutex.lock();
         defer self.question_mutex.unlock();
-        while (!self.question_resolved and !self.closing.load(.acquire)) {
+        // stop_requested in the predicate (symmetric with requestApproval): a
+        // stop/agent-death that broadcasts question_cond must cancel this wait
+        // even when no answer ever arrives.
+        while (!self.question_resolved and !self.closing.load(.acquire) and !self.stop_requested.load(.acquire)) {
             self.question_cond.wait(&self.question_mutex);
         }
         const cancelled = self.question_cancelled or self.closing.load(.acquire) or !self.question_resolved;
