@@ -175,7 +175,12 @@ pub fn parseSessionUpdate(allocator: std.mem.Allocator, params: std.json.Value) 
     if (std.mem.eql(u8, variant, "agent_message_chunk") or std.mem.eql(u8, variant, "agent_thought_chunk")) {
         const content = objectValue(update, "content") orelse return .ignored;
         var tid: ?[]u8 = null;
-        const text = flattenContent(allocator, content, &tid) catch return null;
+        // Not errdefer: this function returns ?SessionUpdate (no error union),
+        // so `catch return null` is a normal return and errdefer never fires.
+        const text = flattenContent(allocator, content, &tid) catch {
+            if (tid) |t| allocator.free(t);
+            return null;
+        };
         if (tid) |t| allocator.free(t);
         if (std.mem.eql(u8, variant, "agent_message_chunk")) return .{ .agent_message_chunk = text };
         return .{ .agent_thought_chunk = text };
@@ -334,6 +339,22 @@ test "parseSessionUpdate tolerates unknown variants and malformed params" {
     var bad = try parseValue(a, "{\"nope\":true}");
     defer bad.deinit();
     try std.testing.expect(parseSessionUpdate(a, bad.value) == null);
+}
+
+test "parseSessionUpdate frees terminal id when a later allocation fails" {
+    const a = std.testing.allocator;
+    var p = try parseValue(a,
+        \\{"update":{"sessionUpdate":"agent_message_chunk","content":[{"type":"terminal","terminalId":"term-xyz"},{"type":"text","text":"hello"}]}}
+    );
+    defer p.deinit();
+    // Fail each allocation in turn; testing.allocator flags any leak (e.g. the
+    // terminal id duped before a later append fails).
+    var fail_index: usize = 0;
+    while (fail_index < 16) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index });
+        var u = parseSessionUpdate(failing.allocator(), p.value) orelse continue;
+        u.deinit(failing.allocator());
+    }
 }
 
 test "parsePermissionRequest and outcome encoding round-trip" {
