@@ -67,10 +67,12 @@ const CopyEndpoint = union(enum) {
     err: []u8,
 };
 
+const SurfaceAccess = enum { read, write };
+
 /// Resolve a file tool's optional `surface_id` to a local, WSL, or SSH target.
 /// A missing surface_id follows the selected terminal context when one exists;
 /// otherwise it means local.
-fn resolveFileTarget(ctx: *ToolContext, surface_id: ?[]const u8) !FileTarget {
+fn resolveFileTarget(ctx: *ToolContext, surface_id: ?[]const u8, required_access: SurfaceAccess) !FileTarget {
     const sid = surface_id orelse terminal_tools.selectedWriteContext(ctx) orelse return .{ .local = null };
     const snapshot = ctx.tool_snapshot orelse return .{
         .err = try std.fmt.allocPrint(ctx.allocator, "No terminal snapshot is available for surface_id={s}.", .{sid}),
@@ -78,6 +80,11 @@ fn resolveFileTarget(ctx: *ToolContext, surface_id: ?[]const u8) !FileTarget {
     const surface = terminal_tools.resolveSurfaceId(snapshot, sid, terminal_tools.selectedWriteContext(ctx)) orelse {
         return .{ .err = try terminal_tools.allocNoSurfaceError(ctx.allocator, snapshot, sid) };
     };
+    const access_error = switch (required_access) {
+        .read => try terminal_tools.ensureReadAccess(ctx, surface),
+        .write => try terminal_tools.ensureWriteAccess(ctx, surface),
+    };
+    if (access_error) |message| return .{ .err = message };
     if (surface.is_wsl) return .{ .wsl = surface };
     if (!surface.is_ssh) return .{ .local = surface };
     if (surface.ssh_connection) |conn| return .{ .remote = .{ .surface = surface, .conn = conn } };
@@ -85,7 +92,7 @@ fn resolveFileTarget(ctx: *ToolContext, surface_id: ?[]const u8) !FileTarget {
     return .{ .err = try std.fmt.allocPrint(ctx.allocator, "Surface {s} is an SSH terminal but its connection is unavailable.", .{surface.id}) };
 }
 
-fn resolveCopyEndpoint(ctx: *ToolContext, surface_id: ?[]const u8) !CopyEndpoint {
+fn resolveCopyEndpoint(ctx: *ToolContext, surface_id: ?[]const u8, required_access: SurfaceAccess) !CopyEndpoint {
     const sid = surface_id orelse return .{ .local = null };
     const snapshot = ctx.tool_snapshot orelse return .{
         .err = try std.fmt.allocPrint(ctx.allocator, "No terminal snapshot is available for surface_id={s}.", .{sid}),
@@ -93,6 +100,11 @@ fn resolveCopyEndpoint(ctx: *ToolContext, surface_id: ?[]const u8) !CopyEndpoint
     const surface = terminal_tools.resolveSurfaceId(snapshot, sid, terminal_tools.selectedWriteContext(ctx)) orelse {
         return .{ .err = try terminal_tools.allocNoSurfaceError(ctx.allocator, snapshot, sid) };
     };
+    const access_error = switch (required_access) {
+        .read => try terminal_tools.ensureReadAccess(ctx, surface),
+        .write => try terminal_tools.ensureWriteAccess(ctx, surface),
+    };
+    if (access_error) |message| return .{ .err = message };
     if (surface.is_ssh) {
         if (surface.ssh_connection) |conn| {
             return .{ .ssh = .{ .surface = surface, .conn = conn } };
@@ -264,9 +276,9 @@ pub fn copyFile(
 ) ![]u8 {
     if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
 
-    const source_endpoint = try resolveCopyEndpoint(ctx, source_surface_id);
+    const source_endpoint = try resolveCopyEndpoint(ctx, source_surface_id, .read);
     if (source_endpoint == .err) return source_endpoint.err;
-    const dest_endpoint = try resolveCopyEndpoint(ctx, dest_surface_id);
+    const dest_endpoint = try resolveCopyEndpoint(ctx, dest_surface_id, .write);
     if (dest_endpoint == .err) return dest_endpoint.err;
 
     const source_path = resolveEndpointPath(ctx, source_endpoint, source_path_in) catch |err| {
@@ -337,7 +349,7 @@ pub fn copyFile(
 
 pub fn readFile(ctx: *ToolContext, path: []const u8, surface_id: ?[]const u8, offset: usize, limit: usize) ![]u8 {
     if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
-    const target = try resolveFileTarget(ctx, surface_id);
+    const target = try resolveFileTarget(ctx, surface_id, .read);
     if (target == .err) return target.err;
     const resolved = resolveFileTargetPath(ctx, target, path) catch |err| {
         return std.fmt.allocPrint(ctx.allocator, "Failed to resolve {s}: {s}", .{ path, @errorName(err) });
@@ -378,7 +390,7 @@ pub fn readFile(ctx: *ToolContext, path: []const u8, surface_id: ?[]const u8, of
 
 pub fn writeFile(ctx: *ToolContext, path: []const u8, content: []const u8, surface_id: ?[]const u8) ![]u8 {
     if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
-    const target = try resolveFileTarget(ctx, surface_id);
+    const target = try resolveFileTarget(ctx, surface_id, .write);
     if (target == .err) return target.err;
     const resolved = resolveFileTargetPath(ctx, target, path) catch |err| {
         return std.fmt.allocPrint(ctx.allocator, "Failed to resolve {s}: {s}", .{ path, @errorName(err) });
@@ -442,7 +454,7 @@ pub fn writeFile(ctx: *ToolContext, path: []const u8, content: []const u8, surfa
 
 pub fn editFile(ctx: *ToolContext, path: []const u8, old_string: []const u8, new_string: []const u8, replace_all: bool, surface_id: ?[]const u8) ![]u8 {
     if (ctx.isCancelled()) return ctx.allocator.dupe(u8, "Canceled.");
-    const target = try resolveFileTarget(ctx, surface_id);
+    const target = try resolveFileTarget(ctx, surface_id, .write);
     if (target == .err) return target.err;
     const resolved = resolveFileTargetPath(ctx, target, path) catch |err| {
         return std.fmt.allocPrint(ctx.allocator, "Failed to resolve {s}: {s}", .{ path, @errorName(err) });
@@ -668,7 +680,7 @@ test "file tool resolution uses ssh connection carried by the request snapshot" 
         .cancelled = fakeCancelled,
     };
 
-    const target = try resolveFileTarget(&ctx, "ssh-surface");
+    const target = try resolveFileTarget(&ctx, "ssh-surface", .read);
     switch (target) {
         .remote => |remote| {
             try std.testing.expectEqualStrings("ssh-surface", remote.surface.id);
@@ -684,7 +696,7 @@ test "file tool resolution uses ssh connection carried by the request snapshot" 
         else => return error.TestExpectedEqual,
     }
 
-    const endpoint = try resolveCopyEndpoint(&ctx, "ssh-surface");
+    const endpoint = try resolveCopyEndpoint(&ctx, "ssh-surface", .read);
     switch (endpoint) {
         .ssh => |remote| {
             try std.testing.expectEqualStrings("ssh-surface", remote.surface.id);
@@ -731,7 +743,7 @@ test "file tool resolution defaults to the selected WSL surface" {
     };
     terminal_tools.setWriteContext(&ctx, "wsl-surface");
 
-    const target = try resolveFileTarget(&ctx, null);
+    const target = try resolveFileTarget(&ctx, null, .read);
     switch (target) {
         .wsl => |surface| try std.testing.expectEqualStrings("wsl-surface", surface.id),
         else => return error.TestExpectedEqual,
@@ -776,7 +788,7 @@ test "file tool paths resolve relative to selected remote cwd" {
     };
     terminal_tools.setWriteContext(&ctx, "ssh-surface");
 
-    const target = try resolveFileTarget(&ctx, null);
+    const target = try resolveFileTarget(&ctx, null, .read);
     const resolved = try resolveFileTargetPath(&ctx, target, "demo.txt");
     defer a.free(resolved);
     try std.testing.expectEqualStrings("/data1/home/xzg/test/demo.txt", resolved);

@@ -5,6 +5,7 @@ const types = @import("../assistant/conversation/types.zig");
 const agent_detector = @import("../terminal_agents/detector.zig");
 const agent_prompt_answer = @import("../terminal_agents/prompt_answer.zig");
 const ai_agent_access = @import("../agent/access.zig");
+const terminal_lease = @import("../agent/terminal_lease.zig");
 const platform_process = @import("../platform/process.zig");
 const terminal_tools = @import("terminal.zig");
 const tool_access = @import("access.zig");
@@ -515,6 +516,7 @@ pub fn terminalAnswerPrompt(ctx: *ToolContext, surface_id: ?[]const u8, answer: 
     const host = ctx.tool_host orelse return ctx.allocator.dupe(u8, "No terminal tool host is available.");
     const sid = surface_id orelse "focused";
     const surface = terminal_tools.resolveSurfaceId(snapshot, sid, terminal_tools.selectedWriteContext(ctx)) orelse return terminal_tools.allocNoSurfaceError(ctx.allocator, snapshot, sid);
+    if (try terminal_tools.ensureWriteAccess(ctx, surface)) |message| return message;
 
     // Read the LIVE screen (per-surface, mutex-protected, worker-safe).
     const screen = host.surfaceSnapshot(host.ctx, ctx.allocator, surface.id, surface.ptr) catch
@@ -1791,4 +1793,50 @@ test "terminal_answer_prompt sends nothing when no prompt is awaiting" {
 
     try std.testing.expectEqual(@as(usize, 0), host_ctx.all_len);
     try std.testing.expect(std.mem.indexOf(u8, result, "awaiting an answer") != null);
+}
+
+test "terminal_answer_prompt cannot read another Agent's screen" {
+    const a = std.testing.allocator;
+    const registry = terminal_lease.active();
+    registry.clear();
+    defer registry.clear();
+    registry.beginSync();
+    registry.observe("surface-claude");
+    registry.finishSync();
+    try std.testing.expect(registry.claim(202, "surface-claude"));
+
+    var host_ctx = ReplWaitTestHost.Ctx{ .busy_until = 0, .settled_text = "1. Yes" };
+    var dummy: u8 = 0;
+    const surfaces = try a.alloc(ToolSurface, 1);
+    surfaces[0] = .{
+        .id = @constCast("surface-claude"),
+        .title = @constCast("Claude Code"),
+        .cwd = @constCast("/home/xzg"),
+        .snapshot = @constCast(""),
+        .tab_index = 0,
+        .focused = true,
+        .is_ssh = false,
+        .is_wsl = false,
+        .agent_app = .claude_code,
+        .agent_state = .waiting_approval,
+        .agent_confidence = 90,
+        .ptr = @ptrCast(&host_ctx),
+    };
+    var ctx = ToolContext{
+        .allocator = a,
+        .ctx = &dummy,
+        .tool_host = ReplWaitTestHost.host(&host_ctx),
+        .tool_snapshot = .{ .surfaces = surfaces, .active_tab = 0 },
+        .settings = .{ .permission = .full },
+        .agent_instance_id = 101,
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+    defer if (ctx.tool_snapshot) |snap| a.free(snap.surfaces);
+
+    const result = try terminalAnswerPrompt(&ctx, @as(?[]const u8, "surface-claude"), "approve");
+    defer a.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "Terminal access denied") != null);
+    try std.testing.expectEqual(@as(usize, 0), host_ctx.snap_calls);
+    try std.testing.expectEqual(@as(usize, 0), host_ctx.all_len);
 }

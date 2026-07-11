@@ -798,6 +798,16 @@ pub fn isExited(self: *Surface) bool {
     };
 }
 
+/// Whether this existing surface can be restarted in place. The original
+/// command and identity stay attached to the same tab/split.
+pub fn canRespawn(self: *Surface) bool {
+    if (self.respawn_command == null) return false;
+    return switch (self.currentIoState()) {
+        .exited, .failed => true,
+        else => false,
+    };
+}
+
 fn setIoRunning(self: *Surface) void {
     self.io_state_mutex.lock();
     defer self.io_state_mutex.unlock();

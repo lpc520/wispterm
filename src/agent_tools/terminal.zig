@@ -1,6 +1,7 @@
 //! Agent terminal context and surface-selection tools.
 const std = @import("std");
 const types = @import("../assistant/conversation/types.zig");
+const terminal_lease = @import("../agent/terminal_lease.zig");
 const tool_output = @import("output.zig");
 
 const ToolContext = types.ToolContext;
@@ -10,6 +11,8 @@ const ToolClosedTab = types.ToolClosedTab;
 
 /// Number of output lines included in a copilot context block.
 pub const COPILOT_CONTEXT_LINES: usize = 40;
+
+pub const ListScope = enum { owned, all };
 
 pub fn surfaceKind(surface: ToolSurface) []const u8 {
     if (surface.is_ssh) return "ssh";
@@ -26,6 +29,7 @@ pub fn context(ctx: *const ToolContext) ![]u8 {
     const surface = findSurface(snapshot_value, selected) orelse {
         return std.fmt.allocPrint(ctx.allocator, "Selected terminal context surface_id={s} is no longer open.", .{selected});
     };
+    if (try ensureReadAccess(ctx, surface)) |message| return message;
     if (surface.agent_app != .none) {
         return std.fmt.allocPrint(
             ctx.allocator,
@@ -57,7 +61,7 @@ pub fn context(ctx: *const ToolContext) ![]u8 {
     );
 }
 
-pub fn list(ctx: *const ToolContext) ![]u8 {
+pub fn list(ctx: *const ToolContext, scope: ListScope) ![]u8 {
     const snapshot_value = collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
     defer snapshot_value.deinit(ctx.allocator);
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -71,17 +75,22 @@ pub fn list(ctx: *const ToolContext) ![]u8 {
     } else {
         try out.appendSlice(ctx.allocator, "selected_context=none\n");
     }
+    var visible_count: usize = 0;
     for (snapshot_value.surfaces) |surface| {
+        const access = accessFor(ctx, surface);
+        if (scope == .owned and access != .owned) continue;
+        visible_count += 1;
         const is_selected = if (selected) |id| std.mem.eql(u8, id, surface.id) else false;
-        try out.print(ctx.allocator, "- id={s} tab={d} focused={} selected={} kind={s} title=\"{s}\" cwd=\"{s}\"", .{
+        try out.print(ctx.allocator, "- id={s} tab={d} focused={} selected={} access={s} kind={s} title=\"{s}\"", .{
             surface.id,
             surface.tab_index + 1,
             surface.focused,
             is_selected,
+            access.label(),
             surfaceKind(surface),
             surface.title,
-            surface.cwd,
         });
+        if (access == .owned) try out.print(ctx.allocator, " cwd=\"{s}\"", .{surface.cwd});
         if (surface.agent_app != .none) {
             try out.print(ctx.allocator, " agent={s}:{s} confidence={d}", .{
                 surface.agent_app.label(),
@@ -91,6 +100,7 @@ pub fn list(ctx: *const ToolContext) ![]u8 {
         }
         try out.append(ctx.allocator, '\n');
     }
+    if (visible_count == 0 and scope == .owned) try out.appendSlice(ctx.allocator, "No owned terminal surfaces. Create one with tab_new, or open the Copilot sidebar on the terminal you want to own.\n");
     return tool_output.truncateOwned(ctx.allocator, ctx.settings, try out.toOwnedSlice(ctx.allocator));
 }
 
@@ -104,13 +114,16 @@ pub fn snapshot(ctx: *const ToolContext, surface_id: ?[]const u8) ![]u8 {
     // concrete id so the filter below matches the focused terminal.
     var target_id = surface_id;
     if (surface_id) |sid| {
-        if (resolveSurfaceId(snapshot_value, sid, selectedWriteContext(ctx))) |s| target_id = s.id;
+        const surface = resolveSurfaceId(snapshot_value, sid, selectedWriteContext(ctx)) orelse return allocNoSurfaceError(ctx.allocator, snapshot_value, sid);
+        if (try ensureReadAccess(ctx, surface)) |message| return message;
+        target_id = surface.id;
     }
 
     for (snapshot_value.surfaces) |surface| {
         if (target_id) |id| {
             if (!std.mem.eql(u8, surface.id, id)) continue;
         }
+        if (target_id == null and accessFor(ctx, surface) != .owned) continue;
         try out.print(ctx.allocator, "surface={s} title=\"{s}\" kind={s} focused={}", .{
             surface.id,
             surface.title,
@@ -150,6 +163,7 @@ pub fn select(ctx: *ToolContext, surface_id: []const u8) ![]u8 {
     const snapshot_value = collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
     defer snapshot_value.deinit(ctx.allocator);
     const surface = resolveSurfaceId(snapshot_value, surface_id, selectedWriteContext(ctx)) orelse return allocNoSurfaceError(ctx.allocator, snapshot_value, surface_id);
+    if (try ensureWriteAccess(ctx, surface)) |message| return message;
     setWriteContext(ctx, surface.id);
     return std.fmt.allocPrint(
         ctx.allocator,
@@ -168,6 +182,10 @@ pub fn select(ctx: *ToolContext, surface_id: []const u8) ![]u8 {
 pub fn focus(ctx: *ToolContext, surface_id: []const u8) ![]u8 {
     const host = ctx.tool_host orelse return ctx.allocator.dupe(u8, "No terminal focus host is available.");
     const callback = host.focusTerminal orelse return ctx.allocator.dupe(u8, "No terminal focus host is available.");
+    const current_snapshot = collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
+    defer current_snapshot.deinit(ctx.allocator);
+    const requested = findSurface(current_snapshot, surface_id) orelse return allocNoSurfaceError(ctx.allocator, current_snapshot, surface_id);
+    if (try ensureWriteAccess(ctx, requested)) |message| return message;
     const surface = callback(host.ctx, ctx.allocator, surface_id) catch |err| {
         return std.fmt.allocPrint(ctx.allocator, "terminal_focus failed: {s}", .{@errorName(err)});
     };
@@ -189,6 +207,29 @@ pub fn focus(ctx: *ToolContext, surface_id: []const u8) ![]u8 {
             surface.title,
             surface.cwd,
         },
+    );
+}
+
+/// Restart an exited SSH surface in place. This deliberately does not replay
+/// any command that was running when the transport dropped.
+pub fn reconnect(ctx: *ToolContext, surface_id: []const u8) ![]u8 {
+    const snapshot_value = collectToolSnapshot(ctx) catch return ctx.allocator.dupe(u8, "No terminal snapshot host is available.");
+    defer snapshot_value.deinit(ctx.allocator);
+    const surface = resolveSurfaceId(snapshot_value, surface_id, selectedWriteContext(ctx)) orelse return allocNoSurfaceError(ctx.allocator, snapshot_value, surface_id);
+    if (try ensureWriteAccess(ctx, surface)) |message| return message;
+    if (!surface.is_ssh) return ctx.allocator.dupe(u8, "terminal_reconnect only supports an existing SSH terminal surface.");
+    const host = ctx.tool_host orelse return ctx.allocator.dupe(u8, "No terminal reconnect host is available.");
+    const callback = host.reconnectTerminal orelse return ctx.allocator.dupe(u8, "No terminal reconnect host is available.");
+    var refreshed = callback(host.ctx, ctx.allocator, surface.id) catch |err| switch (err) {
+        error.NotReconnectable => return ctx.allocator.dupe(u8, "This SSH terminal is still connected or cannot be restarted in place."),
+        error.NotSshSurface => return ctx.allocator.dupe(u8, "terminal_reconnect only supports an existing SSH terminal surface."),
+        else => return std.fmt.allocPrint(ctx.allocator, "terminal_reconnect failed: {s}", .{@errorName(err)}),
+    };
+    defer refreshed.deinit(ctx.allocator);
+    return std.fmt.allocPrint(
+        ctx.allocator,
+        "Reconnecting SSH surface_id={s} in place. The previous remote command outcome is unknown; do not re-run it automatically. Wait for the original surface to reach a prompt, then inspect it with terminal_snapshot.",
+        .{refreshed.id},
     );
 }
 
@@ -299,21 +340,12 @@ pub fn resolveSurfaceId(snapshot_value: ToolSnapshot, surface_id: []const u8, wr
 /// Error result for an unmatched surface_id that lists the open surfaces, so the
 /// model can retry in one step instead of calling terminal_list.
 pub fn allocNoSurfaceError(allocator: std.mem.Allocator, snapshot_value: ToolSnapshot, surface_id: []const u8) ![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.print(allocator, "No terminal surface matches surface_id={s}. Open surfaces:\n", .{surface_id});
-    if (snapshot_value.surfaces.len == 0) try out.appendSlice(allocator, "(none)\n");
-    for (snapshot_value.surfaces) |surface| {
-        try out.print(allocator, "- id={s} tab={d} focused={} kind={s} title=\"{s}\"\n", .{
-            surface.id,
-            surface.tab_index + 1,
-            surface.focused,
-            surfaceKind(surface),
-            surface.title,
-        });
-    }
-    try out.appendSlice(allocator, "Use one of these ids, or surface_id=focused for the focused terminal.");
-    return out.toOwnedSlice(allocator);
+    _ = snapshot_value;
+    return std.fmt.allocPrint(
+        allocator,
+        "No terminal surface matches surface_id={s}. Call terminal_list(scope=\"owned\") to list terminals available to this Agent.",
+        .{surface_id},
+    );
 }
 
 /// Build the per-message copilot context block from a full surface snapshot:
@@ -357,6 +389,7 @@ pub fn defaultExecSurfaceId(ctx: *const ToolContext) ?[]const u8 {
 }
 
 pub fn ensureWriteContext(ctx: *ToolContext, surface: ToolSurface) !?[]u8 {
+    if (try ensureWriteAccess(ctx, surface)) |message| return message;
     const write_context = selectedWriteContext(ctx) orelse {
         const message = try std.fmt.allocPrint(
             ctx.allocator,
@@ -380,6 +413,29 @@ pub fn ensureWriteContext(ctx: *ToolContext, surface: ToolSurface) !?[]u8 {
     return message;
 }
 
+pub fn ensureReadAccess(ctx: *const ToolContext, surface: ToolSurface) !?[]u8 {
+    if (accessFor(ctx, surface) == .owned) return null;
+    return @as(?[]u8, try accessDenied(ctx.allocator, surface, "read"));
+}
+
+pub fn ensureWriteAccess(ctx: *const ToolContext, surface: ToolSurface) !?[]u8 {
+    if (accessFor(ctx, surface) == .owned) return null;
+    return @as(?[]u8, try accessDenied(ctx.allocator, surface, "write"));
+}
+
+pub fn accessFor(ctx: *const ToolContext, surface: ToolSurface) terminal_lease.Access {
+    if (ctx.agent_instance_id == 0) return .owned;
+    return terminal_lease.active().access(ctx.agent_instance_id, surface.id);
+}
+
+fn accessDenied(allocator: std.mem.Allocator, surface: ToolSurface, operation: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "Terminal access denied: cannot {s} surface_id={s} tab={d} title=\"{s}\" because this Agent does not own it. Call terminal_list(scope=\"all\") for metadata only; terminal ownership is not granted by that call.",
+        .{ operation, surface.id, surface.tab_index + 1, surface.title },
+    );
+}
+
 test "buildCopilotContext keeps cwd and the last N lines" {
     const snap = "l1\nl2\nl3\nl4\nl5\n";
     const out = try buildCopilotContext(std.testing.allocator, "/home/u", snap);
@@ -398,6 +454,53 @@ test "buildCopilotContext truncates to the last COPILOT_CONTEXT_LINES" {
     defer std.testing.allocator.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "line99") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "line0\n") == null);
+}
+
+test "terminal ownership hides foreign surfaces and denies reads" {
+    const allocator = std.testing.allocator;
+    const registry = terminal_lease.active();
+    registry.clear();
+    defer registry.clear();
+
+    registry.beginSync();
+    registry.observe("aaa");
+    registry.observe("bbb");
+    registry.finishSync();
+    try std.testing.expect(registry.claim(101, "aaa"));
+    try std.testing.expect(registry.claim(202, "bbb"));
+
+    const cached = try twoSurfaceSnapshotForTest(allocator);
+    defer cached.deinit(allocator);
+    var dummy: u8 = 0;
+    var ctx = ToolContext{
+        .allocator = allocator,
+        .ctx = &dummy,
+        .tool_host = null,
+        .tool_snapshot = cached,
+        .settings = .{},
+        .agent_instance_id = 101,
+        .approve = fakeApprove,
+        .cancelled = fakeCancelled,
+    };
+
+    const owned = try list(&ctx, .owned);
+    defer allocator.free(owned);
+    try std.testing.expect(std.mem.indexOf(u8, owned, "id=aaa") != null);
+    try std.testing.expect(std.mem.indexOf(u8, owned, "id=bbb") == null);
+
+    const all = try list(&ctx, .all);
+    defer allocator.free(all);
+    try std.testing.expect(std.mem.indexOf(u8, all, "id=bbb") != null);
+    try std.testing.expect(std.mem.indexOf(u8, all, "cwd=\"/\"") != null);
+
+    const denied_snapshot = try snapshot(&ctx, "bbb");
+    defer allocator.free(denied_snapshot);
+    try std.testing.expect(std.mem.indexOf(u8, denied_snapshot, "Terminal access denied") != null);
+    try std.testing.expect(std.mem.indexOf(u8, denied_snapshot, "› ") == null);
+
+    const denied_select = try select(&ctx, "bbb");
+    defer allocator.free(denied_select);
+    try std.testing.expect(std.mem.indexOf(u8, denied_select, "Terminal access denied") != null);
 }
 
 fn fakeApprove(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8) bool {
@@ -684,7 +787,7 @@ test "list shows one-based tab numbers matching the UI" {
         .cancelled = fakeCancelled,
     };
 
-    const out = try list(&ctx);
+    const out = try list(&ctx, .owned);
     defer allocator.free(out);
 
     // The first tab is shown as 1 and the second as 2, even though they are
@@ -723,8 +826,8 @@ test "select resolves focused aliases and reports missing surfaces" {
     const missing = try select(&ctx, "zzz");
     defer allocator.free(missing);
     try std.testing.expect(std.mem.indexOf(u8, missing, "zzz") != null);
-    try std.testing.expect(std.mem.indexOf(u8, missing, "aaa") != null);
-    try std.testing.expect(std.mem.indexOf(u8, missing, "bbb") != null);
+    try std.testing.expect(std.mem.indexOf(u8, missing, "aaa") == null);
+    try std.testing.expect(std.mem.indexOf(u8, missing, "bbb") == null);
 }
 
 test "select focused alias honors write context before UI focus and falls back when stale" {

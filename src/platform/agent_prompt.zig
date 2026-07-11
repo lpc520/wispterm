@@ -40,7 +40,7 @@ pub fn copilotSystemPromptForOs(os_tag: std.Target.Os.Tag) []const u8 {
 const copilot_binding_clause =
     \\
     \\
-    \\You are the in-context copilot for the user's CURRENTLY FOCUSED terminal. Default every terminal action to that terminal — you do not need terminal_list or terminal_select first, and may omit surface_id (it resolves to the focused terminal). Call terminal_context when you need to verify which terminal is currently bound. Only call terminal_list/terminal_select when the user explicitly asks you to act on a different terminal or server. Each message includes a lightweight snapshot (cwd + recent output) of that terminal.
+    \\You are the in-context copilot for the user's CURRENTLY FOCUSED terminal. That bound terminal and its splits belong to this Agent. Default every terminal action to it — you do not need terminal_list or terminal_select first, and may omit surface_id (it resolves to the bound terminal). Call terminal_context when you need to verify the binding. Other Agents' terminals are unavailable even if listed; do not create or reuse another terminal because the bound SSH terminal disconnects. Each message includes a lightweight snapshot (cwd + recent output) of the bound terminal.
 ;
 
 const posix_copilot_prompt = posix_prompt ++ copilot_binding_clause;
@@ -52,9 +52,10 @@ const common_tools_before_wsl =
     \\- Preserve user work; do not overwrite, reset, or delete unless asked.
     \\
     \\Terminal tools:
-    \\- Use `terminal_list` before terminal writes, then `terminal_select`.
+    \\- `terminal_list` lists owned terminals; `scope=all` is metadata-only. Use `terminal_select` only with owned surfaces.
     \\- Use `terminal_context` to inspect the selected write context.
     \\- Use `terminal_focus` before `ui_screenshot` when the requested tab or panel is not focused.
+    \\- For disconnected SSH, use `terminal_reconnect` on the same surface. Its command outcome is unknown; never replay it.
     \\- Use `ssh_session_exec` at an open SSH shell prompt.
     \\- Use `ssh_profile_save` / `ssh_profile_connect` for saved SSH details.
 ;
@@ -73,7 +74,7 @@ const common_tools_after_wsl =
     \\- For a stuck terminal (`>` prompt, unclosed quote, hung command, pager), send `terminal_repl_exec repl=plain code=<ctrl-c>` (or `<ctrl-u>`/`<esc>`/`<ctrl-d>`).
     \\- Read terminal snapshots from the bottom; if stale/truncated, re-read with `terminal_snapshot`.
     \\- Answer Claude Code/Codex approval menus with `terminal_answer_prompt`; never blind-press unseen prompts.
-    \\- Use `tab_new` only when no suitable terminal exists.
+    \\- Use `tab_new` only when no suitable terminal exists; it is reserved for this Agent.
     \\- For WispTerm questions, call `wispterm_docs`.
     \\- For biomedical literature, decompose into English keywords (AND/OR), then call `pubmed`.
     \\- Delegate heavy research/reading (full web pages, PDFs, multi-query searches) to `subagent` with one complete task description; only its final report enters this conversation.

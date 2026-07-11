@@ -5804,6 +5804,31 @@ fn focusAgentTerminalSurfaceById(surface_id_raw: []const u8) ?AgentTerminalFocus
     return null;
 }
 
+fn reconnectAgentTerminalSurface(allocator: std.mem.Allocator, surface_id_raw: []const u8) anyerror!ai_chat.ToolSurface {
+    const surface_id = std.mem.trim(u8, surface_id_raw, " \t\r\n");
+    if (surface_id.len == 0) return error.SurfaceNotFound;
+
+    for (0..tab.g_tab_count) |tab_index| {
+        const tab_state = tab.g_tabs[tab_index] orelse continue;
+        if (tab_state.kind != .terminal) continue;
+        var it = tab_state.tree.surfaces();
+        while (it.next()) |entry| {
+            const surface = entry.surface;
+            if (!std.mem.eql(u8, surface.remote_id[0..], surface_id)) continue;
+            if (surface.launch_kind != .ssh) return error.NotSshSurface;
+            if (!surface.canRespawn()) return error.NotReconnectable;
+            surface.respawn();
+            // Match the UI Enter-to-reconnect path: respawn retains the SSH
+            // profile but does not arm password prompt detection itself.
+            if (surface.ssh_connection) |*conn| {
+                if (conn.usesPasswordAuth()) overlays.scheduleSshPasswordForSurface(surface);
+            }
+            return surface_snapshots.makeAgentToolSurface(allocator, surface, tab_index, false);
+        }
+    }
+    return error.SurfaceNotFound;
+}
+
 fn agentRequestFocusTerminalSurface(allocator: std.mem.Allocator, surface_id: []const u8) anyerror!ai_chat.ToolSurface {
     const target = focusAgentTerminalSurfaceById(surface_id) orelse return error.SurfaceNotFound;
     return surface_snapshots.makeAgentToolSurface(
@@ -6035,6 +6060,7 @@ fn agentRequestHost() agent_requests.Host {
         .saveSshProfile = agentRequestSaveSshProfile,
         .captureUiScreenshot = agentRequestCaptureUiScreenshot,
         .focusTerminalSurface = agentRequestFocusTerminalSurface,
+        .reconnectTerminalSurface = reconnectAgentTerminalSurface,
     };
 }
 
@@ -6175,6 +6201,7 @@ fn onPlatformMessage(msg: window_backend.MessageId, wParam: window_backend.WordP
         .agent_tab_close => agent_requests.handleTabCloseRequest(@ptrFromInt(decoded.ptr), agent_host),
         .agent_ui_screenshot => agent_requests.handleUiScreenshotRequest(@ptrFromInt(decoded.ptr), agent_host),
         .agent_terminal_focus => agent_requests.handleTerminalFocusRequest(@ptrFromInt(decoded.ptr), agent_host),
+        .agent_terminal_reconnect => agent_requests.handleTerminalReconnectRequest(@ptrFromInt(decoded.ptr), agent_host),
         .remote_ai_input => remote_sync.handleAiInputRequest(@ptrFromInt(decoded.ptr), remoteSyncHost()),
         .remote_open_ai_agent => remote_sync.handleAiAgentOpenRequest(@ptrFromInt(decoded.ptr), remoteSyncHost()),
         .chatops_control => weixin_bridge.handleControlRequest(@ptrFromInt(decoded.ptr), weixinBridgeHost()),
@@ -6196,6 +6223,7 @@ fn installAgentToolHost(self: *AppWindow) void {
         .sshConnectionForSurface = surface_snapshots.agentSshConnectionForSurface,
         .uiScreenshot = agent_requests.uiScreenshot,
         .focusTerminal = agent_requests.focusTerminal,
+        .reconnectTerminal = agent_requests.reconnectTerminal,
     });
 }
 
