@@ -4547,7 +4547,7 @@ fn cycleAiFormProtocol(forward: bool) void {
 }
 
 /// Protocol row display: the current protocol name plus a small ASCII toggle
-/// affordance (←/→ switches between the three valid protocols).
+/// affordance (←/→ switches between the valid protocols).
 fn aiProtocolDisplay() []const u8 {
     const S = struct {
         threadlocal var buf: [48]u8 = undefined;
