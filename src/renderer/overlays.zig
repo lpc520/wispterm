@@ -267,7 +267,6 @@ const TransferCancelConfirmLayout = struct {
 // ============================================================================
 
 const COMMAND_PALETTE_FILTER_MAX = command_palette_state.FILTER_MAX;
-const COMMAND_PALETTE_MAX_VISIBLE_ROWS = command_palette_layout.MAX_VISIBLE_ROWS;
 
 const THEME_OVERRIDE_KEYS = [_][]const u8{
     "background",
@@ -333,7 +332,11 @@ fn sendSnippet(idx: usize) void {
 
 const CommandPaletteMode = command_center_state.CommandPaletteMode;
 
-threadlocal var g_palette_scratch: [COMMAND_PALETTE_MAX_VISIBLE_ROWS]PaletteItem = undefined;
+/// Result-list capacity, decoupled from the 14-row render window: the list
+/// scrolls (selection-follow + wheel) through everything the rebuild collects.
+/// Sized for all commands + user snippets/profiles + a broad theme search.
+const PALETTE_SCRATCH_CAP: usize = 512;
+threadlocal var g_palette_scratch: [PALETTE_SCRATCH_CAP]PaletteItem = undefined;
 threadlocal var g_palette_scratch_len: usize = 0;
 threadlocal var g_command_palette_history_rows: []agent_history.Row = &.{};
 threadlocal var g_command_palette_history_rows_owned: bool = false;
@@ -1220,12 +1223,12 @@ test "command palette surfaces user snippets and filters them by name/descriptio
     sshState().profiles_loaded = true;
     assistantProfiles().profiles_loaded = true;
 
-    // Empty filter shows only the curated built-in commands; snippets surface
-    // by typing, like SSH/AI/theme rows.
+    // Empty filter lists the user's snippets after the built-in commands
+    // (the list scrolls past the render window; themes stay search-only).
     setCommandPaletteFilterForTest("");
     rebuildPaletteScratch();
-    try std.testing.expect(!paletteContainsSnippetForTest(0));
-    try std.testing.expect(!paletteContainsSnippetForTest(1));
+    try std.testing.expect(paletteContainsSnippetForTest(0));
+    try std.testing.expect(paletteContainsSnippetForTest(1));
 
     // Name match.
     setCommandPaletteFilterForTest("deploy");
@@ -1320,13 +1323,30 @@ fn rebuildPaletteScratch() void {
     loadSnippets();
 
     if (filter.len == 0) {
-        // Empty filter shows the curated top-N built-in commands only. Snippets
-        // (like SSH/AI/theme rows) surface once the user types a filter — the
-        // 14-row cap means anything appended here would just be truncated.
+        // Empty filter: every command plus the user's own entries (snippets,
+        // SSH profiles, AI profiles), scrollable past the render window.
+        // Themes stay search-only — 453 embedded entries would drown the list.
         for (COMMAND_ENTRIES, 0..) |entry, idx| {
             if (!commandEntryMatches(entry)) continue;
-            if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+            if (g_palette_scratch_len >= PALETTE_SCRATCH_CAP) break;
             g_palette_scratch[g_palette_scratch_len] = .{ .command = idx };
+            g_palette_scratch_len += 1;
+        }
+        for (snippetsState().items, 0..) |_, idx| {
+            if (g_palette_scratch_len >= PALETTE_SCRATCH_CAP) break;
+            g_palette_scratch[g_palette_scratch_len] = .{ .snippet = idx };
+            g_palette_scratch_len += 1;
+        }
+        loadSshProfiles();
+        for (0..sshState().profile_count) |profile_idx| {
+            if (g_palette_scratch_len >= PALETTE_SCRATCH_CAP) break;
+            g_palette_scratch[g_palette_scratch_len] = .{ .ssh_profile = profile_idx };
+            g_palette_scratch_len += 1;
+        }
+        loadAiProfiles();
+        for (0..assistantProfiles().profile_count) |ai_idx| {
+            if (g_palette_scratch_len >= PALETTE_SCRATCH_CAP) break;
+            g_palette_scratch[g_palette_scratch_len] = .{ .ai_profile = ai_idx };
             g_palette_scratch_len += 1;
         }
         return;
@@ -1334,12 +1354,12 @@ fn rebuildPaletteScratch() void {
 
     for (COMMAND_ENTRIES, 0..) |entry, idx| {
         if (!commandEntryTitleMatches(entry, filter)) continue;
-        if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+        if (g_palette_scratch_len >= PALETTE_SCRATCH_CAP) break;
         g_palette_scratch[g_palette_scratch_len] = .{ .command = idx };
         g_palette_scratch_len += 1;
     }
     for (snippetsState().items, 0..) |snippet, idx| {
-        if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+        if (g_palette_scratch_len >= PALETTE_SCRATCH_CAP) break;
         if (!containsIgnoreCase(snippet.name, filter) and !containsIgnoreCase(snippet.description, filter)) continue;
         g_palette_scratch[g_palette_scratch_len] = .{ .snippet = idx };
         g_palette_scratch_len += 1;
@@ -1347,19 +1367,19 @@ fn rebuildPaletteScratch() void {
     for (COMMAND_ENTRIES, 0..) |entry, idx| {
         if (commandEntryTitleMatches(entry, filter)) continue;
         if (!commandEntrySecondaryMatches(entry, filter)) continue;
-        if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+        if (g_palette_scratch_len >= PALETTE_SCRATCH_CAP) break;
         g_palette_scratch[g_palette_scratch_len] = .{ .command = idx };
         g_palette_scratch_len += 1;
     }
     loadSshProfiles();
     for (0..sshState().profile_count) |profile_idx| {
-        if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+        if (g_palette_scratch_len >= PALETTE_SCRATCH_CAP) break;
         const profile = &sshState().profiles[profile_idx];
         const name = profileField(profile, .name);
         if (command_palette_model.sshProfileNameMatchesFilter(name, filter)) {
             g_palette_scratch[g_palette_scratch_len] = .{ .ssh_profile = profile_idx };
             g_palette_scratch_len += 1;
-            if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+            if (g_palette_scratch_len >= PALETTE_SCRATCH_CAP) break;
         }
         if (command_palette_model.tmuxProfileMatchesFilter(name, filter)) {
             g_palette_scratch[g_palette_scratch_len] = .{ .tmux_profile = profile_idx };
@@ -1368,14 +1388,14 @@ fn rebuildPaletteScratch() void {
     }
     loadAiProfiles();
     for (0..assistantProfiles().profile_count) |ai_idx| {
-        if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+        if (g_palette_scratch_len >= PALETTE_SCRATCH_CAP) break;
         const profile = &assistantProfiles().profiles[ai_idx];
         if (!command_palette_model.aiProfileLabelMatchesFilter(aiProfileField(profile, .name), filter)) continue;
         g_palette_scratch[g_palette_scratch_len] = .{ .ai_profile = ai_idx };
         g_palette_scratch_len += 1;
     }
     for (&themes_embed.entries, 0..) |th, ti| {
-        if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+        if (g_palette_scratch_len >= PALETTE_SCRATCH_CAP) break;
         if (!containsIgnoreCase(th.name, filter)) continue;
         g_palette_scratch[g_palette_scratch_len] = .{ .theme = ti };
         g_palette_scratch_len += 1;
