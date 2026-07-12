@@ -168,6 +168,7 @@ comptime {
         _ = @import("platform/remote_file.zig");
         _ = @import("platform/remote_transport.zig");
         _ = @import("platform/session_lock.zig");
+        _ = @import("platform/shell_integration.zig");
         _ = @import("platform/text.zig");
         _ = @import("platform/thread_control.zig");
         _ = @import("platform/threading.zig");
