@@ -1596,6 +1596,7 @@ fn paletteDpiScale() f32 {
 }
 
 const platform_display = @import("../platform/display.zig");
+const ui_patterns = @import("ui_patterns.zig");
 
 pub const ImeCaretPx = struct { x: f32, y: f32, h: f32 };
 
@@ -5761,8 +5762,7 @@ fn sessionFirstVisibleRow(selection: usize, visible_rows: usize, row_count: usiz
 fn sessionLayout(window_width: f32, window_height: f32, top_offset: f32) SessionLayout {
     const content_height = @max(1, window_height - top_offset);
     const min_box_w: f32 = if (g_ssh_form_visible or g_ssh_list_visible or g_ai_form_visible or g_ai_list_visible) 460 else 360;
-    const max_box_w = @max(260.0, @min(760.0, window_width - 48.0));
-    const box_w: f32 = @round(@min(@max(min_box_w, sessionDesiredBoxWidth()), max_box_w));
+    const box_w = ui_patterns.modalWidth(window_width, min_box_w, sessionDesiredBoxWidth(), 760, 24);
     const row_h = overlayRowHeight(38);
     const header_h = @round(18 + overlayLineHeight() * 2 + 12);
     const filter_h = if (g_ssh_list_visible) overlayControlHeight(42) else 0;
