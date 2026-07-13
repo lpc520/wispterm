@@ -7055,8 +7055,8 @@ pub fn renderSettingsPage(window_height: f32, top_offset: f32, content_x: f32, c
     ui_pipeline.fillQuadAlpha(layout.page_x, page_y, layout.nav_w, layout.page_h, mixColor(bg, fg, 0.025), 0.96);
     ui_pipeline.fillQuadAlpha(layout.page_x + layout.nav_w - 1, page_y, 1, layout.page_h, border_color, 0.72);
 
-    const nav_title_y = textYFromTop(window_height, layout.page_top_px + 24);
-    const nav_label_y = textYFromTop(window_height, layout.page_top_px + 68);
+    const nav_title_y = textYFromTop(window_height, layout.nav_title_top_px);
+    const nav_label_y = textYFromTop(window_height, layout.nav_label_top_px);
     renderTitlebarText(i18n.s().settings_title, layout.page_x + 24, nav_title_y, mixColor(fg, accent, 0.10));
     renderTitlebarText(if (i18n.lang() == .zh_CN) "偏好设置" else "PREFERENCES", layout.page_x + 24, nav_label_y, muted_color);
 

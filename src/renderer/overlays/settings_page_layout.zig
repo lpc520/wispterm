@@ -44,6 +44,8 @@ pub const Layout = struct {
     page_w: f32,
     page_h: f32,
     nav_w: f32,
+    nav_title_top_px: f32,
+    nav_label_top_px: f32,
     nav_item_top_px: f32,
     nav_item_h: f32,
     category_count: usize,
@@ -139,6 +141,10 @@ pub fn compute(input: Input) Layout {
     // read as a workbench and leaves deliberate expansion space on the right.
     const content_w = @max(1.0, @min(1060.0, main_w - side_pad * 2));
     const content_x = @round(input.content_x + nav_w + side_pad);
+    const nav_title_top_px = input.top_offset + 24;
+    const nav_label_top_px = nav_title_top_px + textHeight(input.cell_height) + 10;
+    const nav_item_top_px = nav_label_top_px + textHeight(input.cell_height) + 12;
+    const nav_item_h = @round(@max(42.0, textHeight(input.cell_height) + 14.0));
     const row_h = settingsRowHeight(input.cell_height);
     const header_h = @round(@max(104.0, textHeight(input.cell_height) * 2.0 + 56.0));
     const bottom_pad: f32 = 24;
@@ -156,8 +162,10 @@ pub fn compute(input: Input) Layout {
         .page_w = page_w,
         .page_h = page_h,
         .nav_w = nav_w,
-        .nav_item_top_px = input.top_offset + 98,
-        .nav_item_h = 42,
+        .nav_title_top_px = nav_title_top_px,
+        .nav_label_top_px = nav_label_top_px,
+        .nav_item_top_px = nav_item_top_px,
+        .nav_item_h = nav_item_h,
         .category_count = input.category_count,
         .content_x = content_x,
         .content_w = content_w,
@@ -221,4 +229,23 @@ test "settings tab hit testing maps content rows and font buttons" {
     try std.testing.expectEqual(@as(?usize, 0), layout.rowAt(layout.content_x + 8, layout.row_top_px + 2));
     const plus_x = layout.content_x + layout.content_w - 46;
     try std.testing.expectEqual(FontControl.plus, layout.fontControlAt(plus_x).?);
+}
+
+test "settings category rail grows with large UI text" {
+    const cell_height: f32 = 40;
+    const layout = compute(.{
+        .window_height = 1200,
+        .top_offset = 58,
+        .content_x = 220,
+        .content_width = 1710,
+        .cell_height = cell_height,
+        .focus_index = 0,
+        .row_count = 5,
+        .category_count = 3,
+    });
+
+    try std.testing.expect(layout.nav_label_top_px >= layout.nav_title_top_px + cell_height);
+    try std.testing.expect(layout.nav_item_top_px >= layout.nav_label_top_px + cell_height);
+    try std.testing.expect(layout.nav_item_h >= cell_height + 14);
+    try std.testing.expectEqual(@as(?usize, 0), layout.categoryAt(layout.page_x + 20, layout.nav_item_top_px + 2));
 }
