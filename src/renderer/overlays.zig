@@ -6917,7 +6917,37 @@ fn settingsRowDescription(row: usize) []const u8 {
     };
 }
 
-fn renderSettingsRow(layout: SettingsLayout, window_height: f32, row_index: usize, title: []const u8, value: []const u8, selected: bool) void {
+const SettingsControlKind = enum {
+    adjuster,
+    toggle,
+    choice,
+    action,
+};
+
+fn settingsControlKind(row: usize) SettingsControlKind {
+    if (shell_integration.supported and (row == SETTINGS_CONTROL_ROW_START + 9 or row == SETTINGS_CONTROL_ROW_START + 10)) return .toggle;
+    return switch (row) {
+        0 => .adjuster,
+        SETTINGS_THEME_ROW,
+        SETTINGS_CONTROL_ROW_START + 0,
+        SETTINGS_CONTROL_ROW_START + 3,
+        SETTINGS_CONTROL_ROW_START + 4,
+        SETTINGS_CONTROL_ROW_START + 6,
+        => .choice,
+        SETTINGS_CONTROL_ROW_START + 1,
+        SETTINGS_CONTROL_ROW_START + 2,
+        SETTINGS_CONTROL_ROW_START + 5,
+        SETTINGS_CONTROL_ROW_START + 7,
+        SETTINGS_CONTROL_ROW_START + 8,
+        => .toggle,
+        settings_page.SETTINGS_RAW_CONFIG_ROW,
+        settings_page.SETTINGS_RESTORE_DEFAULTS_ROW,
+        => .action,
+        else => .action,
+    };
+}
+
+fn renderSettingsRow(layout: SettingsLayout, window_height: f32, row: usize, row_index: usize, title: []const u8, value: []const u8, selected: bool) void {
     const visible = layout.visibleRow(window_height, row_index) orelse return;
     const gl_y = visible.gl_y;
     const x = layout.content_x;
@@ -6937,12 +6967,42 @@ fn renderSettingsRow(layout: SettingsLayout, window_height: f32, row_index: usiz
         ui_pipeline.fillQuadAlpha(x + 2, gl_y + 8, 3, layout.row_h - 16, accent, 0.82);
     }
     if (value.len > 0) {
-        const value_w = @min(210.0, measureTitlebarText(value) + 24);
+        const kind = settingsControlKind(row);
+        const max_value_w: f32 = switch (kind) {
+            .toggle => 96,
+            .adjuster => 152,
+            .choice => 360,
+            .action => 180,
+        };
+        const min_value_w: f32 = switch (kind) {
+            .toggle => 76,
+            .adjuster => 118,
+            .choice => 132,
+            .action => 96,
+        };
+        const trailing_w: f32 = switch (kind) {
+            .choice, .action => 26,
+            .adjuster, .toggle => 12,
+        };
+        const value_w = @min(max_value_w, @max(min_value_w, measureTitlebarText(value) + 24 + trailing_w));
         const value_x = @round(right_edge - value_w);
         const control_h = @round(@max(32.0, font.g_titlebar_cell_height + 10.0));
         const pill_y = gl_y + @round((layout.row_h - control_h) / 2);
-        renderRoundedQuadAlpha(value_x, pill_y, value_w, control_h, 9, mixColor(bg, fg, 0.09), 0.92);
-        renderTitlebarTextLimited(value, value_x + 12, rowTextY(pill_y, control_h), if (selected) accent else mixColor(bg, fg, 0.82), value_w - 24);
+        const is_on = std.mem.eql(u8, value, i18n.s().settings_value_on);
+        const control_bg = if (kind == .toggle and is_on) mixColor(bg, accent, 0.20) else mixColor(bg, fg, 0.09);
+        renderRoundedQuadAlpha(value_x, pill_y, value_w, control_h, 9, control_bg, 0.92);
+        const value_color = if (selected) accent else mixColor(bg, fg, 0.82);
+        if (kind == .toggle) {
+            const knob_d: f32 = @max(16.0, control_h - 12.0);
+            const knob_x = if (is_on) value_x + value_w - knob_d - 7 else value_x + 7;
+            renderRoundedQuadAlpha(knob_x, pill_y + (control_h - knob_d) / 2, knob_d, knob_d, knob_d / 2, if (is_on) accent else mixColor(bg, fg, 0.42), 0.96);
+            _ = renderTitlebarTextLimited(value, value_x + 12, rowTextY(pill_y, control_h), value_color, value_w - knob_d - 24);
+        } else {
+            _ = renderTitlebarTextLimited(value, value_x + 12, rowTextY(pill_y, control_h), value_color, value_w - 20 - trailing_w);
+            if (kind == .choice or kind == .action) {
+                renderTitlebarText(">", value_x + value_w - 18, rowTextY(pill_y, control_h), mixColor(bg, fg, 0.60));
+            }
+        }
         title_max_w = @max(1.0, value_x - title_x - 18);
     }
 
@@ -7058,7 +7118,7 @@ pub fn renderSettingsPage(window_height: f32, top_offset: f32, content_x: f32, c
             settings_page.SETTINGS_RESTORE_DEFAULTS_ROW => "Enter",
             else => "",
         };
-        renderSettingsRow(layout, window_height, row_index, title, value, focus == row);
+        renderSettingsRow(layout, window_height, row, row_index, title, value, focus == row);
     }
 
     // Scrollbar indicator when not all rows fit (short windows). The list is
@@ -7080,6 +7140,13 @@ pub fn renderSettingsPage(window_height: f32, top_offset: f32, content_x: f32, c
         const thumb_gl_y = @round(window_height - (track_top_px + thumb_offset) - thumb_h);
         ui_pipeline.fillQuadAlpha(sb_x, thumb_gl_y, sb_w, thumb_h, accent, 0.55);
     }
+
+    const footer_h = ui_patterns.workbenchFooterHeight(font.g_titlebar_cell_height);
+    const footer_top = ui_patterns.workbenchFooterTop(window_height, layout.page_top_px, footer_h);
+    const footer_y = @round(window_height - footer_top - footer_h);
+    ui_pipeline.fillQuadAlpha(layout.page_x, footer_y, layout.page_w, footer_h, mixColor(bg, fg, 0.030), 0.98);
+    ui_pipeline.fillQuadAlpha(layout.page_x, footer_y + footer_h - 1, layout.page_w, 1, border_color, 0.68);
+    renderTitlebarTextLimited(i18n.s().settings_workbench_footer, layout.content_x, rowTextY(footer_y, footer_h), muted_color, layout.content_w);
 }
 
 /// Mouse-wheel handling for the settings page. The list scrolls by moving the
