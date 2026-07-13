@@ -58,6 +58,7 @@ const feishu_reg_panel = @import("../feishu/registration_panel.zig");
 const session_launcher = @import("overlays/session_launcher.zig");
 const command_palette_state = @import("overlays/command_palette_state.zig");
 const command_palette_layout = @import("overlays/command_palette_layout.zig");
+const btw_conversation = @import("overlays/btw_conversation.zig");
 const close_confirm = @import("../close_confirm.zig");
 const close_confirm_state = @import("../ui/close_shortcut_confirm.zig");
 const weixin_qr_panel = @import("../weixin/qr_panel.zig");
@@ -129,6 +130,7 @@ fn overlayState() *overlay_state.OverlayState {
 /// accidental use safely reallocates fresh state instead of dangling.
 pub fn releaseThreadState() void {
     if (g_overlay_state) |s| {
+        s.deinit(AppWindow.g_allocator orelse std.heap.page_allocator);
         std.heap.page_allocator.destroy(s);
         g_overlay_state = null;
     }
@@ -178,6 +180,14 @@ fn launcherState() *session_launcher.State {
     return &overlayState().session;
 }
 
+fn btwState() *btw_conversation.State {
+    return &overlayState().btw;
+}
+
+fn whatsNewState() *overlay_state.WhatsNewState {
+    return &overlayState().whats_new;
+}
+
 fn commandPaletteState() *command_palette_state.State {
     return &overlayState().command_palette;
 }
@@ -224,8 +234,6 @@ const update_prompt_model = @import("overlays/update_prompt_model.zig");
 const UpdatePromptAction = update_prompt_model.UpdatePromptAction;
 const md = @import("../markdown_text.zig");
 const whats_new_model = @import("overlays/whats_new_model.zig");
-threadlocal var g_whats_new_visible: bool = false;
-threadlocal var g_whats_new_scroll: i64 = 0;
 threadlocal var g_integration_prompt_visible: bool = false;
 threadlocal var g_integration_prompt_scroll: i64 = 0;
 threadlocal var g_update_prompt_rect: ?DebugLineRect = null;
@@ -2179,6 +2187,91 @@ pub fn renderBrowserUrlBar(window_width: f32, window_height: f32, top_offset: f3
     }
 
     ui_pipeline.fillQuadAlpha(panel_x, bar_y, panel_w, 1, mixColor(bg, fg, 0.18), 0.55);
+}
+
+pub fn btwConversationVisible() bool {
+    return btwState().visible();
+}
+
+pub fn btwConversationSession() ?*ai_chat.Session {
+    const opaque_ptr = btwState().session orelse return null;
+    return @ptrCast(@alignCast(opaque_ptr));
+}
+
+pub fn openBtwConversation(source: *ai_chat.Session, initial_prompt: []const u8) void {
+    const allocator = AppWindow.g_allocator orelse return;
+    const session = source.createBtwSession(allocator, initial_prompt) catch {
+        showStatusToast("Could not open BTW conversation");
+        return;
+    };
+    btwState().set(session, struct {
+        fn deinit(opaque_ptr: *anyopaque) void {
+            const owned: *ai_chat.Session = @ptrCast(@alignCast(opaque_ptr));
+            owned.deinit();
+        }
+    }.deinit);
+}
+
+pub fn closeBtwConversation() void {
+    btwState().close();
+}
+
+pub fn btwConversationLayout(window_width: f32, top_offset: f32) btw_conversation.Layout {
+    return btw_conversation.layout(window_width, top_offset);
+}
+
+pub fn btwConversationHandleChar(codepoint: u21) AppWindow.UiEffect {
+    const session = btwConversationSession() orelse return .none;
+    session.handleChar(codepoint);
+    return .repaint;
+}
+
+pub fn btwConversationHandleKey(ev: input_key.KeyEvent, wrap_cols: usize) AppWindow.UiEffect {
+    const session = btwConversationSession() orelse return .none;
+    if (ev.key == .escape and !session.requestState().inflight) {
+        closeBtwConversation();
+        return .repaint;
+    }
+    session.handleKeyWithWrapCols(ev, wrap_cols);
+    return .repaint;
+}
+
+pub fn btwConversationHandleScroll(delta_y: f64) AppWindow.UiEffect {
+    const session = btwConversationSession() orelse return .none;
+    const delta: f32 = -@as(f32, @floatCast(delta_y)) * 72.0 / 120.0;
+    session.scrollBy(delta);
+    return .repaint;
+}
+
+pub fn renderBtwConversation(window_width: f32, window_height: f32, top_offset: f32) void {
+    const session = btwConversationSession() orelse return;
+    const layout = btw_conversation.layout(window_width, top_offset);
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const banner_y = @round(window_height - layout.banner_top_px - layout.banner_h);
+
+    ui_pipeline.fillQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.54);
+    ui_pipeline.fillQuadAlpha(layout.chat_x - 1, 0, layout.chat_w + 2, window_height - layout.banner_top_px + 1, mixColor(bg, accent, 0.32), 0.72);
+    ui_pipeline.fillQuad(layout.chat_x, banner_y, layout.chat_w, layout.banner_h, mixColor(bg, fg, 0.065));
+    renderTitlebarTextStrong("BTW · Temporary conversation", layout.chat_x + 18, rowTextY(banner_y, layout.banner_h), mixColor(fg, accent, 0.16));
+    const hint = "Isolated from the original context · Esc stops, then closes";
+    const hint_w = measureTitlebarText(hint);
+    if (hint_w + 420 < layout.chat_w) {
+        renderTitlebarText(hint, layout.chat_x + layout.chat_w - hint_w - 18, rowTextY(banner_y, layout.banner_h), mixColor(bg, fg, 0.56));
+    } else {
+        const compact_hint = "Esc";
+        renderTitlebarText(compact_hint, layout.chat_x + layout.chat_w - measureTitlebarText(compact_hint) - 18, rowTextY(banner_y, layout.banner_h), mixColor(bg, fg, 0.56));
+    }
+    AppWindow.assistant_conversation_renderer.render(
+        session,
+        window_width,
+        window_height,
+        layout.chat_top_px,
+        layout.chat_x,
+        layout.chat_w,
+        false,
+    );
 }
 
 /// Render the command center overlay.
@@ -7809,7 +7902,7 @@ test "overlays: SSH list filter backspace restores matching rows" {
 test "overlays: anyBlockingOverlayVisible reflects each modal overlay" {
     const saved_palette = commandPaletteState().visible;
     const saved_settings_visible = settingsState().visible;
-    const saved_whats_new = g_whats_new_visible;
+    const saved_whats_new = whatsNewState().visible;
     const saved_integration_prompt = g_integration_prompt_visible;
     const saved_confirms = overlayState().confirms;
     const saved_session = g_session_launcher_visible;
@@ -7821,7 +7914,7 @@ test "overlays: anyBlockingOverlayVisible reflects each modal overlay" {
     defer {
         commandPaletteState().visible = saved_palette;
         settingsState().visible = saved_settings_visible;
-        g_whats_new_visible = saved_whats_new;
+        whatsNewState().visible = saved_whats_new;
         g_integration_prompt_visible = saved_integration_prompt;
         overlayState().confirms = saved_confirms;
         g_session_launcher_visible = saved_session;
@@ -7835,7 +7928,7 @@ test "overlays: anyBlockingOverlayVisible reflects each modal overlay" {
     // Clear every blocking flag → nothing should report blocking.
     commandPaletteState().visible = false;
     settingsState().visible = false;
-    g_whats_new_visible = false;
+    whatsNewState().visible = false;
     g_integration_prompt_visible = false;
     overlayState().confirms = .{};
     g_session_launcher_visible = false;
@@ -7855,9 +7948,9 @@ test "overlays: anyBlockingOverlayVisible reflects each modal overlay" {
     try std.testing.expect(anyBlockingOverlayVisible());
     settingsState().visible = false;
 
-    g_whats_new_visible = true;
+    whatsNewState().visible = true;
     try std.testing.expect(anyBlockingOverlayVisible());
-    g_whats_new_visible = false;
+    whatsNewState().visible = false;
 
     g_integration_prompt_visible = true;
     try std.testing.expect(anyBlockingOverlayVisible());
@@ -8383,16 +8476,16 @@ fn whatsNewNotes() []const u8 {
 }
 
 pub fn showWhatsNew() void {
-    g_whats_new_scroll = 0;
-    g_whats_new_visible = true;
+    whatsNewState().scroll = 0;
+    whatsNewState().visible = true;
 }
 
 pub fn hideWhatsNew() void {
-    g_whats_new_visible = false;
+    whatsNewState().visible = false;
 }
 
 pub fn whatsNewVisible() bool {
-    return g_whats_new_visible;
+    return whatsNewState().visible;
 }
 
 /// True when a full-window GPU overlay is up that the native browser/Jupyter
@@ -8402,7 +8495,8 @@ pub fn whatsNewVisible() bool {
 /// webview while this holds so the command center, settings, confirm dialogs,
 /// etc. stay visible.
 pub fn anyBlockingOverlayVisible() bool {
-    return commandPaletteVisible() or
+    return btwConversationVisible() or
+        commandPaletteVisible() or
         settingsPageVisible() or
         sessionLauncherVisible() or
         whatsNewVisible() or
@@ -8444,22 +8538,22 @@ pub fn anyOverlayActive(now: i64) bool {
 }
 
 pub fn whatsNewHandleKey(ev: input_key.KeyEvent) void {
-    if (!g_whats_new_visible) return;
+    if (!whatsNewState().visible) return;
     switch (ev.key) {
         .escape, .enter => hideWhatsNew(),
-        .page_up => g_whats_new_scroll -= 10,
-        .page_down => g_whats_new_scroll += 10,
-        .arrow_up => g_whats_new_scroll -= 1,
-        .arrow_down => g_whats_new_scroll += 1,
-        .home => g_whats_new_scroll = 0,
-        .end => g_whats_new_scroll = std.math.maxInt(i32),
+        .page_up => whatsNewState().scroll -= 10,
+        .page_down => whatsNewState().scroll += 10,
+        .arrow_up => whatsNewState().scroll -= 1,
+        .arrow_down => whatsNewState().scroll += 1,
+        .home => whatsNewState().scroll = 0,
+        .end => whatsNewState().scroll = std.math.maxInt(i32),
         else => {},
     }
 }
 
 pub fn whatsNewHandleScroll(delta_y: f64) void {
-    if (!g_whats_new_visible) return;
-    g_whats_new_scroll += if (delta_y > 0) @as(i64, -3) else 3;
+    if (!whatsNewState().visible) return;
+    whatsNewState().scroll += if (delta_y > 0) @as(i64, -3) else 3;
 }
 
 fn openWhatsNewRelease() void {
@@ -8472,7 +8566,7 @@ fn openWhatsNewRelease() void {
 /// Returns true if the click was consumed by the modal (always true while open,
 /// so clicks never fall through to the terminal underneath).
 pub fn whatsNewExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_height: f32) bool {
-    if (!g_whats_new_visible) return false;
+    if (!whatsNewState().visible) return false;
     const layout = whatsNewLayout(window_width, window_height);
     const px: f32 = @floatCast(xpos);
     const py: f32 = @floatCast(ypos);
@@ -8644,7 +8738,7 @@ fn renderWhatsNewBody(
 }
 
 pub fn renderWhatsNew(window_width: f32, window_height: f32) void {
-    const fade = autoFade(.whats_new, g_whats_new_visible) orelse return;
+    const fade = autoFade(.whats_new, whatsNewState().visible) orelse return;
     ui_pipeline.g_ui_fade = fade;
     defer ui_pipeline.g_ui_fade = 1.0;
 
@@ -8711,8 +8805,8 @@ pub fn renderWhatsNew(window_width: f32, window_height: f32) void {
         const highlights = whats_new_model.highlightClauses(&highlights_buf, summary);
 
         const total = whatsNewHighlightsRows(highlights, wrap_cols) + whats_new_model.totalRows(body_notes, wrap_cols);
-        const scroll = whats_new_model.clampScroll(g_whats_new_scroll, total, layout.visible_rows);
-        g_whats_new_scroll = @intCast(scroll);
+        const scroll = whats_new_model.clampScroll(whatsNewState().scroll, total, layout.visible_rows);
+        whatsNewState().scroll = @intCast(scroll);
 
         var rows_state: WhatsNewRows = .{ .scroll = scroll };
         if (renderWhatsNewHighlights(layout, window_height, highlights, wrap_cols, line_h, &rows_state, heading, accent, body)) {

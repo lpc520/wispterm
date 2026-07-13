@@ -79,6 +79,8 @@ pub fn parseVisionEnabled(value: []const u8) bool {
 const REMOTE_SNAPSHOT_MAX_BYTES: usize = 24 * 1024;
 const INPUT_PROMPT_MAX_BYTES: usize = 64 * 1024;
 const SYSTEM_PROMPT_MAX_BYTES: usize = 16 * 1024;
+const BTW_PROMPT_MAX_BYTES: usize = 8 * 1024;
+const BTW_CONTEXT_MAX_BYTES: usize = 12 * 1024;
 const WORKING_DIR_MAX_BYTES: usize = 1024;
 /// 两次 ESC 间隔不超过此毫秒数时判定为"双击"，用于打开回溯选择器。
 const DOUBLE_ESC_WINDOW_MS: i64 = 400;
@@ -413,6 +415,7 @@ const DeferredAction = union(enum) {
     resume_picker,
     copilot_conversation_picker,
     model_switch_picker,
+    btw_overlay,
     export_markdown: MarkdownExportMode,
     copy_transcript: MarkdownExportMode,
 };
@@ -431,16 +434,17 @@ const BuiltinResult = struct {
 fn fireDeferredAction(session: *Session, action: DeferredAction) void {
     switch (action) {
         .none => {},
-        .resume_picker => if (g_session_resume_trigger) |t| t(),
-        .copilot_conversation_picker => if (g_copilot_picker_trigger) |t| t(),
+        .resume_picker => if (g_ui_triggers.session_resume) |t| t(),
+        .copilot_conversation_picker => if (g_ui_triggers.copilot_picker) |t| t(),
         // Targets the session that submitted `/model` (copilot sidebar OR a tab),
         // not the active tab — they can differ.
-        .model_switch_picker => if (g_model_switch_trigger) |t| t(session),
+        .model_switch_picker => if (g_ui_triggers.model_switch) |t| t(session),
+        .btw_overlay => if (g_ui_triggers.btw_overlay) |t| t(session),
         // Targets the session that submitted `/export` (copilot sidebar OR a tab),
         // not the active tab — they can differ.
-        .export_markdown => |mode| if (g_transcript_sink_triggers.export_markdown) |t| t(session, mode),
+        .export_markdown => |mode| if (g_ui_triggers.export_markdown) |t| t(session, mode),
         // Targets the session that submitted `/copy` (copilot sidebar OR a tab).
-        .copy_transcript => |mode| if (g_transcript_sink_triggers.copy) |t| t(session, mode),
+        .copy_transcript => |mode| if (g_ui_triggers.copy) |t| t(session, mode),
     }
 }
 
@@ -450,16 +454,15 @@ var g_access_rules_storage: ?ai_agent_access.AccessRules = null;
 var g_access_rules: ?*const ai_agent_access.AccessRules = null;
 var g_default_working_dir_buf: [WORKING_DIR_MAX_BYTES]u8 = undefined;
 var g_default_working_dir_len: usize = 0;
-var g_session_resume_trigger: ?*const fn () void = null;
-var g_copilot_picker_trigger: ?*const fn () void = null;
-/// Sinks for the rendered conversation Markdown: `/export` writes a file,
-/// `/copy` writes the clipboard. One struct to respect the g_* global ceiling.
-const TranscriptSinkTriggers = struct {
+const UiTriggers = struct {
+    session_resume: ?*const fn () void = null,
+    copilot_picker: ?*const fn () void = null,
+    model_switch: ?*const fn (*Session) void = null,
+    btw_overlay: ?*const fn (*Session) void = null,
     export_markdown: ?*const fn (*Session, MarkdownExportMode) void = null,
     copy: ?*const fn (*Session, MarkdownExportMode) void = null,
 };
-var g_transcript_sink_triggers: TranscriptSinkTriggers = .{};
-var g_model_switch_trigger: ?*const fn (*Session) void = null;
+var g_ui_triggers: UiTriggers = .{};
 threadlocal var g_dynamic_tool_specs: []ai_chat_protocol.DynamicToolSpec = &.{};
 threadlocal var g_dynamic_tool_specs_owned: bool = false;
 threadlocal var g_dynamic_binary_tools: []ai_chat_types.DynamicBinaryTool = &.{};
@@ -506,33 +509,40 @@ fn resolveSubagentProfileForRequest(allocator: std.mem.Allocator, agent_enabled:
 /// Wire the callback that `/resume` fires to open the agent history picker.
 /// Fired AFTER the session mutex unlocks (the picker lives in the app layer).
 pub fn setSessionResumeTrigger(cb: ?*const fn () void) void {
-    g_session_resume_trigger = cb;
+    g_ui_triggers.session_resume = cb;
 }
 
 /// Wire the callback that `/resume` fires in a Copilot sidebar session to open
 /// the Copilot conversation picker. Fired AFTER the session mutex unlocks.
 pub fn setCopilotPickerTrigger(cb: ?*const fn () void) void {
-    g_copilot_picker_trigger = cb;
+    g_ui_triggers.copilot_picker = cb;
 }
 
 /// Wire the callback that `/model` fires (after unlock) to either switch by the
 /// pending name or open the profile picker. Lives in the app layer.
 pub fn setModelSwitchTrigger(cb: ?*const fn (*Session) void) void {
-    g_model_switch_trigger = cb;
+    g_ui_triggers.model_switch = cb;
+}
+
+/// Wire the callback that opens the temporary `/btw` conversation overlay.
+/// Fired after the source session mutex unlocks; the callback reads and clears
+/// the pending prompt with `takePendingBtwPrompt`.
+pub fn setBtwOverlayTrigger(cb: ?*const fn (*Session) void) void {
+    g_ui_triggers.btw_overlay = cb;
 }
 
 /// Wire the callback that `/export [full|clean]` fires to write the conversation
 /// Markdown. Fired AFTER the session mutex unlocks, because the export reads the
 /// session under the SAME mutex (`allocMarkdownExport`) and would otherwise deadlock.
 pub fn setMarkdownExportTrigger(cb: ?*const fn (*Session, MarkdownExportMode) void) void {
-    g_transcript_sink_triggers.export_markdown = cb;
+    g_ui_triggers.export_markdown = cb;
 }
 
 /// Wire the callback that `/copy [full|clean]` fires to put the conversation
 /// Markdown on the clipboard. Fired AFTER the session mutex unlocks, because
 /// the copy reads the session under the SAME mutex (`allocMarkdownExport`).
 pub fn setTranscriptCopyTrigger(cb: ?*const fn (*Session, MarkdownExportMode) void) void {
-    g_transcript_sink_triggers.copy = cb;
+    g_ui_triggers.copy = cb;
 }
 threadlocal var g_tool_host: ?ToolHost = null;
 
@@ -977,12 +987,6 @@ fn parseBtwArg(input: []const u8) ?[]const u8 {
     return std.mem.trim(u8, prompt[tok_end..], " \t\r\n");
 }
 
-fn firstProgressLine(s: []const u8) []const u8 {
-    const trimmed = std.mem.trim(u8, s, " \t\r\n");
-    const end = std.mem.indexOfScalar(u8, trimmed, '\n') orelse trimmed.len;
-    return std.mem.trim(u8, trimmed[0..end], " \t\r\n");
-}
-
 const LoopTaskListScope = enum { session, all };
 
 fn taskOwnerLabel(v: ai_loop_store.TaskView) []const u8 {
@@ -1130,6 +1134,8 @@ pub const Session = struct {
     summary_thread: ?std.Thread = null,
     pending_model_switch_name_buf: [128]u8 = undefined,
     pending_model_switch_name_len: usize = 0,
+    pending_btw_prompt_buf: [BTW_PROMPT_MAX_BYTES]u8 = undefined,
+    pending_btw_prompt_len: usize = 0,
 
     pub const RequestState = struct {
         inflight: bool,
@@ -1476,6 +1482,81 @@ pub const Session = struct {
         const out = self.pending_model_switch_name_buf[0..self.pending_model_switch_name_len];
         self.pending_model_switch_name_len = 0;
         return out;
+    }
+
+    /// Return an owned copy of the prompt supplied after `/btw`, then clear the
+    /// pending slot. Copying under the lock keeps concurrent chatops input from
+    /// overwriting the prompt before the overlay consumes it.
+    pub fn takePendingBtwPrompt(self: *Session, allocator: std.mem.Allocator) ![]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const out = try allocator.dupe(u8, self.pending_btw_prompt_buf[0..self.pending_btw_prompt_len]);
+        self.pending_btw_prompt_len = 0;
+        return out;
+    }
+
+    /// Create the isolated chat session displayed by the `/btw` overlay. It
+    /// shares model credentials/configuration, but receives only a bounded
+    /// snapshot of this conversation and has tools disabled, so its turns can
+    /// never mutate or enter the source session's context.
+    pub fn createBtwSession(
+        self: *Session,
+        allocator: std.mem.Allocator,
+        initial_prompt: []const u8,
+    ) !*Session {
+        var child: *Session = undefined;
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            const turns = try allocator.alloc(ai_model_switch.TurnMessage, self.messages.items.len);
+            defer allocator.free(turns);
+            for (self.messages.items, 0..) |message, i| {
+                turns[i] = .{ .role = message.role, .content = message.content };
+            }
+            const snapshot = try ai_model_switch.buildSummaryUserContent(allocator, turns);
+            defer allocator.free(snapshot);
+            const snapshot_len = ai_model_switch.utf8SafeLen(snapshot, @min(snapshot.len, BTW_CONTEXT_MAX_BYTES));
+            const side_system_prompt = try std.fmt.allocPrint(
+                allocator,
+                "You are handling a temporary BTW side conversation while another assistant session continues independently. " ++
+                    "Answer concise questions using the source-session snapshot below. Do not claim that this side conversation changes, stops, or continues the source task. " ++
+                    "Do not execute tools. Reply in the user's language.\n\nSource status: {s}\n\nSource-session snapshot:\n{s}",
+                .{ self.status(), snapshot[0..snapshot_len] },
+            );
+            defer allocator.free(side_system_prompt);
+
+            child = try Session.initWithVision(
+                allocator,
+                "BTW",
+                self.baseUrl(),
+                self.apiKey(),
+                self.model(),
+                self.apiProtocolName(),
+                side_system_prompt,
+                self.thinkingConfigValue(),
+                self.reasoningEffort(),
+                self.streamConfigValue(),
+                "false",
+                self.visionConfigValue(),
+            );
+            errdefer child.deinit();
+            child.setMaxTokens(self.maxTokens());
+            child.copyTitle("BTW");
+            child.title_is_custom = true;
+            if (self.working_dir_len > 0) {
+                @memcpy(child.working_dir_buf[0..self.working_dir_len], self.working_dir_buf[0..self.working_dir_len]);
+                child.working_dir_len = self.working_dir_len;
+            }
+            if (self.acp_command.len > 0) child.acp_command = try allocator.dupe(u8, self.acp_command);
+        }
+
+        const prompt = std.mem.trim(u8, initial_prompt, " \t\r\n");
+        if (prompt.len > 0) {
+            child.appendInputText(prompt);
+            child.submit();
+        }
+        return child;
     }
 
     pub fn thinkingConfigValue(self: *const Session) []const u8 {
@@ -2563,22 +2644,9 @@ pub const Session = struct {
         self.scroll_px = 1_000_000;
     }
 
-    fn allocCurrentProgressLocked(self: *Session) ![]u8 {
-        var i = self.messages.items.len;
-        while (i > 0) : (i -= 1) {
-            const msg = self.messages.items[i - 1];
-            if (msg.role != .tool) continue;
-            const content = firstProgressLine(msg.content);
-            if (std.mem.startsWith(u8, content, "subagent:")) return self.allocator.dupe(u8, content);
-        }
-        const s = std.mem.trim(u8, self.status(), " \t\r\n");
-        if (s.len != 0 and !std.mem.eql(u8, s, "Ready")) return std.fmt.allocPrint(self.allocator, "Status: {s}", .{s});
-        return self.allocator.dupe(u8, "No active progress.");
-    }
-
     fn runBtwCommandLocked(self: *Session) ?BuiltinResult {
-        _ = parseBtwArg(self.input()) orelse return null;
-        return self.runBuiltinCommandLocked(.btw, "");
+        const arg = parseBtwArg(self.input()) orelse return null;
+        return self.runBuiltinCommandLocked(.btw, arg);
     }
 
     /// Thread-safe wrapper used by the tool layer (worker thread) to post a
@@ -3069,17 +3137,9 @@ pub const Session = struct {
                 result.suppress_output = true;
             },
             .btw => {
-                const text = self.allocCurrentProgressLocked() catch {
-                    self.setStatusLocked("Out of memory");
-                    result.suppress_output = true;
-                    return result;
-                };
-                defer self.allocator.free(text);
-                self.appendLocalToolMessageLocked(text) catch {
-                    self.setStatusLocked("Out of memory");
-                    result.suppress_output = true;
-                    return result;
-                };
+                self.pending_btw_prompt_len = @min(arg.len, self.pending_btw_prompt_buf.len);
+                @memcpy(self.pending_btw_prompt_buf[0..self.pending_btw_prompt_len], arg[0..self.pending_btw_prompt_len]);
+                result.deferred = .btw_overlay;
                 self.clearSubmittedInputLocked();
                 if (!self.request_inflight) self.setStatusLocked("Ready");
                 result.suppress_output = true;
@@ -5979,7 +6039,7 @@ test "ai chat enter submits slash commands instead of completing suggestions" {
     session.messages.deinit(allocator);
 }
 
-test "/btw emits local progress without adding user context" {
+test "/btw opens an isolated overlay without adding user context" {
     const allocator = std.testing.allocator;
     var session = Session{ .allocator = allocator };
     defer {
@@ -5996,6 +6056,24 @@ test "/btw emits local progress without adding user context" {
     session.request_thread = try std.Thread.spawn(.{}, Noop.run, .{});
     session.request_inflight = true;
 
+    const Hook = struct {
+        var seen: ?*Session = null;
+        var prompt_buf: [64]u8 = undefined;
+        var prompt_len: usize = 0;
+
+        fn cb(source: *Session) void {
+            seen = source;
+            const prompt = source.takePendingBtwPrompt(std.testing.allocator) catch return;
+            defer std.testing.allocator.free(prompt);
+            prompt_len = @min(prompt.len, prompt_buf.len);
+            @memcpy(prompt_buf[0..prompt_len], prompt[0..prompt_len]);
+        }
+    };
+    Hook.seen = null;
+    Hook.prompt_len = 0;
+    setBtwOverlayTrigger(Hook.cb);
+    defer setBtwOverlayTrigger(null);
+
     try session.messages.append(allocator, .{
         .role = .tool,
         .content = try allocator.dupe(u8, "subagent: running web_search"),
@@ -6005,10 +6083,9 @@ test "/btw emits local progress without adding user context" {
     session.submit();
 
     try std.testing.expectEqualStrings("", session.input());
-    try std.testing.expectEqual(@as(usize, 2), session.messages.items.len);
-    try std.testing.expectEqual(Role.tool, session.messages.items[1].role);
-    try std.testing.expectEqualStrings("subagent: running web_search", session.messages.items[1].content);
-    try std.testing.expect(!session.messages.items[1].persist_to_history);
+    try std.testing.expectEqual(@as(?*Session, &session), Hook.seen);
+    try std.testing.expectEqualStrings("当前进展", Hook.prompt_buf[0..Hook.prompt_len]);
+    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
 
     session.mutex.lock();
     defer session.mutex.unlock();
@@ -6018,6 +6095,46 @@ test "/btw emits local progress without adding user context" {
         allocator.free(reqs);
     }
     try std.testing.expectEqual(@as(usize, 0), reqs.len);
+}
+
+test "btw child session receives a bounded snapshot and disables tools" {
+    const allocator = std.testing.allocator;
+    const source = try Session.init(
+        allocator,
+        "Source",
+        "https://example.invalid",
+        "test-key",
+        "test-model",
+        "source system prompt",
+        "disabled",
+        "low",
+        "false",
+        "true",
+    );
+    defer source.deinit();
+    source.mutex.lock();
+    try source.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "original goal"),
+    });
+    try source.messages.append(allocator, .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "working on it"),
+    });
+    source.setStatusLocked("Running");
+    source.mutex.unlock();
+
+    const child = try source.createBtwSession(allocator, "");
+    defer child.deinit();
+
+    try std.testing.expectEqualStrings("BTW", child.title());
+    try std.testing.expectEqualStrings("test-model", child.model());
+    try std.testing.expect(!child.agent_enabled);
+    try std.testing.expectEqual(@as(usize, 0), child.messages.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, child.systemPrompt(), "Source status: Running") != null);
+    try std.testing.expect(std.mem.indexOf(u8, child.systemPrompt(), "User: original goal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, child.systemPrompt(), "Assistant: working on it") != null);
+    try std.testing.expectEqual(@as(usize, 2), source.messages.items.len);
 }
 
 test "/rewind via submit opens picker without adding transcript noise" {
