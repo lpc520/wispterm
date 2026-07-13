@@ -217,14 +217,26 @@ fn renderDigestNotification(draw: DrawContext, session: *const memory_center.Ses
         .skipped => .{ 1.0, 0.72, 0.28 },
     };
     const pad: f32 = 12;
-    const h = draw.cell_h + pad;
-    const w = @min(layout.detail_w - pad * 2, 460);
+    // Digest status belongs to the workbench, not only the narrow detail
+    // column. Borrow the list + detail span so progress and result messages
+    // keep their full wording instead of disappearing at the right edge.
+    const left = layout.list_x + pad;
+    const available_w = layout.detail_x + layout.detail_w - left - pad;
+    const w = @min(640.0, available_w);
     if (w <= 0) return;
+    const text_w = w - pad * 2;
+    const rows = @max(@as(usize, 1), wrappedLineCount(notification.message, text_w, draw.glyphAdvance));
+    const line_h = draw.cell_h + 3;
+    const h = @as(f32, @floatFromInt(rows)) * line_h + pad * 2;
     const x = layout.detail_x + layout.detail_w - w - pad;
     const y_top = @max(top + 4, content_bottom - h - pad);
     draw.fillQuadAlpha(x, yFromTop(window_height, y_top, h), w, h, mixColor(draw.bg, accent, 0.16), 0.96);
     draw.fillQuad(x, yFromTop(window_height, y_top, h), 3, h, accent);
-    _ = draw.renderTextLimited(notification.message, x + pad, yTextFromTop(draw, window_height, y_top + 6), accent, w - pad * 2);
+    var it = LineWrap{ .text = notification.message, .max_w = text_w, .advance = draw.glyphAdvance };
+    var row: usize = 0;
+    while (it.next()) |line| : (row += 1) {
+        _ = draw.renderTextLimited(line, x + pad, yTextFromTop(draw, window_height, y_top + pad + @as(f32, @floatFromInt(row)) * line_h), accent, text_w);
+    }
 }
 
 fn renderList(
