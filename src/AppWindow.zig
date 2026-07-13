@@ -197,6 +197,25 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
             }
         }
     }.cb);
+    // `/btw [question]` opens a transient side conversation cloned from the
+    // submitting session. The overlay owns that clone; the source stays intact.
+    ai_chat.setBtwOverlayTrigger(struct {
+        fn cb(source: *ai_chat.Session) void {
+            const app_allocator = g_allocator orelse return;
+            const prompt = source.takePendingBtwPrompt(app_allocator) catch {
+                overlays.showStatusToast("Could not open BTW conversation");
+                return;
+            };
+            defer app_allocator.free(prompt);
+            if (overlays.btwConversationSession() == source) {
+                source.appendLocalToolMessage("Already in the BTW conversation.");
+                applyUiEffect(.repaint);
+                return;
+            }
+            overlays.openBtwConversation(source, prompt);
+            applyUiEffect(.repaint);
+        }
+    }.cb);
     app.maybeStartStartupUpdateCheck();
 
     try ensureGlobalAgentHistoryStore(allocator);
@@ -3993,8 +4012,7 @@ fn clearUiStateOnTabChange() void {
     syncVisibleFileExplorerForActiveTab(false);
     syncActiveSurfaceCaches();
     requestImmediateLayoutResize();
-    g_force_rebuild = true;
-    g_cells_valid = false;
+    applyUiEffect(.repaint);
 }
 
 /// Convert the active surface's CWD from a WSL guest path to a platform-native path.
@@ -5051,6 +5069,7 @@ fn renderResizeFrame(width: i32, height: i32) void {
     overlays.renderMcpServers(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     weixin_qr_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     feishu_reg_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+    overlays.renderBtwConversation(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderDebugOverlay(@floatFromInt(fb_width));
     overlays.renderCloseShortcutConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
@@ -6321,6 +6340,9 @@ fn clearVisibleSurfaceDirty() void {
 }
 
 fn aiStreamingActive() bool {
+    if (overlays.btwConversationSession()) |session| {
+        if (session.requestState().inflight) return true;
+    }
     if (activeAiChat()) |session| {
         if (session.request_inflight) return true;
     }
@@ -6563,6 +6585,17 @@ const ImeCaret = struct {
 };
 
 fn syncImeCaretPosition(win: *window_backend.Window, split_count: usize) void {
+    if (overlays.btwConversationSession()) |session| {
+        if (win.ime_composing) return;
+        const size = window_backend.clientSize(win);
+        const layout = overlays.btwConversationLayout(
+            @floatFromInt(size.width),
+            currentTitlebarHeight(),
+        );
+        syncAiChatImeCaret(win, session, layout.chat_x, layout.chat_w);
+        return;
+    }
+
     // The command palette is a modal overlay on top of every tab; anchor the IME
     // caret to its text filter, not the underlying terminal/AI-chat cursor.
     if (overlays.commandPaletteVisible()) {
@@ -7886,6 +7919,7 @@ fn runMainLoop(self: *AppWindow) !void {
         overlays.renderMcpServers(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         weixin_qr_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         feishu_reg_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+        overlays.renderBtwConversation(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderDebugOverlay(@floatFromInt(fb_width));
         overlays.renderCloseShortcutConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));

@@ -31,9 +31,9 @@ Structural debt is frozen mechanically by source-scanning ratchet tests (the sam
 | Guard | Freezes | Today's ceiling | Escape hatch |
 |---|---|---|---|
 | `file_size_guard` | lines in any `src/**/*.zig` | < **10,000** (also `zig build check-sizes`) | split by responsibility; never raise the limit |
-| `global_state_guard` | top-level `g_*` / `threadlocal` in the watched integration/session files | AppWindow **67**, input **52**, overlays **39**, assistant/conversation/session **20** | put new state in a state struct (`appwindow/state.zig`, …) |
+| `global_state_guard` | top-level `g_*` / `threadlocal` in the watched integration/session files | AppWindow **66**, input **49**, overlays **33**, assistant/conversation/session **16** | put new state in a state struct (`appwindow/state.zig`, …) |
 | `import_hub_guard` | `pub const X = @import(...)` re-exports in `AppWindow.zig` | **17** | import the real module directly, not via `AppWindow.X` |
-| `side_effect_guard` | direct `g_force_rebuild` / `g_cells_valid` writes in the watched integration/session files | AppWindow **57**, input **81**, overlays **12**, assistant/conversation/session **0** | return a `UiEffect`, land it through `AppWindow.applyUiEffect` |
+| `side_effect_guard` | direct `g_force_rebuild` / `g_cells_valid` writes in the watched integration/session files | AppWindow **45**, input **81**, overlays **10**, assistant/conversation/session **0** | return a `UiEffect`, land it through `AppWindow.applyUiEffect` |
 
 The 10,000-line guard is a **runaway tripwire, not a health metric**: `check-sizes` prevents uncontrolled growth, it does not certify architectural health. A file under it can still be tangled; treat any file over **5,000 lines** as a signal to review responsibility, dependency direction, state ownership, and test boundaries. The boundary ratchets — not the line count — are the primary enforcement mechanism.
 
