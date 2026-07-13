@@ -173,6 +173,54 @@ test "input: command palette shortcut toggles command center" {
     try std.testing.expect(!overlays.commandPaletteVisible());
 }
 
+test "input: btw overlay owns text input and Escape closes it" {
+    try skipUnlessInputRendererShard();
+    const allocator = std.testing.allocator;
+    const previous_allocator = AppWindow.g_allocator;
+    defer AppWindow.g_allocator = previous_allocator;
+    AppWindow.g_allocator = allocator;
+
+    const source = try AppWindow.ai_chat.Session.init(
+        allocator,
+        "Source",
+        "https://example.invalid",
+        "",
+        "test-model",
+        "system",
+        "disabled",
+        "low",
+        "false",
+        "false",
+    );
+    defer source.deinit();
+    defer overlays.closeBtwConversation();
+
+    overlays.openBtwConversation(source, "");
+    try std.testing.expect(overlays.btwConversationVisible());
+    const child = overlays.btwConversationSession().?;
+
+    handleChar(.{ .codepoint = 'h' });
+    try std.testing.expectEqualStrings("h", child.input());
+
+    handleKey(.{
+        .key_code = platform_input.key_enter,
+        .ctrl = false,
+        .shift = false,
+        .alt = false,
+        .super = false,
+    });
+    try std.testing.expect(std.mem.startsWith(u8, child.status(), "Missing API key"));
+
+    handleKey(.{
+        .key_code = platform_input.key_escape,
+        .ctrl = false,
+        .shift = false,
+        .alt = false,
+        .super = false,
+    });
+    try std.testing.expect(!overlays.btwConversationVisible());
+}
+
 test "input: browser toolbar has a refresh action entrypoint" {
     try skipUnlessInputRendererShard();
     const info = @typeInfo(@TypeOf(refreshBrowserPanel)).@"fn";
@@ -476,10 +524,28 @@ test "input: command center child escape returns to command center" {
 test "input: settings page arrow navigation requests a repaint" {
     try skipUnlessInputRendererShard();
     const previous_keybinds = AppWindow.g_keybinds;
-    defer AppWindow.g_keybinds = previous_keybinds;
-    defer overlays.settingsPageClose();
+    const previous_allocator = AppWindow.g_allocator;
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    const previous_should_close = AppWindow.g_should_close;
+    var settings_tab = tab.TabState{ .kind = .settings, .tree = .empty };
+    defer {
+        overlays.settingsPageClose();
+        AppWindow.g_keybinds = previous_keybinds;
+        AppWindow.g_allocator = previous_allocator;
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+        AppWindow.g_should_close = previous_should_close;
+    }
 
     AppWindow.g_keybinds = keybind.Set.defaults();
+    AppWindow.g_allocator = std.testing.allocator;
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tabs[0] = &settings_tab;
+    tab.g_tab_count = 1;
+    active_tab_state.g_active_tab = 0;
     overlays.settingsPageOpen();
     try std.testing.expect(overlays.settingsPageVisible());
 
@@ -494,10 +560,28 @@ test "input: settings page arrow navigation requests a repaint" {
 test "input: settings page dispatchKey returns repaint effect" {
     try skipUnlessInputRendererShard();
     const previous_keybinds = AppWindow.g_keybinds;
-    defer AppWindow.g_keybinds = previous_keybinds;
-    defer overlays.settingsPageClose();
+    const previous_allocator = AppWindow.g_allocator;
+    const previous_tabs = tab.g_tabs;
+    const previous_count = tab.g_tab_count;
+    const previous_active = active_tab_state.g_active_tab;
+    const previous_should_close = AppWindow.g_should_close;
+    var settings_tab = tab.TabState{ .kind = .settings, .tree = .empty };
+    defer {
+        overlays.settingsPageClose();
+        AppWindow.g_keybinds = previous_keybinds;
+        AppWindow.g_allocator = previous_allocator;
+        tab.g_tabs = previous_tabs;
+        tab.g_tab_count = previous_count;
+        active_tab_state.g_active_tab = previous_active;
+        AppWindow.g_should_close = previous_should_close;
+    }
 
     AppWindow.g_keybinds = keybind.Set.defaults();
+    AppWindow.g_allocator = std.testing.allocator;
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tabs[0] = &settings_tab;
+    tab.g_tab_count = 1;
+    active_tab_state.g_active_tab = 0;
     overlays.settingsPageOpen();
 
     const effect = dispatchKey(arrow_down_event);
@@ -1861,7 +1945,11 @@ fn weixinQrPanelConsumesChar() bool {
 pub threadlocal var g_selecting: bool = false; // True while mouse button is held
 pub threadlocal var g_click_x: f64 = 0; // X position of initial click (for threshold calculation)
 pub threadlocal var g_click_y: f64 = 0; // Y position of initial click
-var g_selection_changed_for_copy: bool = false;
+const RuntimeState = struct {
+    selection_changed_for_copy: bool = false,
+    left_click_tracker: click_tracker.ClickTracker = .{},
+};
+threadlocal var g_runtime_state: RuntimeState = .{};
 
 // Terminal mouse reporting drag state. When a press is delivered to the PTY
 // (the focused program enabled mouse tracking and Shift wasn't held), the
@@ -1872,7 +1960,6 @@ var g_selection_changed_for_copy: bool = false;
 // input/mouse_dispatch.zig as a pure, std-only helper; input.zig owns the one
 // instance and supplies the I/O (report target, PTY write, focus).
 threadlocal var g_mouse_report: mouse_dispatch.TerminalMouseReportState(*Surface) = .{};
-threadlocal var g_left_click_tracker: click_tracker.ClickTracker = .{};
 const MULTI_CLICK_INTERVAL_MS: i64 = 500;
 const MAX_SELECTION_COLS: usize = 4096;
 
@@ -1963,7 +2050,6 @@ pub threadlocal var g_browser_resize_hover: bool = false; // Mouse is over the e
 pub threadlocal var g_browser_resize_dragging: bool = false; // Currently dragging the browser edge
 pub threadlocal var g_ai_copilot_resize_hover: bool = false; // Mouse is over the AI copilot left edge
 pub threadlocal var g_ai_copilot_resize_dragging: bool = false; // Currently dragging the AI copilot edge
-pub threadlocal var g_url_open_mode: link_open.Mode = .embedded;
 
 /// Whether the AI copilot sidebar currently owns keyboard/mouse focus. Set by
 /// AppWindow.toggleAiCopilot; full key/mouse routing lands in a later task.
@@ -2186,7 +2272,7 @@ pub fn toggleBrowserPanel() void {
     const allocator = AppWindow.g_allocator orelse return;
     const parent = AppWindow.currentNativeHandle();
     const surface = AppWindow.activeSurface();
-    if (g_url_open_mode == .system_browser and !browser_panel.isVisibleForActiveTab()) {
+    if (link_open.current_mode == .system_browser and !browser_panel.isVisibleForActiveTab()) {
         const target = browser_panel.externalUrlForSurface(allocator, browser_panel.DEFAULT_URL, surface) orelse return;
         defer allocator.free(target);
         _ = platform_open_url.open(allocator, .{ .url = target });
@@ -2719,6 +2805,13 @@ fn handleChar(ev: platform_input.CharEvent) void {
 
 fn dispatchChar(ev: platform_input.CharEvent) ui_effect.UiEffect {
     overlays.startupShortcutsDismiss();
+    if (overlays.btwConversationVisible()) {
+        if (!ev.ctrl and !ev.alt) {
+            AppWindow.resetCursorBlink();
+            return overlays.btwConversationHandleChar(ev.codepoint);
+        }
+        return .consumed_only;
+    }
     if (overlays.sessionLauncherVisible()) {
         if (!ev.ctrl and !ev.alt) {
             overlays.sessionLauncherInsertChar(ev.codepoint);
@@ -3138,6 +3231,35 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
     const action = configuredAction(ev);
     const is_close_shortcut = actionIs(action, .close_panel_or_tab);
     if (!is_close_shortcut and !isModifierKey(ev.key_code)) close_confirm_state.clear();
+    if (overlays.btwConversationVisible()) {
+        const session = overlays.btwConversationSession() orelse return .consumed_only;
+        if (actionIs(action, .paste)) {
+            pasteFromClipboardIntoAiChat(session);
+            return input_effects.repaint();
+        }
+        if (actionIs(action, .paste_image)) {
+            pasteImageIntoAiChat(session);
+            return input_effects.repaint();
+        }
+        const mod = ev.ctrl or ev.super;
+        if (mod and !ev.alt and ev.key_code == 0x41) {
+            session.selectAll();
+            return input_effects.repaint();
+        }
+        if (mod and !ev.alt and ev.key_code == 0x43) {
+            copyAiChatToClipboard(session);
+            return .consumed_only;
+        }
+        if (mod and !ev.alt and ev.key_code == 0x58) {
+            copyAiChatCutToClipboard(session);
+            return input_effects.repaint();
+        }
+        if (isAiChatKey(ev)) {
+            AppWindow.resetCursorBlink();
+            return overlays.btwConversationHandleKey(key_event, btwInputWrapCols());
+        }
+        return .consumed_only;
+    }
     if (overlays.sessionLauncherVisible()) {
         if (actionIs(action, .paste)) {
             return if (pasteClipboardIntoSessionLauncher()) .repaint else .none;
@@ -3803,6 +3925,16 @@ fn aiChatInputWrapCols() usize {
     const ww: f32 = @floatFromInt(size.width);
     const panel_w = @max(1.0, ww - AppWindow.leftPanelsWidth() - AppWindow.rightPanelsWidth());
     return AppWindow.assistant_conversation_renderer.inputWrapColumns(panel_w);
+}
+
+fn btwInputWrapCols() usize {
+    const win = AppWindow.g_window orelse return std.math.maxInt(usize);
+    const size = clientSize(win);
+    const layout = overlays.btwConversationLayout(
+        @floatFromInt(size.width),
+        @floatCast(titlebarHeight()),
+    );
+    return AppWindow.assistant_conversation_renderer.inputWrapColumns(layout.chat_w);
 }
 
 /// Wrap columns for the AI copilot sidebar's composer. Mirrors
@@ -4536,18 +4668,18 @@ const TerminalTokenGrid = struct {
 };
 
 fn markSelectionChanged() void {
-    g_selection_changed_for_copy = true;
+    g_runtime_state.selection_changed_for_copy = true;
     requestInputRepaint();
 }
 
 fn nextLeftClickCount(xpos: f64, ypos: f64) u8 {
     const now = std.time.milliTimestamp();
     const max_distance: f64 = @floatCast(@max(font.cell_width, font.cell_height));
-    return g_left_click_tracker.register(xpos, ypos, now, max_distance, MULTI_CLICK_INTERVAL_MS);
+    return g_runtime_state.left_click_tracker.register(xpos, ypos, now, max_distance, MULTI_CLICK_INTERVAL_MS);
 }
 
 fn resetLeftClickCount() void {
-    g_left_click_tracker.reset();
+    g_runtime_state.left_click_tracker.reset();
 }
 
 fn readViewportRowLocked(surface: *Surface, row: usize, buf: *[MAX_SELECTION_COLS]u21) []const u21 {
@@ -4896,11 +5028,11 @@ fn openUrl(surface: *Surface, url: []const u8) bool {
 
     const handle = AppWindow.currentNativeHandle();
     const embedded_available = browser_panel.embeddedBrowserAvailable();
-    const destination = link_open.destinationForUrlClick(embedded_available, g_url_open_mode);
+    const destination = link_open.destinationForUrlClick(embedded_available, link_open.current_mode);
     preview_diagnostics.debug("url", &.{
         .{ .key = "stage", .value = "open" },
         .{ .key = "launch", .value = @tagName(surface.launch_kind) },
-        .{ .key = "mode", .value = @tagName(g_url_open_mode) },
+        .{ .key = "mode", .value = @tagName(link_open.current_mode) },
         .{ .key = "embedded_available", .value = if (embedded_available) "true" else "false" },
         .{ .key = "destination", .value = @tagName(destination) },
         .{ .key = "target", .value = target },
@@ -5380,6 +5512,7 @@ fn openInEditorAtRightClick(ev: platform_input.MouseButtonEvent) bool {
 
 fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
     if (ev.action == .press) close_confirm_state.clear();
+    if (overlays.btwConversationVisible()) return;
     if (overlays.whatsNewVisible()) {
         if (ev.button == .left and ev.action == .press) {
             const win = AppWindow.g_window orelse return;
@@ -5453,22 +5586,6 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
             const ypos: f64 = @floatFromInt(ev.y);
             _ = overlays.restoreDefaultsConfirmExecuteAt(xpos, ypos, @floatFromInt(fb.width), @floatFromInt(fb.height));
             requestInputRepaint();
-        }
-        return;
-    }
-    if (overlays.settingsPageVisible()) {
-        if (ev.button == .left and ev.action == .press) {
-            const win = AppWindow.g_window orelse return;
-            const fb = window_backend.framebufferSize(win);
-            const w_f: f32 = @floatFromInt(fb.width);
-            const h_f: f32 = @floatFromInt(fb.height);
-            const top_offset: f32 = @floatCast(titlebarHeight());
-            const xpos: f64 = @floatFromInt(ev.x);
-            const ypos: f64 = @floatFromInt(ev.y);
-            if (overlays.settingsPageExecuteAt(xpos, ypos, w_f, h_f, top_offset)) return;
-            if (!overlays.settingsPageContainsPoint(xpos, ypos, w_f, h_f, top_offset)) {
-                overlays.settingsPageClose();
-            }
         }
         return;
     }
@@ -5646,7 +5763,7 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
         const titlebar_h: f64 = titlebarHeight();
 
         if (ev.action == .press) {
-            g_selection_changed_for_copy = false;
+            g_runtime_state.selection_changed_for_copy = false;
 
             // Commit rename on any click
             if (tab.g_tab_rename_active) tab.commitTabRename();
@@ -5722,6 +5839,23 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
 
             if (tab.g_sidebar_visible and xpos < @as(f64, @floatCast(titlebar.sidebarWidth()))) {
                 handleSidebarPress(xpos, ypos);
+                return;
+            }
+
+            if (overlays.settingsPageVisible()) {
+                const win = AppWindow.g_window orelse return;
+                const fb = window_backend.framebufferSize(win);
+                const content_x = AppWindow.leftPanelsWidth();
+                const content_width = @max(1, @as(f32, @floatFromInt(fb.width)) - content_x - AppWindow.rightPanelsWidthForWindow(fb.width));
+                _ = overlays.settingsPageExecuteAt(
+                    xpos,
+                    ypos,
+                    @floatFromInt(fb.height),
+                    @floatCast(titlebarHeight()),
+                    content_x,
+                    content_width,
+                );
+                requestInputRepaint();
                 return;
             }
 
@@ -6236,10 +6370,10 @@ fn handleMouseButton(ev: platform_input.MouseButtonEvent) void {
                 }
                 return;
             }
-            if (AppWindow.g_copy_on_select and g_selection_changed_for_copy and activeTerminalSelectionExists()) {
+            if (AppWindow.g_copy_on_select and g_runtime_state.selection_changed_for_copy and activeTerminalSelectionExists()) {
                 copySelectionToClipboard();
             }
-            g_selection_changed_for_copy = false;
+            g_runtime_state.selection_changed_for_copy = false;
             g_selecting = false;
         }
     }
@@ -6404,6 +6538,10 @@ fn updateAiTranscriptSelectionDrag(chat: *AppWindow.ai_chat.Session, xpos: f64, 
 fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
     const xpos: f64 = @floatFromInt(ev.x);
     const ypos: f64 = @floatFromInt(ev.y);
+    if (overlays.btwConversationVisible()) {
+        platform_cursor.set(.arrow);
+        return;
+    }
     if (g_sidebar_resize_dragging) {
         applySidebarWidthFromMouse(xpos);
         platform_cursor.set(.size_we);
@@ -6898,6 +7036,10 @@ fn reportMouseMotion(surface: *Surface, button: mouse_report.Button, ev: platfor
 
 fn handleMouseWheel(ev: platform_input.MouseWheelEvent) void {
     overlays.startupShortcutsDismiss();
+    if (overlays.btwConversationVisible()) {
+        applyInputEffect(overlays.btwConversationHandleScroll(@floatFromInt(ev.delta)));
+        return;
+    }
     if (overlays.whatsNewVisible()) {
         overlays.whatsNewHandleScroll(@floatFromInt(ev.delta));
         requestInputRebuild();

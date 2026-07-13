@@ -296,15 +296,15 @@ pub const slash_command_entries = [_]SlashCommandEntry{
         .action = .model_switch,
     },
     .{
-        .suggestion = .{ .command = "/btw", .description = "show current progress without adding context" },
+        .suggestion = .{ .command = "/btw", .description = "open an isolated side conversation" },
         .action = .btw,
     },
     .{
-        .suggestion = .{ .command = "/verbos", .description = "show detailed current progress" },
+        .suggestion = .{ .command = "/verbos", .description = "open an isolated side conversation" },
         .action = .btw,
     },
     .{
-        .suggestion = .{ .command = "/verbose", .description = "show detailed current progress" },
+        .suggestion = .{ .command = "/verbose", .description = "open an isolated side conversation" },
         .action = .btw,
     },
 };

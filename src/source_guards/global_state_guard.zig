@@ -23,15 +23,12 @@ const Frozen = struct {
 };
 
 const monoliths = [_]Frozen{
-    // Ceilings re-tightened to the current actual after the adoption passes.
-    // input.zig dropped 73->50 via action/query API adoption;
-    // overlays.zig dropped 47->39 by moving command-palette fields into
-    // OverlayState. AppWindow (67) and assistant/conversation/session.zig (20)
-    // are at their actual.
-    .{ .name = "AppWindow.zig", .source = @embedFile("../AppWindow.zig"), .ceiling = 67 },
-    .{ .name = "input.zig", .source = @embedFile("../input.zig"), .ceiling = 50 },
-    .{ .name = "renderer/overlays.zig", .source = @embedFile("../renderer/overlays.zig"), .ceiling = 39 },
-    .{ .name = "assistant/conversation/session.zig", .source = @embedFile("../assistant/conversation/session.zig"), .ceiling = 20 },
+    // Ceilings re-tightened to the current actual after the settings-tab and
+    // `/btw` adoption passes grouped input, conversation, and overlay state.
+    .{ .name = "AppWindow.zig", .source = @embedFile("../AppWindow.zig"), .ceiling = 66 },
+    .{ .name = "input.zig", .source = @embedFile("../input.zig"), .ceiling = 48 },
+    .{ .name = "renderer/overlays.zig", .source = @embedFile("../renderer/overlays.zig"), .ceiling = 33 },
+    .{ .name = "assistant/conversation/session.zig", .source = @embedFile("../assistant/conversation/session.zig"), .ceiling = 16 },
 };
 
 fn globalCount(source: []const u8) usize {
