@@ -1,7 +1,8 @@
 //! Pure layout math for the full-page Settings tab.
 //!
-//! The page uses the same two-column structure as Codex settings: a compact
-//! category rail on the left and a centered settings card on the right.
+//! The page uses a full workbench structure: a compact category rail on the
+//! left and an aligned settings list in the content region. The list is not a
+//! floating card; Settings is a persistent tab rather than a nested dialog.
 
 const std = @import("std");
 const ui_patterns = @import("../ui_patterns.zig");
@@ -133,8 +134,11 @@ pub fn compute(input: Input) Layout {
     const nav_w = @round(@min(250.0, @max(min_nav_w, page_w * 0.23)));
     const main_w = @max(1.0, page_w - nav_w);
     const side_pad: f32 = if (main_w < 560) 20 else 44;
-    const content_w = @max(1.0, @min(900.0, main_w - side_pad * 2));
-    const content_x = @round(input.content_x + nav_w + @max(side_pad, (main_w - content_w) / 2));
+    // Keep the settings readable on ultra-wide displays without centering a
+    // card inside the page. Anchoring this column to the rail makes the page
+    // read as a workbench and leaves deliberate expansion space on the right.
+    const content_w = @max(1.0, @min(1060.0, main_w - side_pad * 2));
+    const content_x = @round(input.content_x + nav_w + side_pad);
     const row_h = settingsRowHeight(input.cell_height);
     const header_h = @round(@max(104.0, textHeight(input.cell_height) * 2.0 + 56.0));
     const bottom_pad: f32 = 24;
@@ -165,7 +169,7 @@ pub fn compute(input: Input) Layout {
     };
 }
 
-test "settings tab layout reserves a category rail and centered content" {
+test "settings tab layout reserves a category rail and aligned content" {
     const layout = compute(.{
         .window_height = 900,
         .top_offset = 40,
@@ -178,8 +182,8 @@ test "settings tab layout reserves a category rail and centered content" {
     });
 
     try std.testing.expect(layout.nav_w >= 190);
-    try std.testing.expect(layout.content_x >= layout.page_x + layout.nav_w);
-    try std.testing.expect(layout.content_w <= 900);
+    try std.testing.expectEqual(layout.page_x + layout.nav_w + 44, layout.content_x);
+    try std.testing.expect(layout.content_w <= 1060);
     try std.testing.expectEqual(@as(?usize, 1), layout.categoryAt(layout.page_x + 20, layout.nav_item_top_px + layout.nav_item_h + 2));
 }
 

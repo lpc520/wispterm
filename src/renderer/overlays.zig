@@ -7028,7 +7028,6 @@ pub fn renderSettingsPage(window_height: f32, top_offset: f32, content_x: f32, c
     const bg = AppWindow.g_theme.background;
     const fg = AppWindow.g_theme.foreground;
     const accent = AppWindow.g_theme.cursor_color;
-    const panel_color = mixColor(bg, fg, 0.042);
     const border_color = mixColor(bg, fg, 0.16);
     const muted_color = mixColor(bg, fg, 0.58);
 
@@ -7057,11 +7056,6 @@ pub fn renderSettingsPage(window_height: f32, top_offset: f32, content_x: f32, c
     const subtitle_y = textYFromTop(window_height, layout.page_top_px + 28 + overlayLineHeight());
     renderTitlebarText(settingsCategoryLabel(state.category), layout.content_x, page_title_y, mixColor(fg, accent, 0.10));
     renderTitlebarTextLimited(i18n.s().settings_subtitle, layout.content_x, subtitle_y, muted_color, layout.content_w);
-
-    const card_h = layout.row_h * @as(f32, @floatFromInt(layout.visible_rows));
-    const card_y = @round(window_height - layout.row_top_px - card_h);
-    renderRoundedQuadAlpha(layout.content_x - 1, card_y - 1, layout.content_w + 2, card_h + 2, 11, border_color, 0.66);
-    renderRoundedQuadAlpha(layout.content_x, card_y, layout.content_w, card_h, 10, panel_color, 0.96);
 
     loadAiProfiles();
     const ai_default_value = if (assistantProfiles().profile_count > 0)
