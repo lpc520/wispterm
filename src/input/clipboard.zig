@@ -621,14 +621,13 @@ test "encodeImageBase64 produces standard base64" {
     try std.testing.expectEqualStrings("QUJD", out);
 }
 
-/// Ctrl+Shift+V target when an AI chat composer is focused: read a clipboard
-/// image, and either attach it to the composer (vision models) or drop it with a
-/// log + toast (non-vision models / oversized images).
-pub fn pasteImageIntoAiChat(chat: *AppWindow.ai_chat.Session) void {
-    const allocator = AppWindow.g_allocator orelse return;
-    const owner = clipboardOwner() orelse return;
+/// Returns false only when the clipboard does not contain an image, allowing
+/// Ctrl+Shift+V to fall back to ordinary text paste.
+pub fn pasteImageIntoAiChat(chat: *AppWindow.ai_chat.Session) bool {
+    const allocator = AppWindow.g_allocator orelse return false;
+    const owner = clipboardOwner() orelse return false;
 
-    const image_path = platform_clipboard.readImageAsPngTemp(allocator, owner) orelse return;
+    const image_path = platform_clipboard.readImageAsPngTemp(allocator, owner) orelse return false;
     defer allocator.free(image_path);
     // The temp PNG belongs to us once read; remove it either way.
     defer std.fs.deleteFileAbsolute(image_path) catch {};
@@ -636,7 +635,7 @@ pub fn pasteImageIntoAiChat(chat: *AppWindow.ai_chat.Session) void {
     const max_bytes = AppWindow.ai_chat.MAX_PASTED_IMAGE_BYTES;
     const bytes = std.fs.cwd().readFileAlloc(allocator, image_path, max_bytes + 1) catch |err| {
         std.debug.print("Chat image paste: could not read {s}: {s}\n", .{ image_path, @errorName(err) });
-        return;
+        return true;
     };
     defer allocator.free(bytes);
 
@@ -650,11 +649,11 @@ pub fn pasteImageIntoAiChat(chat: *AppWindow.ai_chat.Session) void {
             overlays.showStatusToast("Vision off for this model \xe2\x80\x94 image ignored");
         },
         .attached => {
-            const b64 = encodeImageBase64(allocator, bytes) catch return;
+            const b64 = encodeImageBase64(allocator, bytes) catch return true;
             defer allocator.free(b64);
             chat.addPendingImage(b64, "image/png") catch {
                 std.debug.print("Chat image paste: out of memory attaching image\n", .{});
-                return;
+                return true;
             };
             std.debug.print("Chat image paste: attached image ({d} bytes, {d} pending)\n", .{ bytes.len, chat.pendingImageCount() });
             var placeholder_buf: [32]u8 = undefined;
@@ -665,17 +664,21 @@ pub fn pasteImageIntoAiChat(chat: *AppWindow.ai_chat.Session) void {
             AppWindow.g_cells_valid = false;
         },
     }
+    return true;
 }
 
-pub fn pasteImageFromClipboard() void {
-    const surface = AppWindow.activeSurface() orelse return;
-    const allocator = AppWindow.g_allocator orelse return;
-    const owner = clipboardOwner() orelse return;
+/// Returns false only when the clipboard does not contain an image, allowing
+/// Ctrl+Shift+V to fall back to ordinary text paste.
+pub fn pasteImageFromClipboard() bool {
+    const surface = AppWindow.activeSurface() orelse return false;
+    const allocator = AppWindow.g_allocator orelse return false;
+    const owner = clipboardOwner() orelse return false;
 
-    const image_path = platform_clipboard.readImageAsPngTemp(allocator, owner) orelse return;
+    const image_path = platform_clipboard.readImageAsPngTemp(allocator, owner) orelse return false;
     defer allocator.free(image_path);
 
     _ = pasteSavedClipboardImage(surface, allocator, image_path);
+    return true;
 }
 
 pub fn writeTextToActivePty(text: []const u8) void {

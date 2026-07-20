@@ -153,6 +153,7 @@ Use `keybind = clear` before custom bindings if you want to remove all defaults 
 | Increase / decrease font size | **Ctrl++** / **Ctrl+-** | **Cmd++** / **Cmd+-** |
 | Copy terminal selection or AI Chat selection/transcript | **Ctrl+Shift+C** | **Cmd+Shift+C** |
 | Select from the last terminal click anchor | Shift-click terminal text | Shift-click terminal text |
+| Select terminal text while tmux mouse mode is enabled | **Shift-drag** | **Shift-drag** |
 | Select part of an AI answer | Drag AI answer text | Drag AI answer text |
 | Select and copy part of an AI answer | Shift-drag AI answer text | Shift-drag AI answer text |
 | Select AI Chat input; select transcript when input is empty | **Ctrl+A** in AI Chat | **Cmd+A** in AI Chat |
@@ -175,7 +176,7 @@ Use `keybind = clear` before custom bindings if you want to remove all defaults 
 | Edit AI Chat input cursor | Left/Right/Home/End/Delete/Backspace | Left/Right/Home/End/Delete/Backspace |
 | Stop in-flight AI Chat or Agent request | **Esc** in AI Chat while working | **Esc** in AI Chat while working |
 | Copy selection (right-click) | Right-click a selection | Right-click a selection |
-| Paste text | **Ctrl+V** | **Cmd+V** |
+| Paste text | **Ctrl+V**; **Ctrl+Shift+V** also pastes text when the clipboard has no image | **Cmd+V**; **Cmd+Shift+V** also pastes text when the clipboard has no image |
 | Paste clipboard image | **Ctrl+Shift+V** | **Cmd+Shift+V** |
 | Move focus to adjacent panel | **Alt** + arrow keys | **Opt** + arrow keys |
 | Focus panel 1–9 by number | **Ctrl+1**–**9** | **Cmd+1**–**9** |

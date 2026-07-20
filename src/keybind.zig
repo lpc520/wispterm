@@ -513,6 +513,15 @@ test "copy default: macOS binds Cmd+C only, other platforms keep Ctrl+Shift+C" {
     }
 }
 
+test "paste image default keeps Ctrl or Cmd Shift V" {
+    const set = Set.defaults();
+    const mods: Mods = if (builtin.target.os.tag == .macos)
+        .{ .win = true, .shift = true }
+    else
+        .{ .ctrl = true, .shift = true };
+    try std.testing.expectEqual(@as(?Action, .paste_image), set.lookupApp(.{ .mods = mods, .key_code = 'V' }));
+}
+
 test "keybind overriding an action removes its old default trigger" {
     var set = Set.defaults();
     const is_macos = builtin.target.os.tag == .macos;

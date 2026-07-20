@@ -3128,9 +3128,9 @@ fn executeCommand(cmd: command_dispatch.Command) bool {
         },
         .paste_image => {
             if (assistant_conversation.current(aiCopilotFocused())) |target| {
-                pasteImageIntoAiChat(target.session);
+                if (!pasteImageIntoAiChat(target.session)) pasteFromClipboardIntoAiChat(target.session);
             } else {
-                pasteImageFromClipboard();
+                if (!pasteImageFromClipboard()) pasteFromClipboard();
             }
         },
         // Panel-focus shortcuts are "performable": if there is no pane in
@@ -3238,7 +3238,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
             return input_effects.repaint();
         }
         if (actionIs(action, .paste_image)) {
-            pasteImageIntoAiChat(session);
+            if (!pasteImageIntoAiChat(session)) pasteFromClipboardIntoAiChat(session);
             return input_effects.repaint();
         }
         const mod = ev.ctrl or ev.super;
